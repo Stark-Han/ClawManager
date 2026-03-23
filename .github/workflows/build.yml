@@ -110,7 +110,7 @@ jobs:
       - name: Deploy manifest to cluster
         shell: bash
         run: |
-          sed 's|image: ghcr.io/iamlovingit/clawmanager:latest|image: clawmanager:ci|' deployments/k8s/clawmanager.yaml | kubectl apply -f -
+          sed 's|image: ghcr.io/yuan-lab-llm/clawmanager:latest|image: clawmanager:ci|' deployments/k8s/clawmanager.yaml | kubectl apply -f -
 
       - name: Wait for MySQL deployment
         run: kubectl -n clawmanager-system rollout status deployment/mysql --timeout=300s

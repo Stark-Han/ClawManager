@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   prepare-scheduled-release:
@@ -102,30 +103,16 @@ jobs:
     name: Publish Release
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    env:
-      RELEASE_REGISTRY: ${{ vars.RELEASE_REGISTRY }}
-      RELEASE_IMAGE_REPOSITORY: ${{ vars.RELEASE_IMAGE_REPOSITORY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate release configuration
-        shell: bash
-        run: |
-          if [ -z "${RELEASE_REGISTRY}" ]; then
-            echo "Repository variable RELEASE_REGISTRY is required."
-            exit 1
-          fi
-          if [ -z "${RELEASE_IMAGE_REPOSITORY}" ]; then
-            echo "Repository variable RELEASE_IMAGE_REPOSITORY is required."
-            exit 1
-          fi
-
       - name: Set release metadata
         shell: bash
         run: |
+          REPOSITORY_OWNER_LOWER="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           echo "TAG_NAME=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
-          echo "IMAGE_URI=${RELEASE_REGISTRY}/${RELEASE_IMAGE_REPOSITORY}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=ghcr.io/${REPOSITORY_OWNER_LOWER}/clawmanager" >> "$GITHUB_ENV"
 
       - name: Build image fingerprint
         shell: bash
@@ -133,12 +120,12 @@ jobs:
           docker build --iidfile /tmp/clawmanager-release.iid -t clawmanager:release-check .
           echo "IMAGE_FINGERPRINT=$(cat /tmp/clawmanager-release.iid)" >> "$GITHUB_ENV"
 
-      - name: Log in to registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.RELEASE_REGISTRY }}
-          username: ${{ secrets.RELEASE_REGISTRY_USERNAME }}
-          password: ${{ secrets.RELEASE_REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
