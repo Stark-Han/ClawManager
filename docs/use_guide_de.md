@@ -330,75 +330,223 @@ Sie umfasst hauptsächlich die folgenden Informationen:
 
 > Hinweis: Die Konsole dient hauptsächlich dazu, die Gesamtressourcen der Plattform, die Knoten und den Betriebsüberblick über Instanzen anzuzeigen, und wird nicht direkt für konkrete OpenClaw-Operationen innerhalb einzelner Instanzen verwendet.
 
-### 9.2 Überblick über die AI-Gateway-Funktionen
+### 9.2 Sicherheitszentrum (skill-scanner)
 
-Das AI Gateway umfasst zusätzlich zur **Modelle**-Konfiguration die folgenden Module:
+Das **Sicherheitszentrum** in der Konsole dient dazu, den Scan-Status der Plattformressourcen, historische Berichte und Scanner-Konfigurationen zentral einzusehen. Es basiert auf dem Backend-Dienst **skill-scanner** und kann statische Scans, Deep Scans sowie ergänzende, LLM-basierte Analysen auf Ressourcen ausführen. Dadurch unterstützt es Administratoren dabei, potenziell riskante Inhalte, ungewöhnliche Ressourcen und verdächtige Skills zu identifizieren.
 
-- **AI-Audit**: Einsicht in Modellaufruf-Trace, Request- und Response-Payloads, erkannte Risiken, Routing-Entscheidungen und Aufrufdetails.
-- **Kosten**: Anzeige von Token-Nutzung, geschätzten Kosten, internen Kosten und Trendstatistiken.
-- **Risikokontrollregeln**: Konfiguration von Regeln zur Erkennung sensibler Inhalte und Steuerung, ob Treffer durchgelassen oder an das Sicherheitsmodell weitergeleitet werden.
+Das Sicherheitszentrum umfasst derzeit hauptsächlich die folgenden drei Module:
 
-### 9.3 Kostenmodul
+* **Laufzeitübersicht**
+* **Berichtshistorie**
+* **Scanner-Konfiguration**
 
-Die Kostenseite dient zur Erfassung der Kosten und der Token-Nutzung von Modellaufrufen auf der Plattform und hilft Administratoren dabei, den Gesamtverbrauch zu verstehen.
+#### 9.2.1 Laufzeitübersicht
+
+![](./main/14.png)
+
+Die Seite „Laufzeitübersicht“ dient dazu, den gesamten aktuellen Scan-Status und die Risikoverteilung der Plattform einzusehen, damit Administratoren die aktuelle Sicherheitslage schnell erfassen können.
+
+Die Seite enthält hauptsächlich die folgenden Informationen:
+
+* **Aktuell wirksamer Modus**: Zeigt an, ob derzeit der **Quick-Modus** oder der **Deep-Modus** verwendet wird.
+* **Schnellscan / Vollscan**:
+
+  * **Schnellscan**: Geeignet für neu hinzugefügte oder geänderte Ressourcen. Der Scanumfang ist leichter und die Ausführung schneller.
+  * **Vollscan**: Geeignet für das regelmäßige erneute Scannen aller Ressourcen, um den aktuellen Zustand aller Plattformressourcen vollständig zu überprüfen.
+* **Gesamtzahl der Assets**: Anzahl der Ressourcen, die aktuell in den Scanbereich des Sicherheitszentrums aufgenommen sind.
+* **Abgeschlossene Scans**: Anzahl der Ressourcen, deren Scan bereits abgeschlossen ist.
+* **Hohes Risiko / Mittleres Risiko**: Statistik der in den aktuellen Scanergebnissen erkannten Risikostufen.
+* **Scan-Abdeckung**: Zeigt den Anteil der tatsächlich gescannten Assets an der Gesamtzahl der Plattform-Assets.
+* **SAFE / Hohes Risiko / Wartend / Fehlgeschlagen**:
+
+  * **SAFE**: Anzahl der Ressourcen, die den Scan bestanden haben und bei denen aktuell kein Risiko festgestellt wurde
+  * **Hohes Risiko**: Anzahl der Risiko-Assets, die sofort bearbeitet werden müssen
+  * **Wartend**: Anzahl der Ressourcen, die auf Beweissicherung oder auf die Einreihung in die Scan-Warteschlange warten
+  * **Fehlgeschlagen**: Anzahl der fehlgeschlagenen Scan-Ausführungen, die erneut ausgeführt werden müssen
+* **Risikolage der Plattform-Assets**: Zeigt die aktuelle Risikoverteilung der Plattform-Assets aggregiert nach Risikostufe.
+* **Hot Assets**: Zeigt die am häufigsten verwendeten Skills oder hochfrequent genutzten Ressourcen an, damit Administratoren wichtige Assets schnell identifizieren können.
+* **Scanner-Status**: Zeigt die Verfügbarkeit und den Verbindungsstatus des aktuellen skill-scanner an, zum Beispiel „Statischer Scan verfügbar“ oder „Verbunden“.
+* **Risikohinweise und Handlungsempfehlungen**: Gibt kurze Hinweise entsprechend der aktuellen Risikolage.
+* **Letzte Scan-Aufgaben**: Zeigt kürzlich ausgeführte Scan-Einträge an, damit aktuelle Scan-Aktivitäten nachvollzogen werden können.
+
+> Hinweis:
+>
+> * Wenn auf der Seite „Derzeit gibt es keine Assets mit hohem oder mittlerem Risiko“ angezeigt wird, bedeutet dies, dass in den aktuellen Scan-Ergebnissen keine signifikanten Risiken gefunden wurden.
+> * Wenn auf der Seite „Es gibt noch keine Scan-Aufzeichnungen“ angezeigt wird, bedeutet dies, dass bisher noch kein Scan ausgeführt wurde oder noch keine gültigen Scan-Ergebnisse erzeugt wurden.
+
+#### 9.2.2 Berichtshistorie
+
+Die Seite „Berichtshistorie“ dient dazu, historische Scan-Berichte und zugehörige Ergebnisdatensätze einzusehen, damit Administratoren vergangene Scan-Ausführungen nachvollziehen können.
+
+Dieses Modul dient hauptsächlich dazu:
+
+* Ergebnisse bereits ausgeführter Scan-Aufgaben einzusehen
+* Scan-Ausgaben zu verschiedenen Zeitpunkten zu vergleichen
+* Änderungen des Sicherheitszustands einer bestimmten Ressource über verschiedene Phasen hinweg nachzuverfolgen
+* Eine historische Grundlage für spätere Prüfungen, erneute Scans und Fehleranalysen bereitzustellen
+
+> Hinweis:
+>
+> * Die „Berichtshistorie“ ist stärker auf die Archivierung und Rückverfolgung historischer Ergebnisse ausgerichtet；
+> * Die „Laufzeitübersicht“ ist stärker auf den aktuellen Zustand und den Gesamtüberblick ausgerichtet。
+
+#### 9.2.3 Scanner-Konfiguration
+
+![](./main/15.png)
+
+Die Seite „Scanner-Konfiguration“ dient zur Verwaltung der Betriebsweise von skill-scanner, der LLM-bezogenen Einstellungen sowie der beiden Scan-Strategien quick und deep. Nach dem Speichern wird ein Deployment-Rollout ausgelöst und auf das Wirksamwerden der neuen Konfiguration gewartet.
+
+Die Seite enthält hauptsächlich die folgenden Inhalte:
+
+##### (1) skill-scanner Servicestatus
+
+* Zeigt Namespace, Deployment-Namen und Verbindungsstatus des aktuellen Backend-Scandienstes an.
+* Wenn auf der Seite **Verbunden** und **Statischer Scan verfügbar** angezeigt wird, bedeutet dies, dass die grundlegende statische Scan-Funktion verfügbar ist.
+
+##### (2) LLM-Konfiguration
+
+Dieser Bereich dient zur Konfiguration des primären LLM, damit der Scanner bei Bedarf modellbasierte Analysen ausführen kann.
+
+Die wichtigsten Felder sind:
+
+* **Primäre LLM-Integration**: Die Konfiguration des primären LLM kann direkt aus einem bereits in **AI Gateway** konfigurierten Modell importiert werden.
+* **LLM API Key**: Entspricht `SKILL_SCANNER_LLM_API_KEY` und wird zur Authentifizierung des primären LLM analyzers verwendet.
+* **LLM Model**: Entspricht `SKILL_SCANNER_LLM_MODEL`, zum Beispiel ein konkreter Modellname.
+* **LLM Base URL**: Entspricht `SKILL_SCANNER_LLM_BASE_URL` und dient zur Konfiguration der Serviceadresse des primären LLM.
+
+##### (3) Meta-LLM-Integration
+
+Dieser Bereich dient zur Konfiguration des Modells, das vom Meta Analyzer verwendet wird. Es wird typischerweise für die weitere Zusammenfassung, Konsolidierung oder sekundäre Verarbeitung von Findings verwendet.
+
+Die wichtigsten Felder sind:
+
+* **Meta-LLM-Integration**: Die Konfiguration des Meta Analyzers kann direkt aus einem bereits in **AI Gateway** konfigurierten Modell importiert werden.
+* **Meta LLM API Key**: Entspricht `SKILL_SCANNER_META_LLM_API_KEY`.
+* **Meta LLM Model**: Entspricht `SKILL_SCANNER_META_LLM_MODEL`.
+* **Meta LLM Base URL**: Entspricht `SKILL_SCANNER_META_LLM_BASE_URL`.
+
+> Hinweis:
+>
+> * Wenn derzeit kein LLM konfiguriert ist, zeigt die Seite in der Regel an, dass aktuell nur statisches Scannen unterstützt wird；
+> * Erst nach der Konfiguration des primären LLM und des Meta LLM kann der Scanner vollständigere semantische Analysen und Zusammenfassungen aktivieren。
+
+##### (4) Aktueller Scan-Modus
+
+Die Seite unterstützt die Auswahl des aktuell von der Plattform verwendeten Scan-Modus:
+
+* **Quick-Modus**: Verwendet quick analyzers für den Scan und eignet sich für tägliche Schnellprüfungen.
+* **Deep-Modus**: Verwendet deep analyzers für den Scan und eignet sich für vollständigere und tiefere Analysen.
+
+Wichtig ist:
+
+* Sowohl „Schnellscan“ als auch „Vollscan“ im Dashboard verwenden die hier ausgewählte Scan-Stärke；
+* Der Unterschied liegt hauptsächlich im Scan-Umfang und nicht in der Tiefe der Analyzer selbst。
+
+##### (5) Quick / Deep Scan-Strategie
+
+Im unteren Bereich der Seite werden die beiden Scan-Strategie-Konfigurationen **Quick** und **Deep** separat gepflegt, damit Administratoren je nach Szenario unterschiedliche Analyzer-Kombinationen auswählen können.
+
+Jede Strategie umfasst die folgenden Konfigurationseinträge:
+
+* **Timeout (Sekunden)**: Legt die Timeout-Zeit für Scan-Aufgaben im aktuellen Modus fest.
+* **Aufrufmethoden**: Verschiedene Analyzer können je nach Bedarf aktiviert oder deaktiviert werden.
+
+Die derzeit sichtbaren Analyzer-Typen umfassen:
+
+* **Static**: YAML + YARA statisches Regel-Scannen
+* **Bytecode**: Integritätsprüfung von Python-Bytecode
+* **Pipeline**: Befehlsketten- und Taint-Analyse
+* **Behavioral**: AST-basierte Verhaltens- und Datenflussanalyse
+* **LLM**: Semantische Analyse auf Basis externer LLMs
+* **Meta**: Sekundäre Zusammenfassungsanalyse von Findings
+
+Dies kann in der Regel wie folgt verstanden werden:
+
+* **Quick-Modus**: Legt den Schwerpunkt auf schnellere Ausführung und wird häufig für tägliche inkrementelle Prüfungen verwendet
+* **Deep-Modus**: Kann mehr Analyzer aktivieren und eignet sich für tiefere Prüfungen und Sicherheits-Audits
+
+##### (6) Speichern und anwenden
+
+Die Schaltfläche **Speichern und anwenden** oben rechts dient dazu, alle aktuellen scanner-bezogenen Konfigurationen zu übernehmen. Nach dem Speichern werden folgende Aktionen ausgeführt:
+
+* Aktualisierung der quick / deep Scan-Strategien in ClawManager
+* Aktualisierung der relevanten Umgebungsvariablen des skill-scanner Deployment
+* Warten auf den Abschluss des Rollouts, bevor die neue Konfiguration offiziell wirksam wird
+
+> Hinweis:
+>
+> * Nach Änderungen an der Scanner-Konfiguration wird empfohlen, vor dem Start neuer Scan-Aufgaben zu warten, bis die Konfiguration vollständig wirksam ist；
+> * Falls der Verbindungsstatus nach der Konfiguration ungewöhnlich ist, sollten zuerst das AI Gateway-Modell, die LLM-Adresse, der Key und der Deployment-Rollout-Status geprüft werden。
+
+### 9.3 Überblick über die AI-Gateway-Funktionen
+
+Zusätzlich zur Konfiguration von „Modellen“ enthält AI Gateway auch die folgenden Module:
+
+* **AI Audit**: Zeigt Modellaufruf-Traces, Request- und Response-Payloads, erkannte Risiken, Routing-Entscheidungen und Aufrufdetails an.
+* **Kosten**: Zeigt Token-Nutzung, geschätzte Kosten, interne Kosten und Trendstatistiken an.
+* **Risikokontrollregeln**: Konfiguriert Regeln zur Erkennung sensibler Inhalte und steuert, ob Treffer freigegeben oder an das Sicherheitsmodell weitergeleitet werden.
+
+### 9.4 Kostenmodul
+
+Die Kostenseite dient dazu, die Kosten und die Token-Nutzung von Modellaufrufen auf der Plattform zu erfassen und Administratoren beim Verständnis des Gesamtverbrauchs zu unterstützen.
 
 ![](./main/6.png)
 
 Die Seite enthält hauptsächlich die folgenden Inhalte:
 
-- **Eingabe-Token**: Erfasst die Gesamtmenge der eingegebenen Prompts.
-- **Ausgabe-Token**: Erfasst die Gesamtmenge der vom Modell erzeugten Inhalte.
-- **Geschätzte Kosten**: Kosten, die auf Basis der Provider-Preise geschätzt werden.
-- **Interne Kosten**: Interne Verrechnungskosten im Zusammenhang mit dem Sicherheitsmodell.
-- **Täglicher Kostentrend**: Anzeige der geschätzten Kosten und Token-Veränderungen innerhalb des aktuellen Fensters über die letzten 7 Tage.
-- **Benutzerzusammenfassung**: Aggregation von Nutzung und Kosten nach Benutzer.
-- **Instanzzusammenfassung**: Aggregation von Nutzung und Kosten nach Instanz.
-- **Letzte Kosteneinträge**: Unterstützt die Suche und Paginierung von Kosteneinträgen nach Trace, Benutzer, Modell und weiteren Bedingungen und ermöglicht den direkten Sprung zu Audit-Details.
+* **Input Token**: Statistik über die Gesamtmenge der Eingabe-Prompts
+* **Output Token**: Statistik über die Gesamtmenge der vom Modell generierten Inhalte
+* **Geschätzte Kosten**: Auf Basis der Provider-Stückpreise geschätzte Kosten
+* **Interne Kosten**: Interne Verrechnungskosten im Zusammenhang mit dem Sicherheitsmodell
+* **Täglicher Kostentrend**: Zeigt die Veränderungen von geschätzten Kosten und Token im aktuellen Fenster über die letzten 7 Tage an
+* **Benutzerübersicht**: Aggregierte Nutzung und Kosten nach Benutzer
+* **Instanzübersicht**: Aggregierte Nutzung und Kosten nach Instanz
+* **Neueste Kostenaufzeichnungen**: Unterstützt Suche und Paginierung von Kostenaufzeichnungen nach Trace, Benutzer, Modell und weiteren Bedingungen und ermöglicht den Sprung zu Audit-Details
 
-> Hinweis: Wenn bisher noch keine Modellaufrufe erzeugt wurden, können Eingabe-Token, Ausgabe-Token, Kosten und Trenddiagramme alle 0 sein. Das ist normal.
+> Hinweis: Falls noch keine Modellaufruf-Datensätze erzeugt wurden, können Input Token, Output Token, Kosten und Trenddiagramme alle 0 sein. Das ist normal.
 
-### 9.4 AI-Audit-Modul
+### 9.5 AI-Audit-Modul
 
-Die Seite AI Audit dient dazu, die zuletzt verwalteten Modellaufrufe einzusehen, und hilft Administratoren dabei, Modellaufrufe, Token-Nutzung und Routing-Ergebnisse zu untersuchen.
+Die AI-Audit-Seite dient dazu, kürzliche Aufrufdatensätze verwalteter Modelle einzusehen und Administratoren bei der Untersuchung von Modellaufrufen, Token-Nutzung und Routing-Ergebnissen zu unterstützen.
 
 ![](./main/7.png)
 
-Zu den Hauptfunktionen gehören:
+Die Hauptfunktionen umfassen:
 
-- **Letzte AI-Traces**: Anzeige der letzten Modellaufrufpfade.
-- **Trace-Liste**: Anzeige der zuletzt verwalteten Traces in einer einheitlichen Tabelle.
-- **Suche und Filter**: Unterstützt die Suche nach Trace, Anfrageinhalt, Benutzer, Modell und weiteren Bedingungen.
-- **Statusfilter**: Unterstützt die Anzeige unterschiedlicher Aufrufergebnisse nach Status.
-- **Modellfilter**: Unterstützt das Filtern der entsprechenden Aufrufeinträge nach Modell.
-- **Seitenweise Aktualisierung**: Unterstützt die seitenweise Anzeige und das manuelle Aktualisieren der neuesten Audit-Ergebnisse.
+* **Letzte AI Trace**: Zeigt aktuelle Modellaufruf-Ketten an
+* **Trace-Liste**: Zeigt aktuelle verwaltete Traces in einer einheitlichen Tabelle an
+* **Suche und Filterung**: Unterstützt Suche nach Trace, Request-Inhalt, Benutzer, Modell und weiteren Bedingungen
+* **Statusfilterung**: Unterstützt die Anzeige verschiedener Aufrufergebnisse nach Status
+* **Modellfilterung**: Unterstützt die Filterung zugehöriger Aufrufdatensätze nach Modell
+* **Paginierung und Aktualisierung**: Unterstützt paginierte Anzeige und manuelles Aktualisieren der neuesten Audit-Ergebnisse
 
-> Hinweis: Wenn auf der Seite „Keine AI-Audit-Einträge“ angezeigt wird, bedeutet dies, dass bislang noch keine tatsächlichen Modellaufrufe erzeugt wurden.
+> Hinweis: Wenn auf der Seite „Es liegen noch keine AI-Audit-Aufzeichnungen vor“ angezeigt wird, bedeutet dies, dass noch keine tatsächlichen Modellaufruf-Anfragen erzeugt wurden.
 
-### 9.5 Modul für Risikokontrollregeln
+### 9.6 Modul für Risikokontrollregeln
 
-Die Seite für Risikokontrollregeln dient zur Konfiguration von Regeln zur Erkennung sensibler Inhalte und zur Festlegung der Aktion nach einem Regel-Treffer.
+Die Seite für Risikokontrollregeln dient dazu, Erkennungsregeln für sensible Inhalte zu konfigurieren und festzulegen, welche Aktion nach einem Regeltreffer ausgeführt werden soll.
 
 ![](./main/8.png)
 
 Dieses Modul unterstützt hauptsächlich:
 
-- **Verwaltung der Regelliste**: Anzeige aller Regeln und ihres Aktivierungsstatus.
-- **Ansicht nach Regelkategorien**: Regeln können nach Kategorien wie personenbezogene Informationen, Unternehmensinformationen, Kundengeschäft, Sicherheitsnachweise, Finanzen und Recht, politisch sensible Inhalte, benutzerdefiniert usw. angezeigt werden.
-- **Konfiguration der Regelfelder**: Regel-ID, Anzeigename, Schweregrad, Aktion, Sortierung, Regex-Pattern und Beschreibung können festgelegt werden.
-- **Regelaktionssteuerung**: Nach einem Treffer kann gewählt werden, ob der Inhalt durchgelassen oder an das Sicherheitsmodell weitergeleitet wird.
-- **Massenaktivierung / -deaktivierung**: Unterstützt die Anpassung des Regelstatus in größeren Mengen.
-- **Regel-Testkonsole**: Beispielttext kann eingefügt werden, um zu testen, welche Inhalte durch aktivierte Regeln oder Regelentwürfe getroffen werden.
+* **Verwaltung der Regelliste**: Anzeige aller Regeln und ihres Aktivierungsstatus
+* **Ansicht nach Regelkategorie**: Unterstützt die Anzeige nach Kategorien wie personenbezogene Informationen, Unternehmensinformationen, Kundengeschäft, Sicherheitszugangsdaten, Finanzen und Recht, politisch sensible Inhalte und benutzerdefiniert
+* **Konfiguration der Regelfelder**: Es können Regel-ID, Anzeigename, Schweregrad, Aktion, Reihenfolge, Regex-Pattern und Beschreibung festgelegt werden
+* **Steuerung der Regelaktion**: Bei einem Treffer kann gewählt werden, ob Inhalte freigegeben oder an das Sicherheitsmodell weitergeleitet werden
+* **Stapelweises Aktivieren / Deaktivieren**: Unterstützt die stapelweise Anpassung des Regelstatus
+* **Regel-Testkonsole**: Ermöglicht das Einfügen von Beispieltexten, um zu testen, welche aktiven oder Entwurfsregeln ausgelöst werden
 
-Aktuelle Beispiele für integrierte Regeln umfassen unter anderem:
+Die aktuell integrierten Regelbeispiele umfassen unter anderem:
 
-- Personenbezogene Informationen: E-Mail-Adressen, Mobilnummern, Ausweisnummern, Passnummern, Bankkarten-Kontext, Adressen, Lebenslaufinhalte usw.
-- Unternehmensinformationen: interne Netzwerk-IP, interne Domänennamen, Host-Benennung, Kubernetes Service DNS, Projekt-Codenamen, Organisationsstruktur, Gehalts-/HR-Informationen usw.
-- Kundengeschäft: Kundenlisten, Verträge / Angebote, Rechnungs-Steuernummern, CRM-/Ticket-Daten usw.
-- Sicherheitsnachweise: private Schlüssel, API Keys, Tokens, JWTs, Cookie / Session, Datenbank-Verbindungszeichenfolgen, kubeconfig, Geheimnisse in Umgebungsvariablen usw.
-- Finanzen und Recht: Budgets, Gewinne, Umsatz, juristische Stellungnahmen, Klagen, NDA usw.
-- Politisch sensible Inhalte: politische Institutionen, Militär / nationale Sicherheit, extremistische Gewaltdarstellungen usw.
+* Personenbezogene Informationen: E-Mail-Adresse, Mobiltelefonnummer, Ausweisnummer, Reisepassnummer, Bankkartenkontext, Adresse, Lebenslaufinhalte usw.
+* Unternehmensinformationen: interne IP, interne Domain, Host-Benennung, Kubernetes Service DNS, Projekt-Codename, Organisationsstruktur, Gehalts- / HR-Informationen usw.
+* Kundengeschäft: Kundenlisten, Verträge / Angebote, Steuer-IDs auf Rechnungen, CRM- / Ticket-Daten usw.
+* Sicherheitszugangsdaten: Private Keys, API Keys, Tokens, JWT, Cookie / Session, Datenbank-Verbindungsstrings, Kubeconfig, geheime Umgebungsvariablen usw.
+* Finanzen und Recht: Budget, Gewinn, Umsatz, Rechtsgutachten, Rechtsstreitigkeiten, NDA usw.
+* Politisch sensible Inhalte: politische Institutionen, Militär / nationale Sicherheit, extremistische und gewaltbezogene Ausdrücke usw.
 
-> Hinweis: Die Standardregeln decken bereits viele gängige Szenarien zur Erkennung sensibler Informationen ab. In der Praxis können je nach Geschäftsanforderung weitere Regeln hinzugefügt, angepasst oder deaktiviert werden.
+> Hinweis: Die Standardregeln decken bereits viele gängige Szenarien zur Erkennung sensibler Informationen ab. In der Praxis können Regeln je nach Geschäftsanforderung weiter ergänzt, angepasst oder deaktiviert werden.
 ---
 
 <a id="sec-13"></a>
@@ -455,6 +603,59 @@ Rechts oben auf der Seite werden unterstützt:
 
 > Hinweis: Die Ressourcenverwaltung dient hauptsächlich dazu, OpenClaw-Ressourcen vorzubereiten, die nach dem Start einer Instanz verwendet werden können, und ersetzt nicht direkt den Prozess der Instanzerstellung. Bei der Erstellung einer Instanz können Ressourcen über **Manuelle Ressourcen**, **Ressourcenpakete** und **Archivimport** eingebunden werden.
 
+
+### 10.3.1 Kanal erstellen
+
+„Kanäle“ werden verwendet, um die Verbindungsweise zwischen OpenClaw und externen Nachrichtenplattformen oder Zugriffsendpunkten zu konfigurieren, z. B. Telegram, Slack und Feishu / Lark.
+
+![](./main/12.png)
+
+Gehe beim Erstellen eines Kanals wie folgt vor:
+
+1. Öffne die Seite **Ressourcenverwaltung** und bleibe im Reiter **Ressourcen**.
+2. Wähle links unter den Ressourcentypen **Kanal** aus.
+3. Klicke rechts auf der Seite auf **Neu**, um das Dialogfenster „Neue Ressource“ zu öffnen.
+4. Fülle im Dialog die Basisinformationen aus:
+   - **Typ**: **Kanal** auswählen
+   - **Ressourcen-Key**: Trage die eindeutige Kennung dieses Kanals ein. Es wird empfohlen, einen leicht erkennbaren und nicht doppelt verwendeten englischen Namen oder eine entsprechende Kombination zu verwenden
+   - **Name**: Trage den Anzeigenamen des Kanals ein
+   - **Tags**: optional, für Klassifizierung und Suche
+   - **Beschreibung**: optional, zur ergänzenden Beschreibung des Kanalzwecks
+   - **Aktiviert**: Es wird empfohlen, diese Option aktiviert zu lassen
+5. Wähle im Bereich **Channel Template** eine Startvorlage aus. Derzeit werden folgende Vorlagen unterstützt:
+   - `Telegram`
+   - `Slack`
+   - `Feishu / Lark`
+
+6. Nachdem du eine Vorlage ausgewählt hast, klicke auf **Vorlage laden**. Das System schreibt die Grundkonfiguration der entsprechenden Vorlage automatisch in den darunterliegenden Bereich **Content JSON**.
+7. Ergänze oder ändere anschließend die Feldinhalte in **Content JSON** entsprechend deinen tatsächlichen Anbindungsinformationen.
+8. Wenn die Konfiguration korrekt ist, klicke auf Speichern, um die Erstellung des Kanals abzuschließen.
+
+> Hinweis:
+> - **Channel Template** dient dazu, schnell eine Grundkonfiguration zu erzeugen；
+> - **Content JSON** ist der tatsächlich wirksame Konfigurationsinhalt des Kanals；
+> - Wenn keine Vorlage vollständig passt, kannst du die Konfiguration auch direkt manuell in **Content JSON** eintragen。
+
+### 10.3.2 Skills hochladen
+
+Skills werden verwendet, um OpenClaw wiederverwendbare Funktionsfähigkeiten bereitzustellen. Die Plattform unterstützt den Batch-Import von Skills durch das Hochladen von Archivdateien.
+
+![](./main/13.png)
+
+Gehe beim Hochladen von Skills wie folgt vor:
+
+1. Öffne die Seite **Ressourcenverwaltung** und bleibe im Reiter **Ressourcen**.
+2. Wähle links unter den Ressourcentypen **Skills** aus.
+3. Klicke auf **Datei auswählen** und wähle ein lokales Skill-Archiv aus.
+4. Die aktuelle Seite unterstützt nur das Hochladen von **`.zip`**-Dateien.
+5. Nachdem die Datei ausgewählt wurde, klicke rechts auf **Skill-Archiv hochladen**.
+6. Das System analysiert den hochgeladenen Inhalt automatisch und importiert jedes Verzeichnis der ersten Ebene als einen Skill.
+7. Nach Abschluss des Uploads kannst du die importierten Skills in der Skill-Liste anzeigen.
+
+> Hinweis:
+> - Es wird empfohlen, das Skill-Archiv im Voraus sauber nach Verzeichnissen zu strukturieren；
+> - Jedes Verzeichnis der ersten Ebene wird als eigenständiger Skill erkannt；
+> - Falls die Liste nach dem Upload nicht sofort aktualisiert wird, kannst du oben rechts auf der Seite manuell auf **Aktualisieren** klicken, um neu zu laden。
 ---
 
 <a id="sec-14"></a>

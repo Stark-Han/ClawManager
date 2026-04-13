@@ -330,75 +330,223 @@ It mainly includes the following information:
 
 > Note: The console is mainly used to view the overall platform resources, nodes, and instance operation summary, and is not used directly for specific OpenClaw operations inside an instance.
 
-### 9.2 Overview of AI Gateway Features
+### 9.2 Security Center (skill-scanner)
 
-In addition to **Models**, the AI Gateway also includes the following modules:
+The **Security Center** in the console is used to centrally view the scanning status of platform resources, historical reports, and scanner configurations. It relies on the backend **skill-scanner** service and can be used to perform static scanning, deep scanning, and supplementary LLM-based analysis on resources, thereby helping administrators identify potential risky content, abnormal resources, and suspicious skills.
 
-- **AI Audit**: View model call traces, request and response payloads, risk hits, routing decisions, and call details.
-- **Cost**: View token usage, estimated costs, internal costs, and trend statistics.
-- **Risk Control Rules**: Configure sensitive content detection rules and control whether matched content is allowed through or routed to the secure model.
+The Security Center currently includes the following three modules:
 
-### 9.3 Cost Module
+* **Runtime Overview**
+* **Report History**
+* **Scanner Configuration**
 
-The Cost page is used to count the costs and token usage of platform model calls, helping administrators understand the overall consumption.
+#### 9.2.1 Runtime Overview
+
+![](./main/14.png)
+
+The “Runtime Overview” page is used to view the overall scanning status and risk distribution of the current platform, helping administrators quickly understand the current security posture.
+
+The page mainly includes the following information:
+
+* **Current Active Mode**: Displays whether the system is currently using **Quick Mode** or **Deep Mode**.
+* **Quick Scan / Full Scan**:
+
+  * **Quick Scan**: Suitable for handling newly added or modified resources, with a lighter scan scope and faster execution speed.
+  * **Full Scan**: Suitable for periodically rescanning all resources to fully review the current state of all platform resources.
+* **Total Assets**: The number of resources currently included in the scanning scope of the Security Center.
+* **Completed Scans**: The number of resources that have completed scanning.
+* **High Risk / Medium Risk**: Statistics on the risk levels identified in the current scanning results.
+* **Scan Coverage**: Shows the proportion of assets that have actually completed scanning relative to the total assets on the platform.
+* **SAFE / High Risk / Pending / Failed**:
+
+  * **SAFE**: Number of resources that passed the scan and currently have no detected risks
+  * **High Risk**: Number of risky assets that require immediate handling
+  * **Pending**: Number of resources waiting for evidence collection or queued for scanning
+  * **Failed**: Number of scan tasks that failed and need to be rerun
+* **Platform Asset Risk Trend**: Displays the current risk distribution of platform assets aggregated by risk level.
+* **Hot Assets**: Displays the most frequently used skills or high-frequency resources to help administrators quickly locate key assets.
+* **Scanner Status**: Displays the availability and connection status of the current skill-scanner, such as “Static scanning available” and “Connected”.
+* **Risk Alerts and Handling Suggestions**: Provides brief alert information based on the current risk posture.
+* **Recent Scan Tasks**: Displays recently executed scan records for easier review of recent scanning activities.
+
+> Notes:
+>
+> * When the page shows “There are currently no high-risk or medium-risk assets,” it means no significant risks have been found in the current scan results.
+> * When the page shows “There are no scan task records yet,” it means no scans have been executed yet, or no valid scan results have been generated.
+
+#### 9.2.2 Report History
+
+The “Report History” page is used to view historical scan reports and related result records, making it easier for administrators to review past scan executions.
+
+This module is mainly used for:
+
+* Viewing the results of previously executed scan tasks
+* Comparing scan outputs at different points in time
+* Assisting in tracking security changes of a specific resource at different stages
+* Providing historical references for subsequent review, rescanning, and issue troubleshooting
+
+> Notes:
+>
+> * “Report History” focuses more on archiving and reviewing historical results;
+> * “Runtime Overview” focuses more on current status and overall overview.
+
+#### 9.2.3 Scanner Configuration
+
+![](./main/15.png)
+
+The “Scanner Configuration” page is used to manage the operating mode of skill-scanner, LLM-related settings, and the two scanning strategies: quick and deep. After saving, a Deployment rollout will be triggered, and the system will wait for the new configuration to take effect.
+
+The page mainly includes the following content:
+
+##### (1) skill-scanner Service Status
+
+* Displays the namespace, Deployment name, and connection status of the current backend scanning service.
+* When the page shows **Connected** and **Static scanning available**, it means the basic static scanning capability is available.
+
+##### (2) LLM Configuration
+
+This section is used to configure the primary LLM so that the scanner can perform model-based analysis when needed.
+
+The main fields include:
+
+* **Primary LLM Integration**: The primary LLM configuration can be imported directly from a model already configured in **AI Gateway**.
+* **LLM API Key**: Corresponds to `SKILL_SCANNER_LLM_API_KEY`, used for authentication of the primary LLM analyzer.
+* **LLM Model**: Corresponds to `SKILL_SCANNER_LLM_MODEL`, for example a specific model name.
+* **LLM Base URL**: Corresponds to `SKILL_SCANNER_LLM_BASE_URL`, used to configure the primary LLM service endpoint.
+
+##### (3) Meta LLM Integration
+
+This section is used to configure the model used by the meta analyzer, typically for further summarization, aggregation, or secondary processing of findings.
+
+The main fields include:
+
+* **Meta LLM Integration**: The meta analyzer configuration can be imported directly from a model already configured in **AI Gateway**.
+* **Meta LLM API Key**: Corresponds to `SKILL_SCANNER_META_LLM_API_KEY`.
+* **Meta LLM Model**: Corresponds to `SKILL_SCANNER_META_LLM_MODEL`.
+* **Meta LLM Base URL**: Corresponds to `SKILL_SCANNER_META_LLM_BASE_URL`.
+
+> Notes:
+>
+> * If no LLM is currently configured, the page will usually indicate that only static scanning is supported at the moment;
+> * Only after configuring both the primary LLM and the Meta LLM can the scanner enable more complete semantic analysis and summarization capabilities.
+
+##### (4) Current Scanning Mode
+
+The page supports selecting the scanning mode currently used by the platform:
+
+* **Quick Mode**: Uses quick analyzers for scanning and is suitable for daily rapid checks.
+* **Deep Mode**: Uses deep analyzers for scanning and is suitable for more complete and in-depth analysis.
+
+It should be noted that:
+
+* Both “Quick Scan” and “Full Scan” on the Dashboard will use the scan strength selected here;
+* Their main difference lies in the scan scope, not in the analyzer depth itself.
+
+##### (5) Quick / Deep Scanning Strategy
+
+The lower part of the page maintains two sets of scanning strategy configurations, **Quick** and **Deep**, so that administrators can choose different analyzer combinations for different scenarios.
+
+Each strategy includes the following configuration items:
+
+* **Timeout (seconds)**: Sets the timeout for scan tasks under the current mode.
+* **Invocation Methods**: Different analyzers can be enabled or disabled as needed.
+
+The currently visible analyzer types include:
+
+* **Static**: YAML + YARA static rule scanning
+* **Bytecode**: Python bytecode integrity verification
+* **Pipeline**: Command chain and taint analysis
+* **Behavioral**: AST-based behavior and data flow analysis
+* **LLM**: Semantic analysis relying on external LLMs
+* **Meta**: Secondary summarization analysis of findings
+
+These can usually be understood as follows:
+
+* **Quick Mode**: Focuses on faster execution and is often used for daily incremental checks
+* **Deep Mode**: Can enable more analyzers and is suitable for deeper review and security auditing
+
+##### (6) Save and Apply
+
+The **Save and Apply** button in the upper-right corner is used to submit all current scanner-related configurations. After saving, it will:
+
+* Update the quick / deep scanning strategies in ClawManager
+* Update the related environment variables of the skill-scanner Deployment
+* Wait for the rollout to complete before the new configuration officially takes effect
+
+> Notes:
+>
+> * After modifying scanner configurations, it is recommended to wait until the configuration has fully taken effect before executing new scan tasks;
+> * If the connection status becomes abnormal after configuration changes, it is recommended to first check the AI Gateway model, LLM endpoint, Key, and Deployment rollout status.
+
+### 9.3 AI Gateway Feature Overview
+
+In addition to model configuration, AI Gateway also includes the following modules:
+
+* **AI Audit**: View model invocation traces, request and response payloads, hit risks, routing decisions, and invocation details.
+* **Cost**: View token usage, estimated cost, internal cost, and trend statistics.
+* **Risk Control Rules**: Configure sensitive detection rules to control whether matched content is allowed through or routed to the security model.
+
+### 9.4 Cost Module
+
+The Cost page is used to count the cost and token usage of platform model calls, helping administrators understand overall consumption.
 
 ![](./main/6.png)
 
-The page mainly includes the following contents:
+The page mainly includes the following content:
 
-- **Input Tokens**: Counts the total amount of input prompts.
-- **Output Tokens**: Counts the total amount of model-generated content.
-- **Estimated Cost**: Cost estimated according to Provider pricing.
-- **Internal Cost**: Internal accounting cost related to the secure model.
-- **Daily Cost Trend**: View estimated cost and token changes in the current window over the last 7 days.
-- **User Summary**: Aggregate usage and cost by user.
-- **Instance Summary**: Aggregate usage and cost by instance.
-- **Recent Cost Records**: Supports searching and paging through cost records by Trace, user, model, and other conditions, and supports jumping to audit details.
+* **Input Tokens**: Statistics of the total input prompt tokens.
+* **Output Tokens**: Statistics of the total tokens generated by the model.
+* **Estimated Cost**: Cost estimated according to the Provider's unit price.
+* **Internal Cost**: Internal accounting cost related to the security model.
+* **Daily Cost Trend**: View estimated cost and token changes within the current window over the last 7 days.
+* **User Summary**: Aggregated usage and cost by user.
+* **Instance Summary**: Aggregated usage and cost by instance.
+* **Recent Cost Records**: Supports searching and paginated viewing of cost records by Trace, user, model, and other conditions, and can further jump to audit details.
 
-> Note: If no model call records have been generated yet, input tokens, output tokens, costs, and trend charts may all be 0, which is normal.
+> Note: If no model invocation records have been generated yet, input tokens, output tokens, cost, and trend charts may all be 0, which is normal.
 
-### 9.4 AI Audit Module
+### 9.5 AI Audit Module
 
-The AI Audit page is used to view recent managed model call records and helps administrators troubleshoot model calls, token usage, and routing results.
+The AI Audit page is used to view recent managed model invocation records, helping administrators troubleshoot model invocations, token usage, and routing results.
 
 ![](./main/7.png)
 
-Main features include:
+The main functions include:
 
-- **Recent AI Traces**: View recent model call paths.
-- **Trace List**: View recent managed traces in a unified table.
-- **Search and Filter**: Supports searching by trace, request content, user, model, and other conditions.
-- **Status Filter**: Supports viewing different call results by status.
-- **Model Filter**: Supports filtering corresponding call records by model.
-- **Paged Refresh**: Supports paginated viewing and manually refreshing the latest audit results.
+* **Recent AI Trace**: View recent model invocation chains.
+* **Trace List**: View recent managed traces in a unified table.
+* **Search and Filtering**: Supports searching by Trace, request content, user, model, and other conditions.
+* **Status Filtering**: Supports viewing different invocation results by status.
+* **Model Filtering**: Supports filtering corresponding invocation records by model.
+* **Pagination and Refresh**: Supports paginated viewing and manual refresh of the latest audit results.
 
-> Note: If the page shows “No AI audit records”, it means that no actual model invocation request has been generated yet.
+> Note: If the page shows “No AI audit records yet,” it means that no actual model invocation requests have been generated yet.
 
-### 9.5 Risk Control Rules Module
+### 9.6 Risk Control Rules Module
 
-The Risk Control Rules page is used to configure sensitive content detection rules and decide the handling action after a rule match.
+The Risk Control Rules page is used to configure sensitive content detection rules and determine the action to be taken after a rule is hit.
 
 ![](./main/8.png)
 
 This module mainly supports:
 
-- **Rule List Management**: View all rules and their enabled status.
-- **Rule Category Viewing**: Supports viewing rules by categories such as personal information, company information, customer business, security credentials, finance and legal, politically sensitive, custom, and others.
-- **Rule Field Configuration**: You can set the rule ID, display name, severity level, action, sort order, regex pattern, and description.
-- **Rule Action Control**: After a rule is matched, you can choose to allow it through or route it to the secure model.
-- **Bulk Enable / Disable**: Supports bulk adjustment of rule status.
-- **Rule Testing Console**: You can paste sample text to test which enabled rules or draft rules will be matched.
+* **Rule List Management**: View all rules and their enabled status.
+* **Rule Category View**: Supports viewing rules by categories such as personal information, company information, customer business, security credentials, finance and legal, politically sensitive, and custom.
+* **Rule Field Configuration**: Supports setting rule ID, display name, severity level, action, order, regex pattern, and description.
+* **Rule Action Control**: When a rule is hit, it can be configured to allow the content or route it to the security model.
+* **Batch Enable / Disable**: Supports batch adjustment of rule status.
+* **Rule Test Console**: Paste sample text to test which enabled rules or draft rules will be triggered.
 
-Built-in rule examples currently include but are not limited to:
+The built-in rule examples currently include, but are not limited to:
 
-- Personal information: email address, mobile number, ID card number, passport number, bank card context, address, resume content, etc.
-- Company information: private network IP, internal domain name, host naming, Kubernetes Service DNS, project codename, organizational structure, salary / HR information, etc.
-- Customer business: customer lists, contracts / quotations, invoice tax numbers, CRM / ticket data, etc.
-- Security credentials: private keys, API keys, tokens, JWTs, Cookie / Session, database connection strings, kubeconfig, environment variable secrets, etc.
-- Finance and legal: budgets, profits, revenue, legal opinions, litigation, NDAs, etc.
-- Politically sensitive: political institutions, military/national security, extremist violence-related expressions, etc.
+* Personal information: email address, mobile number, ID card number, passport number, bank card context, address, resume content, etc.
+* Company information: internal IP, internal domain name, host naming, Kubernetes Service DNS, project code name, organizational structure, salary / HR information, etc.
+* Customer business: customer list, contracts / quotations, invoice tax IDs, CRM / ticket data, etc.
+* Security credentials: private keys, API keys, tokens, JWT, Cookie / Session, database connection strings, kubeconfig, environment variable secrets, etc.
+* Finance and legal: budget, profit, revenue, legal opinions, litigation, NDA, etc.
+* Politically sensitive: political institutions, military/national security, extremist and violent expressions, etc.
 
-> Note: The default rules already cover many common sensitive information detection scenarios. In actual use, you can continue to add, adjust, or disable some rules according to business needs.
+> Note: Default rules already cover many common sensitive information detection scenarios. In actual use, rules can be further added, adjusted, or disabled according to business requirements.
 ---
 
 <a id="sec-13"></a>
@@ -455,6 +603,59 @@ The upper-right corner of the page supports:
 
 > Note: Resource Management is mainly used to prepare OpenClaw resource content that can be used after the instance starts, and does not directly replace the instance creation process. When creating an instance, resources can be injected through methods such as **Manual Resources**, **Resource Bundles**, and **Archive Import**.
 
+
+### 10.3.1 Create a Channel
+
+A "Channel" is used to configure how OpenClaw connects to external messaging platforms or access endpoints, such as Telegram, Slack, and Feishu / Lark.
+
+![](./main/12.png)
+
+To create a channel, follow these steps:
+
+1. Go to the **Resource Management** page and stay on the **Resources** tab.
+2. In the resource type list on the left, select **Channel**.
+3. Click **New** on the right side of the page to open the "Create Resource" dialog.
+4. Fill in the basic information in the dialog:
+   - **Type**: select **Channel**
+   - **Resource Key**: enter the unique identifier for this channel. It is recommended to use an easy-to-recognize and non-duplicated English name or combined identifier
+   - **Name**: enter the display name of the channel
+   - **Tags**: optional, used for classification and search
+   - **Description**: optional, used to supplement the purpose of the channel
+   - **Enabled**: it is recommended to keep this checked
+5. In the **Channel Template** section, choose an initial template. The currently supported templates include:
+   - `Telegram`
+   - `Slack`
+   - `Feishu / Lark`
+
+6. After selecting a template, click **Load Template**. The system will automatically write the basic configuration of the corresponding template into the **Content JSON** section below.
+7. Based on your actual integration information, continue to supplement or modify the fields in **Content JSON**.
+8. After confirming the configuration is correct, click Save to complete channel creation.
+
+> Notes:
+> - **Channel Template** helps you quickly generate a basic configuration;
+> - **Content JSON** is the final effective channel configuration content;
+> - If there is no fully matching template, you can also manually fill in the configuration directly in **Content JSON**.
+
+### 10.3.2 Upload Skills
+
+Skills are used to provide reusable functional capabilities for OpenClaw. The platform supports batch importing skills by uploading archive files.
+
+![](./main/13.png)
+
+To upload skills, follow these steps:
+
+1. Go to the **Resource Management** page and stay on the **Resources** tab.
+2. In the resource type list on the left, select **Skills**.
+3. Click **Choose File** and select a local skill archive.
+4. The current page only supports uploading **`.zip`** files.
+5. After selecting the file, click **Upload Skill Archive** on the right.
+6. The system will automatically parse the uploaded content and import each first-level directory as one skill.
+7. After the upload is complete, you can view the imported skills in the skill list.
+
+> Notes:
+> - It is recommended to organize the skill archive in advance by directory;
+> - Each first-level directory will be recognized as an independent skill;
+> - If the list is not refreshed immediately after upload, you can manually click **Refresh** in the upper-right corner of the page to reload it.
 ---
 
 <a id="sec-14"></a>
