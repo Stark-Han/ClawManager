@@ -78,6 +78,10 @@ kubectl get pods -A
 kubectl get svc -A
 ```
 
+**Note:** We provide two deployment manifests. Choose based on your environment:
+- `deployments/k8s/clawmanager.yaml` - For standard Kubernetes clusters with sufficient resources. Includes MinIO for object storage and Skill Scanner for skill management.
+- `deployments/k3s/clawmanager.yaml` - For K3s clusters or resource-constrained environments. Includes Skill Scanner, but uses local filesystem for storage instead of MinIO.
+
 ## Build From Source
 
 If you want to run or package ClawManager from source instead of using the bundled Kubernetes manifest:

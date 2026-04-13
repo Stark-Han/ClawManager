@@ -73,6 +73,10 @@ kubectl get pods -A
 kubectl get svc -A
 ```
 
+**참고:** 두 가지 배포 매니페스트를 제공합니다. 환경에 따라 선택하세요:
+- `deployments/k8s/clawmanager.yaml` - 리소스가 충분한 표준 Kubernetes 클러스터용입니다. MinIO 객체 스토리지와 Skill Scanner 스킬 관리를 포함합니다.
+- `deployments/k3s/clawmanager.yaml` - K3s 클러스터 또는 리소스 제한 환경용입니다. Skill Scanner를 포함하지만 MinIO 대신 로컬 파일 시스템을 사용하여 저장합니다.
+
 ## 소스 코드에서 빌드
 
 저장소에 포함된 Kubernetes 매니페스트 대신 소스 코드에서 ClawManager를 실행하거나 패키징하려면:

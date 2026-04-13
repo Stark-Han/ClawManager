@@ -73,6 +73,10 @@ kubectl get pods -A
 kubectl get svc -A
 ```
 
+**Hinweis:** Wir stellen zwei Deployment-Manifeste bereit. Wählen Sie basierend auf Ihrer Umgebung:
+- `deployments/k8s/clawmanager.yaml` - Für Standard-Kubernetes-Cluster mit ausreichenden Ressourcen. Enthält MinIO für Objektspeicher und Skill Scanner für Skill-Management.
+- `deployments/k3s/clawmanager.yaml` - Für K3s-Cluster oder ressourcenbeschränkte Umgebungen. Enthält Skill Scanner, verwendet jedoch das lokale Dateisystem anstelle von MinIO für die Speicherung.
+
 ## Aus Dem Quellcode Bauen
 
 Wenn du ClawManager aus dem Quellcode starten oder paketieren moechtest, statt das mitgelieferte Kubernetes-Manifest zu verwenden:

@@ -80,6 +80,10 @@ kubectl get pods -A
 kubectl get svc -A
 ```
 
+**注意：** 我们提供两个部署清单，请根据您的环境选择：
+- `deployments/k8s/clawmanager.yaml` - 适用于资源充足的标准 Kubernetes 集群。包含 MinIO 对象存储和 Skill Scanner 技能管理。
+- `deployments/k3s/clawmanager.yaml` - 适用于 K3s 集群或资源受限环境。包含 Skill Scanner，但使用本地文件系统存储（而非 MinIO）。
+
 ## 从源码构建
 
 如果你想从源码运行或打包 ClawManager，而不是直接使用仓库自带的 Kubernetes 清单：

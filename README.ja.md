@@ -73,6 +73,10 @@ kubectl get pods -A
 kubectl get svc -A
 ```
 
+**注記:** 2 種類のデプロイメントマニフェストを提供しています。お使いの環境に応じて選択してください：
+- `deployments/k8s/clawmanager.yaml` - リソースが十分な標準 Kubernetes クラスター向け。MinIO によるオブジェクトストレージと Skill Scanner によるスキル管理を含みます。
+- `deployments/k3s/clawmanager.yaml` - K3s クラスターまたはリソース制約のある環境向け。Skill Scanner を含みますが、MinIO の代わりにローカルファイルシステムを使用して保存します。
+
 ## ソースコードからビルド
 
 同梱の Kubernetes マニフェストではなく、ソースコードから ClawManager を実行またはパッケージ化したい場合:
