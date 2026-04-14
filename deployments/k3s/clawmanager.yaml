@@ -45,7 +45,7 @@ data:
       description TEXT,
       type ENUM('openclaw', 'ubuntu', 'debian', 'centos', 'custom', 'webtop') DEFAULT 'ubuntu',
       status ENUM('creating', 'running', 'stopped', 'error', 'deleting') DEFAULT 'creating',
-      cpu_cores INT NOT NULL,
+      cpu_cores DECIMAL(10,2) NOT NULL,
       memory_gb INT NOT NULL,
       disk_gb INT NOT NULL,
       gpu_enabled BOOLEAN DEFAULT FALSE,
@@ -121,7 +121,7 @@ data:
       id INT AUTO_INCREMENT PRIMARY KEY,
       user_id INT NOT NULL UNIQUE,
       max_instances INT DEFAULT 10,
-      max_cpu_cores INT DEFAULT 40,
+      max_cpu_cores DECIMAL(10,2) DEFAULT 40,
       max_memory_gb INT DEFAULT 100,
       max_storage_gb INT DEFAULT 500,
       max_gpu_count INT DEFAULT 2,
@@ -497,6 +497,10 @@ data:
       INDEX idx_skill_scan_results_blob (blob_id, scanned_at),
       INDEX idx_skill_scan_results_risk (risk_level, scanned_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  009_cpu_cores_decimal.sql: |
+    USE clawmanager;
+    ALTER TABLE instances MODIFY COLUMN cpu_cores DECIMAL(10,2) NOT NULL;
+    ALTER TABLE user_quotas MODIFY COLUMN max_cpu_cores DECIMAL(10,2) DEFAULT 40;
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

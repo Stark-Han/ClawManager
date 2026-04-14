@@ -36,7 +36,7 @@ type CreateInstanceRequest struct {
 	Name               string              `json:"name" validate:"required,min=3,max=50"`
 	Description        *string             `json:"description,omitempty"`
 	Type               string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop"`
-	CPUCores           int                 `json:"cpu_cores" validate:"required,min=1,max=32"`
+	CPUCores           float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB           int                 `json:"memory_gb" validate:"required,min=1,max=128"`
 	DiskGB             int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
 	GPUEnabled         bool                `json:"gpu_enabled"`
@@ -123,7 +123,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		return nil, fmt.Errorf("failed to list user instances for quota validation: %w", err)
 	}
 
-	currentCPU := 0
+	currentCPU := 0.0
 	currentMemory := 0
 	currentStorage := 0
 	currentGPU := 0
@@ -146,7 +146,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 
 	// Check CPU limit
 	if currentCPU+req.CPUCores > quota.MaxCPUCores {
-		return nil, fmt.Errorf("CPU cores exceed quota: current %d, requested %d, max %d", currentCPU, req.CPUCores, quota.MaxCPUCores)
+		return nil, fmt.Errorf("CPU cores exceed quota: current %v, requested %v, max %v", currentCPU, req.CPUCores, quota.MaxCPUCores)
 	}
 
 	// Check memory limit

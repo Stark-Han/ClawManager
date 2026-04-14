@@ -494,10 +494,11 @@ const CreateInstancePage: React.FC = () => {
                     <input
                       type="number"
                       id="cpu"
-                      min={1}
+                      min={0.1}
                       max={32}
+                      step={0.1}
                       value={formData.cpu_cores}
-                      onChange={(e) => setFormData({ ...formData, cpu_cores: parseInt(e.target.value) || 1 })}
+                      onChange={(e) => setFormData({ ...formData, cpu_cores: parseFloat(e.target.value) || 0.1 })}
                       className="app-input mt-1 block w-full"
                     />
                   </div>

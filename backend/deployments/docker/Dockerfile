@@ -1,5 +1,7 @@
 # Build stage
 FROM golang:1.21-alpine AS builder
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
 
 WORKDIR /app
 

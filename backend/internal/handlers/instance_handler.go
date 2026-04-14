@@ -65,7 +65,7 @@ type CreateInstanceRequest struct {
 	Name               string                       `json:"name" binding:"required,min=3,max=50"`
 	Description        *string                      `json:"description,omitempty"`
 	Type               string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop"`
-	CPUCores           int                          `json:"cpu_cores" binding:"required,min=1,max=32"`
+	CPUCores           float64                      `json:"cpu_cores" binding:"required,min=0.1,max=32"`
 	MemoryGB           int                          `json:"memory_gb" binding:"required,min=1,max=128"`
 	DiskGB             int                          `json:"disk_gb" binding:"required,min=10,max=1000"`
 	GPUEnabled         bool                         `json:"gpu_enabled"`
