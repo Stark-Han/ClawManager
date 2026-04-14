@@ -12,6 +12,11 @@ FROM golang:1.26.1-alpine AS backend-builder
 
 WORKDIR /app/backend
 
+ARG GOPROXY
+ARG GOSUMDB
+ARG GOFLAGS
+ENV GOFLAGS=${GOFLAGS}
+
 RUN apk add --no-cache git
 
 COPY backend/go.mod backend/go.sum ./

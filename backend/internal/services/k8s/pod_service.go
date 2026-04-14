@@ -35,7 +35,7 @@ type PodConfig struct {
 	InstanceName       string
 	UserID             int
 	Type               string
-	CPUCores           int
+	CPUCores           float64
 	MemoryGB           int
 	GPUEnabled         bool
 	GPUCount           int
@@ -59,11 +59,11 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 	// Build resource requirements
 	resources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%d", config.CPUCores)),
+			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%g", config.CPUCores)),
 			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", config.MemoryGB)),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%d", config.CPUCores)),
+			corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%g", config.CPUCores)),
 			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", config.MemoryGB)),
 		},
 	}
