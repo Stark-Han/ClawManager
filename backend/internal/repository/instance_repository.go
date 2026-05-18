@@ -105,7 +105,7 @@ func (r *instanceRepository) CountAll() (int, error) {
 // GetByUserID gets instances by user ID with pagination
 func (r *instanceRepository) GetByUserID(userID int, offset, limit int) ([]models.Instance, error) {
 	var instances []models.Instance
-	err := r.sess.Collection("instances").Find(db.Cond{"user_id": userID}).Offset(offset).Limit(limit).All(&instances)
+	err := r.sess.Collection("instances").Find(db.Cond{"user_id": userID}).OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get instances: %w", err)
 	}

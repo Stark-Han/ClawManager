@@ -65,6 +65,7 @@ func main() {
 	instanceDesiredStateRepo := repository.NewInstanceDesiredStateRepository(database)
 	instanceCommandRepo := repository.NewInstanceCommandRepository(database)
 	instanceConfigRevisionRepo := repository.NewInstanceConfigRevisionRepository(database)
+	teamRepo := repository.NewTeamRepository(database)
 	skillRepo := repository.NewSkillRepository(database)
 	securityScanRepo := repository.NewSecurityScanRepository(database)
 
@@ -108,6 +109,7 @@ func main() {
 	instanceRuntimeStatusService := services.NewInstanceRuntimeStatusService(instanceRuntimeStatusRepo, instanceAgentRepo, instanceDesiredStateRepo)
 	instanceCommandService := services.NewInstanceCommandService(instanceCommandRepo, instanceRuntimeStatusRepo, instanceDesiredStateRepo)
 	instanceConfigRevisionService := services.NewInstanceConfigRevisionService(instanceConfigRevisionRepo)
+	teamService := services.NewTeamService(teamRepo, instanceService)
 	skillService := services.NewSkillService(skillRepo, instanceRepo, instanceCommandService, objectStorageService, skillScannerClient)
 	securityScanService := services.NewSecurityScanService(securityScanRepo, skillRepo, objectStorageService, skillScannerClient)
 	aiGatewayService := aigateway.NewService(llmModelRepo, modelInvocationService, auditEventService, costRecordService, riskDetectionService, riskHitService, chatSessionService, chatMessageService)
@@ -127,6 +129,7 @@ func main() {
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)
 	securityHandler := handlers.NewSecurityHandler(securityScanService)
 	agentHandler := handlers.NewAgentHandler(instanceAgentService, instanceCommandService, instanceRuntimeStatusService, instanceConfigRevisionService, skillService)
+	teamHandler := handlers.NewTeamHandler(teamService)
 
 	// Initialize WebSocket hub and handler
 	wsHub := services.GetHub()
@@ -135,6 +138,7 @@ func main() {
 	// Start sync service to keep instance status in sync with K8s
 	syncService := services.NewSyncService(instanceRepo, instanceRuntimeStatusService)
 	syncService.Start()
+	teamService.Start()
 
 	// Setup router
 	r := gin.Default()
@@ -223,6 +227,18 @@ func main() {
 		adminInstances.Use(middleware.NewAdminAuth(userRepo))
 		{
 			adminInstances.GET("", instanceHandler.ListAllInstances)
+		}
+
+		teams := api.Group("/teams")
+		teams.Use(middleware.Auth())
+		teams.Use(middleware.SetUserInfo(userRepo))
+		{
+			teams.GET("", teamHandler.ListTeams)
+			teams.POST("", teamHandler.CreateTeam)
+			teams.GET("/:id", teamHandler.GetTeam)
+			teams.DELETE("/:id", teamHandler.DeleteTeam)
+			teams.POST("/:id/tasks", teamHandler.DispatchTask)
+			teams.DELETE("/:id/members/:memberID", teamHandler.DeleteMember)
 		}
 
 		openClawConfigs := api.Group("/openclaw-configs")
@@ -406,6 +422,7 @@ func main() {
 
 	// Stop background services
 	syncService.Stop()
+	teamService.Stop()
 	wsHub.Stop()
 	instanceHandler.Shutdown()
 

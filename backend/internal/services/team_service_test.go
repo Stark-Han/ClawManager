@@ -1,0 +1,288 @@
+package services
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"clawreef/internal/models"
+)
+
+func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
+	t.Setenv("CLAWMANAGER_TEAM_MANAGER_BASE_URL", "http://manager.example")
+
+	service := &teamService{}
+	env := service.teamMemberEnv(&models.Team{
+		ID:              12,
+		SharedMountPath: "/team",
+	}, "leader", "lead")
+
+	if env["CLAWMANAGER_TEAM_ID"] != "12" {
+		t.Fatalf("expected Team id env, got %q", env["CLAWMANAGER_TEAM_ID"])
+	}
+	if env["CLAWMANAGER_TEAM_MEMBER_ID"] != "leader" {
+		t.Fatalf("expected member id env, got %q", env["CLAWMANAGER_TEAM_MEMBER_ID"])
+	}
+	if env["CLAWMANAGER_TEAM_ROLE"] != "lead" {
+		t.Fatalf("expected Team role env, got %q", env["CLAWMANAGER_TEAM_ROLE"])
+	}
+	if env["CLAWMANAGER_TEAM_INBOX_KEY"] != "claw:team:12:inbox:leader" {
+		t.Fatalf("unexpected inbox key: %q", env["CLAWMANAGER_TEAM_INBOX_KEY"])
+	}
+	if env["CLAWMANAGER_TEAM_EVENTS_KEY"] != "claw:team:12:events" {
+		t.Fatalf("unexpected events key: %q", env["CLAWMANAGER_TEAM_EVENTS_KEY"])
+	}
+	if env["CLAWMANAGER_TEAM_MANAGER_URL"] != "http://manager.example" {
+		t.Fatalf("unexpected manager url: %q", env["CLAWMANAGER_TEAM_MANAGER_URL"])
+	}
+	if env["CLAWMANAGER_TEAM_CONFIG_PATH"] != "/team/team.json" {
+		t.Fatalf("unexpected Team config path: %q", env["CLAWMANAGER_TEAM_CONFIG_PATH"])
+	}
+	if env["CLAWMANAGER_TEAM_AUTORUN"] != "true" || env["CLAWMANAGER_TEAM_CONSUMER_GROUP"] != "team-members" {
+		t.Fatalf("expected Team autorun and consumer group env, got %#v", env)
+	}
+	for key := range env {
+		if strings.Contains(key, "REDIS_URL") || strings.Contains(key, "TOKEN") {
+			t.Fatalf("sensitive Team env %s must come from Secret, not plain env", key)
+		}
+	}
+}
+
+func TestNewRedisBusParsesURLWithoutNetwork(t *testing.T) {
+	bus, err := newRedisBus("redis://:pass@redis.example:6380/3")
+	if err != nil {
+		t.Fatalf("newRedisBus returned error: %v", err)
+	}
+	if bus.address != "redis.example:6380" || bus.password != "pass" || bus.db != 3 || bus.useTLS {
+		t.Fatalf("unexpected redis bus config: %#v", bus)
+	}
+}
+
+func TestPlanTeamMembersRequiresExactlyOneLeader(t *testing.T) {
+	_, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "worker", Role: "developer"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one leader") {
+		t.Fatalf("expected exactly one leader validation error, got %v", err)
+	}
+
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "lead", Role: "team leader"},
+		{MemberID: "worker", Role: "developer"},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	if len(plans) != 2 || !plans[0].IsLeader || plans[0].Role != "leader" {
+		t.Fatalf("expected first member to be normalized as leader, got %#v", plans)
+	}
+	if plans[1].RuntimeType != "openclaw" {
+		t.Fatalf("expected default runtime type openclaw, got %#v", plans[1])
+	}
+}
+
+func TestPlanTeamMembersSupportsHermesRuntime(t *testing.T) {
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "lead", Role: "leader"},
+		{MemberID: "hermes-writer", Role: "writer", RuntimeType: "Hermes"},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	if plans[1].RuntimeType != "hermes" {
+		t.Fatalf("expected Hermes runtime to be normalized, got %#v", plans[1])
+	}
+
+	_, err = planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "lead", Role: "leader"},
+		{MemberID: "worker", Role: "developer", RuntimeType: "ubuntu"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported team member runtime type") {
+		t.Fatalf("expected unsupported runtime validation error, got %v", err)
+	}
+}
+
+func TestTeamMemberInstanceNameUsesTeamIDAndMemberKey(t *testing.T) {
+	name := teamMemberInstanceName("Software Engineering Team", 42, "code-reviewer")
+	if name != "software-engineering-team-42-code-reviewer" {
+		t.Fatalf("unexpected Team member instance name: %q", name)
+	}
+
+	longName := teamMemberInstanceName("very-long-software-engineering-platform-team", 12345, "extremely-long-code-reviewer-member-key")
+	if len(longName) > 50 {
+		t.Fatalf("expected instance name to stay within 50 chars, got %d: %q", len(longName), longName)
+	}
+	if !strings.Contains(longName, "-12345-") {
+		t.Fatalf("expected instance name to include Team ID, got %q", longName)
+	}
+}
+
+func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
+	description := "reviews implementation and validates results"
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "leader", Role: "leader"},
+		{MemberID: "worker", Role: "developer", Description: &description},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	roster, err := buildTeamRosterConfig(&models.Team{
+		ID:                9,
+		CommunicationMode: "leader_mediated",
+		SharedMountPath:   "/team",
+	}, plans)
+	if err != nil {
+		t.Fatalf("buildTeamRosterConfig returned error: %v", err)
+	}
+	for _, forbidden := range []string{"REDIS_URL", "TOKEN", "OPENAI_API_KEY", "secret"} {
+		if strings.Contains(roster, forbidden) {
+			t.Fatalf("roster must not contain sensitive value marker %q: %s", forbidden, roster)
+		}
+	}
+	if !strings.Contains(roster, `"leaderMemberId":"leader"`) || !strings.Contains(roster, `"eventsKey":"claw:team:9:events"`) {
+		t.Fatalf("roster missing expected leader or redis keys: %s", roster)
+	}
+	if !strings.Contains(roster, description) {
+		t.Fatalf("roster missing member description: %s", roster)
+	}
+	if !strings.Contains(roster, `"runtimeType":"openclaw"`) {
+		t.Fatalf("roster missing member runtime type: %s", roster)
+	}
+}
+
+func TestBuildInitialLeaderTaskPayloadDescribesRosterAndTeamSend(t *testing.T) {
+	payload := buildInitialLeaderTaskPayload("Software Engineering Team")
+
+	if payload["intent"] != initialLeaderTaskIntent {
+		t.Fatalf("unexpected bootstrap intent: %#v", payload)
+	}
+	if payload["title"] == "" {
+		t.Fatalf("expected bootstrap task title: %#v", payload)
+	}
+	prompt, ok := payload["prompt"].(string)
+	if !ok {
+		t.Fatalf("expected prompt string: %#v", payload)
+	}
+	for _, expected := range []string{
+		"`team Software Engineering Team`",
+		"Redis Team成员构成",
+		"运行状态与技术能力边界",
+		"协作与通信机制(team_send)",
+		"任务流转方式",
+		"消息同步方式",
+		"上下文共享方式",
+		"可调用的方法、工具与操作能力",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("bootstrap prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestActiveTeamMembersFiltersDeletedMembers(t *testing.T) {
+	members := activeTeamMembers([]models.TeamMember{
+		{MemberKey: "leader", Status: models.TeamMemberStatusIdle},
+		{MemberKey: "old", Status: models.TeamMemberStatusDeleted},
+		{MemberKey: "gone", Status: models.TeamMemberStatusDeleting},
+	})
+	if len(members) != 1 || members[0].MemberKey != "leader" {
+		t.Fatalf("unexpected active members: %#v", members)
+	}
+}
+
+func TestDeletedTeamNameReleasesUniqueName(t *testing.T) {
+	name := deletedTeamName("DeepResearch", 42)
+	if name != "DeepResearch__deleted_42" {
+		t.Fatalf("unexpected deleted Team name: %q", name)
+	}
+	if again := deletedTeamName(name, 42); again != name {
+		t.Fatalf("deleted Team name should be idempotent, got %q", again)
+	}
+}
+
+func TestTeamTaskStaleTimeoutUsesEnvironment(t *testing.T) {
+	t.Setenv("CLAWMANAGER_TEAM_TASK_STALE_SECONDS", "60")
+	if got := teamTaskStaleTimeout(); got != time.Minute {
+		t.Fatalf("expected one minute stale timeout, got %s", got)
+	}
+
+	t.Setenv("CLAWMANAGER_TEAM_TASK_STALE_SECONDS", "0")
+	if got := teamTaskStaleTimeout(); got != 0 {
+		t.Fatalf("expected disabled stale timeout, got %s", got)
+	}
+}
+
+func TestApplyTeamMemberRuntimeProjectionSetsBlockedAvailability(t *testing.T) {
+	member := &models.TeamMember{Availability: models.TeamMemberAvailabilityBusy}
+	payload := map[string]interface{}{
+		"availability":  "blocked",
+		"lastSummary":   "Task failed: LLM request failed: network connection error.",
+		"currentTaskId": "task_cb1062da-dff2-46ff-836f-86490583d944",
+		"currentIntent": "weather_query_beijing",
+	}
+
+	applyTeamMemberRuntimeProjection(member, payload, "status")
+
+	if member.Availability != models.TeamMemberAvailabilityBlocked {
+		t.Fatalf("expected blocked availability, got %q", member.Availability)
+	}
+	if member.LastSummary == nil || !strings.Contains(*member.LastSummary, "LLM request failed") {
+		t.Fatalf("expected last summary projection, got %#v", member.LastSummary)
+	}
+	if member.RuntimeTaskID == nil || *member.RuntimeTaskID != "task_cb1062da-dff2-46ff-836f-86490583d944" {
+		t.Fatalf("expected runtime task id projection, got %#v", member.RuntimeTaskID)
+	}
+}
+
+func TestApplyTeamMemberRuntimeProjectionClearsStaleBlockedOnCompletion(t *testing.T) {
+	reason := "previous task failed"
+	member := &models.TeamMember{
+		Availability:  models.TeamMemberAvailabilityBlocked,
+		BlockedReason: &reason,
+	}
+	payload := map[string]interface{}{
+		"lastSummary":   "Redis Team task processing completed",
+		"currentTaskId": "task_001",
+	}
+
+	applyTeamMemberRuntimeProjection(member, payload, "task_completed")
+
+	if member.Availability != models.TeamMemberAvailabilityIdle {
+		t.Fatalf("expected idle availability after task completion, got %q", member.Availability)
+	}
+	if member.BlockedReason != nil {
+		t.Fatalf("expected stale blocked reason to be cleared, got %#v", *member.BlockedReason)
+	}
+}
+
+func TestMergeMissingEventFieldsEnrichesOutboundPayload(t *testing.T) {
+	base := map[string]interface{}{
+		"event":     "outbound",
+		"messageId": "msg_123",
+		"from":      "leader",
+		"to":        "worker",
+	}
+	extra := map[string]interface{}{
+		"messageId": "msg_123",
+		"title":     "Check date",
+		"text":      "Check today's date and send the result back.",
+		"metadata": map[string]interface{}{
+			"prompt": "metadata prompt should also be available",
+		},
+	}
+
+	merged := mergeMissingEventFields(base, extra)
+
+	if merged["messageId"] != "msg_123" || merged["from"] != "leader" || merged["to"] != "worker" {
+		t.Fatalf("base fields should be preserved, got %#v", merged)
+	}
+	if merged["title"] != "Check date" || merged["text"] == "" {
+		t.Fatalf("expected outbound payload to be enriched with title/text, got %#v", merged)
+	}
+	if merged["prompt"] != "metadata prompt should also be available" {
+		t.Fatalf("expected metadata prompt to be merged, got %#v", merged)
+	}
+	if !teamEventHasBody(merged) {
+		t.Fatalf("expected enriched event to have displayable body: %#v", merged)
+	}
+}

@@ -536,7 +536,7 @@ data:
     UPDATE system_image_settings
     SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest'
     WHERE image = 'ghcr.io/Yuan-lab-LLM/AgentsRuntime/hermes:latest';
-  014_add_instance_runtime_type.sql: |
+  019_add_instance_runtime_type.sql: |
     USE clawmanager;
     SET @instance_runtime_type_column_exists = (
       SELECT COUNT(*)
@@ -553,7 +553,7 @@ data:
     PREPARE instance_runtime_type_column_stmt FROM @instance_runtime_type_column_sql;
     EXECUTE instance_runtime_type_column_stmt;
     DEALLOCATE PREPARE instance_runtime_type_column_stmt;
-  015_add_system_image_runtime_type.sql: |
+  020_add_system_image_runtime_type.sql: |
     USE clawmanager;
     SET @system_image_runtime_type_column_exists = (
       SELECT COUNT(*)

@@ -240,6 +240,21 @@ func (c *Client) GetPVCName(instanceID int) string {
 	return sanitizeK8sName(fmt.Sprintf("clawreef-%d-pvc", instanceID))
 }
 
+// GetTeamSharedPVCName returns the PVC name used for a Team shared workspace.
+func (c *Client) GetTeamSharedPVCName(teamID int) string {
+	return sanitizeK8sName(fmt.Sprintf("clawreef-team-%d-shared", teamID))
+}
+
+// GetTeamSecretName returns the Secret name used for Team Redis URL and token env.
+func (c *Client) GetTeamSecretName(teamID int) string {
+	return sanitizeK8sName(fmt.Sprintf("clawreef-team-%d-bus", teamID))
+}
+
+// GetTeamConfigMapName returns the ConfigMap name used for Team roster/config.
+func (c *Client) GetTeamConfigMapName(teamID int) string {
+	return sanitizeK8sName(fmt.Sprintf("clawreef-team-%d-config", teamID))
+}
+
 // GetServiceName returns the service name for an instance
 func (c *Client) GetServiceName(instanceID int, instanceName string) string {
 	return sanitizeK8sName(fmt.Sprintf("clawreef-%d-%s-svc", instanceID, instanceName))

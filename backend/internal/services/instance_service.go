@@ -21,6 +21,7 @@ import (
 // InstanceService defines the interface for instance operations
 type InstanceService interface {
 	Create(userID int, req CreateInstanceRequest) (*models.Instance, error)
+	ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error
 	GetByID(id int) (*models.Instance, error)
 	GetByUserID(userID int, offset, limit int) ([]models.Instance, int, error)
 	GetAllInstances(offset, limit int) ([]models.Instance, int, error)
@@ -31,6 +32,98 @@ type InstanceService interface {
 	Update(instanceID int, req UpdateInstanceRequest) error
 	GetInstanceStatus(instanceID int) (*InstanceStatus, error)
 	ForceSyncInstance(instanceID int) error
+}
+
+func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error {
+	if len(requests) == 0 {
+		return nil
+	}
+	for idx := range requests {
+		requests[idx].Name = strings.TrimSpace(requests[idx].Name)
+		if requests[idx].Name == "" {
+			return fmt.Errorf("instance name is required")
+		}
+		environmentOverrides, err := normalizeEnvironmentOverrides(requests[idx].EnvironmentOverrides)
+		if err != nil {
+			return err
+		}
+		if _, err := marshalEnvironmentOverrides(environmentOverrides); err != nil {
+			return err
+		}
+	}
+
+	quota, err := s.quotaRepo.GetByUserID(userID)
+	if err != nil {
+		return fmt.Errorf("failed to get user quota: %w", err)
+	}
+	if quota == nil {
+		return fmt.Errorf("user quota not found")
+	}
+
+	currentCount, err := s.instanceRepo.CountByUserID(userID)
+	if err != nil {
+		return fmt.Errorf("failed to count instances: %w", err)
+	}
+	if currentCount+len(requests) > quota.MaxInstances {
+		return fmt.Errorf("instance limit reached: %d/%d", currentCount+len(requests), quota.MaxInstances)
+	}
+
+	existingInstances, err := s.instanceRepo.GetByUserID(userID, 0, 1000)
+	if err != nil {
+		return fmt.Errorf("failed to list user instances for quota validation: %w", err)
+	}
+
+	currentCPU := 0.0
+	currentMemory := 0
+	currentStorage := 0
+	currentGPU := 0
+	existingNames := map[string]struct{}{}
+	for _, existing := range existingInstances {
+		currentCPU += existing.CPUCores
+		currentMemory += existing.MemoryGB
+		currentStorage += existing.DiskGB
+		if existing.GPUEnabled {
+			currentGPU += existing.GPUCount
+		}
+		existingNames[strings.TrimSpace(strings.ToLower(existing.Name))] = struct{}{}
+	}
+
+	requestedCPU := 0.0
+	requestedMemory := 0
+	requestedStorage := 0
+	requestedGPU := 0
+	requestNames := map[string]struct{}{}
+	for _, req := range requests {
+		normalizedName := strings.TrimSpace(strings.ToLower(req.Name))
+		if _, exists := existingNames[normalizedName]; exists {
+			return fmt.Errorf("instance name already exists")
+		}
+		if _, exists := requestNames[normalizedName]; exists {
+			return fmt.Errorf("instance name already exists")
+		}
+		requestNames[normalizedName] = struct{}{}
+		requestedCPU += req.CPUCores
+		requestedMemory += req.MemoryGB
+		requestedStorage += req.DiskGB
+		if req.GPUEnabled {
+			requestedGPU += req.GPUCount
+		}
+	}
+
+	if currentCPU+requestedCPU > quota.MaxCPUCores {
+		return fmt.Errorf("CPU cores exceed quota: current %v, requested %v, max %v", currentCPU, requestedCPU, quota.MaxCPUCores)
+	}
+	if currentMemory+requestedMemory > quota.MaxMemoryGB {
+		return fmt.Errorf("memory exceed quota: current %dGB, requested %dGB, max %dGB", currentMemory, requestedMemory, quota.MaxMemoryGB)
+	}
+	if currentStorage+requestedStorage > quota.MaxStorageGB {
+		return fmt.Errorf("storage exceed quota: current %dGB, requested %dGB, max %dGB", currentStorage, requestedStorage, quota.MaxStorageGB)
+	}
+	if currentGPU+requestedGPU > quota.MaxGPUCount {
+		return fmt.Errorf("GPU count exceed quota: current %d, requested %d, max %d", currentGPU, requestedGPU, quota.MaxGPUCount)
+	}
+
+	return nil
 }
 
 // CreateInstanceRequest holds data for creating an instance
@@ -51,6 +144,16 @@ type CreateInstanceRequest struct {
 	EnvironmentOverrides map[string]string   `json:"environment_overrides,omitempty"`
 	StorageClass         string              `json:"storage_class"`
 	OpenClawConfigPlan   *OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
+	Team                 *TeamInstanceConfig `json:"-"`
+}
+
+type TeamInstanceConfig struct {
+	Environment     map[string]string
+	SecretName      string
+	SharedPVCName   string
+	SharedMountPath string
+	ConfigMapName   string
+	ConfigMountPath string
 }
 
 // UpdateInstanceRequest holds data for updating an instance
@@ -273,6 +376,9 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		s.instanceRepo.Delete(instance.ID)
 		return nil, fmt.Errorf("failed to resolve instance environment: %w", err)
 	}
+	if req.Team != nil {
+		extraEnv = mergeEnvMaps(extraEnv, req.Team.Environment)
+	}
 
 	var bootstrapSnapshot *models.OpenClawInjectionSnapshot
 	var bootstrapSecretName string
@@ -327,24 +433,51 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 
 	// Create Pod
 	shmSizeGB := popSHMSizeGB(extraEnv)
+	envFromSecretNames := []string{bootstrapSecretName}
+	extraPVCMounts := []k8s.PVCMount{}
+	configMapFileMounts := []k8s.ConfigMapFileMount{}
+	if req.Team != nil {
+		if strings.TrimSpace(req.Team.SecretName) != "" {
+			envFromSecretNames = append(envFromSecretNames, strings.TrimSpace(req.Team.SecretName))
+		}
+		if strings.TrimSpace(req.Team.SharedPVCName) != "" && strings.TrimSpace(req.Team.SharedMountPath) != "" {
+			extraPVCMounts = append(extraPVCMounts, k8s.PVCMount{
+				Name:      "team-shared",
+				ClaimName: strings.TrimSpace(req.Team.SharedPVCName),
+				MountPath: strings.TrimSpace(req.Team.SharedMountPath),
+			})
+		}
+		if strings.TrimSpace(req.Team.ConfigMapName) != "" && strings.TrimSpace(req.Team.ConfigMountPath) != "" {
+			configMapFileMounts = append(configMapFileMounts, k8s.ConfigMapFileMount{
+				Name:          "team-config",
+				ConfigMapName: strings.TrimSpace(req.Team.ConfigMapName),
+				Key:           "team.json",
+				MountPath:     strings.TrimSpace(req.Team.ConfigMountPath),
+				ReadOnly:      true,
+			})
+		}
+	}
+
 	podConfig := k8s.PodConfig{
-		InstanceID:         instance.ID,
-		InstanceName:       instance.Name,
-		UserID:             userID,
-		Type:               instance.Type,
-		RuntimeType:        runtimeType,
-		CPUCores:           instance.CPUCores,
-		MemoryGB:           instance.MemoryGB,
-		GPUEnabled:         instance.GPUEnabled,
-		GPUCount:           instance.GPUCount,
-		Image:              runtimeConfig.Image,
-		MountPath:          runtimeConfig.MountPath,
-		ContainerPort:      runtimeConfig.Port,
-		ImagePullPolicy:    corev1.PullPolicy(defaultImagePullPolicy()),
-		ExtraEnv:           extraEnv,
-		EnvFromSecretNames: []string{bootstrapSecretName},
-		SHMSizeGB:          shmSizeGB,
-		SecurityMode:       s.securityModeForInstance(instance.Type),
+		InstanceID:          instance.ID,
+		InstanceName:        instance.Name,
+		UserID:              userID,
+		Type:                instance.Type,
+		RuntimeType:         runtimeType,
+		CPUCores:            instance.CPUCores,
+		MemoryGB:            instance.MemoryGB,
+		GPUEnabled:          instance.GPUEnabled,
+		GPUCount:            instance.GPUCount,
+		Image:               runtimeConfig.Image,
+		MountPath:           runtimeConfig.MountPath,
+		ContainerPort:       runtimeConfig.Port,
+		ImagePullPolicy:     corev1.PullPolicy(defaultImagePullPolicy()),
+		ExtraEnv:            extraEnv,
+		EnvFromSecretNames:  envFromSecretNames,
+		ExtraPVCMounts:      extraPVCMounts,
+		ConfigMapFileMounts: configMapFileMounts,
+		SHMSizeGB:           shmSizeGB,
+		SecurityMode:        s.securityModeForInstance(instance.Type),
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)

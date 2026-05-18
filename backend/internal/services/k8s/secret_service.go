@@ -91,3 +91,18 @@ func (s *SecretService) UpsertSecret(ctx context.Context, userID int, name strin
 	}
 	return nil
 }
+
+// DeleteSecret deletes a Secret from the user's namespace. Missing secrets are treated as already deleted.
+func (s *SecretService) DeleteSecret(ctx context.Context, userID int, name string) error {
+	if s.client == nil || s.client.Clientset == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	namespace := s.client.GetNamespace(userID)
+	if err := s.client.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete secret %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}

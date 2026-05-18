@@ -42,23 +42,40 @@ func (s *PodService) GetClient() *Client {
 
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
-	InstanceID         int
-	InstanceName       string
-	UserID             int
-	Type               string
-	RuntimeType        string
-	CPUCores           float64
-	MemoryGB           int
-	GPUEnabled         bool
-	GPUCount           int
-	Image              string
-	MountPath          string
-	ContainerPort      int32
-	ImagePullPolicy    corev1.PullPolicy
-	ExtraEnv           map[string]string
-	EnvFromSecretNames []string
-	SHMSizeGB          int
-	SecurityMode       PodSecurityMode
+	InstanceID          int
+	InstanceName        string
+	UserID              int
+	Type                string
+	RuntimeType         string
+	CPUCores            float64
+	MemoryGB            int
+	GPUEnabled          bool
+	GPUCount            int
+	Image               string
+	MountPath           string
+	ContainerPort       int32
+	ImagePullPolicy     corev1.PullPolicy
+	ExtraEnv            map[string]string
+	EnvFromSecretNames  []string
+	ExtraPVCMounts      []PVCMount
+	ConfigMapFileMounts []ConfigMapFileMount
+	SHMSizeGB           int
+	SecurityMode        PodSecurityMode
+}
+
+type PVCMount struct {
+	Name      string
+	ClaimName string
+	MountPath string
+	ReadOnly  bool
+}
+
+type ConfigMapFileMount struct {
+	Name          string
+	ConfigMapName string
+	Key           string
+	MountPath     string
+	ReadOnly      bool
 }
 
 // CreatePod creates a new pod for an instance
@@ -212,6 +229,52 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
 			Name:  key,
 			Value: value,
+		})
+	}
+
+	for _, mount := range config.ExtraPVCMounts {
+		if mount.Name == "" || mount.ClaimName == "" || mount.MountPath == "" {
+			continue
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: mount.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: mount.ClaimName,
+					ReadOnly:  mount.ReadOnly,
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      mount.Name,
+			MountPath: mount.MountPath,
+			ReadOnly:  mount.ReadOnly,
+		})
+	}
+
+	for _, mount := range config.ConfigMapFileMounts {
+		if mount.Name == "" || mount.ConfigMapName == "" || mount.Key == "" || mount.MountPath == "" {
+			continue
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: mount.Name,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: mount.ConfigMapName},
+					Items: []corev1.KeyToPath{
+						{
+							Key:  mount.Key,
+							Path: mount.Key,
+						},
+					},
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      mount.Name,
+			MountPath: mount.MountPath,
+			SubPath:   mount.Key,
+			ReadOnly:  true,
 		})
 	}
 

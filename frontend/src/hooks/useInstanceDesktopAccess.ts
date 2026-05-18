@@ -165,6 +165,32 @@ export function useInstanceDesktopAccess({
     setReconnecting(false);
   }, [clearRefreshTimeout, clearRetryTimeout, instanceId]);
 
+  useEffect(() => {
+    clearRetryTimeout();
+    clearRefreshTimeout();
+    requestIdRef.current += 1;
+
+    const cachedSession = instanceId
+      ? desktopSessionStore.get(instanceId)
+      : null;
+    const nextEmbedUrl = cachedSession?.embedUrl ?? null;
+    const nextExpiresAt = cachedSession?.expiresAt
+      ? new Date(cachedSession.expiresAt)
+      : null;
+
+    embedUrlRef.current = nextEmbedUrl;
+    expiresAtRef.current = nextExpiresAt;
+    hasEstablishedSessionRef.current =
+      cachedSession?.hasEstablishedSession ?? false;
+    retryAttemptRef.current = 0;
+
+    setEmbedUrl(nextEmbedUrl);
+    setExpiresAt(nextExpiresAt);
+    setError(null);
+    setLoading(false);
+    setReconnecting(false);
+  }, [clearRefreshTimeout, clearRetryTimeout, instanceId]);
+
   const shouldPreserveSession = useCallback(() => {
     return (
       retainSessionOnStop &&

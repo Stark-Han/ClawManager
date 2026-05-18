@@ -31,6 +31,9 @@ import InstanceListPage from '../pages/instances/InstanceListPage';
 import CreateInstancePage from '../pages/instances/CreateInstancePage';
 import InstanceDetailPage from '../pages/instances/InstanceDetailPage';
 import InstancePortalPage from '../pages/instances/InstancePortalPage';
+import TeamListPage from '../pages/teams/TeamListPage';
+import CreateTeamPage from '../pages/teams/CreateTeamPage';
+import TeamDetailPage from '../pages/teams/TeamDetailPage';
 
 // Protected Route Component
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -180,6 +183,30 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <InstancePortalPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teams"
+        element={
+          <ProtectedRoute>
+            <TeamListPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teams/new"
+        element={
+          <ProtectedRoute>
+            <CreateTeamPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/teams/:id"
+        element={
+          <ProtectedRoute>
+            <TeamDetailPage />
           </ProtectedRoute>
         }
       />

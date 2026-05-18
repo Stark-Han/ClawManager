@@ -117,3 +117,64 @@ func TestCreatePodShellRuntimeSkipsDesktopNetworkProbes(t *testing.T) {
 		t.Fatalf("expected shell runtime to skip desktop TCP probes")
 	}
 }
+
+func TestCreatePodAppliesExtraPVCMountsAndSecretEnv(t *testing.T) {
+	previousClient := globalClient
+	t.Cleanup(func() {
+		globalClient = previousClient
+	})
+
+	globalClient = &Client{
+		Clientset:    fake.NewSimpleClientset(),
+		Namespace:    "clawreef",
+		StorageClass: "standard",
+	}
+
+	service := NewPodService()
+	pod, err := service.CreatePod(context.Background(), PodConfig{
+		InstanceID:         43,
+		InstanceName:       "openclaw-team",
+		UserID:             7,
+		Type:               "openclaw",
+		CPUCores:           1,
+		MemoryGB:           2,
+		Image:              "openclaw:test",
+		MountPath:          "/config",
+		ContainerPort:      3001,
+		EnvFromSecretNames: []string{"clawreef-team-1-bus"},
+		ExtraPVCMounts: []PVCMount{
+			{Name: "team-shared", ClaimName: "clawreef-team-1-shared", MountPath: "/team"},
+		},
+		ConfigMapFileMounts: []ConfigMapFileMount{
+			{Name: "team-config", ConfigMapName: "clawreef-team-1-config", Key: "team.json", MountPath: "/team/team.json", ReadOnly: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePod returned error: %v", err)
+	}
+
+	container := pod.Spec.Containers[0]
+	if len(container.EnvFrom) != 1 || container.EnvFrom[0].SecretRef == nil || container.EnvFrom[0].SecretRef.Name != "clawreef-team-1-bus" {
+		t.Fatalf("expected Team secret envFrom, got %#v", container.EnvFrom)
+	}
+
+	foundMount := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "team-shared" && mount.MountPath == "/team" {
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Fatalf("expected /team shared PVC mount, got %#v", container.VolumeMounts)
+	}
+
+	foundConfig := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "team-config" && mount.MountPath == "/team/team.json" && mount.SubPath == "team.json" && mount.ReadOnly {
+			foundConfig = true
+		}
+	}
+	if !foundConfig {
+		t.Fatalf("expected /team/team.json ConfigMap file mount, got %#v", container.VolumeMounts)
+	}
+}
