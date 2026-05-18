@@ -27,6 +27,7 @@
 
 <p align="center">
   <a href="#product-tour">Explore the Product</a> |
+  <a href="#team-workspaces">Team Workspaces</a> |
   <a href="#ai-gateway">AI Gateway</a> |
   <a href="#agent-control-plane">Agent Control Plane</a> |
   <a href="#runtime-integrations">Runtime Integrations</a> |
@@ -54,6 +55,7 @@
 
 Recent highlights from the latest product and documentation updates.
 
+- [2026-05-18] Added the Team workspace MVP introduction and preview, covering one-click Team creation, OpenClaw member orchestration, Redis Team Bus injection, shared storage, member status, task dispatch, and event/result views.
 - [2026-04-29] Added Hermes runtime integration support, including Webtop-based instance provisioning, Agent Control Plane registration, AI Gateway injection, channel and skill bootstrap, and `.hermes` import/export workflows. See the [Hermes Runtime Guide](./docs/hermes-runtime-agent-development.md).
 - [2026-04-08] Added skill management and skill scanning workflows to the platform, via [Merged PR #52](https://github.com/Yuan-lab-LLM/ClawManager/pull/52).
 - [2026-03-26] AI Gateway documentation was refreshed with stronger coverage for model governance, audit and trace, cost accounting, and risk control. See the [AI Gateway Guide](./docs/aigateway.md).
@@ -85,6 +87,20 @@ It is designed for:
 - platform teams running AI agent instances for multiple users
 - operators who need runtime visibility, command dispatch, and desired-state control
 - builders who want governed AI access and reusable resource injection instead of manual per-instance setup
+
+<a id="team-workspaces"></a>
+## Team Workspaces
+
+Team workspaces extend ClawManager from single-instance operations into coordinated multi-agent runtime management. A user can create a Team, assign one leader and multiple members, and let ClawManager provision the member runtimes, inject collaboration configuration, and keep task and event state visible from the control plane.
+
+The current MVP focuses on OpenClaw member orchestration and the Redis Team Bus loop:
+
+- one-click Team creation with a validated leader/member roster
+- member runtime Pods created with Team role, member id, control-plane URL, and shared mount configuration
+- Redis-backed inbox, events, presence, and DLQ keys injected through controlled environment and Secret references
+- shared PVC mounted at `/team` for context, artifacts, snapshots, and task results
+- Team detail view with leader desktop access, team chat, member roster, dispatch panel, task progress, and event/result history
+- DB-backed Team, member, task, and event records so Redis remains the message bus, not the source of truth
 
 <a id="runtime-integrations"></a>
 ## Runtime Integrations
@@ -157,6 +173,14 @@ See the [Resource Management Guide](./docs/resource-management.md) and the [Secu
 
 The product is designed to feel coherent across administration, workspace access, and AI governance. Instead of treating these as separate tools, ClawManager brings them into one control surface.
 
+### Team Workspace
+
+The Team workspace page brings the leader desktop, Team chat, member table, and dispatch workflow into one operational view, so users can follow collaboration progress without leaving ClawManager.
+
+<p align="center">
+  <img src="./docs/main/team-workspace.png" alt="ClawManager Team workspace" width="100%" />
+</p>
+
 ### Admin Console
 
 The admin console brings together users, quotas, runtime operations, security controls, and platform-level policies in one place. It is the operational center for teams running AI agent infrastructure at scale.
@@ -185,9 +209,10 @@ AI Gateway extends the workspace experience with governed model access, audit tr
 
 1. Admins define governance policies and reusable resources.
 2. Users create or enter managed AI agent workspaces on Kubernetes.
-3. Agents connect back to the control plane and report runtime state.
-4. Channels, skills, and bundles are compiled and applied to instances.
-5. AI traffic flows through AI Gateway with audit, risk, and cost controls.
+3. Team workspaces can provision multiple member runtimes with Redis Team Bus and shared storage configuration.
+4. Agents connect back to the control plane and report runtime state.
+5. Channels, skills, and bundles are compiled and applied to instances.
+6. AI traffic flows through AI Gateway with audit, risk, and cost controls.
 
 ## Developer Snapshot
 

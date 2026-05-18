@@ -27,6 +27,7 @@
 
 <p align="center">
   <a href="#product-tour">Produktueberblick</a> |
+  <a href="#team-workspaces">Team Workspaces</a> |
   <a href="#ai-gateway">AI Gateway</a> |
   <a href="#agent-control-plane">Agent Control Plane</a> |
   <a href="#runtime-integrations">Runtime-Integrationen</a> |
@@ -54,6 +55,7 @@
 
 Wichtige aktuelle Produkt- und Dokumentations-Updates.
 
+- [2026-05-18] Team-Workspace-MVP mit Einfuehrung und Vorschau hinzugefuegt, inklusive One-Click-Team-Erstellung, OpenClaw-Member-Orchestrierung, Redis-Team-Bus-Injection, Shared Storage, Member-Status, Task-Dispatch sowie Event- und Ergebnisansichten.
 - [2026-04-29] Hermes-Runtime-Integration hinzugefuegt, inklusive Webtop-basierter Instanzbereitstellung, Agent-Control-Plane-Registrierung, AI-Gateway-Injection, channel- und skill-Bootstrap sowie `.hermes` Import/Export. Siehe [Hermes Runtime Guide](./docs/hermes-runtime-agent-development.md).
 - [2026-04-08] Skill-Verwaltung und Skill-Scanning wurden der Plattform hinzugefuegt. Details siehe [Merged PR #52](https://github.com/Yuan-lab-LLM/ClawManager/pull/52).
 - [2026-03-26] Die AI-Gateway-Dokumentation wurde erweitert und deckt nun Modell-Governance, Audit und Trace, Kostenrechnung sowie Risikokontrolle genauer ab. Siehe [AI Gateway Guide](./docs/aigateway.md).
@@ -85,6 +87,20 @@ Es eignet sich besonders fuer:
 - Plattformteams, die AI-Agent-Instanzen fuer mehrere Nutzer betreiben
 - Betriebsteams, die Runtime-Sichtbarkeit, Command-Dispatch und Desired-State-Kontrolle benoetigen
 - Entwicklungsteams, die Agent-Workspaces ueber wiederverwendbare Ressourcen statt ueber manuelle Konfiguration bereitstellen wollen
+
+<a id="team-workspaces"></a>
+## Team Workspaces
+
+Team Workspaces erweitern ClawManager von Einzelinstanz-Betrieb zu koordinierter Multi-Agent-Runtime-Verwaltung. Nutzer koennen ein Team erstellen, einen Leader und mehrere Member zuweisen und ClawManager die Bereitstellung der Member-Runtimes, die Injection der Kollaborationskonfiguration und die Sichtbarkeit von Tasks und Events in der Control Plane ueberlassen.
+
+Das aktuelle MVP konzentriert sich auf OpenClaw-Member-Orchestrierung und den Redis-Team-Bus-Loop:
+
+- One-Click-Team-Erstellung mit validiertem Leader/Member-Roster
+- Member-Runtime-Pods mit Team-Rolle, Member-ID, Control-Plane-URL und Shared-Mount-Konfiguration
+- Redis-basierte inbox-, events-, presence- und DLQ-Keys ueber kontrollierte Umgebungsvariablen und Secret-Referenzen
+- Shared PVC unter `/team` fuer Kontext, Artefakte, Snapshots und Task-Ergebnisse
+- Team-Detailansicht mit Leader-Desktop, Team-Chat, Member-Liste, Dispatch-Panel, Task-Fortschritt und Event-/Ergebnis-Historie
+- DB-gestuetzte Team-, Member-, Task- und Event-Datensaetze, sodass Redis Message Bus bleibt und nicht zur Source of Truth wird
 
 <a id="runtime-integrations"></a>
 ## Runtime-Integrationen
@@ -161,6 +177,14 @@ Siehe [Resource Management Guide (English)](./docs/resource-management.md) und [
 
 ClawManager ist so gestaltet, dass Administration, Zugriff und AI-Governance nicht wie getrennte Werkzeuge wirken, sondern wie eine zusammenhaengende Produkterfahrung.
 
+### Team Workspace
+
+Die Team-Workspace-Seite bringt Leader-Desktop, Team-Chat, Member-Tabelle und Dispatch-Workflow in eine gemeinsame Betriebsansicht, damit Nutzer den Kollaborationsfortschritt direkt in ClawManager verfolgen koennen.
+
+<p align="center">
+  <img src="./docs/main/team-workspace.png" alt="ClawManager Team Workspace" width="100%" />
+</p>
+
 ### Admin Console
 
 Die Admin-Konsole vereint Nutzer, Quotas, Runtime-Operationen, Security-Kontrollen und plattformweite Richtlinien in einer Oberflaeche. Sie ist die zentrale Arbeitsflaeche fuer Teams, die AI-Agent-Infrastruktur im grossen Massstab betreiben.
@@ -189,9 +213,10 @@ AI Gateway integriert Modell-Governance direkt in die Workspace-Erfahrung. Audit
 
 1. Administratoren definieren Governance-Richtlinien und wiederverwendbare Ressourcen.
 2. Nutzer erstellen oder betreten verwaltete AI-Agent-Workspaces auf Kubernetes.
-3. Agents verbinden sich mit der Control Plane und melden Runtime-Zustaende.
-4. Channel, skill und bundle werden kompiliert und auf Instanzen angewendet.
-5. AI-Traffic fliesst ueber das AI Gateway und erhaelt Audit-, Risiko- und Kostenkontrollen.
+3. Team Workspaces koennen mehrere Member-Runtimes mit Redis Team Bus und Shared-Storage-Konfiguration bereitstellen.
+4. Agents verbinden sich mit der Control Plane und melden Runtime-Zustaende.
+5. Channel, skill und bundle werden kompiliert und auf Instanzen angewendet.
+6. AI-Traffic fliesst ueber das AI Gateway und erhaelt Audit-, Risiko- und Kostenkontrollen.
 
 ## Entwicklerueberblick
 
