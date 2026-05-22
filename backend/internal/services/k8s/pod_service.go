@@ -42,24 +42,27 @@ func (s *PodService) GetClient() *Client {
 
 // PodConfig holds configuration for creating a pod
 type PodConfig struct {
-	InstanceID          int
-	InstanceName        string
-	UserID              int
-	Type                string
-	CPUCores            float64
-	MemoryGB            int
-	GPUEnabled          bool
-	GPUCount            int
-	Image               string
-	MountPath           string
-	ContainerPort       int32
-	ImagePullPolicy     corev1.PullPolicy
-	ExtraEnv            map[string]string
-	EnvFromSecretNames  []string
-	ExtraPVCMounts      []PVCMount
-	ConfigMapFileMounts []ConfigMapFileMount
-	SHMSizeGB           int
-	SecurityMode        PodSecurityMode
+	InstanceID           int
+	InstanceName         string
+	UserID               int
+	Type                 string
+	RuntimeType          string
+	CPUCores             float64
+	MemoryGB             int
+	GPUEnabled           bool
+	GPUCount             int
+	Image                string
+	MountPath            string
+	ContainerPort        int32
+	ImagePullPolicy      corev1.PullPolicy
+	ExtraEnv             map[string]string
+	EnvFromSecretNames   []string
+	ExtraPVCMounts       []PVCMount
+	ConfigMapFileMounts  []ConfigMapFileMount
+	FSGroup              *int64
+	VolumeOwnershipFixes []VolumeOwnershipFix
+	SHMSizeGB            int
+	SecurityMode         PodSecurityMode
 }
 
 type PVCMount struct {
@@ -75,6 +78,14 @@ type ConfigMapFileMount struct {
 	Key           string
 	MountPath     string
 	ReadOnly      bool
+	AsDirectory   bool
+}
+
+type VolumeOwnershipFix struct {
+	Name      string
+	MountPath string
+	UID       int64
+	GID       int64
 }
 
 // CreatePod creates a new pod for an instance
@@ -86,6 +97,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 	podName := s.client.GetPodName(config.InstanceID, config.InstanceName)
 	namespace := s.client.GetNamespace(config.UserID)
 	pvcName := s.client.GetPVCName(config.InstanceID)
+	runtimeType := normalizePodRuntimeType(config.RuntimeType)
 
 	// Build resource requirements
 	resources := corev1.ResourceRequirements{
@@ -134,11 +146,13 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 				"instance-name": config.InstanceName,
 				"user-id":       fmt.Sprintf("%d", config.UserID),
 				"instance-type": config.Type,
+				"runtime-type":  runtimeType,
 				"managed-by":    "clawreef",
 			},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:   corev1.RestartPolicyNever,
+			SecurityContext: buildPodSecurityContext(config.FSGroup),
 			Containers: []corev1.Container{
 				{
 					Name:            "desktop",
@@ -215,6 +229,13 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		},
 	}
 
+	if runtimeType == "shell" {
+		pod.Spec.Containers[0].Ports = nil
+		pod.Spec.Containers[0].StartupProbe = nil
+		pod.Spec.Containers[0].ReadinessProbe = nil
+		pod.Spec.Containers[0].LivenessProbe = nil
+	}
+
 	for key, value := range config.ExtraEnv {
 		pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
 			Name:  key,
@@ -242,6 +263,13 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		})
 	}
 
+	for index, fix := range config.VolumeOwnershipFixes {
+		if fix.Name == "" || fix.MountPath == "" || fix.UID < 0 || fix.GID < 0 {
+			continue
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, buildVolumeOwnershipInitContainer(index, config.Image, pullPolicy, fix))
+	}
+
 	for _, mount := range config.ConfigMapFileMounts {
 		if mount.Name == "" || mount.ConfigMapName == "" || mount.Key == "" || mount.MountPath == "" {
 			continue
@@ -260,12 +288,15 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 				},
 			},
 		})
-		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		volumeMount := corev1.VolumeMount{
 			Name:      mount.Name,
 			MountPath: mount.MountPath,
-			SubPath:   mount.Key,
 			ReadOnly:  true,
-		})
+		}
+		if !mount.AsDirectory {
+			volumeMount.SubPath = mount.Key
+		}
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, volumeMount)
 	}
 
 	if config.SHMSizeGB > 0 {
@@ -328,6 +359,18 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 	return createdPod, nil
 }
 
+func buildPodSecurityContext(fsGroup *int64) *corev1.PodSecurityContext {
+	if fsGroup == nil || *fsGroup <= 0 {
+		return nil
+	}
+	fsGroupValue := *fsGroup
+	policy := corev1.FSGroupChangeOnRootMismatch
+	return &corev1.PodSecurityContext{
+		FSGroup:             &fsGroupValue,
+		FSGroupChangePolicy: &policy,
+	}
+}
+
 func buildContainerSecurityContext(mode PodSecurityMode) *corev1.SecurityContext {
 	switch mode {
 	case PodSecurityChromiumCompat:
@@ -346,6 +389,50 @@ func buildContainerSecurityContext(mode PodSecurityMode) *corev1.SecurityContext
 	default:
 		return nil
 	}
+}
+
+func buildVolumeOwnershipInitContainer(index int, image string, pullPolicy corev1.PullPolicy, fix VolumeOwnershipFix) corev1.Container {
+	rootUser := int64(0)
+	return corev1.Container{
+		Name:            fmt.Sprintf("fix-volume-permissions-%d", index+1),
+		Image:           image,
+		ImagePullPolicy: pullPolicy,
+		Command: []string{
+			"sh",
+			"-c",
+			`set -eu
+target="${CLAWMANAGER_FIX_VOLUME_PATH}"
+uid="${CLAWMANAGER_FIX_VOLUME_UID}"
+gid="${CLAWMANAGER_FIX_VOLUME_GID}"
+if [ -d "$target" ]; then
+  chown -R "${uid}:${gid}" "$target" || true
+  chmod -R ug+rwX "$target" || true
+  find "$target" -type d -exec chmod g+s {} \; || true
+fi`,
+		},
+		Env: []corev1.EnvVar{
+			{Name: "CLAWMANAGER_FIX_VOLUME_PATH", Value: fix.MountPath},
+			{Name: "CLAWMANAGER_FIX_VOLUME_UID", Value: fmt.Sprintf("%d", fix.UID)},
+			{Name: "CLAWMANAGER_FIX_VOLUME_GID", Value: fmt.Sprintf("%d", fix.GID)},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &rootUser,
+			RunAsGroup: &rootUser,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      fix.Name,
+				MountPath: fix.MountPath,
+			},
+		},
+	}
+}
+
+func normalizePodRuntimeType(runtimeType string) string {
+	if runtimeType == "shell" {
+		return "shell"
+	}
+	return "desktop"
 }
 
 func intstrFromInt32(port int32) intstr.IntOrString {

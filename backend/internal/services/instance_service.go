@@ -131,6 +131,7 @@ type CreateInstanceRequest struct {
 	Name                 string              `json:"name" validate:"required,min=3,max=50"`
 	Description          *string             `json:"description,omitempty"`
 	Type                 string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
+	RuntimeType          string              `json:"runtime_type" validate:"omitempty,oneof=desktop shell"`
 	CPUCores             float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB             int                 `json:"memory_gb" validate:"required,min=1,max=128"`
 	DiskGB               int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
@@ -153,6 +154,9 @@ type TeamInstanceConfig struct {
 	SharedMountPath string
 	ConfigMapName   string
 	ConfigMountPath string
+	SharedUID       int64
+	SharedGID       int64
+	SharedUmask     string
 }
 
 // UpdateInstanceRequest holds data for updating an instance
@@ -303,11 +307,18 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	}
 
 	runtimeConfig := buildRuntimeConfig(req.Type, req.OSType, req.OSVersion, req.ImageRegistry, req.ImageTag)
+	runtimeType := normalizeInstanceRuntimeType(req.RuntimeType)
 	if (req.ImageRegistry == nil || strings.TrimSpace(*req.ImageRegistry) == "") && (req.ImageTag == nil || strings.TrimSpace(*req.ImageTag) == "") {
-		if image, ok := runtimeImageOverride(req.Type); ok {
+		if selection, ok := runtimeImageOverride(req.Type); ok {
+			image := selection.Image
 			req.ImageRegistry = &image
 			req.ImageTag = nil
+			runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
 			runtimeConfig = buildRuntimeConfig(req.Type, req.OSType, req.OSVersion, req.ImageRegistry, req.ImageTag)
+		}
+	} else if req.ImageRegistry != nil {
+		if selection, ok := runtimeImageOverrideForImage(req.Type, *req.ImageRegistry); ok {
+			runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
 		}
 	}
 
@@ -322,6 +333,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		Name:                     req.Name,
 		Description:              req.Description,
 		Type:                     req.Type,
+		RuntimeType:              runtimeType,
 		Status:                   "creating",
 		CPUCores:                 req.CPUCores,
 		MemoryGB:                 req.MemoryGB,
@@ -427,15 +439,34 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	envFromSecretNames := []string{bootstrapSecretName}
 	extraPVCMounts := []k8s.PVCMount{}
 	configMapFileMounts := []k8s.ConfigMapFileMount{}
+	volumeOwnershipFixes := []k8s.VolumeOwnershipFix{}
+	var fsGroup *int64
 	if req.Team != nil {
 		if strings.TrimSpace(req.Team.SecretName) != "" {
 			envFromSecretNames = append(envFromSecretNames, strings.TrimSpace(req.Team.SecretName))
 		}
 		if strings.TrimSpace(req.Team.SharedPVCName) != "" && strings.TrimSpace(req.Team.SharedMountPath) != "" {
+			sharedMountPath := strings.TrimSpace(req.Team.SharedMountPath)
 			extraPVCMounts = append(extraPVCMounts, k8s.PVCMount{
 				Name:      "team-shared",
 				ClaimName: strings.TrimSpace(req.Team.SharedPVCName),
-				MountPath: strings.TrimSpace(req.Team.SharedMountPath),
+				MountPath: sharedMountPath,
+			})
+			sharedUID := req.Team.SharedUID
+			if sharedUID <= 0 {
+				sharedUID = 1000
+			}
+			sharedGID := req.Team.SharedGID
+			if sharedGID <= 0 {
+				sharedGID = 1000
+			}
+			fsGroupValue := sharedGID
+			fsGroup = &fsGroupValue
+			volumeOwnershipFixes = append(volumeOwnershipFixes, k8s.VolumeOwnershipFix{
+				Name:      "team-shared",
+				MountPath: sharedMountPath,
+				UID:       sharedUID,
+				GID:       sharedGID,
 			})
 		}
 		if strings.TrimSpace(req.Team.ConfigMapName) != "" && strings.TrimSpace(req.Team.ConfigMountPath) != "" {
@@ -445,29 +476,33 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 				Key:           "team.json",
 				MountPath:     strings.TrimSpace(req.Team.ConfigMountPath),
 				ReadOnly:      true,
+				AsDirectory:   true,
 			})
 		}
 	}
 
 	podConfig := k8s.PodConfig{
-		InstanceID:          instance.ID,
-		InstanceName:        instance.Name,
-		UserID:              userID,
-		Type:                instance.Type,
-		CPUCores:            instance.CPUCores,
-		MemoryGB:            instance.MemoryGB,
-		GPUEnabled:          instance.GPUEnabled,
-		GPUCount:            instance.GPUCount,
-		Image:               runtimeConfig.Image,
-		MountPath:           runtimeConfig.MountPath,
-		ContainerPort:       runtimeConfig.Port,
-		ImagePullPolicy:     corev1.PullPolicy(defaultImagePullPolicy()),
-		ExtraEnv:            extraEnv,
-		EnvFromSecretNames:  envFromSecretNames,
-		ExtraPVCMounts:      extraPVCMounts,
-		ConfigMapFileMounts: configMapFileMounts,
-		SHMSizeGB:           shmSizeGB,
-		SecurityMode:        s.securityModeForInstance(instance.Type),
+		InstanceID:           instance.ID,
+		InstanceName:         instance.Name,
+		UserID:               userID,
+		Type:                 instance.Type,
+		RuntimeType:          runtimeType,
+		CPUCores:             instance.CPUCores,
+		MemoryGB:             instance.MemoryGB,
+		GPUEnabled:           instance.GPUEnabled,
+		GPUCount:             instance.GPUCount,
+		Image:                runtimeConfig.Image,
+		MountPath:            runtimeConfig.MountPath,
+		ContainerPort:        runtimeConfig.Port,
+		ImagePullPolicy:      corev1.PullPolicy(defaultImagePullPolicy()),
+		ExtraEnv:             extraEnv,
+		EnvFromSecretNames:   envFromSecretNames,
+		ExtraPVCMounts:       extraPVCMounts,
+		ConfigMapFileMounts:  configMapFileMounts,
+		FSGroup:              fsGroup,
+		VolumeOwnershipFixes: volumeOwnershipFixes,
+		SHMSizeGB:            shmSizeGB,
+		SecurityMode:         s.securityModeForInstance(instance.Type),
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)
@@ -481,28 +516,32 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		return nil, fmt.Errorf("failed to create pod: %w", err)
 	}
 
-	// Create Service for the instance
-	serviceConfig := k8s.ServiceConfig{
-		InstanceID:      instance.ID,
-		InstanceName:    instance.Name,
-		UserID:          userID,
-		ContainerPort:   runtimeConfig.Port,
-		AdditionalPorts: additionalServicePorts(runtimeConfig.Port),
-	}
-
-	serviceInfo, err := s.serviceService.CreateService(ctx, serviceConfig)
-	if err != nil {
-		// Rollback: delete pod, PVC and instance record
-		s.podService.DeletePod(ctx, userID, instance.ID)
-		s.pvcService.DeletePVC(ctx, userID, instance.ID)
-		if bootstrapSnapshot != nil {
-			_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+	if instanceUsesDesktopRuntime(instance) {
+		// Create Service for browser desktop access.
+		serviceConfig := k8s.ServiceConfig{
+			InstanceID:      instance.ID,
+			InstanceName:    instance.Name,
+			UserID:          userID,
+			ContainerPort:   runtimeConfig.Port,
+			AdditionalPorts: additionalServicePorts(runtimeConfig.Port),
 		}
-		s.instanceRepo.Delete(instance.ID)
-		return nil, fmt.Errorf("failed to create service: %w", err)
-	}
 
-	fmt.Printf("Instance %d: Service created successfully (ClusterIP: %s)\n", instance.ID, serviceInfo.ClusterIP)
+		serviceInfo, err := s.serviceService.CreateService(ctx, serviceConfig)
+		if err != nil {
+			// Rollback: delete pod, PVC and instance record
+			s.podService.DeletePod(ctx, userID, instance.ID)
+			s.pvcService.DeletePVC(ctx, userID, instance.ID)
+			if bootstrapSnapshot != nil {
+				_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+			}
+			s.instanceRepo.Delete(instance.ID)
+			return nil, fmt.Errorf("failed to create service: %w", err)
+		}
+
+		fmt.Printf("Instance %d: Service created successfully (ClusterIP: %s)\n", instance.ID, serviceInfo.ClusterIP)
+	} else {
+		fmt.Printf("Instance %d: Shell runtime selected, skipping desktop service creation\n", instance.ID)
+	}
 
 	// Update instance with pod info
 	podNamespace := pod.Namespace
@@ -627,6 +666,7 @@ func (s *instanceService) Start(instanceID int) error {
 		InstanceName:       instance.Name,
 		UserID:             instance.UserID,
 		Type:               instance.Type,
+		RuntimeType:        normalizeInstanceRuntimeType(instance.RuntimeType),
 		CPUCores:           instance.CPUCores,
 		MemoryGB:           instance.MemoryGB,
 		GPUEnabled:         instance.GPUEnabled,
@@ -646,20 +686,22 @@ func (s *instanceService) Start(instanceID int) error {
 		return fmt.Errorf("failed to create pod: %w", err)
 	}
 
-	// Ensure Service exists (create if not exists)
-	serviceExists, _ := s.serviceService.ServiceExists(ctx, instance.UserID, instance.ID)
-	if !serviceExists {
-		serviceConfig := k8s.ServiceConfig{
-			InstanceID:      instance.ID,
-			InstanceName:    instance.Name,
-			UserID:          instance.UserID,
-			ContainerPort:   runtimeConfig.Port,
-			AdditionalPorts: additionalServicePorts(runtimeConfig.Port),
-		}
-		_, err = s.serviceService.CreateService(ctx, serviceConfig)
-		if err != nil {
-			fmt.Printf("Warning: failed to create service for instance %d: %v\n", instance.ID, err)
-			// Don't fail if service creation fails, pod is already running
+	if instanceUsesDesktopRuntime(instance) {
+		// Ensure Service exists (create if not exists)
+		serviceExists, _ := s.serviceService.ServiceExists(ctx, instance.UserID, instance.ID)
+		if !serviceExists {
+			serviceConfig := k8s.ServiceConfig{
+				InstanceID:      instance.ID,
+				InstanceName:    instance.Name,
+				UserID:          instance.UserID,
+				ContainerPort:   runtimeConfig.Port,
+				AdditionalPorts: additionalServicePorts(runtimeConfig.Port),
+			}
+			_, err = s.serviceService.CreateService(ctx, serviceConfig)
+			if err != nil {
+				fmt.Printf("Warning: failed to create service for instance %d: %v\n", instance.ID, err)
+				// Don't fail if service creation fails, pod is already running
+			}
 		}
 	}
 
@@ -1307,4 +1349,20 @@ func additionalServicePorts(primaryPort int32) []int32 {
 	}
 
 	return nil
+}
+
+func normalizeInstanceRuntimeType(runtimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(runtimeType)) {
+	case "shell":
+		return "shell"
+	default:
+		return "desktop"
+	}
+}
+
+func instanceUsesDesktopRuntime(instance *models.Instance) bool {
+	if instance == nil {
+		return true
+	}
+	return normalizeInstanceRuntimeType(instance.RuntimeType) == "desktop"
 }

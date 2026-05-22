@@ -3,6 +3,8 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -244,6 +246,10 @@ func (s *PVCService) createPVForTeamSharedPVC(ctx context.Context, namespace, pv
 		return nil, fmt.Errorf("failed to get Team shared PVC %s for UID: %w", pvcName, err)
 	}
 	storageSize := resource.MustParse(fmt.Sprintf("%dGi", storageSizeGB))
+	nodeAffinity, err := s.hostPathPVNodeAffinity(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select node for Team shared hostPath PV %s: %w", pvName, err)
+	}
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: pvName,
@@ -263,6 +269,7 @@ func (s *PVCService) createPVForTeamSharedPVC(ctx context.Context, namespace, pv
 			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
 			StorageClassName:              storageClass,
+			NodeAffinity:                  nodeAffinity,
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
 					Path: hostPath,
@@ -296,6 +303,68 @@ func (s *PVCService) createPVForTeamSharedPVC(ctx context.Context, namespace, pv
 	}
 	fmt.Printf("Team shared PVC %s successfully bound to PV %s\n", pvcName, pvName)
 	return pvc, nil
+}
+
+func (s *PVCService) hostPathPVNodeAffinity(ctx context.Context) (*corev1.VolumeNodeAffinity, error) {
+	if s == nil || s.client == nil {
+		return nil, fmt.Errorf("k8s client not initialized")
+	}
+	nodes, err := s.client.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		name     string
+		hostname string
+	}
+	candidates := []candidate{}
+	for _, node := range nodes.Items {
+		if node.Spec.Unschedulable || !isStorageNodeReady(node) {
+			continue
+		}
+		hostname := strings.TrimSpace(node.Labels["kubernetes.io/hostname"])
+		if hostname == "" {
+			hostname = strings.TrimSpace(node.Name)
+		}
+		if hostname == "" {
+			continue
+		}
+		candidates = append(candidates, candidate{name: node.Name, hostname: hostname})
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no ready node found for hostPath PV")
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].name < candidates[j].name
+	})
+	return hostPathPVNodeAffinityForHostname(candidates[0].hostname), nil
+}
+
+func hostPathPVNodeAffinityForHostname(hostname string) *corev1.VolumeNodeAffinity {
+	return &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{
+				{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{
+							Key:      "kubernetes.io/hostname",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{hostname},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func isStorageNodeReady(node corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (s *PVCService) monitorPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string, timeout time.Duration) {

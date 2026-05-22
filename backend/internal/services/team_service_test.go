@@ -35,8 +35,14 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	if env["CLAWMANAGER_TEAM_MANAGER_URL"] != "http://manager.example" {
 		t.Fatalf("unexpected manager url: %q", env["CLAWMANAGER_TEAM_MANAGER_URL"])
 	}
-	if env["CLAWMANAGER_TEAM_CONFIG_PATH"] != "/team/team.json" {
+	if env["CLAWMANAGER_TEAM_CONFIG_PATH"] != "/etc/clawmanager/team/team.json" {
 		t.Fatalf("unexpected Team config path: %q", env["CLAWMANAGER_TEAM_CONFIG_PATH"])
+	}
+	if env["CLAWMANAGER_TEAM_SHARED_UID"] != "1000" || env["CLAWMANAGER_TEAM_SHARED_GID"] != "1000" || env["CLAWMANAGER_TEAM_UMASK"] != "0002" {
+		t.Fatalf("expected Team shared permission env, got %#v", env)
+	}
+	if env["PUID"] != "1000" || env["PGID"] != "1000" || env["UMASK"] != "0002" {
+		t.Fatalf("expected runtime shared permission env, got %#v", env)
 	}
 	if env["CLAWMANAGER_TEAM_AUTORUN"] != "true" || env["CLAWMANAGER_TEAM_CONSUMER_GROUP"] != "team-members" {
 		t.Fatalf("expected Team autorun and consumer group env, got %#v", env)
@@ -48,6 +54,37 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	}
 }
 
+func TestBuildTeamMemberInstanceRequestUsesSharedPermissionDefaults(t *testing.T) {
+	service := &teamService{}
+	pvcName := "clawreef-team-7-shared"
+	secretName := "clawreef-team-7-bus"
+	req := service.buildTeamMemberInstanceRequest(&models.Team{
+		ID:                  7,
+		Name:                "Delivery",
+		SharedPVCName:       &pvcName,
+		SharedMountPath:     "/team",
+		TeamTokenSecretName: &secretName,
+	}, plannedTeamMember{
+		MemberKey:   "delivery-lead",
+		DisplayName: "delivery lead",
+		Role:        "leader",
+		RuntimeType: "openclaw",
+	})
+
+	if req.Team == nil {
+		t.Fatalf("expected Team instance config")
+	}
+	if req.Team.SharedUID != 1000 || req.Team.SharedGID != 1000 || req.Team.SharedUmask != "0002" {
+		t.Fatalf("unexpected Team shared permission config: %#v", req.Team)
+	}
+	if req.Team.ConfigMountPath != "/etc/clawmanager/team" {
+		t.Fatalf("unexpected Team config mount path: %q", req.Team.ConfigMountPath)
+	}
+	if req.Team.Environment["CLAWMANAGER_TEAM_CONFIG_PATH"] != "/etc/clawmanager/team/team.json" {
+		t.Fatalf("unexpected Team config env: %#v", req.Team.Environment)
+	}
+}
+
 func TestNewRedisBusParsesURLWithoutNetwork(t *testing.T) {
 	bus, err := newRedisBus("redis://:pass@redis.example:6380/3")
 	if err != nil {
@@ -55,6 +92,26 @@ func TestNewRedisBusParsesURLWithoutNetwork(t *testing.T) {
 	}
 	if bus.address != "redis.example:6380" || bus.password != "pass" || bus.db != 3 || bus.useTLS {
 		t.Fatalf("unexpected redis bus config: %#v", bus)
+	}
+}
+
+func TestDefaultTeamRedisURLUsesClusterServiceFallback(t *testing.T) {
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_URL", "")
+	t.Setenv("TEAM_REDIS_URL", "")
+	t.Setenv("REDIS_URL", "")
+	t.Setenv("CLAWMANAGER_SYSTEM_NAMESPACE", "")
+	t.Setenv("K8S_NAMESPACE", "clawmanager")
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_SERVICE_NAME", "")
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_SERVICE", "")
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_SERVICE_PORT", "")
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_PORT", "")
+	t.Setenv("CLAWMANAGER_TEAM_REDIS_DB", "")
+	t.Setenv("TEAM_REDIS_DB", "")
+
+	got := defaultTeamRedisURL()
+	want := "redis://clawmanager-team-redis.clawmanager-system.svc.cluster.local:6379/0"
+	if got != want {
+		t.Fatalf("expected default Team redis URL %q, got %q", want, got)
 	}
 }
 

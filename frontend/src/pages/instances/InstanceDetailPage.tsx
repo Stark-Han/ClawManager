@@ -97,6 +97,19 @@ type MetricCurve = {
   preNormalized?: boolean;
 };
 
+type CpuInfo = {
+  cores?: number;
+  available_cores?: number;
+  usage_percent?: number;
+  used_cores?: number;
+  usage_ready?: boolean;
+  load?: {
+    "1m"?: number;
+    "5m"?: number;
+    "15m"?: number;
+  };
+};
+
 type TranslateFn = (
   key: string,
   variables?: Record<string, string | number>,
@@ -420,7 +433,12 @@ const InstanceDetailPage: React.FC = () => {
       return;
     }
 
-    const ts = Date.now();
+    const reportedTimestamp = runtimeDetails?.runtime?.last_reported_at
+      ? new Date(runtimeDetails.runtime.last_reported_at).getTime()
+      : Date.now();
+    const ts = Number.isFinite(reportedTimestamp)
+      ? reportedTimestamp
+      : Date.now();
     const previousNetwork = lastNetworkCounterRef.current;
     let networkDownSample: number | null = null;
     let networkUpSample: number | null = null;
@@ -774,6 +792,9 @@ const InstanceDetailPage: React.FC = () => {
                 <span className="rounded-full border border-[#ead8cf] bg-[#fffaf7] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#8f776b]">
                   {instance.type}
                 </span>
+                <span className="rounded-full border border-[#dbe4ef] bg-[#f7fbff] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#516070]">
+                  {instance.runtime_type || "desktop"}
+                </span>
                 <span className="text-sm text-[#7a6d66]">
                   {t("instances.instanceIdLabel")}: {instance.id}
                 </span>
@@ -844,8 +865,9 @@ const InstanceDetailPage: React.FC = () => {
                   instanceId={instance.id}
                   instanceName={instance.name}
                   isRunning={effectiveInstanceStatus === "running"}
+                  runtimeType={instance.runtime_type || "desktop"}
                   overlay={
-                    instance.type === "openclaw"
+                    instance.runtime_type !== "shell" && instance.type === "openclaw"
                       ? {
                           gatewayStatus,
                           canControl: canControlGateway,
@@ -1864,6 +1886,66 @@ function percentLabel(value: number | null, t: TranslateFn): string {
   return `${Math.round(value)}%`;
 }
 
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function getCpuUsagePercent(cpu?: CpuInfo): number | null {
+  if (!cpu) {
+    return null;
+  }
+
+  if (
+    cpu.usage_ready !== false &&
+    typeof cpu.usage_percent === "number" &&
+    Number.isFinite(cpu.usage_percent)
+  ) {
+    return clampPercent(cpu.usage_percent);
+  }
+
+  return null;
+}
+
+function asCpuInfo(value: unknown): CpuInfo | undefined {
+  const record = asRecord(value);
+  return record as CpuInfo | undefined;
+}
+
+function formatLoadValue(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(2)
+    : "-";
+}
+
+function buildCpuDetail(cpu: CpuInfo | undefined, t: TranslateFn): string {
+  if (!cpu) {
+    return t("instances.notAvailable");
+  }
+
+  const details = [
+    typeof cpu.used_cores === "number" &&
+    Number.isFinite(cpu.used_cores) &&
+    typeof cpu.available_cores === "number" &&
+    Number.isFinite(cpu.available_cores)
+      ? t("instances.metricCpuUsedCoresDetail", {
+          used: cpu.used_cores.toFixed(2),
+          available: `${cpu.available_cores}`,
+        })
+      : typeof cpu.cores === "number" && Number.isFinite(cpu.cores)
+        ? t("instances.metricCpuCoresDetail", { cores: cpu.cores })
+        : null,
+    cpu.load
+      ? t("instances.metricCpuLoadDetail", {
+          load1: formatLoadValue(cpu.load["1m"]),
+          load5: formatLoadValue(cpu.load["5m"]),
+          load15: formatLoadValue(cpu.load["15m"]),
+        })
+      : null,
+  ].filter(Boolean);
+
+  return details.length > 0 ? details.join(" · ") : t("instances.notAvailable");
+}
+
 function buildMetricCurves({
   cpuInfo,
   memoryInfo,
@@ -1881,14 +1963,8 @@ function buildMetricCurves({
   sessionStartedAt: number;
   t: TranslateFn;
 }): MetricCurve[] {
-  const cores = getNumber(cpuInfo?.cores) || 1;
-  const cpuLoad = asRecord(cpuInfo?.load);
-  const cpuPoints = [
-    Math.min(((getNumber(cpuLoad?.["15m"]) || 0) / cores) * 100, 100),
-    Math.min(((getNumber(cpuLoad?.["5m"]) || 0) / cores) * 100, 100),
-    Math.min(((getNumber(cpuLoad?.["1m"]) || 0) / cores) * 100, 100),
-  ];
-  const cpuCurrent = cpuPoints[cpuPoints.length - 1] ?? 0;
+  const cpu = asCpuInfo(cpuInfo);
+  const cpuCurrent = getCpuUsagePercent(cpu);
 
   const memTotal = getNumber(memoryInfo?.mem_total_bytes);
   const memAvailable = getNumber(memoryInfo?.mem_available_bytes);
@@ -1969,13 +2045,11 @@ function buildMetricCurves({
   return [
     {
       label: t("instances.metricCpu"),
-      value: percentLabel(cpuCurrent, t),
-      detail: t("instances.metricCpuDetail", {
-        cores,
-        load1: formatNumber(getNumber(cpuLoad?.["1m"]), t),
-        load5: formatNumber(getNumber(cpuLoad?.["5m"]), t),
-        load15: formatNumber(getNumber(cpuLoad?.["15m"]), t),
-      }),
+      value:
+        cpuCurrent === null
+          ? t("instances.metricCpuSampling")
+          : `${cpuCurrent.toFixed(0)}%`,
+      detail: buildCpuDetail(cpu, t),
       accent: "#f97316",
       points: cpuSeries,
     },
@@ -2204,13 +2278,6 @@ function normalizePoints(points: number[]): number[] {
   return safe.map((point) => Math.max(point / max, 0.08));
 }
 
-function formatNumber(value: number | null, t: TranslateFn): string {
-  if (value === null) {
-    return t("instances.notAvailable");
-  }
-  return value.toFixed(2);
-}
-
 function formatBytesCompact(value: number | null, t: TranslateFn): string {
   if (value === null) {
     return t("instances.notAvailable");
@@ -2294,13 +2361,8 @@ function extractMetricSnapshot(systemInfoValue: unknown) {
     return null;
   }
 
-  const cpuInfo = asRecord(systemInfo.cpu);
-  const cpuLoad = asRecord(cpuInfo?.load);
-  const cores = getNumber(cpuInfo?.cores) || 1;
-  const cpuPercent = Math.min(
-    (((getNumber(cpuLoad?.["1m"]) || 0) / cores) * 100) || 0,
-    100,
-  );
+  const cpuInfo = asCpuInfo(systemInfo.cpu);
+  const cpuPercent = getCpuUsagePercent(cpuInfo);
 
   const memoryInfo = asRecord(systemInfo.memory);
   const memTotal = getNumber(memoryInfo?.mem_total_bytes);
