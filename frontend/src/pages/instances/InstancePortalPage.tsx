@@ -417,7 +417,8 @@ const InstancePortalPage: React.FC = () => {
                   instanceId={selectedInstance.id}
                   instanceName={selectedInstance.name}
                   isRunning={selectedInstance.status === "running"}
-                  className="h-full min-h-0 rounded-none border-0 shadow-none"
+                  heightClassName="h-full min-h-0 max-h-none"
+                  className="rounded-none border-0 shadow-none"
                 />
               ) : embedUrl ? (
                 <div className="relative h-full">

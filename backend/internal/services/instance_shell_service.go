@@ -80,7 +80,7 @@ func (s *InstanceShellService) Stream(ctx context.Context, userID, instanceID in
 
 	pod, err := s.podService.GetPod(streamCtx, userID, instanceID)
 	if err != nil {
-		_ = writeShellText(conn, writeMu, done, fmt.Sprintf("\r\nfailed to get pod: %v\r\n", err))
+		_ = writeShellBytes(conn, writeMu, done, []byte(fmt.Sprintf("\r\nfailed to get pod: %v\r\n", err)))
 		return fmt.Errorf("failed to get pod: %w", err)
 	}
 
@@ -101,7 +101,7 @@ func (s *InstanceShellService) Stream(ctx context.Context, userID, instanceID in
 
 	exec, err := remotecommand.NewSPDYExecutor(s.podService.GetClient().Config, "POST", req.URL())
 	if err != nil {
-		_ = writeShellText(conn, writeMu, done, fmt.Sprintf("\r\nfailed to initialize shell: %v\r\n", err))
+		_ = writeShellBytes(conn, writeMu, done, []byte(fmt.Sprintf("\r\nfailed to initialize shell: %v\r\n", err)))
 		return fmt.Errorf("failed to initialize shell stream: %w", err)
 	}
 
@@ -112,7 +112,7 @@ func (s *InstanceShellService) Stream(ctx context.Context, userID, instanceID in
 		Tty:               true,
 		TerminalSizeQueue: sizeQueue,
 	}); err != nil && streamCtx.Err() == nil {
-		_ = writeShellText(conn, writeMu, done, fmt.Sprintf("\r\nshell closed: %v\r\n", err))
+		_ = writeShellBytes(conn, writeMu, done, []byte(fmt.Sprintf("\r\nshell closed: %v\r\n", err)))
 		return fmt.Errorf("shell stream failed: %w", err)
 	}
 
@@ -123,7 +123,7 @@ func defaultShellCommand() []string {
 	return []string{
 		"sh",
 		"-lc",
-		"if command -v bash >/dev/null 2>&1; then exec bash -l; fi; exec sh",
+		`export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}"; if command -v tmux >/dev/null 2>&1; then session="${CLAWMANAGER_TMUX_SESSION:-openclaw-shell}"; exec tmux new-session -A -s "$session"; fi; if command -v bash >/dev/null 2>&1; then exec bash -l; fi; exec sh`,
 	}
 }
 
@@ -193,37 +193,40 @@ func readShellWebSocket(ctx context.Context, cancel context.CancelFunc, conn *we
 			_ = stdin.CloseWithError(err)
 			return
 		}
-		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
-			continue
-		}
-
-		var message shellClientMessage
-		if messageType == websocket.TextMessage && json.Unmarshal(payload, &message) == nil && message.Type != "" {
-			switch message.Type {
-			case "input":
-				if message.Data != "" {
-					_, _ = io.WriteString(stdin, message.Data)
-				}
-			case "resize":
-				sizeQueue.push(message.Cols, message.Rows)
+		switch messageType {
+		case websocket.BinaryMessage:
+			if len(payload) > 0 {
+				_, _ = stdin.Write(payload)
 			}
-			continue
-		}
+		case websocket.TextMessage:
+			var message shellClientMessage
+			if json.Unmarshal(payload, &message) == nil && message.Type != "" {
+				switch message.Type {
+				case "input":
+					if message.Data != "" {
+						_, _ = io.WriteString(stdin, message.Data)
+					}
+				case "resize":
+					sizeQueue.push(message.Cols, message.Rows)
+				}
+				continue
+			}
 
-		if len(payload) > 0 {
-			_, _ = stdin.Write(payload)
+			if len(payload) > 0 {
+				_, _ = stdin.Write(payload)
+			}
 		}
 	}
 }
 
 func (w *shellWebSocketWriter) Write(payload []byte) (int, error) {
-	if err := writeShellText(w.conn, w.mu, w.done, string(payload)); err != nil {
+	if err := writeShellBytes(w.conn, w.mu, w.done, payload); err != nil {
 		return 0, err
 	}
 	return len(payload), nil
 }
 
-func writeShellText(conn *websocket.Conn, mu *sync.Mutex, done <-chan struct{}, text string) error {
+func writeShellBytes(conn *websocket.Conn, mu *sync.Mutex, done <-chan struct{}, payload []byte) error {
 	select {
 	case <-done:
 		return io.ErrClosedPipe
@@ -231,5 +234,5 @@ func writeShellText(conn *websocket.Conn, mu *sync.Mutex, done <-chan struct{}, 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	return conn.WriteMessage(websocket.TextMessage, []byte(text))
+	return conn.WriteMessage(websocket.BinaryMessage, payload)
 }

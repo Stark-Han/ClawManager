@@ -1,55 +1,46 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClipboardEvent, KeyboardEvent } from "react";
+import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { useI18n } from "../contexts/I18nContext";
 
 interface InstanceShellTerminalProps {
   instanceId: number;
   instanceName: string;
   isRunning: boolean;
+  heightClassName?: string;
   className?: string;
 }
 
-const MAX_TERMINAL_BUFFER = 80_000;
-const ANSI_PATTERN =
-  // eslint-disable-next-line no-control-regex
-  /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
+type ShellConnectionState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error";
 
-const KEY_SEQUENCES: Record<string, string> = {
-  ArrowUp: "\x1b[A",
-  ArrowDown: "\x1b[B",
-  ArrowRight: "\x1b[C",
-  ArrowLeft: "\x1b[D",
-  Home: "\x1b[H",
-  End: "\x1b[F",
-  Delete: "\x1b[3~",
-  PageUp: "\x1b[5~",
-  PageDown: "\x1b[6~",
-};
+const textEncoder = new TextEncoder();
 
 export function InstanceShellTerminal({
   instanceId,
   instanceName,
   isRunning,
+  heightClassName = "h-[54vh] min-h-[420px] max-h-[720px] md:h-[58vh] xl:h-[60vh]",
   className = "",
 }: InstanceShellTerminalProps) {
   const { t } = useI18n();
-  const [connected, setConnected] = useState(false);
-  const [connecting, setConnecting] = useState(false);
+  const [connectionState, setConnectionState] =
+    useState<ShellConnectionState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [output, setOutput] = useState("");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [terminalElement, setTerminalElement] =
+    useState<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const terminalRef = useRef<HTMLDivElement | null>(null);
-  const outputRef = useRef<HTMLPreElement | null>(null);
-
-  const appendOutput = useCallback((chunk: string) => {
-    const normalized = chunk
-      .replace(ANSI_PATTERN, "")
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n");
-    setOutput((current) =>
-      (current + normalized).slice(-MAX_TERMINAL_BUFFER),
-    );
-  }, []);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
 
   const buildShellUrl = useCallback(() => {
     const token = localStorage.getItem("access_token");
@@ -70,97 +61,250 @@ export function InstanceShellTerminal({
     return url.toString();
   }, [instanceId]);
 
-  const sendMessage = useCallback((data: string) => {
+  const fitAndSendResize = useCallback(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) {
+      return;
+    }
+
+    try {
+      fitAddon.fit();
+    } catch {
+      return;
+    }
+
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    socket.send(JSON.stringify({ type: "input", data }));
+
+    socket.send(
+      JSON.stringify({
+        type: "resize",
+        cols: terminal.cols,
+        rows: terminal.rows,
+      }),
+    );
   }, []);
 
-  const sendResize = useCallback(() => {
-    const socket = socketRef.current;
-    const terminal = terminalRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !terminal) {
-      return;
+  const scheduleFitAndResize = useCallback(() => {
+    if (resizeFrameRef.current != null) {
+      window.cancelAnimationFrame(resizeFrameRef.current);
     }
-
-    const rect = terminal.getBoundingClientRect();
-    const cols = Math.max(40, Math.floor(rect.width / 8));
-    const rows = Math.max(12, Math.floor(rect.height / 18));
-    socket.send(JSON.stringify({ type: "resize", cols, rows }));
-  }, []);
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      fitAndSendResize();
+    });
+  }, [fitAndSendResize]);
 
   const disconnect = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
-    setConnected(false);
-    setConnecting(false);
+    setConnectionState((current) =>
+      current === "connected" || current === "connecting"
+        ? "disconnected"
+        : current,
+    );
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement === container) {
+        await document.exitFullscreen();
+      } else {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+        await container.requestFullscreen();
+      }
+    } catch (fullscreenError) {
+      console.error("Failed to toggle shell fullscreen", fullscreenError);
+    }
   }, []);
 
   const connect = useCallback(() => {
-    if (!isRunning || connecting || connected) {
+    if (!isRunning) {
+      return;
+    }
+
+    const existingSocket = socketRef.current;
+    if (
+      existingSocket &&
+      (existingSocket.readyState === WebSocket.OPEN ||
+        existingSocket.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
     const shellUrl = buildShellUrl();
     if (!shellUrl) {
       setError(t("instances.shellMissingToken"));
+      setConnectionState("error");
       return;
     }
 
-    setConnecting(true);
+    const terminal = terminalRef.current;
+    terminal?.reset();
+    terminal?.clear();
+
+    setConnectionState("connecting");
     setError(null);
-    setOutput("");
 
     const socket = new WebSocket(shellUrl);
+    socket.binaryType = "arraybuffer";
     socketRef.current = socket;
 
     socket.onopen = () => {
-      setConnected(true);
-      setConnecting(false);
-      appendOutput(t("instances.shellConnected", { name: instanceName }));
-      window.setTimeout(sendResize, 0);
+      setConnectionState("connected");
       terminalRef.current?.focus();
+      scheduleFitAndResize();
     };
 
     socket.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        appendOutput(event.data);
+      const currentTerminal = terminalRef.current;
+      if (!currentTerminal) {
+        return;
+      }
+
+      if (event.data instanceof ArrayBuffer) {
+        currentTerminal.write(new Uint8Array(event.data));
         return;
       }
 
       if (event.data instanceof Blob) {
-        void event.data.text().then(appendOutput);
+        void event.data.arrayBuffer().then((buffer) => {
+          terminalRef.current?.write(new Uint8Array(buffer));
+        });
+        return;
+      }
+
+      if (typeof event.data === "string") {
+        currentTerminal.write(event.data);
       }
     };
 
     socket.onerror = () => {
       setError(t("instances.shellConnectionFailed"));
+      setConnectionState("error");
     };
 
     socket.onclose = () => {
-      setConnected(false);
-      setConnecting(false);
-      appendOutput(t("instances.shellDisconnected"));
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
+      setConnectionState((current) =>
+        current === "error" ? current : "disconnected",
+      );
     };
-  }, [
-    appendOutput,
-    buildShellUrl,
-    connected,
-    connecting,
-    instanceName,
-    isRunning,
-    sendResize,
-    t,
-  ]);
+  }, [buildShellUrl, isRunning, scheduleFitAndResize, t]);
 
   useEffect(() => {
-    return () => disconnect();
-  }, [disconnect]);
+    if (!terminalElement) {
+      return;
+    }
+
+    const terminal = new Terminal({
+      allowProposedApi: true,
+      allowTransparency: false,
+      convertEol: false,
+      cursorBlink: true,
+      cursorStyle: "block",
+      drawBoldTextInBrightColors: true,
+      fontFamily:
+        '"Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
+      fontSize: 13,
+      ignoreBracketedPasteMode: false,
+      lineHeight: 1.18,
+      scrollback: 100000,
+      theme: {
+        background: "#0b1020",
+        foreground: "#d7e1f2",
+        cursor: "#ffffff",
+        cursorAccent: "#0b1020",
+        selectionBackground: "#334155",
+        black: "#0b1020",
+        red: "#ef4444",
+        green: "#22c55e",
+        yellow: "#f59e0b",
+        blue: "#3b82f6",
+        magenta: "#a855f7",
+        cyan: "#14b8a6",
+        white: "#e5e7eb",
+        brightBlack: "#64748b",
+        brightRed: "#f87171",
+        brightGreen: "#4ade80",
+        brightYellow: "#fbbf24",
+        brightBlue: "#60a5fa",
+        brightMagenta: "#c084fc",
+        brightCyan: "#2dd4bf",
+        brightWhite: "#f8fafc",
+      },
+    });
+    const fitAddon = new FitAddon();
+    const unicode11Addon = new Unicode11Addon();
+
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(unicode11Addon);
+    terminal.unicode.activeVersion = "11";
+    terminal.open(terminalElement);
+
+    terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+
+    const dataDisposable = terminal.onData((data) => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      socket.send(textEncoder.encode(data));
+    });
+
+    scheduleFitAndResize();
+
+    return () => {
+      dataDisposable.dispose();
+      if (resizeFrameRef.current != null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      socketRef.current?.close();
+      socketRef.current = null;
+      terminal.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [scheduleFitAndResize, terminalElement]);
+
+  useEffect(() => {
+    if (!terminalElement || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => scheduleFitAndResize());
+    observer.observe(terminalElement);
+    return () => observer.disconnect();
+  }, [scheduleFitAndResize, terminalElement]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === containerRef.current);
+      window.setTimeout(() => {
+        scheduleFitAndResize();
+        terminalRef.current?.focus();
+      }, 50);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, [scheduleFitAndResize]);
 
   useEffect(() => {
     if (!isRunning) {
@@ -168,97 +312,27 @@ export function InstanceShellTerminal({
     }
   }, [disconnect, isRunning]);
 
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
-  }, [output]);
+  const isConnecting = connectionState === "connecting";
+  const isConnected = connectionState === "connected";
+  const statusLabel = isConnected
+    ? t("instances.shellConnectedStatus")
+    : isConnecting
+      ? t("instances.shellConnecting")
+      : error
+        ? error
+        : t("instances.shellReady");
+  const fullscreenLabel = isFullscreen
+    ? t("instances.exitFullscreen")
+    : t("instances.enterFullscreen");
+  const containerFrameClass = isFullscreen
+    ? "h-screen min-h-0 max-h-none rounded-none border-0 shadow-none"
+    : `rounded-lg border border-[#1f2937] shadow-[0_30px_90px_-56px_rgba(17,24,39,0.9)] ${heightClassName}`;
 
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || typeof ResizeObserver === "undefined") {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => sendResize());
-    observer.observe(terminal);
-    return () => observer.disconnect();
-  }, [sendResize]);
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (!connected) {
-      return;
-    }
-
-    if (event.ctrlKey && !event.altKey && !event.metaKey) {
-      const key = event.key.toLowerCase();
-      if (key === "c") {
-        event.preventDefault();
-        sendMessage("\x03");
-        return;
-      }
-      if (key === "d") {
-        event.preventDefault();
-        sendMessage("\x04");
-        return;
-      }
-      if (key === "l") {
-        event.preventDefault();
-        setOutput("");
-        sendMessage("\x0c");
-        return;
-      }
-    }
-
-    if (event.key === "Enter") {
-      event.preventDefault();
-      sendMessage("\r");
-      return;
-    }
-    if (event.key === "Backspace") {
-      event.preventDefault();
-      sendMessage("\x7f");
-      return;
-    }
-    if (event.key === "Tab") {
-      event.preventDefault();
-      sendMessage("\t");
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      sendMessage("\x1b");
-      return;
-    }
-    if (KEY_SEQUENCES[event.key]) {
-      event.preventDefault();
-      sendMessage(KEY_SEQUENCES[event.key]);
-      return;
-    }
-    if (
-      event.key.length === 1 &&
-      !event.metaKey &&
-      !event.altKey
-    ) {
-      event.preventDefault();
-      sendMessage(event.key);
-    }
-  };
-
-  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    if (!connected) {
-      return;
-    }
-    const text = event.clipboardData.getData("text");
-    if (text) {
-      event.preventDefault();
-      sendMessage(text);
-    }
-  };
-
-  if (!isRunning && !connected) {
+  if (!isRunning && !isConnected) {
     return (
-      <div className={`app-panel border-dashed p-12 text-center ${className}`}>
+      <div
+        className={`app-panel flex flex-col items-center justify-center border-dashed p-12 text-center ${heightClassName} ${className}`}
+      >
         <h3 className="text-sm font-medium text-gray-900">
           {t("instances.startTheInstance")}
         </h3>
@@ -271,21 +345,61 @@ export function InstanceShellTerminal({
 
   return (
     <div
-      className={`relative flex min-h-[420px] flex-col overflow-hidden rounded-lg border border-[#1f2937] bg-[#0b1020] shadow-[0_30px_90px_-56px_rgba(17,24,39,0.9)] ${className}`}
+      ref={containerRef}
+      className={`relative flex flex-col overflow-hidden bg-[#0b1020] ${containerFrameClass} ${className}`}
     >
       <div className="flex items-center justify-between border-b border-[#202a3b] bg-[#111827] px-4 py-3 text-white">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">{instanceName}</p>
-          <p className="mt-1 text-xs text-[#aab4c4]">
-            {connected
-              ? t("instances.shellConnectedStatus")
-              : connecting
-                ? t("instances.shellConnecting")
-                : t("instances.shellReady")}
+          <p
+            className={`mt-1 truncate text-xs ${
+              error ? "text-red-300" : "text-[#aab4c4]"
+            }`}
+          >
+            {statusLabel}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {connected ? (
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={fullscreenLabel}
+            title={fullscreenLabel}
+            className="flex h-8 w-8 items-center justify-center rounded-md bg-[#243041] text-gray-200 hover:bg-[#31415a] hover:text-white"
+          >
+            {isFullscreen ? (
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            ) : (
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
+                />
+              </svg>
+            )}
+          </button>
+          {isConnected ? (
             <button
               type="button"
               onClick={disconnect}
@@ -297,10 +411,10 @@ export function InstanceShellTerminal({
             <button
               type="button"
               onClick={connect}
-              disabled={connecting}
+              disabled={isConnecting}
               className="rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:cursor-wait disabled:opacity-70"
             >
-              {connecting
+              {isConnecting
                 ? t("instances.shellConnecting")
                 : t("instances.connectShell")}
             </button>
@@ -308,24 +422,11 @@ export function InstanceShellTerminal({
         </div>
       </div>
 
-      <div
-        ref={terminalRef}
-        tabIndex={0}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        className="min-h-0 flex-1 cursor-text outline-none"
-      >
-        <pre
-          ref={outputRef}
-          className="h-full overflow-auto whitespace-pre-wrap break-words px-4 py-4 font-mono text-[13px] leading-5 text-[#d7e1f2]"
-        >
-          {output ||
-            (error
-              ? error
-              : connecting
-                ? t("instances.shellConnecting")
-                : t("instances.shellReady"))}
-        </pre>
+      <div className="min-h-0 flex-1 overflow-hidden p-4">
+        <div
+          ref={setTerminalElement}
+          className="h-full w-full overflow-hidden [&_.xterm]:h-full [&_.xterm-screen]:outline-none [&_.xterm-viewport]:bg-[#0b1020]"
+        />
       </div>
     </div>
   );

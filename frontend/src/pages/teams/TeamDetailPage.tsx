@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { InstanceAccess } from "../../components/InstanceAccess";
 import UserLayout from "../../components/UserLayout";
+import { useAuth } from "../../contexts/AuthContext";
+import { instanceService } from "../../services/instanceService";
 import { teamService } from "../../services/teamService";
+import type { Instance } from "../../types/instance";
 import type { TeamDetails, TeamEvent, TeamMember, TeamTask } from "../../types/team";
 
 const statusStyle = (status: string) => {
@@ -268,6 +271,9 @@ const taskKeyFromEvent = (
   event: TeamEvent,
   payload: Record<string, unknown>,
 ) => {
+  if (event.task_id) {
+    return `clawmanager-task-${event.task_id}`;
+  }
   const taskId = payloadText(payload, [
     "taskId",
     "task_id",
@@ -277,9 +283,6 @@ const taskKeyFromEvent = (
   ]);
   if (taskId) {
     return taskId;
-  }
-  if (event.task_id) {
-    return `clawmanager-task-${event.task_id}`;
   }
   const inReplyTo = payloadText(payload, ["inReplyTo", "in_reply_to"]);
   if (inReplyTo) {
@@ -392,26 +395,38 @@ const buildCollaborationGroups = (
   memberById: Map<number, TeamMember>,
 ) => {
   const taskByID = new Map(tasks.map((task) => [task.id, task]));
+  const taskByMessageID = new Map(
+    tasks
+      .filter((task) => task.message_id)
+      .map((task) => [task.message_id, task]),
+  );
   const messageTaskKeys = new Map<string, string>();
+  for (const task of tasks) {
+    if (task.message_id) {
+      messageTaskKeys.set(task.message_id, `clawmanager-task-${task.id}`);
+    }
+  }
   for (const event of events) {
     const payload = normalizeEventPayload(event);
-    const taskID = payloadText(payload, [
-      "taskId",
-      "task_id",
-      "currentTaskId",
-      "runtimeTaskId",
-      "MessageThreadId",
-    ]);
-    if (!taskID) {
+    const taskKey = event.task_id
+      ? `clawmanager-task-${event.task_id}`
+      : payloadText(payload, [
+          "taskId",
+          "task_id",
+          "currentTaskId",
+          "runtimeTaskId",
+          "MessageThreadId",
+        ]);
+    if (!taskKey) {
       continue;
     }
     const messageID = payloadText(payload, ["messageId", "message_id"]) || event.message_id;
     const inReplyTo = payloadText(payload, ["inReplyTo", "in_reply_to"]);
     if (messageID) {
-      messageTaskKeys.set(messageID, taskID);
+      messageTaskKeys.set(messageID, taskKey);
     }
     if (inReplyTo) {
-      messageTaskKeys.set(inReplyTo, taskID);
+      messageTaskKeys.set(inReplyTo, taskKey);
     }
   }
   const groups = new Map<string, CollaborationGroup>();
@@ -434,7 +449,9 @@ const buildCollaborationGroups = (
     if (mappedTaskKey && (taskKey.startsWith("message:") || taskKey.startsWith("reply:"))) {
       taskKey = mappedTaskKey;
     }
-    const existingTask = event.task_id ? taskByID.get(event.task_id) : undefined;
+    const existingTask =
+      (event.task_id ? taskByID.get(event.task_id) : undefined) ||
+      (messageID ? taskByMessageID.get(messageID) : undefined);
     const item: CollaborationItem = {
       event,
       payload,
@@ -503,6 +520,7 @@ const buildCollaborationGroups = (
 const TeamDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const teamId = id ? Number(id) : null;
   const [details, setDetails] = useState<TeamDetails | null>(null);
   const [loading, setLoading] = useState(true);
@@ -515,6 +533,12 @@ const TeamDetailPage: React.FC = () => {
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [desktopMemberId, setDesktopMemberId] = useState<number | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [selectedMemberInstance, setSelectedMemberInstance] =
+    useState<Instance | null>(null);
+  const [memberInstanceLoading, setMemberInstanceLoading] = useState(false);
+  const [memberInstanceError, setMemberInstanceError] = useState<string | null>(
+    null,
+  );
 
   const loadTeam = useCallback(
     async (options?: { background?: boolean }) => {
@@ -570,6 +594,58 @@ const TeamDetailPage: React.FC = () => {
     details?.members.find((member) => member.id === desktopMemberId) || leader;
   const tasks = details?.tasks || [];
   const events = details?.events || [];
+  const selectedMemberInstanceResolved =
+    selectedMemberInstance?.id === selectedDesktopMember?.instance_id;
+  const selectedAccessRuntimeType = selectedMemberInstanceResolved && selectedMemberInstance
+    ? selectedMemberInstance.runtime_type
+    : null;
+  const currentUserLabel = useMemo(() => {
+    const username = typeof user?.username === "string" ? user.username.trim() : "";
+    const email = typeof user?.email === "string" ? user.email.trim() : "";
+    const baseLabel = username || email;
+    return baseLabel ? `${baseLabel}（当前用户）` : "当前用户";
+  }, [user?.email, user?.username]);
+  const currentUserKey =
+    typeof user?.id === "number" ? `user-${user.id}` : "current-user";
+
+  useEffect(() => {
+    const instanceId = selectedDesktopMember?.instance_id;
+    if (!instanceId) {
+      setSelectedMemberInstance(null);
+      setMemberInstanceError(null);
+      setMemberInstanceLoading(false);
+      return;
+    }
+
+    let disposed = false;
+    setMemberInstanceLoading(true);
+    setMemberInstanceError(null);
+
+    void instanceService
+      .getInstance(instanceId)
+      .then((instance) => {
+        if (!disposed) {
+          setSelectedMemberInstance(instance);
+        }
+      })
+      .catch((err: any) => {
+        if (!disposed) {
+          setSelectedMemberInstance(null);
+          setMemberInstanceError(
+            err.response?.data?.error || "加载成员实例访问方式失败",
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setMemberInstanceLoading(false);
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [selectedDesktopMember?.instance_id]);
 
   const handleDeleteTeam = async () => {
     if (!teamId || !window.confirm(`删除 Team「${details?.team.name || teamId}」？`)) {
@@ -722,20 +798,31 @@ const TeamDetailPage: React.FC = () => {
                   实例详情
                 </Link>
               </div>
-              <InstanceAccess
-                key={selectedDesktopMember.instance_id}
-                instanceId={selectedDesktopMember.instance_id}
-                instanceName={selectedDesktopMember.display_name}
-                containerClassName="min-h-0 xl:flex-1 flex flex-col"
-                frameHeightClassName="h-[54vh] min-h-[420px] max-h-[720px] xl:h-auto xl:min-h-0 xl:max-h-none xl:flex-1"
-                isRunning={
-                  selectedDesktopMember.status !== "creating" &&
-                  selectedDesktopMember.status !== "failed" &&
-                  selectedDesktopMember.status !== "offline" &&
-                  selectedDesktopMember.status !== "deleting" &&
-                  selectedDesktopMember.status !== "deleted"
-                }
-              />
+              {!selectedAccessRuntimeType && !memberInstanceError ? (
+                <div className="app-panel flex min-h-[420px] flex-1 items-center justify-center border-dashed p-8 text-sm text-gray-500">
+                  {memberInstanceLoading ? "正在加载成员访问方式..." : "正在准备成员访问方式..."}
+                </div>
+              ) : memberInstanceError ? (
+                <div className="app-panel flex min-h-[420px] flex-1 items-center justify-center border-dashed p-8 text-center text-sm text-red-600">
+                  {memberInstanceError}
+                </div>
+              ) : (
+                <InstanceAccess
+                  key={`${selectedDesktopMember.instance_id}-${selectedAccessRuntimeType}`}
+                  instanceId={selectedDesktopMember.instance_id}
+                  instanceName={selectedDesktopMember.display_name}
+                  runtimeType={selectedAccessRuntimeType || "desktop"}
+                  containerClassName="min-h-0 xl:flex-1 flex flex-col"
+                  frameHeightClassName="h-[54vh] min-h-[420px] max-h-[720px] xl:h-auto xl:min-h-0 xl:max-h-none xl:flex-1"
+                  isRunning={
+                    selectedDesktopMember.status !== "creating" &&
+                    selectedDesktopMember.status !== "failed" &&
+                    selectedDesktopMember.status !== "offline" &&
+                    selectedDesktopMember.status !== "deleting" &&
+                    selectedDesktopMember.status !== "deleted"
+                  }
+                />
+              )}
             </section>
           ) : (
             <div className="app-panel border-dashed p-8 text-center text-sm text-gray-500">
@@ -750,6 +837,8 @@ const TeamDetailPage: React.FC = () => {
             members={details.members}
             memberById={memberById}
             leaderMemberId={details.leader_member_id}
+            currentUserLabel={currentUserLabel}
+            currentUserKey={currentUserKey}
             taskPrompt={taskPrompt}
             dispatching={dispatching}
             dispatchError={dispatchError}
@@ -994,6 +1083,8 @@ function CollaborationPanel({
   members,
   memberById,
   leaderMemberId,
+  currentUserLabel,
+  currentUserKey,
   taskPrompt,
   dispatching,
   dispatchError,
@@ -1006,6 +1097,8 @@ function CollaborationPanel({
   members: TeamMember[];
   memberById: Map<number, TeamMember>;
   leaderMemberId?: string;
+  currentUserLabel: string;
+  currentUserKey: string;
   taskPrompt: string;
   dispatching: boolean;
   dispatchError: string | null;
@@ -1013,7 +1106,13 @@ function CollaborationPanel({
   onDispatch: (event: React.FormEvent) => void;
 }) {
   const groups = buildCollaborationGroups(events, tasks, memberById);
-  const messages = buildTeamChatMessages(groups, memberById, leaderMemberId);
+  const messages = buildTeamChatMessages(
+    groups,
+    memberById,
+    leaderMemberId,
+    currentUserLabel,
+    currentUserKey,
+  );
   const onlineCount = members.filter(
     (member) => !["offline", "deleted", "deleting"].includes(member.status),
   ).length;
@@ -1107,6 +1206,8 @@ function buildTeamChatMessages(
   groups: CollaborationGroup[],
   memberById: Map<number, TeamMember>,
   leaderMemberId?: string,
+  currentUserLabel = "当前用户",
+  currentUserKey = "current-user",
 ) {
   const messages: TeamChatMessage[] = [];
   const memberByKey = new Map(
@@ -1122,8 +1223,8 @@ function buildTeamChatMessages(
       messages.push({
         id: `task-${group.task.id}`,
         kind: "member",
-        sender: displayMemberName(leaderMemberId || "leader", memberByKey, leaderMemberId),
-        senderKey: leaderMemberId || "leader",
+        sender: currentUserLabel,
+        senderKey: currentUserKey,
         content: `@${targetLabel} ${prompt}\n任务：${group.task.message_id || group.label}`,
         time: new Date(group.task.created_at).getTime(),
         tone: "assignment",
@@ -1156,6 +1257,9 @@ function buildTeamChatMessages(
     }
 
     for (const item of group.items) {
+      if (isTaskDispatchEcho(item, group.task) || isProtocolProgressEcho(item)) {
+        continue;
+      }
       const message = chatMessageFromItem(item, memberByKey, leaderMemberId);
       if (message) {
         messages.push(message);
@@ -1165,6 +1269,26 @@ function buildTeamChatMessages(
   return messages
     .filter((message) => Number.isFinite(message.time))
     .sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+}
+
+function itemMessageID(item: CollaborationItem) {
+  return payloadText(item.payload, ["messageId", "message_id"]) || item.event.message_id || "";
+}
+
+function isTaskDispatchEcho(item: CollaborationItem, task?: TeamTask) {
+  if (!task) {
+    return false;
+  }
+  if (item.eventType !== "outbound" && item.eventType !== "task_assigned") {
+    return false;
+  }
+  return item.event.task_id === task.id || itemMessageID(item) === task.message_id;
+}
+
+function isProtocolProgressEcho(item: CollaborationItem) {
+  return ["task_received", "task_started", "progress", "task_progress"].includes(
+    item.eventType,
+  );
 }
 
 function chatMessageFromItem(

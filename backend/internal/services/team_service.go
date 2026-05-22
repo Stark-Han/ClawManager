@@ -17,11 +17,15 @@ import (
 )
 
 const (
-	teamSharedMountPath   = "/team"
-	teamConfigMountPath   = "/team/team.json"
-	teamConfigFileName    = "team.json"
-	teamRedisURLSecretKey = "CLAWMANAGER_TEAM_REDIS_URL"
-	teamTokenSecretKey    = "CLAWMANAGER_TEAM_TOKEN"
+	teamSharedMountPath    = "/team"
+	teamConfigFileName     = "team.json"
+	teamConfigMountDirPath = "/etc/clawmanager/team"
+	teamConfigMountPath    = teamConfigMountDirPath + "/" + teamConfigFileName
+	teamSharedUID          = 1000
+	teamSharedGID          = 1000
+	teamSharedUmask        = "0002"
+	teamRedisURLSecretKey  = "CLAWMANAGER_TEAM_REDIS_URL"
+	teamTokenSecretKey     = "CLAWMANAGER_TEAM_TOKEN"
 
 	defaultTeamTaskStaleTimeout = 30 * time.Minute
 	teamTaskStaleSweepInterval  = 30 * time.Second
@@ -441,7 +445,10 @@ func (s *teamService) buildTeamMemberInstanceRequest(team *models.Team, memberPl
 			SharedPVCName:   derefTeamString(team.SharedPVCName),
 			SharedMountPath: team.SharedMountPath,
 			ConfigMapName:   s.teamConfigMapName(team.ID),
-			ConfigMountPath: teamConfigMountPath,
+			ConfigMountPath: teamConfigMountDirPath,
+			SharedUID:       teamSharedUID,
+			SharedGID:       teamSharedGID,
+			SharedUmask:     teamSharedUmask,
 		},
 	}
 }
@@ -454,6 +461,12 @@ func (s *teamService) teamMemberEnv(team *models.Team, memberKey, role string) m
 		"CLAWMANAGER_TEAM_MEMBER_ID":      memberKey,
 		"CLAWMANAGER_TEAM_ROLE":           role,
 		"CLAWMANAGER_TEAM_SHARED_DIR":     team.SharedMountPath,
+		"CLAWMANAGER_TEAM_SHARED_UID":     strconv.Itoa(teamSharedUID),
+		"CLAWMANAGER_TEAM_SHARED_GID":     strconv.Itoa(teamSharedGID),
+		"CLAWMANAGER_TEAM_UMASK":          teamSharedUmask,
+		"PUID":                            strconv.Itoa(teamSharedUID),
+		"PGID":                            strconv.Itoa(teamSharedGID),
+		"UMASK":                           teamSharedUmask,
 		"CLAWMANAGER_TEAM_CONFIG_PATH":    teamConfigMountPath,
 		"CLAWMANAGER_TEAM_AUTORUN":        "true",
 		"CLAWMANAGER_TEAM_CONSUMER_GROUP": "team-members",
@@ -1735,7 +1748,50 @@ func defaultTeamRedisURL() string {
 			return value
 		}
 	}
+	if value, ok := defaultTeamRedisServiceURL(); ok {
+		return value
+	}
 	return ""
+}
+
+func defaultTeamRedisServiceURL() (string, bool) {
+	systemNamespace := strings.TrimSpace(os.Getenv("CLAWMANAGER_SYSTEM_NAMESPACE"))
+	if systemNamespace == "" {
+		if client := k8s.GetClient(); client != nil {
+			systemNamespace = client.GetSystemNamespace()
+		} else if baseNamespace := strings.TrimSpace(os.Getenv("K8S_NAMESPACE")); baseNamespace != "" {
+			systemNamespace = fmt.Sprintf("%s-system", baseNamespace)
+		}
+	}
+	if systemNamespace == "" {
+		return "", false
+	}
+
+	serviceName := strings.TrimSpace(os.Getenv("CLAWMANAGER_TEAM_REDIS_SERVICE_NAME"))
+	if serviceName == "" {
+		serviceName = strings.TrimSpace(os.Getenv("CLAWMANAGER_TEAM_REDIS_SERVICE"))
+	}
+	if serviceName == "" {
+		serviceName = "clawmanager-team-redis"
+	}
+
+	port := normalizePortValue(
+		strings.TrimSpace(os.Getenv("CLAWMANAGER_TEAM_REDIS_SERVICE_PORT")),
+		strings.TrimSpace(os.Getenv("CLAWMANAGER_TEAM_REDIS_PORT")),
+	)
+	if port == "" {
+		port = "6379"
+	}
+
+	db := strings.TrimSpace(os.Getenv("CLAWMANAGER_TEAM_REDIS_DB"))
+	if db == "" {
+		db = strings.TrimSpace(os.Getenv("TEAM_REDIS_DB"))
+	}
+	if db == "" {
+		db = "0"
+	}
+
+	return fmt.Sprintf("redis://%s.%s.svc.cluster.local:%s/%s", serviceName, systemNamespace, port, db), true
 }
 
 func teamTaskStaleTimeout() time.Duration {

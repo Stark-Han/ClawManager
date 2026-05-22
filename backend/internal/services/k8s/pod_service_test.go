@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -146,7 +147,11 @@ func TestCreatePodAppliesExtraPVCMountsAndSecretEnv(t *testing.T) {
 			{Name: "team-shared", ClaimName: "clawreef-team-1-shared", MountPath: "/team"},
 		},
 		ConfigMapFileMounts: []ConfigMapFileMount{
-			{Name: "team-config", ConfigMapName: "clawreef-team-1-config", Key: "team.json", MountPath: "/team/team.json", ReadOnly: true},
+			{Name: "team-config", ConfigMapName: "clawreef-team-1-config", Key: "team.json", MountPath: "/etc/clawmanager/team", ReadOnly: true, AsDirectory: true},
+		},
+		FSGroup: int64Ptr(1000),
+		VolumeOwnershipFixes: []VolumeOwnershipFix{
+			{Name: "team-shared", MountPath: "/team", UID: 1000, GID: 1000},
 		},
 	})
 	if err != nil {
@@ -168,13 +173,41 @@ func TestCreatePodAppliesExtraPVCMountsAndSecretEnv(t *testing.T) {
 		t.Fatalf("expected /team shared PVC mount, got %#v", container.VolumeMounts)
 	}
 
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil || *pod.Spec.SecurityContext.FSGroup != 1000 {
+		t.Fatalf("expected pod fsGroup 1000, got %#v", pod.Spec.SecurityContext)
+	}
+	if pod.Spec.SecurityContext.FSGroupChangePolicy == nil || *pod.Spec.SecurityContext.FSGroupChangePolicy != corev1.FSGroupChangeOnRootMismatch {
+		t.Fatalf("expected OnRootMismatch fsGroup change policy, got %#v", pod.Spec.SecurityContext)
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected one Team shared permission initContainer, got %#v", pod.Spec.InitContainers)
+	}
+	initContainer := pod.Spec.InitContainers[0]
+	if initContainer.SecurityContext == nil || initContainer.SecurityContext.RunAsUser == nil || *initContainer.SecurityContext.RunAsUser != 0 {
+		t.Fatalf("expected permission initContainer to run as root, got %#v", initContainer.SecurityContext)
+	}
+	foundInitMount := false
+	for _, mount := range initContainer.VolumeMounts {
+		if mount.Name == "team-shared" && mount.MountPath == "/team" {
+			foundInitMount = true
+		}
+	}
+	if !foundInitMount {
+		t.Fatalf("expected permission initContainer to mount /team, got %#v", initContainer.VolumeMounts)
+	}
+
 	foundConfig := false
 	for _, mount := range container.VolumeMounts {
-		if mount.Name == "team-config" && mount.MountPath == "/team/team.json" && mount.SubPath == "team.json" && mount.ReadOnly {
+		if mount.Name == "team-config" && mount.MountPath == "/etc/clawmanager/team" && mount.SubPath == "" && mount.ReadOnly {
 			foundConfig = true
 		}
 	}
 	if !foundConfig {
-		t.Fatalf("expected /team/team.json ConfigMap file mount, got %#v", container.VolumeMounts)
+		t.Fatalf("expected Team ConfigMap directory mount, got %#v", container.VolumeMounts)
 	}
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }

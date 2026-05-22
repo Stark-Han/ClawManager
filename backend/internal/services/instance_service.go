@@ -154,6 +154,9 @@ type TeamInstanceConfig struct {
 	SharedMountPath string
 	ConfigMapName   string
 	ConfigMountPath string
+	SharedUID       int64
+	SharedGID       int64
+	SharedUmask     string
 }
 
 // UpdateInstanceRequest holds data for updating an instance
@@ -436,15 +439,34 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	envFromSecretNames := []string{bootstrapSecretName}
 	extraPVCMounts := []k8s.PVCMount{}
 	configMapFileMounts := []k8s.ConfigMapFileMount{}
+	volumeOwnershipFixes := []k8s.VolumeOwnershipFix{}
+	var fsGroup *int64
 	if req.Team != nil {
 		if strings.TrimSpace(req.Team.SecretName) != "" {
 			envFromSecretNames = append(envFromSecretNames, strings.TrimSpace(req.Team.SecretName))
 		}
 		if strings.TrimSpace(req.Team.SharedPVCName) != "" && strings.TrimSpace(req.Team.SharedMountPath) != "" {
+			sharedMountPath := strings.TrimSpace(req.Team.SharedMountPath)
 			extraPVCMounts = append(extraPVCMounts, k8s.PVCMount{
 				Name:      "team-shared",
 				ClaimName: strings.TrimSpace(req.Team.SharedPVCName),
-				MountPath: strings.TrimSpace(req.Team.SharedMountPath),
+				MountPath: sharedMountPath,
+			})
+			sharedUID := req.Team.SharedUID
+			if sharedUID <= 0 {
+				sharedUID = 1000
+			}
+			sharedGID := req.Team.SharedGID
+			if sharedGID <= 0 {
+				sharedGID = 1000
+			}
+			fsGroupValue := sharedGID
+			fsGroup = &fsGroupValue
+			volumeOwnershipFixes = append(volumeOwnershipFixes, k8s.VolumeOwnershipFix{
+				Name:      "team-shared",
+				MountPath: sharedMountPath,
+				UID:       sharedUID,
+				GID:       sharedGID,
 			})
 		}
 		if strings.TrimSpace(req.Team.ConfigMapName) != "" && strings.TrimSpace(req.Team.ConfigMountPath) != "" {
@@ -454,30 +476,33 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 				Key:           "team.json",
 				MountPath:     strings.TrimSpace(req.Team.ConfigMountPath),
 				ReadOnly:      true,
+				AsDirectory:   true,
 			})
 		}
 	}
 
 	podConfig := k8s.PodConfig{
-		InstanceID:          instance.ID,
-		InstanceName:        instance.Name,
-		UserID:              userID,
-		Type:                instance.Type,
-		RuntimeType:         runtimeType,
-		CPUCores:            instance.CPUCores,
-		MemoryGB:            instance.MemoryGB,
-		GPUEnabled:          instance.GPUEnabled,
-		GPUCount:            instance.GPUCount,
-		Image:               runtimeConfig.Image,
-		MountPath:           runtimeConfig.MountPath,
-		ContainerPort:       runtimeConfig.Port,
-		ImagePullPolicy:     corev1.PullPolicy(defaultImagePullPolicy()),
-		ExtraEnv:            extraEnv,
-		EnvFromSecretNames:  envFromSecretNames,
-		ExtraPVCMounts:      extraPVCMounts,
-		ConfigMapFileMounts: configMapFileMounts,
-		SHMSizeGB:           shmSizeGB,
-		SecurityMode:        s.securityModeForInstance(instance.Type),
+		InstanceID:           instance.ID,
+		InstanceName:         instance.Name,
+		UserID:               userID,
+		Type:                 instance.Type,
+		RuntimeType:          runtimeType,
+		CPUCores:             instance.CPUCores,
+		MemoryGB:             instance.MemoryGB,
+		GPUEnabled:           instance.GPUEnabled,
+		GPUCount:             instance.GPUCount,
+		Image:                runtimeConfig.Image,
+		MountPath:            runtimeConfig.MountPath,
+		ContainerPort:        runtimeConfig.Port,
+		ImagePullPolicy:      corev1.PullPolicy(defaultImagePullPolicy()),
+		ExtraEnv:             extraEnv,
+		EnvFromSecretNames:   envFromSecretNames,
+		ExtraPVCMounts:       extraPVCMounts,
+		ConfigMapFileMounts:  configMapFileMounts,
+		FSGroup:              fsGroup,
+		VolumeOwnershipFixes: volumeOwnershipFixes,
+		SHMSizeGB:            shmSizeGB,
+		SecurityMode:         s.securityModeForInstance(instance.Type),
 	}
 
 	pod, err := s.podService.CreatePod(ctx, podConfig)

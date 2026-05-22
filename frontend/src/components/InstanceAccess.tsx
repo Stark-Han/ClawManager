@@ -59,6 +59,7 @@ export function InstanceAccess(props: InstanceAccessProps) {
         instanceId={props.instanceId}
         instanceName={props.instanceName}
         isRunning={props.isRunning}
+        heightClassName={props.frameHeightClassName}
         className={props.containerClassName}
       />
     );
