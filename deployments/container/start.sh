@@ -27,6 +27,16 @@ fi
 
 export SERVER_ADDRESS="${SERVER_ADDRESS:-:9001}"
 export SERVER_MODE="${SERVER_MODE:-release}"
+export CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB="${CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB:-500}"
+
+case "${CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB}" in
+  ''|*[!0-9]*|0)
+    echo "Invalid CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB=${CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB}; falling back to 500 MiB."
+    export CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB="500"
+    ;;
+esac
+
+sed -i "s/client_max_body_size [0-9][0-9]*m;/client_max_body_size ${CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB}m;/" /etc/nginx/nginx.conf
 
 /usr/local/bin/clawreef-server &
 backend_pid=$!

@@ -79,6 +79,22 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 		},
 		{
 			model: models.OpenClawConfigResource{
+				ID:           6,
+				ResourceType: OpenClawConfigResourceTypeChannel,
+				ResourceKey:  "wecom",
+				Name:         "WeCom",
+				Version:      1,
+				ContentJSON:  `{"schemaVersion":1,"kind":"channel","format":"channel/wecom@v1","dependsOn":[],"config":{"enabled":false,"botId":"ww-bot","secret":"wecom-secret","dmPolicy":"pairing","allowFrom":["*"],"legacyField":"drop-me"}}`,
+			},
+			envelope: OpenClawConfigEnvelope{
+				SchemaVersion: 1,
+				Kind:          "channel",
+				Format:        "channel/wecom@v1",
+				Config:        json.RawMessage(`{"enabled":false,"botId":"ww-bot","secret":"wecom-secret","dmPolicy":"pairing","allowFrom":["*"],"legacyField":"drop-me"}`),
+			},
+		},
+		{
+			model: models.OpenClawConfigResource{
 				ID:           5,
 				ResourceType: OpenClawConfigResourceTypeSkill,
 				ResourceKey:  "support-bot",
@@ -102,7 +118,7 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 	}
 
 	gotChannels := renderedEnv[OpenClawChannelsEnv]
-	wantChannels := `{"dingtalk-connector":{"allowFrom":["*"],"clientId":"ding-xxxxxxxxxxxxxx","clientSecret":"xxxxxxxxxxxxxxxxxxxxxxx","enabled":true},"feishu":{"accounts":{"main":{"appId":"cli_xxx","appSecret":"xxx"}},"enabled":true},"slack":{"appToken":"xapp-xxx","botToken":"xoxb-xxx","capabilities":{"interactiveReplies":true},"channels":{"#general":{"allow":true}},"enabled":true,"groupPolicy":"allowlist"},"telegram":{"allowFrom":["*"],"botToken":"123456:xxx","dmPolicy":"open","enabled":true}}`
+	wantChannels := `{"dingtalk-connector":{"allowFrom":["*"],"clientId":"ding-xxxxxxxxxxxxxx","clientSecret":"xxxxxxxxxxxxxxxxxxxxxxx","enabled":true},"feishu":{"accounts":{"main":{"appId":"cli_xxx","appSecret":"xxx"}},"enabled":true},"slack":{"appToken":"xapp-xxx","botToken":"xoxb-xxx","capabilities":{"interactiveReplies":true},"channels":{"#general":{"allow":true}},"enabled":true,"groupPolicy":"allowlist"},"telegram":{"allowFrom":["*"],"botToken":"123456:xxx","dmPolicy":"open","enabled":true},"wecom":{"allowFrom":["*"],"botId":"ww-bot","dmPolicy":"pairing","secret":"wecom-secret"}}`
 	if gotChannels != wantChannels {
 		t.Fatalf("unexpected channel payload:\nwant: %s\ngot:  %s", wantChannels, gotChannels)
 	}
@@ -200,6 +216,44 @@ func TestResourcePayloadFromModelNormalizesStoredDingTalkChannelJSON(t *testing.
 
 	got := string(payload.Content)
 	want := `{"schemaVersion":1,"kind":"channel","format":"channel/dingtalk-connector@v1","dependsOn":[],"config":{"enabled":true,"clientId":"ding-xxxxxxxxxxxxxx","clientSecret":"xxxxxxxxxxxxxxxxxxxxxxx","allowFrom":["*"],"legacyField":"drop-me"}}`
+
+	var gotJSON interface{}
+	if err := json.Unmarshal([]byte(got), &gotJSON); err != nil {
+		t.Fatalf("failed to unmarshal normalized resource content: %v", err)
+	}
+
+	var wantJSON interface{}
+	if err := json.Unmarshal([]byte(want), &wantJSON); err != nil {
+		t.Fatalf("failed to unmarshal expected normalized resource content: %v", err)
+	}
+
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Fatalf("unexpected normalized resource content:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestResourcePayloadFromModelNormalizesStoredWeComChannelJSON(t *testing.T) {
+	t.Parallel()
+
+	item := models.OpenClawConfigResource{
+		ID:           12,
+		UserID:       1,
+		ResourceType: OpenClawConfigResourceTypeChannel,
+		ResourceKey:  "wecom",
+		Name:         "WeCom",
+		Enabled:      true,
+		Version:      1,
+		TagsJSON:     `["channel","builtin","wecom"]`,
+		ContentJSON:  `{"schemaVersion":1,"kind":"channel","format":"channel/wecom@v1","dependsOn":[],"config":{"enabled":false,"botId":"ww-bot","secret":"wecom-secret","allowFrom":[],"legacyField":"keep-me"}}`,
+	}
+
+	payload, err := resourcePayloadFromModel(item)
+	if err != nil {
+		t.Fatalf("resourcePayloadFromModel returned error: %v", err)
+	}
+
+	got := string(payload.Content)
+	want := `{"schemaVersion":1,"kind":"channel","format":"channel/wecom@v1","dependsOn":[],"config":{"enabled":false,"botId":"ww-bot","secret":"wecom-secret","allowFrom":["*"],"legacyField":"keep-me","dmPolicy":"pairing"}}`
 
 	var gotJSON interface{}
 	if err := json.Unmarshal([]byte(got), &gotJSON); err != nil {
@@ -418,6 +472,15 @@ func TestNormalizeOpenClawResourceContentPreservesUnknownChannelFields(t *testin
 			wantKeep: map[string]interface{}{
 				"allowFrom": []interface{}{"C123", "C456"},
 				"dmPolicy":  "closed",
+			},
+		},
+		{
+			name:        "wecom preserves webhook and custom capabilities",
+			resourceKey: "wecom",
+			content:     `{"schemaVersion":1,"kind":"channel","format":"channel/wecom@v1","dependsOn":[],"config":{"enabled":true,"botId":"ww-bot","secret":"sec","dmPolicy":"pairing","allowFrom":[],"webhook":"https://example.com/wecom","capabilities":{"interactiveReplies":true}}}`,
+			wantKeep: map[string]interface{}{
+				"webhook":      "https://example.com/wecom",
+				"capabilities": map[string]interface{}{"interactiveReplies": true},
 			},
 		},
 	}

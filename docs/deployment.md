@@ -38,6 +38,7 @@ Choose the deployment path that matches your environment:
 
 - ClawManager is designed around in-cluster services and platform-mediated access rather than direct pod exposure.
 - Resource Management features depend on object storage and `skill-scanner` being available.
+- Runtime workspace `.openclaw` and `.hermes` archive import/export size is controlled by `CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB`. The default is `500` MiB; set the env var on the ClawManager app deployment when a larger or smaller limit is needed.
 - Production environments should review images, credentials, TLS, persistence, and networking policies before rollout.
 
 ## Related Guides

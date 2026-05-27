@@ -43,6 +43,26 @@ export interface OpenClawConfigBundleItem {
   resource?: OpenClawConfigResourceSummary;
 }
 
+export interface OpenClawConfigBundleSkillItem {
+  skill_id: number;
+  sort_order: number;
+  required: boolean;
+  skill?: {
+    id: number;
+    user_id: number;
+    skill_key: string;
+    name: string;
+    description?: string;
+    status: string;
+    source_type: string;
+    risk_level: string;
+    current_version_id?: number;
+    last_scanned_at?: string;
+    created_at: string;
+    updated_at: string;
+  };
+}
+
 export interface OpenClawConfigBundle {
   id: number;
   user_id: number;
@@ -51,6 +71,7 @@ export interface OpenClawConfigBundle {
   enabled: boolean;
   version: number;
   items: OpenClawConfigBundleItem[];
+  skill_items?: OpenClawConfigBundleSkillItem[];
   created_at: string;
   updated_at: string;
 }
@@ -60,6 +81,7 @@ export interface UpsertOpenClawConfigBundleRequest {
   description?: string;
   enabled: boolean;
   items: OpenClawConfigBundleItem[];
+  skill_items?: OpenClawConfigBundleSkillItem[];
 }
 
 export interface OpenClawConfigPlan {

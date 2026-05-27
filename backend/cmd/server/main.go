@@ -89,7 +89,7 @@ func main() {
 	riskDetectionService := services.NewRiskDetectionService(riskRuleRepo)
 	riskHitService := services.NewRiskHitService(riskHitRepo)
 	riskRuleService := services.NewRiskRuleService(riskRuleRepo)
-	openClawConfigService := services.NewOpenClawConfigService(openClawConfigRepo)
+	openClawConfigService := services.NewOpenClawConfigService(openClawConfigRepo, skillRepo)
 	objectStorageService, err := services.NewObjectStorageService(cfg.ObjectStorage)
 	if err != nil {
 		log.Fatalf("Failed to initialize object storage: %v", err)
@@ -237,7 +237,9 @@ func main() {
 			teams.POST("", teamHandler.CreateTeam)
 			teams.GET("/:id", teamHandler.GetTeam)
 			teams.DELETE("/:id", teamHandler.DeleteTeam)
+			teams.GET("/:id/tasks", teamHandler.ListTasks)
 			teams.POST("/:id/tasks", teamHandler.DispatchTask)
+			teams.GET("/:id/events", teamHandler.ListEvents)
 			teams.DELETE("/:id/members/:memberID", teamHandler.DeleteMember)
 		}
 

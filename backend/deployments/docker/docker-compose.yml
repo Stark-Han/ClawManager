@@ -34,6 +34,7 @@ services:
       DB_PASSWORD: "clawreef123"
       DB_NAME: "clawreef"
       JWT_SECRET: "clawreef-dev-secret-key"
+      CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB: "500"
     ports:
       - "9001:9001"
     depends_on:

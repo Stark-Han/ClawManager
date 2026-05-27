@@ -43,6 +43,12 @@ export const OPENCLAW_CHANNEL_TEMPLATES: OpenClawChannelTemplate[] = [
     clientSecret: '',
     allowFrom: ['*'],
   }),
+  createChannelTemplate('wecom', 'WeCom', 'WeCom channel with bot credentials and pairing DM controls.', 'builtin', {
+    botId: '',
+    secret: '',
+    dmPolicy: 'pairing',
+    allowFrom: ['*'],
+  }),
   createChannelTemplate('slack', 'Slack', 'Slack workspace app powered by Bolt.', 'builtin', {
     enabled: true,
     appToken: '',

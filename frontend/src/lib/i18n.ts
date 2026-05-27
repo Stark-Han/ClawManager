@@ -1703,10 +1703,10 @@ export const translations: Record<Locale, TranslationTree> = {
       workspaceSection: "Workspace",
       openClawWorkspace: "OpenClaw Workspace",
       openClawWorkspaceDesc:
-        "Import or export the `.openclaw` folder as a `.tar.gz` archive up to 50 MiB.",
+        "Import or export the `.openclaw` folder as a `.tar.gz` archive up to 500 MiB by default.",
       runtimeWorkspace: "{runtime} Workspace",
       runtimeWorkspaceDesc:
-        "Import or export the `{directory}` folder as a `.tar.gz` archive up to 50 MiB.",
+        "Import or export the `{directory}` folder as a `.tar.gz` archive up to 500 MiB by default.",
       workspaceReady: "Ready",
       workspacePaused: "Paused",
       exportingOpenClaw: "Exporting...",
@@ -1720,7 +1720,7 @@ export const translations: Record<Locale, TranslationTree> = {
       importRuntimeWorkspace: "Import {directory}",
       importRuntimeWorkspaceSuccess:
         "{runtime} workspace imported successfully.",
-      openClawArchiveTooLarge: "Archive too large. Maximum size is 50 MiB.",
+      openClawArchiveTooLarge: "Archive too large. Maximum size is 500 MiB by default.",
       importOpenClawFailed: "Failed to import .openclaw: {message}",
       exportOpenClawFailed: "Failed to export .openclaw: {message}",
       importRuntimeWorkspaceFailed:
@@ -2068,6 +2068,8 @@ export const translations: Record<Locale, TranslationTree> = {
         "Compose a new reusable bundle without leaving the resources list behind.",
       bundleName: "Bundle Name",
       bundleResources: "Bundle Resources",
+      uploadedSkills: "Uploaded Skills",
+      noUploadedSkillsForBundle: "No active low-risk uploaded skills yet.",
       noResourcesForGroup: "No {type} resources yet.",
       actions: {
         new: "New",
@@ -2103,6 +2105,11 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "DingTalk channel with client credentials and sender allowlist controls.",
         },
+        wecom: {
+          label: "WeCom",
+          description:
+            "WeCom channel with bot credentials and pairing DM controls.",
+        },
         slack: {
           label: "Slack",
           description: "Slack workspace app powered by Bolt.",
@@ -2130,6 +2137,21 @@ export const translations: Record<Locale, TranslationTree> = {
             clientSecret: {
               label: "Client Secret",
               placeholder: "client secret",
+            },
+          },
+        },
+        wecom: {
+          title: "WeCom Channel Editor",
+          description:
+            "Start with the bot credential form, or switch to JSON when you need the full config surface.",
+          fields: {
+            botId: {
+              label: "Bot ID",
+              placeholder: "xxxxxxx",
+            },
+            secret: {
+              label: "Secret",
+              placeholder: "bot secret",
             },
           },
         },
@@ -2910,10 +2932,10 @@ export const translations: Record<Locale, TranslationTree> = {
       workspaceSection: "工作区",
       openClawWorkspace: "OpenClaw 工作区",
       openClawWorkspaceDesc:
-        "可将 `.openclaw` 文件夹导入或导出为不超过 50 MiB 的 `.tar.gz` 压缩包。",
+        "默认可将 `.openclaw` 文件夹导入或导出为不超过 500 MiB 的 `.tar.gz` 压缩包。",
       runtimeWorkspace: "{runtime} 工作区",
       runtimeWorkspaceDesc:
-        "可将 `{directory}` 文件夹导入或导出为不超过 50 MiB 的 `.tar.gz` 压缩包。",
+        "默认可将 `{directory}` 文件夹导入或导出为不超过 500 MiB 的 `.tar.gz` 压缩包。",
       workspaceReady: "可操作",
       workspacePaused: "未就绪",
       exportingOpenClaw: "正在导出...",
@@ -2925,7 +2947,7 @@ export const translations: Record<Locale, TranslationTree> = {
       importingRuntimeWorkspace: "正在导入...",
       importRuntimeWorkspace: "导入 {directory}",
       importRuntimeWorkspaceSuccess: "{runtime} 工作区导入成功。",
-      openClawArchiveTooLarge: "归档过大。最大大小为 50 MiB。",
+      openClawArchiveTooLarge: "归档过大。默认最大大小为 500 MiB。",
       importRuntimeWorkspaceFailed: "导入 {directory} 失败：{message}",
       exportRuntimeWorkspaceFailed: "导出 {directory} 失败：{message}",
       memoryReserved: "预留内存",
@@ -3245,6 +3267,8 @@ export const translations: Record<Locale, TranslationTree> = {
       newBundleSubtitle: "无需离开资源列表，就能创建新的可复用资源包。",
       bundleName: "资源包名称",
       bundleResources: "资源包内容",
+      uploadedSkills: "已上传技能",
+      noUploadedSkillsForBundle: "当前还没有可加入资源包的低风险已上传技能。",
       noResourcesForGroup: "当前还没有 {type} 资源。",
       actions: {
         new: "新建",
@@ -3278,6 +3302,10 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "DingTalk",
           description: "支持客户端凭证和发送方白名单控制的 DingTalk 通道。",
         },
+        wecom: {
+          label: "企业微信",
+          description: "支持 Bot ID、Secret 和私聊配对策略的企业微信通道。",
+        },
         slack: {
           label: "Slack",
           description: "基于 Bolt 的 Slack 工作区应用通道。",
@@ -3304,6 +3332,20 @@ export const translations: Record<Locale, TranslationTree> = {
             clientSecret: {
               label: "Client Secret",
               placeholder: "客户端密钥",
+            },
+          },
+        },
+        wecom: {
+          title: "企业微信 Channel 编辑器",
+          description: "先填写 Bot 凭证表单，只有在需要完整配置时再切到 JSON。",
+          fields: {
+            botId: {
+              label: "Bot ID",
+              placeholder: "xxxxxxx",
+            },
+            secret: {
+              label: "Secret",
+              placeholder: "机器人密钥",
             },
           },
         },
@@ -4122,10 +4164,10 @@ export const translations: Record<Locale, TranslationTree> = {
       workspaceSection: "ワークスペース",
       openClawWorkspace: "OpenClaw ワークスペース",
       openClawWorkspaceDesc:
-        "`.openclaw` フォルダーを 50 MiB までの `.tar.gz` アーカイブとしてインポートまたはエクスポートできます。",
+        "`.openclaw` フォルダーを既定で 500 MiB までの `.tar.gz` アーカイブとしてインポートまたはエクスポートできます。",
       runtimeWorkspace: "{runtime} ワークスペース",
       runtimeWorkspaceDesc:
-        "`{directory}` フォルダーを 50 MiB までの `.tar.gz` アーカイブとしてインポートまたはエクスポートできます。",
+        "`{directory}` フォルダーを既定で 500 MiB までの `.tar.gz` アーカイブとしてインポートまたはエクスポートできます。",
       workspaceReady: "利用可能",
       workspacePaused: "停止中",
       exportingOpenClaw: "エクスポート中...",
@@ -4139,7 +4181,7 @@ export const translations: Record<Locale, TranslationTree> = {
       importRuntimeWorkspace: "{directory} をインポート",
       importRuntimeWorkspaceSuccess:
         "{runtime} ワークスペースをインポートしました。",
-      openClawArchiveTooLarge: "アーカイブが大きすぎます。最大サイズは 50 MiB です。",
+      openClawArchiveTooLarge: "アーカイブが大きすぎます。既定の最大サイズは 500 MiB です。",
       importOpenClawFailed: ".openclaw のインポートに失敗しました: {message}",
       exportOpenClawFailed: ".openclaw のエクスポートに失敗しました: {message}",
       importRuntimeWorkspaceFailed:
@@ -4492,6 +4534,9 @@ export const translations: Record<Locale, TranslationTree> = {
         "リソース一覧を離れずに新しい再利用可能バンドルを作成します。",
       bundleName: "バンドル名",
       bundleResources: "バンドルのリソース",
+      uploadedSkills: "アップロード済みスキル",
+      noUploadedSkillsForBundle:
+        "バンドルに追加できる低リスクのアップロード済みスキルはまだありません。",
       noResourcesForGroup: "{type} のリソースはまだありません。",
       actions: {
         new: "新規作成",
@@ -4527,6 +4572,11 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "クライアント認証情報と送信元許可リストを設定できる DingTalk チャネル。",
         },
+        wecom: {
+          label: "WeCom",
+          description:
+            "Bot 認証情報とペアリング DM 制御を備えた WeCom チャネル。",
+        },
         slack: {
           label: "Slack",
           description: "Bolt ベースの Slack ワークスペースアプリ。",
@@ -4553,6 +4603,21 @@ export const translations: Record<Locale, TranslationTree> = {
             clientSecret: {
               label: "Client Secret",
               placeholder: "client secret",
+            },
+          },
+        },
+        wecom: {
+          title: "WeCom Channel エディタ",
+          description:
+            "まず Bot 認証情報フォームから始め、完全な設定が必要なときだけ JSON に切り替えます。",
+          fields: {
+            botId: {
+              label: "Bot ID",
+              placeholder: "xxxxxxx",
+            },
+            secret: {
+              label: "Secret",
+              placeholder: "bot secret",
             },
           },
         },
@@ -5360,10 +5425,10 @@ export const translations: Record<Locale, TranslationTree> = {
       workspaceSection: "워크스페이스",
       openClawWorkspace: "OpenClaw 워크스페이스",
       openClawWorkspaceDesc:
-        "`.openclaw` 폴더를 최대 50 MiB 크기의 `.tar.gz` 아카이브로 가져오거나 내보낼 수 있습니다.",
+        "기본적으로 `.openclaw` 폴더를 최대 500 MiB 크기의 `.tar.gz` 아카이브로 가져오거나 내보낼 수 있습니다.",
       runtimeWorkspace: "{runtime} 워크스페이스",
       runtimeWorkspaceDesc:
-        "`{directory}` 폴더를 최대 50 MiB 크기의 `.tar.gz` 아카이브로 가져오거나 내보낼 수 있습니다.",
+        "기본적으로 `{directory}` 폴더를 최대 500 MiB 크기의 `.tar.gz` 아카이브로 가져오거나 내보낼 수 있습니다.",
       workspaceReady: "준비됨",
       workspacePaused: "대기 중",
       exportingOpenClaw: "내보내는 중...",
@@ -5377,7 +5442,7 @@ export const translations: Record<Locale, TranslationTree> = {
       importRuntimeWorkspace: "{directory} 가져오기",
       importRuntimeWorkspaceSuccess:
         "{runtime} 워크스페이스를 가져왔습니다.",
-      openClawArchiveTooLarge: "아카이브가 너무 큽니다. 최대 크기는 50 MiB입니다.",
+      openClawArchiveTooLarge: "아카이브가 너무 큽니다. 기본 최대 크기는 500 MiB입니다.",
       importOpenClawFailed: ".openclaw 가져오기 실패: {message}",
       exportOpenClawFailed: ".openclaw 내보내기 실패: {message}",
       importRuntimeWorkspaceFailed: "{directory} 가져오기 실패: {message}",
@@ -5724,6 +5789,9 @@ export const translations: Record<Locale, TranslationTree> = {
         "리소스 목록을 벗어나지 않고 새 재사용 번들을 만듭니다.",
       bundleName: "번들 이름",
       bundleResources: "번들 리소스",
+      uploadedSkills: "업로드된 스킬",
+      noUploadedSkillsForBundle:
+        "번들에 추가할 수 있는 저위험 업로드 스킬이 아직 없습니다.",
       noResourcesForGroup: "{type} 리소스가 아직 없습니다.",
       actions: {
         new: "새로 만들기",
@@ -5759,6 +5827,11 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "클라이언트 자격 증명과 발신자 허용 목록을 지원하는 DingTalk 채널입니다.",
         },
+        wecom: {
+          label: "WeCom",
+          description:
+            "Bot 자격 증명과 페어링 DM 제어를 지원하는 WeCom 채널입니다.",
+        },
         slack: {
           label: "Slack",
           description: "Bolt 기반의 Slack 워크스페이스 앱입니다.",
@@ -5785,6 +5858,21 @@ export const translations: Record<Locale, TranslationTree> = {
             clientSecret: {
               label: "Client Secret",
               placeholder: "client secret",
+            },
+          },
+        },
+        wecom: {
+          title: "WeCom Channel 편집기",
+          description:
+            "먼저 Bot 자격 증명 폼으로 시작하고, 전체 설정이 필요할 때만 JSON 으로 전환하세요.",
+          fields: {
+            botId: {
+              label: "Bot ID",
+              placeholder: "xxxxxxx",
+            },
+            secret: {
+              label: "Secret",
+              placeholder: "bot secret",
             },
           },
         },
@@ -6613,10 +6701,10 @@ export const translations: Record<Locale, TranslationTree> = {
       workspaceSection: "Arbeitsbereich",
       openClawWorkspace: "OpenClaw-Arbeitsbereich",
       openClawWorkspaceDesc:
-        "Importieren oder exportieren Sie den Ordner `.openclaw` als `.tar.gz`-Archiv bis 50 MiB.",
+        "Importieren oder exportieren Sie den Ordner `.openclaw` standardmaessig als `.tar.gz`-Archiv bis 500 MiB.",
       runtimeWorkspace: "{runtime}-Arbeitsbereich",
       runtimeWorkspaceDesc:
-        "Importieren oder exportieren Sie den Ordner `{directory}` als `.tar.gz`-Archiv bis 50 MiB.",
+        "Importieren oder exportieren Sie den Ordner `{directory}` standardmaessig als `.tar.gz`-Archiv bis 500 MiB.",
       workspaceReady: "Bereit",
       workspacePaused: "Pausiert",
       exportingOpenClaw: "Export wird erstellt...",
@@ -6630,7 +6718,7 @@ export const translations: Record<Locale, TranslationTree> = {
       importRuntimeWorkspace: "{directory} importieren",
       importRuntimeWorkspaceSuccess:
         "{runtime}-Arbeitsbereich erfolgreich importiert.",
-      openClawArchiveTooLarge: "Archiv zu groß. Die maximale Größe beträgt 50 MiB.",
+      openClawArchiveTooLarge: "Archiv zu gross. Die Standard-Maximalgroesse betraegt 500 MiB.",
       importOpenClawFailed: ".openclaw-Import fehlgeschlagen: {message}",
       exportOpenClawFailed: ".openclaw-Export fehlgeschlagen: {message}",
       importRuntimeWorkspaceFailed:
@@ -6987,6 +7075,9 @@ export const translations: Record<Locale, TranslationTree> = {
         "Erstellen Sie ein neues wiederverwendbares Bundle, ohne die Ressourcenliste zu verlassen.",
       bundleName: "Bundle-Name",
       bundleResources: "Bundle-Ressourcen",
+      uploadedSkills: "Hochgeladene Skills",
+      noUploadedSkillsForBundle:
+        "Es gibt noch keine aktiven hochgeladenen Skills mit niedrigem Risiko.",
       noResourcesForGroup: "Es gibt noch keine {type}-Ressourcen.",
       actions: {
         new: "Neu",
@@ -7022,6 +7113,11 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "DingTalk-Channel mit Client-Zugangsdaten und Absender-Allowlist-Steuerung.",
         },
+        wecom: {
+          label: "WeCom",
+          description:
+            "WeCom-Channel mit Bot-Zugangsdaten und Pairing-Steuerung fuer Direktnachrichten.",
+        },
         slack: {
           label: "Slack",
           description: "Slack-Workspace-App auf Basis von Bolt.",
@@ -7049,6 +7145,21 @@ export const translations: Record<Locale, TranslationTree> = {
             clientSecret: {
               label: "Client Secret",
               placeholder: "client secret",
+            },
+          },
+        },
+        wecom: {
+          title: "WeCom-Channel-Editor",
+          description:
+            "Beginnen Sie mit dem Formular für Bot-Zugangsdaten und wechseln Sie nur bei Bedarf zur vollständigen JSON-Konfiguration.",
+          fields: {
+            botId: {
+              label: "Bot ID",
+              placeholder: "xxxxxxx",
+            },
+            secret: {
+              label: "Secret",
+              placeholder: "bot secret",
             },
           },
         },

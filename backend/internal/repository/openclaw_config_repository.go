@@ -25,6 +25,8 @@ type OpenClawConfigRepository interface {
 	DeleteBundle(id int) error
 	ListBundleItems(bundleID int) ([]models.OpenClawConfigBundleItem, error)
 	ReplaceBundleItems(bundleID int, items []models.OpenClawConfigBundleItem) error
+	ListBundleSkills(bundleID int) ([]models.OpenClawConfigBundleSkill, error)
+	ReplaceBundleSkills(bundleID int, items []models.OpenClawConfigBundleSkill) error
 
 	CreateSnapshot(snapshot *models.OpenClawInjectionSnapshot) error
 	UpdateSnapshot(snapshot *models.OpenClawInjectionSnapshot) error
@@ -168,6 +170,29 @@ func (r *openClawConfigRepository) ReplaceBundleItems(bundleID int, items []mode
 		item.BundleID = bundleID
 		if _, err := r.sess.Collection("openclaw_config_bundle_items").Insert(item); err != nil {
 			return fmt.Errorf("failed to add openclaw config bundle item: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (r *openClawConfigRepository) ListBundleSkills(bundleID int) ([]models.OpenClawConfigBundleSkill, error) {
+	var items []models.OpenClawConfigBundleSkill
+	if err := r.sess.Collection("openclaw_config_bundle_skills").Find(db.Cond{"bundle_id": bundleID}).OrderBy("sort_order", "id").All(&items); err != nil {
+		return nil, fmt.Errorf("failed to list openclaw config bundle skills: %w", err)
+	}
+	return items, nil
+}
+
+func (r *openClawConfigRepository) ReplaceBundleSkills(bundleID int, items []models.OpenClawConfigBundleSkill) error {
+	if err := r.sess.Collection("openclaw_config_bundle_skills").Find(db.Cond{"bundle_id": bundleID}).Delete(); err != nil && err != db.ErrNoMoreRows {
+		return fmt.Errorf("failed to delete existing openclaw config bundle skills: %w", err)
+	}
+
+	for _, item := range items {
+		item.BundleID = bundleID
+		if _, err := r.sess.Collection("openclaw_config_bundle_skills").Insert(item); err != nil {
+			return fmt.Errorf("failed to add openclaw config bundle skill: %w", err)
 		}
 	}
 

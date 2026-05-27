@@ -168,23 +168,47 @@ type OpenClawConfigBundleItemPayload struct {
 	Resource   *OpenClawConfigResourceSummary `json:"resource,omitempty"`
 }
 
+type OpenClawConfigBundleSkillSummary struct {
+	ID               int        `json:"id"`
+	UserID           int        `json:"user_id"`
+	SkillKey         string     `json:"skill_key"`
+	Name             string     `json:"name"`
+	Description      *string    `json:"description,omitempty"`
+	Status           string     `json:"status"`
+	SourceType       string     `json:"source_type"`
+	RiskLevel        string     `json:"risk_level"`
+	CurrentVersionID *int       `json:"current_version_id,omitempty"`
+	LastScannedAt    *time.Time `json:"last_scanned_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type OpenClawConfigBundleSkillPayload struct {
+	SkillID   int                               `json:"skill_id"`
+	SortOrder int                               `json:"sort_order"`
+	Required  bool                              `json:"required"`
+	Skill     *OpenClawConfigBundleSkillSummary `json:"skill,omitempty"`
+}
+
 type OpenClawConfigBundlePayload struct {
-	ID          int                               `json:"id"`
-	UserID      int                               `json:"user_id"`
-	Name        string                            `json:"name"`
-	Description *string                           `json:"description,omitempty"`
-	Enabled     bool                              `json:"enabled"`
-	Version     int                               `json:"version"`
-	Items       []OpenClawConfigBundleItemPayload `json:"items"`
-	CreatedAt   time.Time                         `json:"created_at"`
-	UpdatedAt   time.Time                         `json:"updated_at"`
+	ID          int                                `json:"id"`
+	UserID      int                                `json:"user_id"`
+	Name        string                             `json:"name"`
+	Description *string                            `json:"description,omitempty"`
+	Enabled     bool                               `json:"enabled"`
+	Version     int                                `json:"version"`
+	Items       []OpenClawConfigBundleItemPayload  `json:"items"`
+	SkillItems  []OpenClawConfigBundleSkillPayload `json:"skill_items"`
+	CreatedAt   time.Time                          `json:"created_at"`
+	UpdatedAt   time.Time                          `json:"updated_at"`
 }
 
 type UpsertOpenClawConfigBundleRequest struct {
-	Name        string                            `json:"name"`
-	Description *string                           `json:"description,omitempty"`
-	Enabled     bool                              `json:"enabled"`
-	Items       []OpenClawConfigBundleItemPayload `json:"items"`
+	Name        string                             `json:"name"`
+	Description *string                            `json:"description,omitempty"`
+	Enabled     bool                               `json:"enabled"`
+	Items       []OpenClawConfigBundleItemPayload  `json:"items"`
+	SkillItems  []OpenClawConfigBundleSkillPayload `json:"skill_items"`
 }
 
 type OpenClawConfigCompilePreview struct {
@@ -234,6 +258,7 @@ type OpenClawConfigService interface {
 	UpdateBundle(userID, id int, req UpsertOpenClawConfigBundleRequest) (*OpenClawConfigBundlePayload, error)
 	DeleteBundle(userID, id int) error
 	CloneBundle(userID, id int) (*OpenClawConfigBundlePayload, error)
+	ResolveBundleSkillIDs(userID int, plan *OpenClawConfigPlan) ([]int, error)
 
 	CompilePreview(userID int, plan OpenClawConfigPlan) (*OpenClawConfigCompilePreview, error)
 	CreateSnapshotForInstance(userID int, instance *models.Instance, plan *OpenClawConfigPlan) (*models.OpenClawInjectionSnapshot, error)
@@ -246,6 +271,7 @@ type OpenClawConfigService interface {
 
 type openClawConfigService struct {
 	repo          repository.OpenClawConfigRepository
+	skillRepo     repository.SkillRepository
 	secretService *k8s.SecretService
 }
 
@@ -268,9 +294,10 @@ type compiledOpenClawConfig struct {
 	totalPayloadSize int
 }
 
-func NewOpenClawConfigService(repo repository.OpenClawConfigRepository) OpenClawConfigService {
+func NewOpenClawConfigService(repo repository.OpenClawConfigRepository, skillRepo repository.SkillRepository) OpenClawConfigService {
 	return &openClawConfigService{
 		repo:          repo,
+		skillRepo:     skillRepo,
 		secretService: k8s.NewSecretService(),
 	}
 }
@@ -535,6 +562,9 @@ func (s *openClawConfigService) CreateBundle(userID int, req UpsertOpenClawConfi
 	if err := s.repo.ReplaceBundleItems(item.ID, normalizeBundleItems(req.Items)); err != nil {
 		return nil, err
 	}
+	if err := s.repo.ReplaceBundleSkills(item.ID, normalizeBundleSkills(req.SkillItems)); err != nil {
+		return nil, err
+	}
 
 	payload, err := s.bundlePayloadFromModel(*item)
 	if err != nil {
@@ -566,6 +596,9 @@ func (s *openClawConfigService) UpdateBundle(userID, id int, req UpsertOpenClawC
 		return nil, err
 	}
 	if err := s.repo.ReplaceBundleItems(item.ID, normalizeBundleItems(req.Items)); err != nil {
+		return nil, err
+	}
+	if err := s.repo.ReplaceBundleSkills(item.ID, normalizeBundleSkills(req.SkillItems)); err != nil {
 		return nil, err
 	}
 
@@ -600,6 +633,10 @@ func (s *openClawConfigService) CloneBundle(userID, id int) (*OpenClawConfigBund
 	if err != nil {
 		return nil, err
 	}
+	skills, err := s.repo.ListBundleSkills(id)
+	if err != nil {
+		return nil, err
+	}
 
 	clone := *item
 	clone.ID = 0
@@ -617,12 +654,58 @@ func (s *openClawConfigService) CloneBundle(userID, id int) (*OpenClawConfigBund
 	if err := s.repo.ReplaceBundleItems(clone.ID, items); err != nil {
 		return nil, err
 	}
+	for idx := range skills {
+		skills[idx].ID = 0
+		skills[idx].BundleID = clone.ID
+	}
+	if err := s.repo.ReplaceBundleSkills(clone.ID, skills); err != nil {
+		return nil, err
+	}
 
 	payload, err := s.bundlePayloadFromModel(clone)
 	if err != nil {
 		return nil, err
 	}
 	return &payload, nil
+}
+
+func (s *openClawConfigService) ResolveBundleSkillIDs(userID int, plan *OpenClawConfigPlan) ([]int, error) {
+	if plan == nil || plan.Mode != OpenClawConfigPlanModeBundle || plan.BundleID == nil || *plan.BundleID <= 0 {
+		return nil, nil
+	}
+
+	bundle, err := s.repo.GetBundleByID(*plan.BundleID)
+	if err != nil {
+		return nil, err
+	}
+	if bundle == nil || bundle.UserID != userID {
+		return nil, fmt.Errorf("openclaw config bundle not found")
+	}
+	if !bundle.Enabled {
+		return nil, fmt.Errorf("openclaw config bundle is disabled")
+	}
+
+	bundleSkills, err := s.repo.ListBundleSkills(bundle.ID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]int, 0, len(bundleSkills))
+	seen := map[int]struct{}{}
+	for _, item := range bundleSkills {
+		if _, exists := seen[item.SkillID]; exists {
+			continue
+		}
+		skill, err := s.getBundleSkill(userID, item.SkillID)
+		if err != nil {
+			return nil, err
+		}
+		if skill == nil {
+			return nil, fmt.Errorf("skill not found")
+		}
+		seen[item.SkillID] = struct{}{}
+		result = append(result, item.SkillID)
+	}
+	return result, nil
 }
 
 func (s *openClawConfigService) CompilePreview(userID int, plan OpenClawConfigPlan) (*OpenClawConfigCompilePreview, error) {
@@ -861,8 +944,8 @@ func (s *openClawConfigService) validateBundleRequest(userID int, req UpsertOpen
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("openclaw config bundle name is required")
 	}
-	if len(req.Items) == 0 {
-		return fmt.Errorf("openclaw config bundle must include at least one resource")
+	if len(req.Items) == 0 && len(req.SkillItems) == 0 {
+		return fmt.Errorf("openclaw config bundle must include at least one resource or skill")
 	}
 
 	seen := map[int]struct{}{}
@@ -883,7 +966,40 @@ func (s *openClawConfigService) validateBundleRequest(userID int, req UpsertOpen
 			return fmt.Errorf("openclaw config resource not found")
 		}
 	}
+
+	seenSkills := map[int]struct{}{}
+	for _, item := range req.SkillItems {
+		if item.SkillID <= 0 {
+			return fmt.Errorf("openclaw config bundle skill id is required")
+		}
+		if _, exists := seenSkills[item.SkillID]; exists {
+			return fmt.Errorf("openclaw config bundle contains duplicate skills")
+		}
+		seenSkills[item.SkillID] = struct{}{}
+
+		skill, err := s.getBundleSkill(userID, item.SkillID)
+		if err != nil {
+			return err
+		}
+		if skill == nil {
+			return fmt.Errorf("skill not found")
+		}
+	}
 	return nil
+}
+
+func (s *openClawConfigService) getBundleSkill(userID, skillID int) (*models.Skill, error) {
+	if s.skillRepo == nil {
+		return nil, fmt.Errorf("skill repository is not initialized")
+	}
+	skill, err := s.skillRepo.GetSkillByID(skillID)
+	if err != nil {
+		return nil, err
+	}
+	if skill == nil || skill.UserID != userID || !isUserManagedSkill(*skill) || !strings.EqualFold(skill.Status, "active") {
+		return nil, nil
+	}
+	return skill, nil
 }
 
 func normalizeBundleItems(items []OpenClawConfigBundleItemPayload) []models.OpenClawConfigBundleItem {
@@ -902,8 +1018,28 @@ func normalizeBundleItems(items []OpenClawConfigBundleItemPayload) []models.Open
 	return result
 }
 
+func normalizeBundleSkills(items []OpenClawConfigBundleSkillPayload) []models.OpenClawConfigBundleSkill {
+	result := make([]models.OpenClawConfigBundleSkill, 0, len(items))
+	for idx, item := range items {
+		sortOrder := item.SortOrder
+		if sortOrder == 0 {
+			sortOrder = idx + 1
+		}
+		result = append(result, models.OpenClawConfigBundleSkill{
+			SkillID:   item.SkillID,
+			SortOrder: sortOrder,
+			Required:  item.Required,
+		})
+	}
+	return result
+}
+
 func (s *openClawConfigService) bundlePayloadFromModel(item models.OpenClawConfigBundle) (OpenClawConfigBundlePayload, error) {
 	bundleItems, err := s.repo.ListBundleItems(item.ID)
+	if err != nil {
+		return OpenClawConfigBundlePayload{}, err
+	}
+	bundleSkills, err := s.repo.ListBundleSkills(item.ID)
 	if err != nil {
 		return OpenClawConfigBundlePayload{}, err
 	}
@@ -928,6 +1064,26 @@ func (s *openClawConfigService) bundlePayloadFromModel(item models.OpenClawConfi
 		})
 	}
 
+	payloadSkills := make([]OpenClawConfigBundleSkillPayload, 0, len(bundleSkills))
+	for _, bundleSkill := range bundleSkills {
+		var summary *OpenClawConfigBundleSkillSummary
+		skill, err := s.getBundleSkill(item.UserID, bundleSkill.SkillID)
+		if err != nil {
+			return OpenClawConfigBundlePayload{}, err
+		}
+		if skill != nil {
+			skillSummary := bundleSkillSummaryFromModel(*skill)
+			summary = &skillSummary
+		}
+
+		payloadSkills = append(payloadSkills, OpenClawConfigBundleSkillPayload{
+			SkillID:   bundleSkill.SkillID,
+			SortOrder: bundleSkill.SortOrder,
+			Required:  bundleSkill.Required,
+			Skill:     summary,
+		})
+	}
+
 	return OpenClawConfigBundlePayload{
 		ID:          item.ID,
 		UserID:      item.UserID,
@@ -936,6 +1092,7 @@ func (s *openClawConfigService) bundlePayloadFromModel(item models.OpenClawConfi
 		Enabled:     item.Enabled,
 		Version:     item.Version,
 		Items:       payloadItems,
+		SkillItems:  payloadSkills,
 		CreatedAt:   item.CreatedAt,
 		UpdatedAt:   item.UpdatedAt,
 	}, nil
@@ -1081,7 +1238,11 @@ func (s *openClawConfigService) loadSelectedResources(userID int, plan OpenClawC
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(items) == 0 {
+		skills, err := s.repo.ListBundleSkills(bundle.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(items) == 0 && len(skills) == 0 {
 			return nil, nil, fmt.Errorf("openclaw config bundle is empty")
 		}
 
@@ -1196,6 +1357,23 @@ func resourceSummaryFromModel(item models.OpenClawConfigResource) OpenClawConfig
 		Name:         item.Name,
 		Enabled:      item.Enabled,
 		Version:      item.Version,
+	}
+}
+
+func bundleSkillSummaryFromModel(item models.Skill) OpenClawConfigBundleSkillSummary {
+	return OpenClawConfigBundleSkillSummary{
+		ID:               item.ID,
+		UserID:           item.UserID,
+		SkillKey:         item.SkillKey,
+		Name:             item.Name,
+		Description:      item.Description,
+		Status:           item.Status,
+		SourceType:       item.SourceType,
+		RiskLevel:        item.RiskLevel,
+		CurrentVersionID: item.CurrentVersionID,
+		LastScannedAt:    item.LastScannedAt,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
 	}
 }
 
@@ -1380,6 +1558,8 @@ func normalizeOpenClawChannelConfigForEnv(resourceKey string, configPayload inte
 		return normalizeSlackChannelConfigForEnv(configPayload)
 	case "telegram":
 		return normalizeTelegramChannelConfigForEnv(configPayload)
+	case "wecom":
+		return normalizeWeComChannelConfigForEnv(configPayload)
 	}
 
 	return configPayload
@@ -1565,6 +1745,32 @@ func normalizeDingTalkChannelConfigForEnv(configPayload interface{}) map[string]
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
 		"allowFrom":    allowFrom,
+	}
+}
+
+func normalizeWeComChannelConfigForEnv(configPayload interface{}) map[string]interface{} {
+	config, ok := configPayload.(map[string]interface{})
+	if !ok {
+		config = map[string]interface{}{}
+	}
+
+	botID, _ := config["botId"].(string)
+	secret, _ := config["secret"].(string)
+	dmPolicy, _ := config["dmPolicy"].(string)
+	if strings.TrimSpace(dmPolicy) == "" {
+		dmPolicy = "pairing"
+	}
+
+	allowFrom := normalizeStringArrayForEnv(config["allowFrom"])
+	if len(allowFrom) == 0 {
+		allowFrom = []string{"*"}
+	}
+
+	return map[string]interface{}{
+		"botId":     botID,
+		"secret":    secret,
+		"dmPolicy":  dmPolicy,
+		"allowFrom": allowFrom,
 	}
 }
 

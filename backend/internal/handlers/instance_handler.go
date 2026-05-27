@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,12 +23,26 @@ import (
 // stream from the exec pipeline rather than a real workspace dump.
 const openclawMinArchiveBytes = 100
 
-// openclawMaxUploadBytes caps the size of an .openclaw import upload.
-// Must align with the edge nginx client_max_body_size so that oversize
-// uploads produce a structured JSON 413 here instead of an opaque HTML
-// 413 from nginx. See ClawManager/deployments/nginx/nginx.conf and
-// deployment/nginx-conf.yaml.
-const openclawMaxUploadBytes = 50 << 20 // 50 MiB
+const (
+	defaultWorkspaceArchiveMaxMiB = int64(500)
+	workspaceArchiveMaxMiBEnv     = "CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB"
+)
+
+func workspaceArchiveMaxMiB() int64 {
+	value := strings.TrimSpace(os.Getenv(workspaceArchiveMaxMiBEnv))
+	if value == "" {
+		return defaultWorkspaceArchiveMaxMiB
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultWorkspaceArchiveMaxMiB
+	}
+	return parsed
+}
+
+func workspaceArchiveMaxBytes() int64 {
+	return workspaceArchiveMaxMiB() << 20
+}
 
 // InstanceHandler handles instance management requests
 type InstanceHandler struct {
@@ -216,7 +231,13 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 		return
 	}
 
-	for _, skillID := range req.SkillIDs {
+	skillIDs, err := h.resolveCreateInstanceSkillIDs(userID.(int), req)
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+
+	for _, skillID := range skillIDs {
 		if _, err := h.skillService.AttachSkillToInstance(instance.ID, skillID); err != nil {
 			utils.HandleError(c, err)
 			return
@@ -224,6 +245,40 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 	}
 
 	utils.Success(c, http.StatusCreated, "Instance created successfully", instance)
+}
+
+func (h *InstanceHandler) resolveCreateInstanceSkillIDs(userID int, req CreateInstanceRequest) ([]int, error) {
+	seen := map[int]struct{}{}
+	result := make([]int, 0, len(req.SkillIDs))
+	for _, skillID := range req.SkillIDs {
+		if skillID <= 0 {
+			continue
+		}
+		if _, exists := seen[skillID]; exists {
+			continue
+		}
+		seen[skillID] = struct{}{}
+		result = append(result, skillID)
+	}
+
+	if h.openClawConfigService != nil {
+		bundleSkillIDs, err := h.openClawConfigService.ResolveBundleSkillIDs(userID, req.OpenClawConfigPlan)
+		if err != nil {
+			return nil, err
+		}
+		for _, skillID := range bundleSkillIDs {
+			if skillID <= 0 {
+				continue
+			}
+			if _, exists := seen[skillID]; exists {
+				continue
+			}
+			seen[skillID] = struct{}{}
+			result = append(result, skillID)
+		}
+	}
+
+	return result, nil
 }
 
 // GetInstance gets an instance by ID
@@ -955,6 +1010,12 @@ func (h *InstanceHandler) ExportOpenClaw(c *gin.Context) {
 		utils.Error(c, http.StatusInternalServerError, "export produced an empty archive")
 		return
 	}
+	maxArchiveBytes := workspaceArchiveMaxBytes()
+	if int64(len(archive)) > maxArchiveBytes {
+		utils.Error(c, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("archive too large; maximum archive size is %d MiB", maxArchiveBytes>>20))
+		return
+	}
 
 	filename := fmt.Sprintf("%s.openclaw.tar.gz", sanitizeDownloadName(instance.Name))
 	c.Header("Content-Type", "application/gzip")
@@ -993,6 +1054,12 @@ func (h *InstanceHandler) ExportHermes(c *gin.Context) {
 		utils.Error(c, http.StatusInternalServerError, "export produced an empty archive")
 		return
 	}
+	maxArchiveBytes := workspaceArchiveMaxBytes()
+	if int64(len(archive)) > maxArchiveBytes {
+		utils.Error(c, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("archive too large; maximum archive size is %d MiB", maxArchiveBytes>>20))
+		return
+	}
 
 	filename := fmt.Sprintf("%s.hermes.tar.gz", sanitizeDownloadName(instance.Name, "hermes-workspace"))
 	c.Header("Content-Type", "application/gzip")
@@ -1017,27 +1084,27 @@ func (h *InstanceHandler) ImportOpenClaw(c *gin.Context) {
 		return
 	}
 
-	// Cap the request body early so oversize uploads fail with a structured
-	// JSON 413 instead of nginx's opaque HTML 413 or a surprise ENOSPC deep
-	// inside multipart parsing. MaxBytesReader trips ParseMultipartForm
+	// Cap the request body at the same deployment limit used by nginx. When
+	// the request reaches the backend, MaxBytesReader trips ParseMultipartForm
 	// (invoked by c.FormFile) with a typed *http.MaxBytesError.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, openclawMaxUploadBytes)
+	maxArchiveBytes := workspaceArchiveMaxBytes()
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxArchiveBytes)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			utils.Error(c, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("archive too large; maximum upload size is %d MiB", openclawMaxUploadBytes>>20))
+				fmt.Sprintf("archive too large; maximum upload size is %d MiB", maxArchiveBytes>>20))
 			return
 		}
 		utils.Error(c, http.StatusBadRequest, "file is required")
 		return
 	}
 
-	if fileHeader.Size > openclawMaxUploadBytes {
+	if fileHeader.Size > maxArchiveBytes {
 		utils.Error(c, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("archive too large; maximum upload size is %d MiB", openclawMaxUploadBytes>>20))
+			fmt.Sprintf("archive too large; maximum upload size is %d MiB", maxArchiveBytes>>20))
 		return
 	}
 
@@ -1048,7 +1115,7 @@ func (h *InstanceHandler) ImportOpenClaw(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if err := h.openClawTransferService.Import(c.Request.Context(), instance.UserID, instance.ID, io.LimitReader(file, openclawMaxUploadBytes)); err != nil {
+	if err := h.openClawTransferService.Import(c.Request.Context(), instance.UserID, instance.ID, io.LimitReader(file, maxArchiveBytes)); err != nil {
 		utils.HandleError(c, err)
 		return
 	}
@@ -1072,23 +1139,24 @@ func (h *InstanceHandler) ImportHermes(c *gin.Context) {
 		return
 	}
 
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, openclawMaxUploadBytes)
+	maxArchiveBytes := workspaceArchiveMaxBytes()
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxArchiveBytes)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			utils.Error(c, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("archive too large; maximum upload size is %d MiB", openclawMaxUploadBytes>>20))
+				fmt.Sprintf("archive too large; maximum upload size is %d MiB", maxArchiveBytes>>20))
 			return
 		}
 		utils.Error(c, http.StatusBadRequest, "file is required")
 		return
 	}
 
-	if fileHeader.Size > openclawMaxUploadBytes {
+	if fileHeader.Size > maxArchiveBytes {
 		utils.Error(c, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("archive too large; maximum upload size is %d MiB", openclawMaxUploadBytes>>20))
+			fmt.Sprintf("archive too large; maximum upload size is %d MiB", maxArchiveBytes>>20))
 		return
 	}
 
@@ -1099,7 +1167,7 @@ func (h *InstanceHandler) ImportHermes(c *gin.Context) {
 	}
 	defer file.Close()
 
-	if err := h.openClawTransferService.ImportHermes(c.Request.Context(), instance.UserID, instance.ID, io.LimitReader(file, openclawMaxUploadBytes)); err != nil {
+	if err := h.openClawTransferService.ImportHermes(c.Request.Context(), instance.UserID, instance.ID, io.LimitReader(file, maxArchiveBytes)); err != nil {
 		utils.HandleError(c, err)
 		return
 	}

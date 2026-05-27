@@ -199,7 +199,7 @@ const OpenClawConfigPlanSection: React.FC<OpenClawConfigPlanSectionProps> = ({
               <option key={bundle.id} value={bundle.id}>
                 {bundle.name} (
                 {t("openClawInjectionSection.bundleOptionCount", {
-                  count: bundle.items.length,
+                  count: bundle.items.length + (bundle.skill_items?.length || 0),
                 })}
                 )
               </option>

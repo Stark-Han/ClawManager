@@ -51,6 +51,20 @@ func (i OpenClawConfigBundleItem) TableName() string {
 	return "openclaw_config_bundle_items"
 }
 
+// OpenClawConfigBundleSkill stores an uploaded skill membership inside a bundle.
+type OpenClawConfigBundleSkill struct {
+	ID        int       `db:"id,primarykey,autoincrement" json:"id"`
+	BundleID  int       `db:"bundle_id" json:"bundle_id"`
+	SkillID   int       `db:"skill_id" json:"skill_id"`
+	SortOrder int       `db:"sort_order" json:"sort_order"`
+	Required  bool      `db:"required" json:"required"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+func (i OpenClawConfigBundleSkill) TableName() string {
+	return "openclaw_config_bundle_skills"
+}
+
 // OpenClawInjectionSnapshot stores the rendered bootstrap payload used by an instance.
 type OpenClawInjectionSnapshot struct {
 	ID                      int        `db:"id,primarykey,autoincrement" json:"id"`
