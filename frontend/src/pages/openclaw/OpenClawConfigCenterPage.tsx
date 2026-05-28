@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import UserLayout from "../../components/UserLayout";
 import { useI18n } from "../../contexts/I18nContext";
@@ -1034,6 +1034,35 @@ const OpenClawConfigCenterPage: React.FC = () => {
     () => findOpenClawChannelTemplate(selectedChannelTemplateId),
     [selectedChannelTemplateId],
   );
+  const buildUniqueResourceKey = useCallback(
+    (baseKey: string): string => {
+      const trimmedBaseKey = baseKey.trim();
+      if (!trimmedBaseKey) {
+        return "";
+      }
+
+      const existingKeys = new Set(
+        resources
+          .filter(
+            (item) =>
+              item.resource_type === "channel" && item.id !== selectedResourceId,
+          )
+          .map((item) => item.resource_key.trim().toLowerCase()),
+      );
+      if (!existingKeys.has(trimmedBaseKey.toLowerCase())) {
+        return trimmedBaseKey;
+      }
+
+      let suffix = 2;
+      let candidate = `${trimmedBaseKey}-${suffix}`;
+      while (existingKeys.has(candidate.toLowerCase())) {
+        suffix += 1;
+        candidate = `${trimmedBaseKey}-${suffix}`;
+      }
+      return candidate;
+    },
+    [resources, selectedResourceId],
+  );
   const supportedChannelEditorId = useMemo(
     () =>
       resourceForm.resource_type === "channel"
@@ -1370,7 +1399,9 @@ const OpenClawConfigCenterPage: React.FC = () => {
     setResourceForm((current) => ({
       ...current,
       resource_type: "channel",
-      resource_key: current.resource_key.trim() || template.resourceKey,
+      resource_key:
+        current.resource_key.trim() ||
+        buildUniqueResourceKey(template.resourceKey),
       name: current.name.trim() || templateLabel,
       description: current.description.trim() || templateDescription,
       tagsText: mergeTagText(current.tagsText, template.tags),

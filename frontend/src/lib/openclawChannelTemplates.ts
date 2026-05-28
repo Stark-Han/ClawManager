@@ -65,6 +65,8 @@ export const OPENCLAW_CHANNEL_TEMPLATES: OpenClawChannelTemplate[] = [
   }),
   createChannelTemplate('feishu', 'Feishu / Lark', 'Feishu or Lark plugin channel with account-aware defaults.', 'plugin', {
     enabled: true,
+    domain: 'feishu',
+    defaultAccount: 'main',
     accounts: {
       main: {
         appId: '',

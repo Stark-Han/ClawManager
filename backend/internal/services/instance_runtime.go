@@ -16,6 +16,11 @@ type InstanceRuntimeConfig struct {
 	Env       map[string]string
 }
 
+const (
+	kasmClipboardSendDisabled   = "-SendCutText 0"
+	kasmClipboardAcceptDisabled = "-AcceptCutText 0"
+)
+
 func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *string) InstanceRuntimeConfig {
 	if registry != nil && strings.TrimSpace(*registry) != "" && (tag == nil || strings.TrimSpace(*tag) == "") {
 		return InstanceRuntimeConfig{
@@ -47,26 +52,17 @@ func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *s
 		config.Image = "lscr.io/linuxserver/webtop:ubuntu-xfce"
 		config.Port = 3001
 		config.MountPath = "/config"
-		config.Env = map[string]string{
-			"TITLE":     "ClawManager Desktop",
-			"SUBFOLDER": "/",
-		}
+		config.Env = defaultWebtopDesktopEnv("ClawManager Desktop")
 	case "webtop":
 		config.Image = "lscr.io/linuxserver/webtop:ubuntu-xfce"
 		config.Port = 3001
 		config.MountPath = "/config"
-		config.Env = map[string]string{
-			"TITLE":     "ClawManager Webtop",
-			"SUBFOLDER": "/",
-		}
+		config.Env = defaultWebtopDesktopEnv("ClawManager Webtop")
 	case "hermes":
 		config.Image = defaultSystemImageSettings["hermes"]
 		config.Port = 3001
 		config.MountPath = "/config/.hermes"
-		config.Env = map[string]string{
-			"TITLE":     "Hermes Runtime",
-			"SUBFOLDER": "/",
-		}
+		config.Env = defaultWebtopDesktopEnv("Hermes Runtime")
 	case "openclaw":
 		config.MountPath = "/config"
 		if (registry == nil || strings.TrimSpace(*registry) == "") && (tag == nil || strings.TrimSpace(*tag) == "") {
@@ -74,10 +70,7 @@ func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *s
 		} else {
 			config.Image = fmt.Sprintf("%s/%s:%s", defaultRegistry, "openclaw-desktop", defaultTag)
 		}
-		config.Env = map[string]string{
-			"TITLE":     "ClawManager Desktop",
-			"SUBFOLDER": "/",
-		}
+		config.Env = defaultWebtopDesktopEnv("ClawManager Desktop")
 	case "debian":
 		config.Image = fmt.Sprintf("%s/%s:%s", defaultRegistry, "debian-desktop", defaultTag)
 	case "centos":
@@ -111,17 +104,20 @@ func defaultMountPathForInstanceType(instanceType string) string {
 func defaultEnvForInstanceType(instanceType string) map[string]string {
 	switch instanceType {
 	case "ubuntu", "webtop", "openclaw":
-		return map[string]string{
-			"TITLE":     "ClawManager Desktop",
-			"SUBFOLDER": "/",
-		}
+		return defaultWebtopDesktopEnv("ClawManager Desktop")
 	case "hermes":
-		return map[string]string{
-			"TITLE":     "Hermes Runtime",
-			"SUBFOLDER": "/",
-		}
+		return defaultWebtopDesktopEnv("Hermes Runtime")
 	default:
 		return map[string]string{}
+	}
+}
+
+func defaultWebtopDesktopEnv(title string) map[string]string {
+	return map[string]string{
+		"TITLE":                    title,
+		"SUBFOLDER":                "/",
+		"KASM_SVC_SEND_CUT_TEXT":   kasmClipboardSendDisabled,
+		"KASM_SVC_ACCEPT_CUT_TEXT": kasmClipboardAcceptDisabled,
 	}
 }
 

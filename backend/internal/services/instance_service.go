@@ -435,7 +435,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	}
 
 	// Create Pod
-	shmSizeGB := popSHMSizeGB(extraEnv)
+	shmSizeGB := popSHMSizeGB(extraEnv, runtimeType, instance.MemoryGB)
 	envFromSecretNames := []string{bootstrapSecretName}
 	extraPVCMounts := []k8s.PVCMount{}
 	configMapFileMounts := []k8s.ConfigMapFileMount{}
@@ -660,13 +660,14 @@ func (s *instanceService) Start(instanceID int) error {
 		return fmt.Errorf("failed to delete network policy: %w", err)
 	}
 
-	shmSizeGB := popSHMSizeGB(extraEnv)
+	runtimeType := normalizeInstanceRuntimeType(instance.RuntimeType)
+	shmSizeGB := popSHMSizeGB(extraEnv, runtimeType, instance.MemoryGB)
 	podConfig := k8s.PodConfig{
 		InstanceID:         instance.ID,
 		InstanceName:       instance.Name,
 		UserID:             instance.UserID,
 		Type:               instance.Type,
-		RuntimeType:        normalizeInstanceRuntimeType(instance.RuntimeType),
+		RuntimeType:        runtimeType,
 		CPUCores:           instance.CPUCores,
 		MemoryGB:           instance.MemoryGB,
 		GPUEnabled:         instance.GPUEnabled,

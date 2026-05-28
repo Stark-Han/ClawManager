@@ -1526,7 +1526,13 @@ func appendCompiledOpenClawEnvPayload(payload interface{}, resource compiledOpen
 			return nil, fmt.Errorf("failed to parse openclaw channel config")
 		}
 
-		channelPayload[resource.model.ResourceKey] = normalizeOpenClawChannelConfigForEnv(resource.model.ResourceKey, configPayload)
+		channelKey := openClawChannelEnvKey(resource.model.ResourceKey, configPayload)
+		nextConfig := normalizeOpenClawChannelConfigForEnv(resource.model.ResourceKey, configPayload)
+		if existingConfig, ok := channelPayload[channelKey]; ok {
+			channelPayload[channelKey] = mergeOpenClawChannelEnvConfig(channelKey, resource.model.ResourceKey, existingConfig, nextConfig)
+		} else {
+			channelPayload[channelKey] = nextConfig
+		}
 		return channelPayload, nil
 	}
 
@@ -1549,7 +1555,7 @@ func appendCompiledOpenClawEnvPayload(payload interface{}, resource compiledOpen
 }
 
 func normalizeOpenClawChannelConfigForEnv(resourceKey string, configPayload interface{}) interface{} {
-	switch strings.ToLower(strings.TrimSpace(resourceKey)) {
+	switch detectOpenClawChannelProvider(resourceKey, configPayload) {
 	case "dingtalk-connector":
 		return normalizeDingTalkChannelConfigForEnv(configPayload)
 	case "feishu":
@@ -1563,6 +1569,103 @@ func normalizeOpenClawChannelConfigForEnv(resourceKey string, configPayload inte
 	}
 
 	return configPayload
+}
+
+func openClawChannelEnvKey(resourceKey string, configPayload interface{}) string {
+	provider := detectOpenClawChannelProvider(resourceKey, configPayload)
+	switch provider {
+	case "dingtalk-connector", "feishu", "slack", "telegram", "wecom":
+		return provider
+	}
+	return normalizeResourceKey(resourceKey)
+}
+
+func mergeOpenClawChannelEnvConfig(channelKey, resourceKey string, existing, next interface{}) interface{} {
+	if channelKey == "feishu" {
+		return mergeFeishuChannelEnvConfig(resourceKey, existing, next)
+	}
+	return next
+}
+
+func mergeFeishuChannelEnvConfig(resourceKey string, existing, next interface{}) interface{} {
+	existingMap, existingOk := existing.(map[string]interface{})
+	nextMap, nextOk := next.(map[string]interface{})
+	if !existingOk || !nextOk {
+		return next
+	}
+
+	merged := make(map[string]interface{}, len(existingMap)+len(nextMap))
+	for k, v := range existingMap {
+		merged[k] = v
+	}
+	for k, v := range nextMap {
+		if k != "accounts" && k != "defaultAccount" {
+			merged[k] = v
+		}
+	}
+	if _, ok := merged["defaultAccount"]; !ok {
+		if defaultAccount, ok := nextMap["defaultAccount"]; ok {
+			merged["defaultAccount"] = defaultAccount
+		}
+	}
+
+	mergedAccounts := map[string]interface{}{}
+	if existingAccounts, ok := existingMap["accounts"].(map[string]interface{}); ok {
+		for k, v := range existingAccounts {
+			mergedAccounts[k] = v
+		}
+	}
+	if nextAccounts, ok := nextMap["accounts"].(map[string]interface{}); ok {
+		for accountKey, account := range nextAccounts {
+			mergedAccountKey := accountKey
+			if accountKey == "main" {
+				key := normalizeResourceKey(resourceKey)
+				if _, exists := mergedAccounts["main"]; exists && key != "" && key != "feishu" {
+					mergedAccountKey = key
+				}
+			}
+			mergedAccounts[mergedAccountKey] = account
+		}
+	}
+	merged["accounts"] = mergedAccounts
+	return merged
+}
+
+func detectOpenClawChannelProvider(resourceKey string, configPayload interface{}) string {
+	key := strings.ToLower(strings.TrimSpace(resourceKey))
+	switch key {
+	case "dingtalk-connector", "feishu", "slack", "telegram", "wecom":
+		return key
+	}
+
+	config, ok := configPayload.(map[string]interface{})
+	if !ok {
+		return key
+	}
+	domain, _ := config["domain"].(string)
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "dingtalk", "dingding", "dingtalk-connector":
+		return "dingtalk-connector"
+	case "feishu", "lark":
+		return "feishu"
+	case "wecom", "wechat-work", "work-wechat", "enterprise-wechat", "qywx":
+		return "wecom"
+	}
+	if accounts, ok := config["accounts"].(map[string]interface{}); ok && len(accounts) > 0 {
+		return "feishu"
+	}
+	if _, hasClientID := config["clientId"].(string); hasClientID {
+		if _, hasClientSecret := config["clientSecret"].(string); hasClientSecret {
+			return "dingtalk-connector"
+		}
+	}
+	if _, hasBotID := config["botId"].(string); hasBotID {
+		if _, hasSecret := config["secret"].(string); hasSecret {
+			return "wecom"
+		}
+	}
+
+	return key
 }
 
 // mergeOpenClawChannelConfigForStorage combines the allowlist-normalized config
@@ -1589,7 +1692,7 @@ func mergeOpenClawChannelConfigForStorage(resourceKey string, original, normaliz
 		merged[k] = v
 	}
 
-	if strings.ToLower(strings.TrimSpace(resourceKey)) == "feishu" {
+	if detectOpenClawChannelProvider(resourceKey, original) == "feishu" {
 		originalAccounts, _ := originalMap["accounts"].(map[string]interface{})
 		normalizedAccounts, _ := normalizedMap["accounts"].(map[string]interface{})
 		if originalAccounts != nil || normalizedAccounts != nil {
@@ -1619,18 +1722,29 @@ func mergeOpenClawChannelConfigForStorage(resourceKey string, original, normaliz
 func normalizeFeishuChannelConfigForEnv(configPayload interface{}) map[string]interface{} {
 	config, ok := configPayload.(map[string]interface{})
 	if !ok {
-		return map[string]interface{}{
-			"enabled": true,
-			"accounts": map[string]interface{}{
-				"main": map[string]interface{}{
-					"appId":     "",
-					"appSecret": "",
-				},
-			},
-		}
+		config = map[string]interface{}{}
 	}
 
 	accounts, _ := config["accounts"].(map[string]interface{})
+	normalizedAccounts := make(map[string]interface{}, len(accounts)+1)
+	for accountKey, rawAccount := range accounts {
+		accountMap, ok := rawAccount.(map[string]interface{})
+		if !ok {
+			normalizedAccounts[accountKey] = rawAccount
+			continue
+		}
+		normalizedAccount := make(map[string]interface{}, len(accountMap))
+		for k, v := range accountMap {
+			normalizedAccount[k] = v
+		}
+		if _, ok := normalizedAccount["appId"].(string); !ok {
+			normalizedAccount["appId"] = ""
+		}
+		if _, ok := normalizedAccount["appSecret"].(string); !ok {
+			normalizedAccount["appSecret"] = ""
+		}
+		normalizedAccounts[accountKey] = normalizedAccount
+	}
 
 	var account map[string]interface{}
 	if mainAccount, ok := accounts["main"].(map[string]interface{}); ok {
@@ -1650,16 +1764,29 @@ func normalizeFeishuChannelConfigForEnv(configPayload interface{}) map[string]in
 	if appSecret == "" {
 		appSecret, _ = config["appSecret"].(string)
 	}
-
-	return map[string]interface{}{
-		"enabled": true,
-		"accounts": map[string]interface{}{
-			"main": map[string]interface{}{
-				"appId":     appID,
-				"appSecret": appSecret,
-			},
-		},
+	if _, ok := normalizedAccounts["main"]; !ok {
+		normalizedAccounts["main"] = map[string]interface{}{
+			"appId":     appID,
+			"appSecret": appSecret,
+		}
 	}
+
+	defaultAccount, _ := config["defaultAccount"].(string)
+	if strings.TrimSpace(defaultAccount) == "" {
+		defaultAccount = "main"
+	}
+
+	result := map[string]interface{}{
+		"enabled":        true,
+		"domain":         "feishu",
+		"defaultAccount": defaultAccount,
+		"accounts":       normalizedAccounts,
+	}
+	if requireMention, ok := config["requireMention"].(bool); ok {
+		result["requireMention"] = requireMention
+	}
+
+	return result
 }
 
 func normalizeSlackChannelConfigForEnv(configPayload interface{}) map[string]interface{} {

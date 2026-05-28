@@ -16,10 +16,11 @@ const (
 )
 
 // popSHMSizeGB removes SHM_SIZE_GB from extraEnv and returns /dev/shm size in GiB.
-// Default is 1 when unset. SHM_SIZE_GB=0 disables the custom emptyDir /dev/shm mount.
+// Desktop runtime defaults scale with instance memory. SHM_SIZE_GB=0 disables
+// the custom emptyDir /dev/shm mount.
 // Values above maxInstanceSHMSizeGB are clamped to protect node memory.
-func popSHMSizeGB(extraEnv map[string]string) int {
-	shmSizeGB := defaultInstanceSHMSizeGB
+func popSHMSizeGB(extraEnv map[string]string, runtimeType string, memoryGB int) int {
+	shmSizeGB := defaultSHMSizeGB(runtimeType, memoryGB)
 	if shmVal, ok := extraEnv["SHM_SIZE_GB"]; ok {
 		if parsed, err := strconv.Atoi(strings.TrimSpace(shmVal)); err == nil {
 			if parsed == 0 {
@@ -34,6 +35,20 @@ func popSHMSizeGB(extraEnv map[string]string) int {
 		delete(extraEnv, "SHM_SIZE_GB")
 	}
 	return shmSizeGB
+}
+
+func defaultSHMSizeGB(runtimeType string, memoryGB int) int {
+	if normalizeInstanceRuntimeType(runtimeType) != "desktop" {
+		return defaultInstanceSHMSizeGB
+	}
+	switch {
+	case memoryGB >= 12:
+		return 4
+	case memoryGB >= 8:
+		return 2
+	default:
+		return defaultInstanceSHMSizeGB
+	}
 }
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

@@ -37,8 +37,9 @@ func TestBuildInstancePodEnvAppliesOverridesAfterDefaults(t *testing.T) {
 	t.Setenv("K8S_NAMESPACE", "")
 
 	raw, err := marshalEnvironmentOverrides(map[string]string{
-		"SUBFOLDER": "/custom-proxy",
-		"CUSTOM":    "enabled",
+		"SUBFOLDER":                "/custom-proxy",
+		"KASM_SVC_ACCEPT_CUT_TEXT": "-AcceptCutText 1",
+		"CUSTOM":                   "enabled",
 	})
 	if err != nil {
 		t.Fatalf("marshalEnvironmentOverrides returned error: %v", err)
@@ -61,6 +62,9 @@ func TestBuildInstancePodEnvAppliesOverridesAfterDefaults(t *testing.T) {
 	if env["SUBFOLDER"] != "/custom-proxy" {
 		t.Fatalf("expected SUBFOLDER override to win, got %q", env["SUBFOLDER"])
 	}
+	if env["KASM_SVC_ACCEPT_CUT_TEXT"] != "-AcceptCutText 1" {
+		t.Fatalf("expected clipboard policy override to win, got %q", env["KASM_SVC_ACCEPT_CUT_TEXT"])
+	}
 	if env["CUSTOM"] != "enabled" {
 		t.Fatalf("expected custom environment variable to be merged")
 	}
@@ -74,14 +78,20 @@ func TestPopSHMSizeGB(t *testing.T) {
 		name     string
 		value    string
 		hasValue bool
+		runtime  string
+		memoryGB int
 		want     int
 	}{
-		{name: "default", want: defaultInstanceSHMSizeGB},
-		{name: "disable", value: "0", hasValue: true, want: 0},
-		{name: "custom", value: "4", hasValue: true, want: 4},
-		{name: "clamp", value: "128", hasValue: true, want: maxInstanceSHMSizeGB},
-		{name: "invalid", value: "nope", hasValue: true, want: defaultInstanceSHMSizeGB},
-		{name: "negative", value: "-1", hasValue: true, want: defaultInstanceSHMSizeGB},
+		{name: "desktop minimum preset", runtime: "desktop", memoryGB: 4, want: defaultInstanceSHMSizeGB},
+		{name: "desktop medium preset", runtime: "desktop", memoryGB: 8, want: 2},
+		{name: "desktop large preset", runtime: "desktop", memoryGB: 12, want: 4},
+		{name: "desktop small fallback", runtime: "desktop", memoryGB: 2, want: defaultInstanceSHMSizeGB},
+		{name: "shell default unchanged", runtime: "shell", memoryGB: 8, want: defaultInstanceSHMSizeGB},
+		{name: "disable", value: "0", hasValue: true, runtime: "desktop", memoryGB: 8, want: 0},
+		{name: "custom", value: "4", hasValue: true, runtime: "desktop", memoryGB: 4, want: 4},
+		{name: "clamp", value: "128", hasValue: true, runtime: "desktop", memoryGB: 8, want: maxInstanceSHMSizeGB},
+		{name: "invalid keeps dynamic desktop default", value: "nope", hasValue: true, runtime: "desktop", memoryGB: 8, want: 2},
+		{name: "negative keeps dynamic desktop default", value: "-1", hasValue: true, runtime: "desktop", memoryGB: 4, want: defaultInstanceSHMSizeGB},
 	}
 
 	for _, tt := range tests {
@@ -91,7 +101,7 @@ func TestPopSHMSizeGB(t *testing.T) {
 				extraEnv["SHM_SIZE_GB"] = tt.value
 			}
 
-			got := popSHMSizeGB(extraEnv)
+			got := popSHMSizeGB(extraEnv, tt.runtime, tt.memoryGB)
 			if got != tt.want {
 				t.Fatalf("expected shm size %d, got %d", tt.want, got)
 			}

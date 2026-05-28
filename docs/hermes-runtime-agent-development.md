@@ -188,7 +188,7 @@ Do not print channel tokens, secrets, webhooks, bootstrap tokens, session tokens
 
 Hermes agent behavior:
 
-1. Use the top-level key as the channel ID, for example `feishu`, `telegram`, `slack`, or `dingtalk-connector`.
+1. Use the top-level key as the runtime channel ID, for example `feishu`, `telegram`, `slack`, or `dingtalk-connector`. Resource-specific Feishu/Lark keys such as `feishu-ops` must be folded into the `feishu.accounts` map before injection.
 2. Skip channels with `enabled=false`, but keep their config on disk so future updates can re-enable them.
 3. Convert channel config into Hermes-native notification or messaging configuration. A reasonable default path is `/config/.hermes/channels.json`, unless Hermes has a native config location.
 4. Preserve unknown fields so future ClawManager extensions are not lost.

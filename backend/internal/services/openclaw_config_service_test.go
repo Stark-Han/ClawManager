@@ -49,6 +49,22 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 			model: models.OpenClawConfigResource{
 				ID:           3,
 				ResourceType: OpenClawConfigResourceTypeChannel,
+				ResourceKey:  "feishu-ops",
+				Name:         "Feishu Ops",
+				Version:      1,
+				ContentJSON:  `{"schemaVersion":1,"kind":"channel","format":"channel/feishu-ops@v1","dependsOn":[],"config":{"enabled":true,"domain":"feishu","defaultAccount":"main","accounts":{"main":{"appId":"cli_ops","appSecret":"ops_secret"}}}}`,
+			},
+			envelope: OpenClawConfigEnvelope{
+				SchemaVersion: 1,
+				Kind:          "channel",
+				Format:        "channel/feishu-ops@v1",
+				Config:        json.RawMessage(`{"enabled":true,"domain":"feishu","defaultAccount":"main","accounts":{"main":{"appId":"cli_ops","appSecret":"ops_secret"}}}`),
+			},
+		},
+		{
+			model: models.OpenClawConfigResource{
+				ID:           4,
+				ResourceType: OpenClawConfigResourceTypeChannel,
 				ResourceKey:  "slack",
 				Name:         "Slack",
 				Version:      1,
@@ -63,7 +79,7 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 		},
 		{
 			model: models.OpenClawConfigResource{
-				ID:           4,
+				ID:           5,
 				ResourceType: OpenClawConfigResourceTypeChannel,
 				ResourceKey:  "telegram",
 				Name:         "Telegram",
@@ -95,7 +111,7 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 		},
 		{
 			model: models.OpenClawConfigResource{
-				ID:           5,
+				ID:           7,
 				ResourceType: OpenClawConfigResourceTypeSkill,
 				ResourceKey:  "support-bot",
 				Name:         "Support Bot",
@@ -118,13 +134,13 @@ func TestRenderCompiledOpenClawPayloadRendersChannelsAsKeyedConfigMap(t *testing
 	}
 
 	gotChannels := renderedEnv[OpenClawChannelsEnv]
-	wantChannels := `{"dingtalk-connector":{"allowFrom":["*"],"clientId":"ding-xxxxxxxxxxxxxx","clientSecret":"xxxxxxxxxxxxxxxxxxxxxxx","enabled":true},"feishu":{"accounts":{"main":{"appId":"cli_xxx","appSecret":"xxx"}},"enabled":true},"slack":{"appToken":"xapp-xxx","botToken":"xoxb-xxx","capabilities":{"interactiveReplies":true},"channels":{"#general":{"allow":true}},"enabled":true,"groupPolicy":"allowlist"},"telegram":{"allowFrom":["*"],"botToken":"123456:xxx","dmPolicy":"open","enabled":true},"wecom":{"allowFrom":["*"],"botId":"ww-bot","dmPolicy":"pairing","secret":"wecom-secret"}}`
+	wantChannels := `{"dingtalk-connector":{"allowFrom":["*"],"clientId":"ding-xxxxxxxxxxxxxx","clientSecret":"xxxxxxxxxxxxxxxxxxxxxxx","enabled":true},"feishu":{"accounts":{"default":{"appId":"cli_xxx","appSecret":"xxx","botName":"old-bot","enabled":true},"feishu-ops":{"appId":"cli_ops","appSecret":"ops_secret"},"main":{"appId":"cli_xxx","appSecret":"xxx"}},"defaultAccount":"default","domain":"feishu","enabled":true,"requireMention":true},"slack":{"appToken":"xapp-xxx","botToken":"xoxb-xxx","capabilities":{"interactiveReplies":true},"channels":{"#general":{"allow":true}},"enabled":true,"groupPolicy":"allowlist"},"telegram":{"allowFrom":["*"],"botToken":"123456:xxx","dmPolicy":"open","enabled":true},"wecom":{"allowFrom":["*"],"botId":"ww-bot","dmPolicy":"pairing","secret":"wecom-secret"}}`
 	if gotChannels != wantChannels {
 		t.Fatalf("unexpected channel payload:\nwant: %s\ngot:  %s", wantChannels, gotChannels)
 	}
 
 	gotSkills := renderedEnv[OpenClawSkillsEnv]
-	wantSkills := `{"items":[{"content":{"schemaVersion":1,"kind":"skill","format":"skill/custom@v1","dependsOn":[],"config":{"prompt":"help"}},"id":5,"key":"support-bot","name":"Support Bot","tags":["skill"],"type":"skill","version":1}],"schemaVersion":1}`
+	wantSkills := `{"items":[{"content":{"schemaVersion":1,"kind":"skill","format":"skill/custom@v1","dependsOn":[],"config":{"prompt":"help"}},"id":7,"key":"support-bot","name":"Support Bot","tags":["skill"],"type":"skill","version":1}],"schemaVersion":1}`
 	if gotSkills != wantSkills {
 		t.Fatalf("unexpected skill payload:\nwant: %s\ngot:  %s", wantSkills, gotSkills)
 	}
@@ -153,6 +169,61 @@ func TestRuntimeBootstrapEnvValuesAddsHermesAndRuntimeAliases(t *testing.T) {
 	}
 	if !strings.Contains(got[RuntimeBootstrapManifestEnv], RuntimeChannelsEnv) {
 		t.Fatalf("expected runtime manifest alias to reference runtime env names, got %s", got[RuntimeBootstrapManifestEnv])
+	}
+}
+
+func TestOpenClawChannelEnvKeyUsesProviderKeyForResourceAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		resourceKey string
+		config      map[string]interface{}
+		want        string
+	}{
+		{
+			name:        "feishu resource alias",
+			resourceKey: "feishu-2",
+			config: map[string]interface{}{
+				"domain": "feishu",
+				"accounts": map[string]interface{}{
+					"main": map[string]interface{}{
+						"appId":     "cli_xxx",
+						"appSecret": "secret",
+					},
+				},
+			},
+			want: "feishu",
+		},
+		{
+			name:        "dingtalk resource alias",
+			resourceKey: "dingtalk-2",
+			config: map[string]interface{}{
+				"clientId":     "ding_xxx",
+				"clientSecret": "secret",
+			},
+			want: "dingtalk-connector",
+		},
+		{
+			name:        "wecom resource alias",
+			resourceKey: "wecom-2",
+			config: map[string]interface{}{
+				"botId":  "ww-bot",
+				"secret": "secret",
+			},
+			want: "wecom",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := openClawChannelEnvKey(tt.resourceKey, tt.config); got != tt.want {
+				t.Fatalf("unexpected env key: want %s, got %s", tt.want, got)
+			}
+		})
 	}
 }
 
