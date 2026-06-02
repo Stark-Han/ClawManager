@@ -442,6 +442,13 @@ data:
       UNIQUE KEY uk_openclaw_bundle_skill (bundle_id, skill_id),
       INDEX idx_openclaw_bundle_skill_bundle (bundle_id, sort_order)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  023_normalize_runtime_config_mounts.sql: |
+    USE clawreef;
+    UPDATE instances
+    SET mount_path = '/config',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE type IN ('openclaw', 'ubuntu', 'webtop', 'hermes')
+      AND mount_path IN ('/data', '/home/user/data', '/config/.hermes');
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

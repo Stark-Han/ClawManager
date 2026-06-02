@@ -59,6 +59,7 @@ type PodConfig struct {
 	EnvFromSecretNames   []string
 	ExtraPVCMounts       []PVCMount
 	ConfigMapFileMounts  []ConfigMapFileMount
+	VolumeInitScripts    []VolumeInitScript
 	FSGroup              *int64
 	VolumeOwnershipFixes []VolumeOwnershipFix
 	SHMSizeGB            int
@@ -86,6 +87,12 @@ type VolumeOwnershipFix struct {
 	MountPath string
 	UID       int64
 	GID       int64
+}
+
+type VolumeInitScript struct {
+	Name      string
+	MountPath string
+	Script    string
 }
 
 // CreatePod creates a new pod for an instance
@@ -263,6 +270,13 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		})
 	}
 
+	for index, initScript := range config.VolumeInitScripts {
+		if initScript.Name == "" || initScript.MountPath == "" || initScript.Script == "" {
+			continue
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, buildVolumeInitScriptContainer(index, config.Image, pullPolicy, initScript))
+	}
+
 	for index, fix := range config.VolumeOwnershipFixes {
 		if fix.Name == "" || fix.MountPath == "" || fix.UID < 0 || fix.GID < 0 {
 			continue
@@ -423,6 +437,33 @@ fi`,
 			{
 				Name:      fix.Name,
 				MountPath: fix.MountPath,
+			},
+		},
+	}
+}
+
+func buildVolumeInitScriptContainer(index int, image string, pullPolicy corev1.PullPolicy, initScript VolumeInitScript) corev1.Container {
+	rootUser := int64(0)
+	return corev1.Container{
+		Name:            fmt.Sprintf("init-volume-layout-%d", index+1),
+		Image:           image,
+		ImagePullPolicy: pullPolicy,
+		Command: []string{
+			"sh",
+			"-c",
+			initScript.Script,
+		},
+		Env: []corev1.EnvVar{
+			{Name: "CLAWMANAGER_VOLUME_PATH", Value: initScript.MountPath},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &rootUser,
+			RunAsGroup: &rootUser,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      initScript.Name,
+				MountPath: initScript.MountPath,
 			},
 		},
 	}

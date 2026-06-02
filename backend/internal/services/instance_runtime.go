@@ -61,7 +61,7 @@ func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *s
 	case "hermes":
 		config.Image = defaultSystemImageSettings["hermes"]
 		config.Port = 3001
-		config.MountPath = "/config/.hermes"
+		config.MountPath = "/config"
 		config.Env = defaultWebtopDesktopEnv("Hermes Runtime")
 	case "openclaw":
 		config.MountPath = "/config"
@@ -95,7 +95,7 @@ func defaultMountPathForInstanceType(instanceType string) string {
 	case "ubuntu", "webtop", "openclaw":
 		return "/config"
 	case "hermes":
-		return "/config/.hermes"
+		return "/config"
 	default:
 		return "/home/user/data"
 	}

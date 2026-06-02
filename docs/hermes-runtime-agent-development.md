@@ -12,11 +12,12 @@ A Hermes image must satisfy two layers of requirements:
 Current Hermes runtime defaults in ClawManager:
 
 - Port: `3001`
+- PVC mount path: `/config`
 - Persistent directory: `/config/.hermes`
 - Default title: `Hermes Runtime`
 - Proxy path: ClawManager rewrites `SUBFOLDER` to `/api/v1/instances/{instance_id}/proxy/` when the instance is created.
 
-Do not change the port or persistent directory in the image. If the image uses a different port or mount path, instance proxying, PVC mounting, and user data persistence will no longer match ClawManager expectations.
+Do not change the port, PVC mount path, or persistent directory in the image. ClawManager mounts the instance PVC at `/config` so Webtop desktop files such as `/config/Desktop` and Hermes runtime files under `/config/.hermes` persist together.
 
 ## Image Build Requirements
 
@@ -799,7 +800,7 @@ Never commit real tokens, channel secrets, Gateway API keys, or downloaded sessi
 Before delivering a Hermes image, verify:
 
 - The Webtop desktop is reachable through the ClawManager instance proxy.
-- `/config/.hermes` is mounted and persists across restarts.
+- `/config` is mounted and both `/config/Desktop` and `/config/.hermes` persist across restarts.
 - The agent registers and starts heartbeat within 30 seconds.
 - The instance detail page shows agent online, runtime running, and an updated last report time.
 - CPU, memory, disk, and network metrics are visible and refresh continuously.
@@ -819,7 +820,7 @@ ClawManager must keep the following capabilities for Hermes to work end to end:
 - Allow `hermes` instances to register with the Agent Control Plane.
 - Inject `CLAWMANAGER_LLM_*` and OpenAI-compatible variables so Hermes can access models through ClawManager AI Gateway.
 - Inject Hermes and generic runtime bootstrap variables for channels, skills, and related resources.
-- Mount persistent storage at `/config/.hermes`.
+- Mount persistent storage at `/config`, while keeping Hermes runtime state under `/config/.hermes`.
 - Support `.hermes` import and export.
 - Keep compatibility fields such as `openclaw_status`, `openclaw_pid`, and `openclaw_version` until generic runtime fields are introduced.
 - Add Hermes-specific runtime control commands, or generic `start_runtime`, `stop_runtime`, and `restart_runtime`, if runtime process control becomes required.

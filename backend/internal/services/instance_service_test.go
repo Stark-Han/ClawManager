@@ -1,6 +1,7 @@
 package services
 
 import (
+	"strings"
 	"testing"
 
 	"clawreef/internal/models"
@@ -128,6 +129,43 @@ func TestBuildAgentEnvInjectsHermesAgentConfig(t *testing.T) {
 	}
 	if env["CLAWMANAGER_AGENT_DISK_LIMIT_BYTES"] != "21474836480" {
 		t.Fatalf("expected Hermes disk limit bytes to be injected, got %q", env["CLAWMANAGER_AGENT_DISK_LIMIT_BYTES"])
+	}
+}
+
+func TestPersistentVolumeMountPathNormalizesManagedDesktopRuntimes(t *testing.T) {
+	for _, instanceType := range []string{"openclaw", "ubuntu", "webtop", "hermes"} {
+		t.Run(instanceType, func(t *testing.T) {
+			got := persistentVolumeMountPath(&models.Instance{
+				Type:      instanceType,
+				MountPath: "/data",
+			})
+			if got != "/config" {
+				t.Fatalf("expected %s PVC mount path /config, got %q", instanceType, got)
+			}
+		})
+	}
+}
+
+func TestManagedRuntimePersistentDirKeepsHermesSubdirectory(t *testing.T) {
+	got := managedRuntimePersistentDir(&models.Instance{
+		Type:      "hermes",
+		MountPath: "/config",
+	})
+	if got != "/config/.hermes" {
+		t.Fatalf("expected Hermes persistent dir /config/.hermes, got %q", got)
+	}
+}
+
+func TestRuntimeVolumeInitScriptsAddsHermesLayoutMigration(t *testing.T) {
+	scripts := runtimeVolumeInitScripts("hermes", "/config")
+	if len(scripts) != 1 {
+		t.Fatalf("expected one Hermes volume init script, got %d", len(scripts))
+	}
+	if scripts[0].Name != "data" || scripts[0].MountPath != "/config" {
+		t.Fatalf("unexpected Hermes volume init script: %#v", scripts[0])
+	}
+	if !strings.Contains(scripts[0].Script, `target="$base/.hermes"`) {
+		t.Fatalf("expected Hermes init script to target /config/.hermes, got %s", scripts[0].Script)
 	}
 }
 

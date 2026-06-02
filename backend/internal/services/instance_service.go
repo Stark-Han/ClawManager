@@ -499,6 +499,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		EnvFromSecretNames:   envFromSecretNames,
 		ExtraPVCMounts:       extraPVCMounts,
 		ConfigMapFileMounts:  configMapFileMounts,
+		VolumeInitScripts:    runtimeVolumeInitScripts(instance.Type, runtimeConfig.MountPath),
 		FSGroup:              fsGroup,
 		VolumeOwnershipFixes: volumeOwnershipFixes,
 		SHMSizeGB:            shmSizeGB,
@@ -642,6 +643,8 @@ func (s *instanceService) Start(instanceID int) error {
 		return fmt.Errorf("failed to build instance agent config: %w", err)
 	}
 	runtimeConfig := buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag)
+	mountPath := persistentVolumeMountPath(instance)
+	instance.MountPath = mountPath
 	extraEnv, err := buildInstancePodEnv(instance, runtimeConfig.Env, gatewayEnv, agentEnv)
 	if err != nil {
 		return fmt.Errorf("failed to resolve instance environment: %w", err)
@@ -673,11 +676,12 @@ func (s *instanceService) Start(instanceID int) error {
 		GPUEnabled:         instance.GPUEnabled,
 		GPUCount:           instance.GPUCount,
 		Image:              runtimeConfig.Image,
-		MountPath:          instance.MountPath,
+		MountPath:          mountPath,
 		ContainerPort:      runtimeConfig.Port,
 		ImagePullPolicy:    corev1.PullPolicy(defaultImagePullPolicy()),
 		ExtraEnv:           extraEnv,
 		EnvFromSecretNames: []string{bootstrapSecretName},
+		VolumeInitScripts:  runtimeVolumeInitScripts(instance.Type, mountPath),
 		SHMSizeGB:          shmSizeGB,
 		SecurityMode:       s.securityModeForInstance(instance.Type),
 	}
@@ -856,10 +860,51 @@ func managedRuntimePersistentDir(instance *models.Instance) string {
 	if strings.EqualFold(instance.Type, "hermes") {
 		return "/config/.hermes"
 	}
+	return persistentVolumeMountPath(instance)
+}
+
+func persistentVolumeMountPath(instance *models.Instance) string {
+	if instance == nil {
+		return "/config"
+	}
+	if defaultPath := defaultMountPathForInstanceType(instance.Type); defaultPath == "/config" {
+		return defaultPath
+	}
 	if strings.TrimSpace(instance.MountPath) != "" {
 		return strings.TrimSpace(instance.MountPath)
 	}
 	return defaultMountPathForInstanceType(instance.Type)
+}
+
+func runtimeVolumeInitScripts(instanceType, mountPath string) []k8s.VolumeInitScript {
+	if !strings.EqualFold(strings.TrimSpace(instanceType), "hermes") || strings.TrimSpace(mountPath) != "/config" {
+		return nil
+	}
+	return []k8s.VolumeInitScript{
+		{
+			Name:      "data",
+			MountPath: "/config",
+			Script: `set -eu
+base="${CLAWMANAGER_VOLUME_PATH:-/config}"
+target="$base/.hermes"
+if [ ! -d "$target" ]; then
+  legacy_found=0
+  for name in hermes-agent skills channels.json session.json bootstrap inventory.json; do
+    if [ -e "$base/$name" ]; then legacy_found=1; fi
+  done
+  mkdir -p "$target"
+  if [ "$legacy_found" = "1" ]; then
+    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+      [ -e "$entry" ] || continue
+      name="${entry##*/}"
+      case "$name" in .|..|.hermes|Desktop|Downloads|lost+found) continue;; esac
+      mv "$entry" "$target"/
+    done
+  fi
+fi
+chown -R 1000:1000 "$target" || true`,
+		},
+	}
 }
 
 func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection, error) {
