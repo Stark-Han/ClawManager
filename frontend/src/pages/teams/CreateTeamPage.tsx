@@ -9,6 +9,17 @@ import {
   type SystemImageSetting,
 } from "../../services/systemSettingsService";
 import { teamService } from "../../services/teamService";
+import {
+  buildAgencyAgentEnvironment,
+  getAgencyAgentProfile,
+} from "../../lib/agencyAgentProfiles";
+import {
+  BUILTIN_MEMBER_TEMPLATES,
+  type ResourcePresetKey,
+  type RuntimeType,
+  type TeamMemberTemplate,
+  type TeamMemberTemplateMember,
+} from "../../lib/teamTemplates";
 import type { CreateTeamRequest } from "../../types/team";
 import type {
   OpenClawConfigCompilePreview,
@@ -21,33 +32,8 @@ type EnvironmentRow = {
   value: string;
 };
 
-type TeamMemberDraft = {
+type TeamMemberDraft = TeamMemberTemplateMember & {
   id: string;
-  memberId: string;
-  name: string;
-  role: string;
-  runtimeType: RuntimeType;
-  description: string;
-  resourcePreset: ResourcePresetKey;
-  isLeader: boolean;
-  cpuCores: number;
-  memoryGb: number;
-  diskGb: number;
-  gpuEnabled: boolean;
-  gpuCount: number;
-  image: string;
-};
-
-type RuntimeType = "openclaw" | "hermes";
-type ResourcePresetKey = "small" | "medium" | "large" | "custom";
-type TeamMemberTemplateMember = Omit<TeamMemberDraft, "id">;
-type TeamMemberTemplate = {
-  id: string;
-  name: string;
-  teamName?: string;
-  description?: string;
-  source: "builtin" | "custom";
-  members: TeamMemberTemplateMember[];
 };
 
 const RUNTIME_OPTIONS: Array<{ value: RuntimeType; label: string }> = [
@@ -66,240 +52,6 @@ const RESOURCE_PRESETS: Record<
 
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CUSTOM_MEMBER_TEMPLATES_STORAGE_KEY = "clawmanager.team.memberTemplates.v1";
-
-const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
-  {
-    id: "builtin-leader-worker",
-    name: "标准双成员",
-    teamName: "research-team",
-    description: "标准 Leader-mediated Team：Leader 负责目标拆解、成员协调和结果汇总，Worker 负责执行实现任务并同步进展。",
-    source: "builtin",
-    members: [
-      {
-        memberId: "leader",
-        name: "team-leader",
-        role: "leader",
-        runtimeType: "openclaw",
-        description: "负责拆解目标、协调成员、汇总结果和对外回报。",
-        resourcePreset: "small",
-        isLeader: true,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "worker",
-        name: "team-worker",
-        role: "developer",
-        runtimeType: "openclaw",
-        description: "负责执行实现任务、提交进展并同步阻塞项。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-    ],
-  },
-  {
-    id: "builtin-dev-qa-docs",
-    name: "研发验收三成员",
-    teamName: "delivery-team",
-    description: "研发交付 Team：Leader 负责拆解和协调，Developer 负责实现联调，Reviewer 负责测试验证、回归检查和交付复核。",
-    source: "builtin",
-    members: [
-      {
-        memberId: "leader",
-        name: "delivery-lead",
-        role: "leader",
-        runtimeType: "openclaw",
-        description: "负责需求拆解、优先级判断、任务派发和结果汇总。",
-        resourcePreset: "medium",
-        isLeader: true,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "developer",
-        name: "developer",
-        role: "developer",
-        runtimeType: "openclaw",
-        description: "负责代码实现、接口联调、必要的单元测试补充。",
-        resourcePreset: "medium",
-        isLeader: false,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "reviewer",
-        name: "reviewer",
-        role: "reviewer",
-        runtimeType: "openclaw",
-        description: "负责测试验证、回归检查、文档和交付清单复核。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-    ],
-  },
-  {
-    id: "builtin-software-engineering-team",
-    name: "Software-Engineering-Team",
-    teamName: "software-engineering-team",
-    description:
-      "软件工程 Team：Leader 负责目标、任务拆分、协调、风险控制和最终收口；PM 定义产品方向和优先级；UI/UX 负责体验与设计规范；Frontend、Backend、Architect、QA 和 Code Reviewer 分别负责界面、服务、架构、质量验证和代码审查。",
-    source: "builtin",
-    members: [
-      {
-        memberId: "leader",
-        name: "engineering-lead",
-        role: "leader",
-        runtimeType: "openclaw",
-        description:
-          "负责目标管理、DoD 定义、任务拆分、依赖协调、风险治理、验收和最终决策。",
-        resourcePreset: "medium",
-        isLeader: true,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "pm",
-        name: "product-manager",
-        role: "product-manager",
-        runtimeType: "openclaw",
-        description:
-          "负责需求收集、产品方向、PRD、Roadmap、用户流程、功能边界、优先级和验收标准。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "ui-ux",
-        name: "ui-ux-designer",
-        role: "ui-ux-designer",
-        runtimeType: "openclaw",
-        description:
-          "负责页面视觉、用户体验、交互流程、Figma 设计稿、组件规范和 Design System。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "frontend",
-        name: "frontend-engineer",
-        role: "frontend-engineer",
-        runtimeType: "openclaw",
-        description:
-          "负责 React/Vue 等前端页面开发、接口对接、状态管理、用户交互和性能优化。",
-        resourcePreset: "medium",
-        isLeader: false,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "backend",
-        name: "backend-engineer",
-        role: "backend-engineer",
-        runtimeType: "openclaw",
-        description:
-          "负责 API、数据库、权限、消息队列、微服务、业务逻辑和系统能力实现。",
-        resourcePreset: "medium",
-        isLeader: false,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "architect",
-        name: "architect",
-        role: "architect",
-        runtimeType: "openclaw",
-        description:
-          "负责技术选型、系统拆分、高可用、扩展性、技术规范和长期演进方案。",
-        resourcePreset: "medium",
-        isLeader: false,
-        cpuCores: 4,
-        memoryGb: 8,
-        diskGb: 50,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "qa",
-        name: "qa-engineer",
-        role: "qa-engineer",
-        runtimeType: "openclaw",
-        description:
-          "负责功能测试、自动化测试、回归测试、压测、Bug 管理和稳定性验证。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-      {
-        memberId: "code-reviewer",
-        name: "code-reviewer",
-        role: "code-reviewer",
-        runtimeType: "openclaw",
-        description:
-          "负责代码审查、架构一致性、可维护性、测试覆盖、风险点、回归影响和合并前质量把关。",
-        resourcePreset: "small",
-        isLeader: false,
-        cpuCores: 2,
-        memoryGb: 4,
-        diskGb: 20,
-        gpuEnabled: false,
-        gpuCount: 0,
-        image: "",
-      },
-    ],
-  },
-];
 
 const newDraftId = () =>
   `member-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -419,10 +171,12 @@ const CreateTeamPage: React.FC = () => {
       memberId: "leader",
       role: "leader",
       isLeader: true,
+      agentProfileKey: "agency.agents-orchestrator",
     }),
     defaultMember({
       memberId: "worker",
       role: "developer",
+      agentProfileKey: "agency.senior-developer",
     }),
   ]);
   const [loadingImages, setLoadingImages] = useState(true);
@@ -695,6 +449,7 @@ const CreateTeamPage: React.FC = () => {
       role: member.isLeader ? "leader" : member.role.trim() || "member",
       runtimeType: member.runtimeType,
       description: member.description.trim(),
+      agentProfileKey: member.agentProfileKey,
       resourcePreset: member.resourcePreset,
       isLeader: member.isLeader,
       cpuCores: member.cpuCores,
@@ -843,6 +598,25 @@ const CreateTeamPage: React.FC = () => {
     return undefined;
   };
 
+  const buildMemberEnvironmentOverrides = (
+    member: TeamMemberDraft,
+    normalizedMemberId: string,
+  ): Record<string, string> | undefined => {
+    const profile = getAgencyAgentProfile(member.agentProfileKey);
+    const profileEnv = buildAgencyAgentEnvironment(profile, {
+      memberId: normalizedMemberId,
+      displayName: member.name.trim() || normalizedMemberId,
+      role: member.isLeader ? "leader" : member.role.trim() || "member",
+      runtimeType: member.runtimeType,
+      isLeader: member.isLeader,
+    });
+    const merged = {
+      ...(environmentDraft.overrides || {}),
+      ...(profileEnv || {}),
+    };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  };
+
   const handleOpenClawPreviewChange = useCallback(
     (
       preview: OpenClawConfigCompilePreview | null,
@@ -933,22 +707,28 @@ const CreateTeamPage: React.FC = () => {
       communication_mode: "leader_mediated",
       shared_storage_gb: sharedStorageGb,
       storage_class: storageClass.trim() || undefined,
-      members: members.map((member) => ({
-        member_id: normalizeMemberId(member.memberId),
-        name: member.name.trim() || undefined,
-        role: member.isLeader ? "leader" : member.role.trim() || "member",
-        runtime_type: member.runtimeType,
-        description: member.description.trim() || undefined,
-        is_leader: member.isLeader,
-        cpu_cores: member.cpuCores,
-        memory_gb: member.memoryGb,
-        disk_gb: member.diskGb,
-        gpu_enabled: member.gpuEnabled,
-        gpu_count: member.gpuEnabled ? member.gpuCount : 0,
-        image_registry: member.image.trim(),
-        environment_overrides: environmentDraft.overrides,
-        openclaw_config_plan: openClawConfigPlan,
-      })),
+      members: members.map((member) => {
+        const normalizedMemberId = normalizeMemberId(member.memberId);
+        return {
+          member_id: normalizedMemberId,
+          name: member.name.trim() || undefined,
+          role: member.isLeader ? "leader" : member.role.trim() || "member",
+          runtime_type: member.runtimeType,
+          description: member.description.trim() || undefined,
+          is_leader: member.isLeader,
+          cpu_cores: member.cpuCores,
+          memory_gb: member.memoryGb,
+          disk_gb: member.diskGb,
+          gpu_enabled: member.gpuEnabled,
+          gpu_count: member.gpuEnabled ? member.gpuCount : 0,
+          image_registry: member.image.trim(),
+          environment_overrides: buildMemberEnvironmentOverrides(
+            member,
+            normalizedMemberId,
+          ),
+          openclaw_config_plan: openClawConfigPlan,
+        };
+      }),
     };
 
     try {
@@ -1268,6 +1048,12 @@ const CreateTeamPage: React.FC = () => {
                             {templateMember.image || "默认镜像"} ·{" "}
                             {templateMember.cpuCores}C/{templateMember.memoryGb}G
                           </div>
+                          {templateMember.agentProfileKey && (
+                            <div className="mt-1 truncate text-xs text-indigo-600">
+                              {getAgencyAgentProfile(templateMember.agentProfileKey)?.name ||
+                                templateMember.agentProfileKey}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
