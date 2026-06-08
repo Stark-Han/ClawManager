@@ -57,6 +57,10 @@ Thumbs.db
 *.temp
 /test_*
 
+# Team runtime config snapshots
+/team-*.json
+/agency-agents-main/
+
 
 .codex-logs/
 dev_docs/
