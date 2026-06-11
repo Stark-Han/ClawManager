@@ -235,6 +235,11 @@ func (c *Client) GetPodName(instanceID int, instanceName string) string {
 	return sanitizeK8sName(fmt.Sprintf("clawreef-%d-%s", instanceID, instanceName))
 }
 
+// GetDeploymentName returns the deployment name for an instance.
+func (c *Client) GetDeploymentName(instanceID int, instanceName string) string {
+	return sanitizeK8sName(fmt.Sprintf("clawreef-%d-%s", instanceID, instanceName))
+}
+
 // GetPVCName returns the PVC name for an instance
 func (c *Client) GetPVCName(instanceID int) string {
 	return sanitizeK8sName(fmt.Sprintf("clawreef-%d-pvc", instanceID))

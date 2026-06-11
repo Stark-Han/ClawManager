@@ -319,7 +319,7 @@ func (s *PVCService) hostPathPVNodeAffinity(ctx context.Context) (*corev1.Volume
 	}
 	candidates := []candidate{}
 	for _, node := range nodes.Items {
-		if node.Spec.Unschedulable || !isStorageNodeReady(node) {
+		if !isHostPathPVNodeCandidate(node) {
 			continue
 		}
 		hostname := strings.TrimSpace(node.Labels["kubernetes.io/hostname"])
@@ -365,6 +365,18 @@ func isStorageNodeReady(node corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+func isHostPathPVNodeCandidate(node corev1.Node) bool {
+	if node.Spec.Unschedulable || !isStorageNodeReady(node) {
+		return false
+	}
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectNoExecute {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *PVCService) monitorPVCBinding(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string, timeout time.Duration) {
@@ -467,6 +479,10 @@ func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName stri
 	}
 
 	storageSize := resource.MustParse(fmt.Sprintf("%dGi", storageSizeGB))
+	nodeAffinity, err := s.hostPathPVNodeAffinity(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select node for hostPath PV %s: %w", pvName, err)
+	}
 
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -487,6 +503,7 @@ func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName stri
 			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
 			StorageClassName:              storageClass,
+			NodeAffinity:                  nodeAffinity,
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
 					Path: hostPath,

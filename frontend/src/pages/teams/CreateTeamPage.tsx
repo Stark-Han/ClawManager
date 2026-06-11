@@ -63,7 +63,7 @@ const defaultMember = (
   overrides?: Partial<TeamMemberDraft>,
 ): TeamMemberDraft => ({
   id: newDraftId(),
-  memberId: "worker",
+  memberId: "worker-1",
   name: "",
   role: "developer",
   runtimeType: "openclaw",

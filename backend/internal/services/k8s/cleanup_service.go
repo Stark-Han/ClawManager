@@ -47,12 +47,17 @@ func (s *CleanupService) DeleteAllInstanceResources(ctx context.Context, userID,
 	for _, namespace := range namespaces {
 		fmt.Printf("Deleting resources for instance %d in namespace %s\n", instanceID, namespace)
 
-		// 1. Delete all Pods with matching instance-id label
+		// 1. Delete all Deployments first so managed Pods are not recreated.
+		if err := s.deleteAllDeployments(ctx, namespace, instanceLabel); err != nil {
+			fmt.Printf("Warning: error deleting deployments: %v\n", err)
+		}
+
+		// 2. Delete all Pods with matching instance-id label
 		if err := s.deleteAllPods(ctx, namespace, instanceLabel); err != nil {
 			fmt.Printf("Warning: error deleting pods: %v\n", err)
 		}
 
-		// 2. Delete all PVCs with matching instance-id label
+		// 3. Delete all PVCs with matching instance-id label
 		if err := s.deleteAllPVCs(ctx, namespace, instanceLabel); err != nil {
 			fmt.Printf("Warning: error deleting PVCs: %v\n", err)
 		}
@@ -78,7 +83,7 @@ func (s *CleanupService) DeleteAllInstanceResources(ctx context.Context, userID,
 		}
 	}
 
-	// 3. Delete all PVs associated with this instance (PVs are not namespaced)
+	// 8. Delete all PVs associated with this instance (PVs are not namespaced)
 	if err := s.deleteAllPVs(ctx, userID, instanceID); err != nil {
 		fmt.Printf("Warning: error deleting PVs: %v\n", err)
 	}
@@ -103,6 +108,14 @@ func (s *CleanupService) findNamespacesWithInstance(ctx context.Context, instanc
 
 	var result []string
 	for _, ns := range namespaces.Items {
+		deployments, err := s.client.Clientset.AppsV1().Deployments(ns.Name).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("instance-id=%s,managed-by=clawreef", instanceLabel),
+		})
+		if err == nil && len(deployments.Items) > 0 {
+			result = append(result, ns.Name)
+			continue
+		}
+
 		// Check if this namespace has any pods for this instance
 		pods, err := s.client.Clientset.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("instance-id=%s,managed-by=clawreef", instanceLabel),
@@ -130,6 +143,33 @@ func (s *CleanupService) findNamespacesWithInstance(ctx context.Context, instanc
 	}
 
 	return result, nil
+}
+
+// deleteAllDeployments deletes all deployments with matching instance-id label.
+func (s *CleanupService) deleteAllDeployments(ctx context.Context, namespace, instanceLabel string) error {
+	deployments, err := s.client.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("instance-id=%s,managed-by=clawreef", instanceLabel),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list deployments: %w", err)
+	}
+
+	if len(deployments.Items) == 0 {
+		fmt.Printf("No deployments found for instance %s\n", instanceLabel)
+		return nil
+	}
+
+	for _, deployment := range deployments.Items {
+		fmt.Printf("Deleting deployment: %s\n", deployment.Name)
+		propagation := metav1.DeletePropagationForeground
+		if err := s.client.Clientset.AppsV1().Deployments(namespace).Delete(ctx, deployment.Name, metav1.DeleteOptions{
+			PropagationPolicy: &propagation,
+		}); err != nil && !errors.IsNotFound(err) {
+			fmt.Printf("Warning: failed to delete deployment %s: %v\n", deployment.Name, err)
+		}
+	}
+
+	return nil
 }
 
 // deleteAllPods deletes all pods with matching instance-id label
@@ -306,6 +346,14 @@ func (s *CleanupService) WaitForResourceDeletion(ctx context.Context, namespaces
 			allDeleted := true
 
 			for _, namespace := range namespaces {
+				deployments, err := s.client.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+					LabelSelector: fmt.Sprintf("instance-id=%s,managed-by=clawreef", instanceLabel),
+				})
+				if err == nil && len(deployments.Items) > 0 {
+					allDeleted = false
+					fmt.Printf("  Still waiting: %d deployment(s) in %s\n", len(deployments.Items), namespace)
+				}
+
 				// Check pods
 				pods, err := s.client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 					LabelSelector: fmt.Sprintf("instance-id=%s,managed-by=clawreef", instanceLabel),

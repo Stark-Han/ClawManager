@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -20,8 +21,9 @@ type PodService struct {
 type PodSecurityMode string
 
 const (
-	podDeletionPollInterval = 500 * time.Millisecond
-	podDeletionTimeout      = 60 * time.Second
+	podDeletionPollInterval   = 500 * time.Millisecond
+	podDeletionTimeout        = 60 * time.Second
+	deploymentDeletionTimeout = 60 * time.Second
 
 	PodSecurityDefault        PodSecurityMode = "default"
 	PodSecurityChromiumCompat PodSecurityMode = "chromium-compat"
@@ -59,6 +61,7 @@ type PodConfig struct {
 	EnvFromSecretNames   []string
 	ExtraPVCMounts       []PVCMount
 	ConfigMapFileMounts  []ConfigMapFileMount
+	VolumeInitScripts    []VolumeInitScript
 	FSGroup              *int64
 	VolumeOwnershipFixes []VolumeOwnershipFix
 	SHMSizeGB            int
@@ -88,13 +91,21 @@ type VolumeOwnershipFix struct {
 	GID       int64
 }
 
-// CreatePod creates a new pod for an instance
+type VolumeInitScript struct {
+	Name      string
+	MountPath string
+	Script    string
+}
+
+// CreatePod creates a single-replica Deployment for an instance and returns the
+// pod template that will be used for managed Pods. Callers should use GetPod to
+// resolve the current real Pod after the Deployment controller creates it.
 func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.Pod, error) {
 	if s.client == nil {
 		return nil, fmt.Errorf("k8s client not initialized")
 	}
 
-	podName := s.client.GetPodName(config.InstanceID, config.InstanceName)
+	deploymentName := s.client.GetDeploymentName(config.InstanceID, config.InstanceName)
 	namespace := s.client.GetNamespace(config.UserID)
 	pvcName := s.client.GetPVCName(config.InstanceID)
 	runtimeType := normalizePodRuntimeType(config.RuntimeType)
@@ -135,23 +146,25 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		annotations["container.apparmor.security.beta.kubernetes.io/desktop"] = "unconfined"
 	}
 
+	labels := map[string]string{
+		"app":           "clawreef",
+		"instance-id":   fmt.Sprintf("%d", config.InstanceID),
+		"instance-name": config.InstanceName,
+		"user-id":       fmt.Sprintf("%d", config.UserID),
+		"instance-type": config.Type,
+		"runtime-type":  runtimeType,
+		"managed-by":    "clawreef",
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        podName,
+			Name:        deploymentName,
 			Namespace:   namespace,
-			Annotations: annotations,
-			Labels: map[string]string{
-				"app":           "clawreef",
-				"instance-id":   fmt.Sprintf("%d", config.InstanceID),
-				"instance-name": config.InstanceName,
-				"user-id":       fmt.Sprintf("%d", config.UserID),
-				"instance-type": config.Type,
-				"runtime-type":  runtimeType,
-				"managed-by":    "clawreef",
-			},
+			Annotations: copyStringMap(annotations),
+			Labels:      copyStringMap(labels),
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy:   corev1.RestartPolicyNever,
+			RestartPolicy:   corev1.RestartPolicyAlways,
 			SecurityContext: buildPodSecurityContext(config.FSGroup),
 			Containers: []corev1.Container{
 				{
@@ -263,6 +276,13 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		})
 	}
 
+	for index, initScript := range config.VolumeInitScripts {
+		if initScript.Name == "" || initScript.MountPath == "" || initScript.Script == "" {
+			continue
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, buildVolumeInitScriptContainer(index, config.Image, pullPolicy, initScript))
+	}
+
 	for index, fix := range config.VolumeOwnershipFixes {
 		if fix.Name == "" || fix.MountPath == "" || fix.UID < 0 || fix.GID < 0 {
 			continue
@@ -327,36 +347,55 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		})
 	}
 
-	createdPod, err := s.client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		// Check if pod already exists
-		if errors.IsAlreadyExists(err) {
-			// Try to get the existing pod with the same name. It may still be terminating.
-			existingPod, getErr := s.client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-			if getErr == nil && existingPod != nil {
-				if existingPod.DeletionTimestamp == nil {
-					deleteErr := s.client.Clientset.CoreV1().Pods(namespace).Delete(ctx, existingPod.Name, metav1.DeleteOptions{})
-					if deleteErr != nil && !errors.IsNotFound(deleteErr) {
-						return nil, fmt.Errorf("failed to delete existing pod %s: %w", existingPod.Name, deleteErr)
-					}
-				}
-
-				if waitErr := s.waitForPodDeletion(ctx, namespace, existingPod.Name); waitErr != nil {
-					return nil, fmt.Errorf("failed waiting for pod deletion %s: %w", existingPod.Name, waitErr)
-				}
-
-				// Retry creation
-				createdPod, err = s.client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
-				if err != nil {
-					return nil, fmt.Errorf("failed to create pod after deletion %s: %w", podName, err)
-				}
-				return createdPod, nil
-			}
-		}
-		return nil, fmt.Errorf("failed to create pod %s: %w", podName, err)
+	replicas := int32(1)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespace,
+			Labels:    copyStringMap(labels),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app":         "clawreef",
+					"instance-id": fmt.Sprintf("%d", config.InstanceID),
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: copyStringMap(annotations),
+					Labels:      copyStringMap(labels),
+				},
+				Spec: pod.Spec,
+			},
+		},
 	}
 
-	return createdPod, nil
+	createdDeployment, err := s.client.Clientset.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			existingDeployment, getErr := s.client.Clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+			if getErr == nil && existingDeployment != nil {
+				if existingDeployment.DeletionTimestamp == nil {
+					return podFromDeployment(existingDeployment), nil
+				}
+
+				if waitErr := s.waitForDeploymentDeletion(ctx, namespace, existingDeployment.Name); waitErr != nil {
+					return nil, fmt.Errorf("failed waiting for deployment deletion %s: %w", existingDeployment.Name, waitErr)
+				}
+
+				createdDeployment, err = s.client.Clientset.AppsV1().Deployments(namespace).Create(ctx, deployment, metav1.CreateOptions{})
+				if err != nil {
+					return nil, fmt.Errorf("failed to create deployment after deletion %s: %w", deploymentName, err)
+				}
+				return podFromDeployment(createdDeployment), nil
+			}
+		}
+		return nil, fmt.Errorf("failed to create deployment %s: %w", deploymentName, err)
+	}
+
+	return podFromDeployment(createdDeployment), nil
 }
 
 func buildPodSecurityContext(fsGroup *int64) *corev1.PodSecurityContext {
@@ -428,6 +467,33 @@ fi`,
 	}
 }
 
+func buildVolumeInitScriptContainer(index int, image string, pullPolicy corev1.PullPolicy, initScript VolumeInitScript) corev1.Container {
+	rootUser := int64(0)
+	return corev1.Container{
+		Name:            fmt.Sprintf("init-volume-layout-%d", index+1),
+		Image:           image,
+		ImagePullPolicy: pullPolicy,
+		Command: []string{
+			"sh",
+			"-c",
+			initScript.Script,
+		},
+		Env: []corev1.EnvVar{
+			{Name: "CLAWMANAGER_VOLUME_PATH", Value: initScript.MountPath},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &rootUser,
+			RunAsGroup: &rootUser,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      initScript.Name,
+				MountPath: initScript.MountPath,
+			},
+		},
+	}
+}
+
 func normalizePodRuntimeType(runtimeType string) string {
 	if runtimeType == "shell" {
 		return "shell"
@@ -437,6 +503,32 @@ func normalizePodRuntimeType(runtimeType string) string {
 
 func intstrFromInt32(port int32) intstr.IntOrString {
 	return intstr.FromInt32(port)
+}
+
+func podFromDeployment(deployment *appsv1.Deployment) *corev1.Pod {
+	if deployment == nil {
+		return nil
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        deployment.Name,
+			Namespace:   deployment.Namespace,
+			Labels:      copyStringMap(deployment.Spec.Template.Labels),
+			Annotations: copyStringMap(deployment.Spec.Template.Annotations),
+		},
+		Spec: deployment.Spec.Template.Spec,
+	}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }
 
 // GetPod gets a pod by instance ID
@@ -460,31 +552,113 @@ func (s *PodService) GetPod(ctx context.Context, userID, instanceID int) (*corev
 		return nil, fmt.Errorf("pod not found for instance %d", instanceID)
 	}
 
-	return &pods.Items[0], nil
+	return selectCurrentPod(pods.Items), nil
 }
 
-// DeletePod deletes a pod
+func selectCurrentPod(pods []corev1.Pod) *corev1.Pod {
+	var selected *corev1.Pod
+	selectedRank := -1
+	for i := range pods {
+		pod := &pods[i]
+		rank := podSelectionRank(pod)
+		if rank > selectedRank {
+			selected = pod
+			selectedRank = rank
+		}
+	}
+	if selected != nil {
+		return selected
+	}
+	return &pods[0]
+}
+
+func podSelectionRank(pod *corev1.Pod) int {
+	if pod == nil {
+		return 0
+	}
+	if pod.DeletionTimestamp != nil {
+		return 1
+	}
+	switch pod.Status.Phase {
+	case corev1.PodRunning:
+		if isPodReadyForSelection(pod) {
+			return 6
+		}
+		return 5
+	case corev1.PodPending:
+		return 4
+	case corev1.PodUnknown:
+		return 3
+	case corev1.PodSucceeded:
+		return 2
+	case corev1.PodFailed:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func isPodReadyForSelection(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// DeletePod deletes the instance Deployment so managed Pods are not recreated.
 func (s *PodService) DeletePod(ctx context.Context, userID, instanceID int) error {
+	return s.DeleteDeployment(ctx, userID, instanceID)
+}
+
+// DeleteDeployment deletes all Deployments for an instance.
+func (s *PodService) DeleteDeployment(ctx context.Context, userID, instanceID int) error {
 	if s.client == nil {
 		return fmt.Errorf("k8s client not initialized")
 	}
 
-	pod, err := s.GetPod(ctx, userID, instanceID)
+	namespace := s.client.GetNamespace(userID)
+	selector := fmt.Sprintf("instance-id=%d", instanceID)
+
+	deployments, err := s.client.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
 	if err != nil {
-		// Pod doesn't exist, nothing to delete
 		if isNotFoundError(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("failed to list deployments: %w", err)
 	}
 
-	err = s.client.Clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete pod %s: %w", pod.Name, err)
+	for _, deployment := range deployments.Items {
+		propagation := metav1.DeletePropagationForeground
+		err = s.client.Clientset.AppsV1().Deployments(namespace).Delete(ctx, deployment.Name, metav1.DeleteOptions{
+			PropagationPolicy: &propagation,
+		})
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete deployment %s: %w", deployment.Name, err)
+		}
+
+		if err := s.waitForDeploymentDeletion(ctx, namespace, deployment.Name); err != nil {
+			return fmt.Errorf("failed waiting for deployment %s to be deleted: %w", deployment.Name, err)
+		}
 	}
 
-	if err := s.waitForPodDeletion(ctx, pod.Namespace, pod.Name); err != nil {
-		return fmt.Errorf("failed waiting for pod %s to be deleted: %w", pod.Name, err)
+	pods, err := s.client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list pods after deployment deletion: %w", err)
+	}
+	for _, pod := range pods.Items {
+		err = s.client.Clientset.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete pod %s: %w", pod.Name, err)
+		}
+		if err := s.waitForPodDeletion(ctx, namespace, pod.Name); err != nil {
+			return fmt.Errorf("failed waiting for pod %s to be deleted: %w", pod.Name, err)
+		}
 	}
 
 	return nil
@@ -518,6 +692,27 @@ func (s *PodService) PodExists(ctx context.Context, userID, instanceID int) (boo
 		return false, err
 	}
 	return true, nil
+}
+
+// DeploymentExists checks if an instance Deployment exists.
+func (s *PodService) DeploymentExists(ctx context.Context, userID, instanceID int) (bool, error) {
+	if s.client == nil {
+		return false, fmt.Errorf("k8s client not initialized")
+	}
+
+	namespace := s.client.GetNamespace(userID)
+	selector := fmt.Sprintf("instance-id=%d", instanceID)
+	deployments, err := s.client.Clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to list deployments: %w", err)
+	}
+
+	return len(deployments.Items) > 0, nil
 }
 
 func isNotFoundError(err error) bool {
@@ -560,6 +755,33 @@ func (s *PodService) waitForPodDeletion(ctx context.Context, namespace, podName 
 				return ctx.Err()
 			}
 			return fmt.Errorf("timed out waiting for pod %s deletion", podName)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *PodService) waitForDeploymentDeletion(ctx context.Context, namespace, deploymentName string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, deploymentDeletionTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(podDeletionPollInterval)
+	defer ticker.Stop()
+
+	for {
+		_, err := s.client.Clientset.AppsV1().Deployments(namespace).Get(waitCtx, deploymentName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to check deployment %s: %w", deploymentName, err)
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("timed out waiting for deployment %s deletion", deploymentName)
 		case <-ticker.C:
 		}
 	}

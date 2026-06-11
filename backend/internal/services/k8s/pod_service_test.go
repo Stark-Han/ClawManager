@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -63,6 +65,14 @@ func TestCreatePodAppliesSecurityModes(t *testing.T) {
 		t.Fatalf("CreatePod returned error: %v", err)
 	}
 
+	deployment := mustGetDeployment(t, service, "clawreef-user-7", "clawreef-42-openclaw-test")
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+		t.Fatalf("expected single-replica deployment, got %#v", deployment.Spec.Replicas)
+	}
+	if deployment.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyAlways {
+		t.Fatalf("expected deployment-managed pod restartPolicy Always, got %s", deployment.Spec.Template.Spec.RestartPolicy)
+	}
+
 	container := pod.Spec.Containers[0]
 	if container.SecurityContext == nil {
 		t.Fatalf("expected chromium compat security context")
@@ -105,6 +115,11 @@ func TestCreatePodShellRuntimeSkipsDesktopNetworkProbes(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("CreatePod returned error: %v", err)
+	}
+
+	deployment := mustGetDeployment(t, service, "clawreef-user-7", "clawreef-43-shell-test")
+	if len(deployment.Spec.Template.Spec.Containers[0].Ports) != 0 {
+		t.Fatalf("expected shell deployment template to skip desktop ports")
 	}
 
 	container := pod.Spec.Containers[0]
@@ -158,6 +173,11 @@ func TestCreatePodAppliesExtraPVCMountsAndSecretEnv(t *testing.T) {
 		t.Fatalf("CreatePod returned error: %v", err)
 	}
 
+	deployment := mustGetDeployment(t, service, "clawreef-user-7", "clawreef-43-openclaw-team")
+	if deployment.Spec.Template.Labels["instance-id"] != "43" {
+		t.Fatalf("expected deployment template instance-id label, got %#v", deployment.Spec.Template.Labels)
+	}
+
 	container := pod.Spec.Containers[0]
 	if len(container.EnvFrom) != 1 || container.EnvFrom[0].SecretRef == nil || container.EnvFrom[0].SecretRef.Name != "clawreef-team-1-bus" {
 		t.Fatalf("expected Team secret envFrom, got %#v", container.EnvFrom)
@@ -208,6 +228,48 @@ func TestCreatePodAppliesExtraPVCMountsAndSecretEnv(t *testing.T) {
 	}
 }
 
+func TestSelectCurrentPodPrefersRecoveringDeploymentPod(t *testing.T) {
+	pods := []corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "old-evicted"},
+			Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "new-pending"},
+			Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		},
+	}
+
+	selected := selectCurrentPod(pods)
+	if selected == nil || selected.Name != "new-pending" {
+		t.Fatalf("expected recovering pending pod to win over failed pod, got %#v", selected)
+	}
+
+	pods = append(pods, corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "ready"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	})
+
+	selected = selectCurrentPod(pods)
+	if selected == nil || selected.Name != "ready" {
+		t.Fatalf("expected ready running pod to win, got %#v", selected)
+	}
+}
+
 func int64Ptr(value int64) *int64 {
 	return &value
+}
+
+func mustGetDeployment(t *testing.T, service *PodService, namespace, name string) *appsv1.Deployment {
+	t.Helper()
+	deployment, err := service.GetClient().Clientset.AppsV1().Deployments(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected deployment %s/%s to exist: %v", namespace, name, err)
+	}
+	return deployment
 }

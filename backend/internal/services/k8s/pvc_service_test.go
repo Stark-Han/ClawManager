@@ -105,6 +105,52 @@ func TestHostPathPVNodeAffinitySkipsUnschedulableAndNotReadyNodes(t *testing.T) 
 	requireHostnameAffinity(t, affinity, "node-c-host")
 }
 
+func TestHostPathPVNodeAffinitySkipsHardTaintedNodes(t *testing.T) {
+	service := &PVCService{
+		client: &Client{
+			Clientset: fake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "k8s-master",
+						Labels: map[string]string{
+							"kubernetes.io/hostname": "k8s-master",
+						},
+					},
+					Spec: corev1.NodeSpec{
+						Taints: []corev1.Taint{
+							{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
+						},
+					},
+					Status: corev1.NodeStatus{
+						Conditions: []corev1.NodeCondition{
+							{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "k8s-worker1",
+						Labels: map[string]string{
+							"kubernetes.io/hostname": "k8s-worker1",
+						},
+					},
+					Status: corev1.NodeStatus{
+						Conditions: []corev1.NodeCondition{
+							{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			),
+		},
+	}
+
+	affinity, err := service.hostPathPVNodeAffinity(context.Background())
+	if err != nil {
+		t.Fatalf("hostPathPVNodeAffinity returned error: %v", err)
+	}
+	requireHostnameAffinity(t, affinity, "k8s-worker1")
+}
+
 func requireHostnameAffinity(t *testing.T, affinity *corev1.VolumeNodeAffinity, hostname string) {
 	t.Helper()
 	if affinity == nil || affinity.Required == nil || len(affinity.Required.NodeSelectorTerms) != 1 {

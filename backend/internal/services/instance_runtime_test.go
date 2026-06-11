@@ -28,8 +28,8 @@ func TestBuildRuntimeConfig_HermesUsesWebtopDefaults(t *testing.T) {
 	if config.Port != 3001 {
 		t.Fatalf("expected Hermes port 3001, got %d", config.Port)
 	}
-	if config.MountPath != "/config/.hermes" {
-		t.Fatalf("expected Hermes mount path /config/.hermes, got %q", config.MountPath)
+	if config.MountPath != "/config" {
+		t.Fatalf("expected Hermes mount path /config, got %q", config.MountPath)
 	}
 	if config.Env["HERMES_HOME"] != "/config/.hermes" {
 		t.Fatalf("expected Hermes HERMES_HOME /config/.hermes, got %q", config.Env["HERMES_HOME"])

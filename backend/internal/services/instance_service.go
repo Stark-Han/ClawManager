@@ -509,6 +509,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		EnvFromSecretNames:   envFromSecretNames,
 		ExtraPVCMounts:       extraPVCMounts,
 		ConfigMapFileMounts:  configMapFileMounts,
+		VolumeInitScripts:    runtimeVolumeInitScripts(instance.Type, runtimeConfig.MountPath),
 		FSGroup:              fsGroup,
 		VolumeOwnershipFixes: volumeOwnershipFixes,
 		SHMSizeGB:            shmSizeGB,
@@ -652,6 +653,8 @@ func (s *instanceService) Start(instanceID int) error {
 		return fmt.Errorf("failed to build instance agent config: %w", err)
 	}
 	runtimeConfig := buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag)
+	mountPath := persistentVolumeMountPath(instance)
+	instance.MountPath = mountPath
 	extraEnv, err := buildInstancePodEnv(instance, runtimeConfig.Env, gatewayEnv, agentEnv)
 	if err != nil {
 		return fmt.Errorf("failed to resolve instance environment: %w", err)
@@ -683,11 +686,12 @@ func (s *instanceService) Start(instanceID int) error {
 		GPUEnabled:         instance.GPUEnabled,
 		GPUCount:           instance.GPUCount,
 		Image:              runtimeConfig.Image,
-		MountPath:          instance.MountPath,
+		MountPath:          mountPath,
 		ContainerPort:      runtimeConfig.Port,
 		ImagePullPolicy:    corev1.PullPolicy(defaultImagePullPolicy()),
 		ExtraEnv:           extraEnv,
 		EnvFromSecretNames: []string{bootstrapSecretName},
+		VolumeInitScripts:  runtimeVolumeInitScripts(instance.Type, mountPath),
 		SHMSizeGB:          shmSizeGB,
 		SecurityMode:       s.securityModeForInstance(instance.Type),
 	}
@@ -866,10 +870,51 @@ func managedRuntimePersistentDir(instance *models.Instance) string {
 	if strings.EqualFold(instance.Type, "hermes") {
 		return "/config/.hermes"
 	}
+	return persistentVolumeMountPath(instance)
+}
+
+func persistentVolumeMountPath(instance *models.Instance) string {
+	if instance == nil {
+		return "/config"
+	}
+	if defaultPath := defaultMountPathForInstanceType(instance.Type); defaultPath == "/config" {
+		return defaultPath
+	}
 	if strings.TrimSpace(instance.MountPath) != "" {
 		return strings.TrimSpace(instance.MountPath)
 	}
 	return defaultMountPathForInstanceType(instance.Type)
+}
+
+func runtimeVolumeInitScripts(instanceType, mountPath string) []k8s.VolumeInitScript {
+	if !strings.EqualFold(strings.TrimSpace(instanceType), "hermes") || strings.TrimSpace(mountPath) != "/config" {
+		return nil
+	}
+	return []k8s.VolumeInitScript{
+		{
+			Name:      "data",
+			MountPath: "/config",
+			Script: `set -eu
+base="${CLAWMANAGER_VOLUME_PATH:-/config}"
+target="$base/.hermes"
+if [ ! -d "$target" ]; then
+  legacy_found=0
+  for name in hermes-agent skills channels.json session.json bootstrap inventory.json; do
+    if [ -e "$base/$name" ]; then legacy_found=1; fi
+  done
+  mkdir -p "$target"
+  if [ "$legacy_found" = "1" ]; then
+    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+      [ -e "$entry" ] || continue
+      name="${entry##*/}"
+      case "$name" in .|..|.hermes|Desktop|Downloads|lost+found) continue;; esac
+      mv "$entry" "$target"/
+    done
+  fi
+fi
+chown -R 1000:1000 "$target" || true`,
+		},
+	}
 }
 
 func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection, error) {
@@ -1052,6 +1097,19 @@ func (s *instanceService) cleanupOrphanedResources(ctx context.Context, userID, 
 		fmt.Printf("Namespace %s has %d other instance(s), will not delete namespace\n", namespace, otheInstanceCount)
 	}
 
+	deployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("instance-id=%s", instanceLabel),
+	})
+	if err == nil && len(deployments.Items) > 0 {
+		for _, deployment := range deployments.Items {
+			fmt.Printf("Deleting orphaned Deployment %s\n", deployment.Name)
+			propagation := metav1.DeletePropagationForeground
+			client.AppsV1().Deployments(namespace).Delete(ctx, deployment.Name, metav1.DeleteOptions{
+				PropagationPolicy: &propagation,
+			})
+		}
+	}
+
 	// List and delete ConfigMaps with instance label
 	configMaps, err := client.CoreV1().ConfigMaps(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("instance-id=%s", instanceLabel),
@@ -1092,6 +1150,34 @@ func (s *instanceService) cleanupOrphanedResources(ctx context.Context, userID, 
 func (s *instanceService) cleanupOrphanedResourcesByUser(ctx context.Context, userID int) {
 	namespace := s.pvcService.GetClient().GetNamespace(userID)
 	client := s.pvcService.GetClient().Clientset
+
+	deployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "managed-by=clawreef",
+	})
+	if err != nil {
+		fmt.Printf("Warning: failed to list deployments in namespace %s: %v\n", namespace, err)
+	} else {
+		for _, deployment := range deployments.Items {
+			instanceIDStr := deployment.Labels["instance-id"]
+			if instanceIDStr == "" {
+				continue
+			}
+
+			instanceID := 0
+			fmt.Sscanf(instanceIDStr, "%d", &instanceID)
+
+			instance, err := s.instanceRepo.GetByID(instanceID)
+			if err != nil || instance == nil {
+				fmt.Printf("Found orphaned deployment %s (instance-id: %s), deleting...\n", deployment.Name, instanceIDStr)
+				propagation := metav1.DeletePropagationForeground
+				if err := client.AppsV1().Deployments(namespace).Delete(ctx, deployment.Name, metav1.DeleteOptions{
+					PropagationPolicy: &propagation,
+				}); err != nil {
+					fmt.Printf("Warning: failed to delete orphaned deployment %s: %v\n", deployment.Name, err)
+				}
+			}
+		}
+	}
 
 	// Get all pods in the namespace with clawreef label
 	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
@@ -1287,6 +1373,28 @@ func (s *instanceService) ForceSyncInstance(instanceID int) error {
 
 	if err != nil {
 		fmt.Printf("Instance %d: Pod not found in K8s: %v\n", instanceID, err)
+
+		deploymentExists, deploymentErr := s.podService.DeploymentExists(ctx, instance.UserID, instance.ID)
+		if deploymentErr != nil {
+			fmt.Printf("Instance %d: failed to check deployment while pod was missing: %v\n", instanceID, deploymentErr)
+		}
+		if deploymentExists {
+			fmt.Printf("Instance %d: Deployment exists but no pod is available yet, updating to creating\n", instanceID)
+			if instance.Status != "creating" {
+				instance.Status = "creating"
+				instance.PodName = nil
+				instance.PodNamespace = nil
+				instance.PodIP = nil
+				instance.UpdatedAt = time.Now()
+
+				if err := s.instanceRepo.Update(instance); err != nil {
+					return fmt.Errorf("failed to update instance status: %w", err)
+				}
+
+				GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+			}
+			return nil
+		}
 
 		// If instance thinks it's running or creating but pod doesn't exist, update to stopped
 		if instance.Status == "running" || instance.Status == "creating" {

@@ -99,6 +99,31 @@ func (s *SyncService) syncInstance(ctx context.Context, instance *models.Instanc
 	// Check if pod exists in K8s
 	pod, err := s.podService.GetPod(ctx, instance.UserID, instance.ID)
 	if err != nil {
+		deploymentExists, deploymentErr := s.podService.DeploymentExists(ctx, instance.UserID, instance.ID)
+		if deploymentErr != nil {
+			fmt.Printf("Instance %d: failed to check deployment while pod was missing: %v\n", instance.ID, deploymentErr)
+		}
+		if deploymentExists {
+			if instance.Status != "creating" {
+				fmt.Printf("Instance %d has deployment but no pod yet, updating status to creating\n", instance.ID)
+				instance.Status = "creating"
+				instance.PodName = nil
+				instance.PodNamespace = nil
+				instance.PodIP = nil
+				instance.UpdatedAt = time.Now()
+
+				if err := s.instanceRepo.Update(instance); err != nil {
+					fmt.Printf("Error updating instance %d status: %v\n", instance.ID, err)
+				} else {
+					s.updateInfraStatus(instance.ID, "creating")
+					GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+				}
+			} else {
+				s.updateInfraStatus(instance.ID, "creating")
+			}
+			return
+		}
+
 		// Pod doesn't exist in K8s
 		if instance.Status == "running" || instance.Status == "creating" {
 			nextStatus := "stopped"
