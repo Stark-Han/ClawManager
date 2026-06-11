@@ -703,6 +703,14 @@ const TeamDetailPage: React.FC = () => {
   }, [user?.email, user?.username]);
   const currentUserKey =
     typeof user?.id === "number" ? `user-${user.id}` : "current-user";
+  const collaborationGroups = useMemo(
+    () => buildCollaborationGroups(events, tasks, memberById),
+    [events, tasks, memberById],
+  );
+  const activeProcessGroup = useMemo(
+    () => selectActiveProcessGroup(collaborationGroups),
+    [collaborationGroups],
+  );
 
   useEffect(() => {
     const instanceId = selectedDesktopMember?.instance_id;
@@ -960,8 +968,7 @@ const TeamDetailPage: React.FC = () => {
 
           <CollaborationPanel
             team={details.team}
-            events={events}
-            tasks={tasks}
+            groups={collaborationGroups}
             members={details.members}
             memberById={memberById}
             leaderMemberId={details.leader_member_id}
@@ -979,7 +986,7 @@ const TeamDetailPage: React.FC = () => {
           />
         </div>
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(520px,0.95fr)]">
           <section className="app-panel overflow-hidden">
             <div className="border-b border-[#f1e7e1] px-5 py-4">
               <h2 className="text-lg font-semibold text-gray-900">成员</h2>
@@ -1093,21 +1100,32 @@ const TeamDetailPage: React.FC = () => {
             </div>
           </section>
 
-          <aside className="space-y-6">
-            <section className="app-panel p-5">
-              <h2 className="text-lg font-semibold text-gray-900">调试派发</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                留空目标会按后端规则投给 Leader；直接选择成员仅用于 smoke、调试或外部集成。
-              </p>
-              <form onSubmit={handleDispatch} className="mt-4 space-y-4">
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700">
-                    目标成员
-                  </span>
+          <aside className="space-y-4">
+            <InteractionProcessPanel
+              group={activeProcessGroup}
+              memberById={memberById}
+              leaderMemberId={details.leader_member_id}
+            />
+
+            <section className="app-panel p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">调试派发</h2>
+                  <p className="mt-0.5 text-xs leading-5 text-gray-500">
+                    留空目标投给 Leader；直选成员用于 smoke、调试或外部集成。
+                  </p>
+                </div>
+                <span className="rounded-full border border-[#f1e7e1] bg-[#fff8f5] px-2.5 py-1 text-[11px] font-medium text-[#9b5f47]">
+                  Debug
+                </span>
+              </div>
+              <form onSubmit={handleDispatch} className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="block min-w-0">
+                  <span className="text-xs font-medium text-gray-600">目标成员</span>
                   <select
                     value={targetMember}
                     onChange={(event) => setTargetMember(event.target.value)}
-                    className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                    className="mt-1 block h-9 w-full rounded-xl border border-[#eadfd8] px-3 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                   >
                     <option value="">
                       默认 Leader（{details.leader_member_id || "-"}）
@@ -1119,35 +1137,40 @@ const TeamDetailPage: React.FC = () => {
                     ))}
                   </select>
                 </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700">标题</span>
+                <label className="block min-w-0">
+                  <span className="text-xs font-medium text-gray-600">标题</span>
                   <input
                     value={taskTitle}
                     onChange={(event) => setTaskTitle(event.target.value)}
-                    className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                    className="mt-1 block h-9 w-full rounded-xl border border-[#eadfd8] px-3 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                   />
                 </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-gray-700">内容</span>
+                <label className="block min-w-0">
+                  <span className="text-xs font-medium text-gray-600">内容</span>
                   <textarea
                     value={taskPrompt}
                     onChange={(event) => setTaskPrompt(event.target.value)}
-                    rows={5}
-                    className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                    rows={2}
+                    className="mt-1 block h-[72px] w-full resize-none rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                   />
                 </label>
+                <div className="flex min-w-0 flex-col justify-end gap-2">
+                  <button
+                    type="submit"
+                    disabled={dispatching}
+                    className="inline-flex h-10 items-center justify-center rounded-xl bg-gradient-to-r from-[#f26148] to-[#e11d2e] px-4 text-sm font-semibold text-white shadow-[0_14px_30px_-20px_rgba(225,29,46,0.75)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {dispatching ? "派发中..." : "派发"}
+                  </button>
+                  <div className="truncate text-[11px] text-gray-400">
+                    Enter 从群聊发送；此处用于直接派发。
+                  </div>
+                </div>
                 {dispatchError && (
-                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 sm:col-span-2">
                     {dispatchError}
                   </p>
                 )}
-                <button
-                  type="submit"
-                  disabled={dispatching}
-                  className="app-button-primary w-full disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {dispatching ? "派发中..." : "派发"}
-                </button>
               </form>
             </section>
 
@@ -1162,9 +1185,14 @@ const TeamDetailPage: React.FC = () => {
 
 function MetaPanel({ details }: { details: TeamDetails }) {
   return (
-    <section className="app-panel p-5">
-      <h2 className="text-lg font-semibold text-gray-900">运行信息</h2>
-      <dl className="mt-4 space-y-3 text-sm">
+    <section className="app-panel p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-base font-semibold text-gray-900">运行信息</h2>
+        <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500">
+          Runtime
+        </span>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
         <MetaRow label="通信模式" value={details.team.communication_mode} />
         <MetaRow label="共享 PVC" value={details.team.shared_pvc_name || "-"} />
         <MetaRow
@@ -1172,7 +1200,11 @@ function MetaPanel({ details }: { details: TeamDetails }) {
           value={details.team.shared_pvc_namespace || "-"}
         />
         <MetaRow label="StorageClass" value={details.team.storage_class || "-"} />
-        <MetaRow label="Events ID" value={details.team.redis_events_last_id} />
+        <MetaRow
+          label="Events ID"
+          value={details.team.redis_events_last_id}
+          className="col-span-2"
+        />
       </dl>
     </section>
   );
@@ -1210,8 +1242,7 @@ function DescriptionPreview({ text }: { text?: string }) {
 
 function CollaborationPanel({
   team,
-  events,
-  tasks,
+  groups,
   members,
   memberById,
   leaderMemberId,
@@ -1228,8 +1259,7 @@ function CollaborationPanel({
   onLoadMoreHistory,
 }: {
   team: TeamDetails["team"];
-  events: TeamEvent[];
-  tasks: TeamTask[];
+  groups: CollaborationGroup[];
   members: TeamMember[];
   memberById: Map<number, TeamMember>;
   leaderMemberId?: string;
@@ -1245,7 +1275,6 @@ function CollaborationPanel({
   onDispatch: (event: React.FormEvent) => void;
   onLoadMoreHistory: () => void;
 }) {
-  const groups = buildCollaborationGroups(events, tasks, memberById);
   const messages = buildTeamChatMessages(
     groups,
     memberById,
@@ -1283,7 +1312,9 @@ function CollaborationPanel({
         }}
       >
         {messages.length === 0 ? (
-          <div className="p-6 text-center text-xs text-gray-500">暂无群聊消息。</div>
+          <div className="space-y-5 px-4 py-5">
+            <div className="p-6 text-center text-xs text-gray-500">暂无群聊消息。</div>
+          </div>
         ) : (
           <div className="space-y-5 px-4 py-5">
             {(hasMoreHistory || historyLoading || historyError) && (
@@ -1321,7 +1352,7 @@ function CollaborationPanel({
         )}
       </div>
 
-      <div className="shrink-0 border-t border-[#dddddd] bg-white px-4 py-3">
+      <div className="shrink-0 border-t border-[#dddddd] bg-white px-3 py-2.5">
         {dispatchError && (
           <div className="mb-2 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
             {dispatchError}
@@ -1339,12 +1370,12 @@ function CollaborationPanel({
             }}
             rows={1}
             placeholder="发送消息..."
-            className="max-h-24 min-h-[38px] flex-1 resize-none rounded-full border border-[#d9d9d9] bg-white px-4 py-2 text-xs leading-5 text-gray-900 outline-none transition focus:border-[#9ca3af] focus:ring-2 focus:ring-gray-100"
+            className="max-h-20 min-h-[34px] flex-1 resize-none rounded-full border border-[#d9d9d9] bg-white px-4 py-1.5 text-xs leading-5 text-gray-900 outline-none transition focus:border-[#9ca3af] focus:ring-2 focus:ring-gray-100"
           />
           <button
             type="submit"
             disabled={dispatching || !taskPrompt.trim()}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1f2937] text-white transition hover:bg-[#111827] disabled:cursor-not-allowed disabled:bg-gray-300"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#1f2937] text-white transition hover:bg-[#111827] disabled:cursor-not-allowed disabled:bg-gray-300"
             aria-label="发送任务"
             title="发送任务"
           >
@@ -1360,6 +1391,913 @@ function CollaborationPanel({
       </div>
     </section>
   );
+}
+
+function InteractionProcessPanel({
+  group,
+  memberById,
+  leaderMemberId,
+}: {
+  group?: CollaborationGroup;
+  memberById: Map<number, TeamMember>;
+  leaderMemberId?: string;
+}) {
+  const memberByKey = new Map(
+    [...memberById.values()].map((member) => [member.member_key, member]),
+  );
+  const steps = group
+    ? buildProcessSteps(group, memberById, memberByKey, leaderMemberId)
+    : [];
+  const finalResult = group ? processFinalResult(group, steps) : "";
+  const visualStatus = group ? processVisualStatus(group, finalResult, steps) : "idle";
+  const progress = group ? processProgress(group, steps, visualStatus) : 0;
+  const isTerminal = ["succeeded", "failed", "stale"].includes(visualStatus);
+  const statusText = processStatusText(visualStatus);
+  const title = group?.task ? taskTitleText(group.task) : group?.title || "等待任务";
+  const queryText = group?.task
+    ? taskPromptText(group.task) || group.title
+    : group?.items.find((item) => item.content)?.content || "";
+  const columns = buildKanbanColumns(group, steps, finalResult, visualStatus);
+  const decompositionItems = buildDecompositionItems(columns);
+  const kanbanCounts = {
+    todo: columns.todo.length,
+    doing: columns.doing.length,
+    done: columns.done.length,
+  };
+  const defaultCardId =
+    columns.doing[0]?.id || columns.done[0]?.id || columns.todo[0]?.id || "";
+  const [selectedCardId, setSelectedCardId] = useState(defaultCardId);
+  const allCards = [...columns.todo, ...columns.doing, ...columns.done];
+  const selectedCard =
+    allCards.find((card) => card.id === selectedCardId) ||
+    allCards.find((card) => card.id === defaultCardId);
+
+  useEffect(() => {
+    setSelectedCardId(defaultCardId);
+  }, [defaultCardId, group?.key]);
+  const progressStyle =
+    visualStatus === "failed" || visualStatus === "stale"
+      ? "from-rose-500 via-orange-400 to-amber-400"
+      : isTerminal
+        ? "from-emerald-500 via-teal-400 to-cyan-400"
+        : "from-sky-500 via-indigo-500 to-violet-500";
+
+  return (
+    <section className="app-panel overflow-hidden rounded-[22px] border-slate-200 shadow-[0_24px_56px_-42px_rgba(15,23,42,0.7)]">
+      <div className="bg-[linear-gradient(135deg,#111827,#1f2937_48%,#0f766e)] px-4 py-3.5 text-white">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                {group && !isTerminal && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-300 opacity-60" />
+                )}
+                <span
+                  className={`relative inline-flex h-2.5 w-2.5 rounded-full ${
+                    !group
+                      ? "bg-slate-400"
+                      : isTerminal
+                        ? "bg-emerald-300"
+                        : "bg-cyan-300"
+                  }`}
+                />
+              </span>
+              <span className="truncate text-xs font-semibold uppercase tracking-[0.16em] text-cyan-100">
+                Execution Kanban
+              </span>
+              <span className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-white/15">
+                {statusText}
+              </span>
+            </div>
+            <div className="mt-2 text-sm font-semibold leading-5">{title}</div>
+            <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-300">
+              {queryText || "用户提交 query 后，这里会展示拆解、执行和汇总。"}
+            </div>
+          </div>
+          <div className="shrink-0 text-right">
+            <div className="text-xl font-semibold leading-none">{progress}%</div>
+            <div className="mt-1 text-[11px] text-slate-300">overall</div>
+          </div>
+        </div>
+        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/15">
+          <div
+            className={`h-full rounded-full bg-gradient-to-r ${progressStyle} transition-all duration-700`}
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-3 bg-gradient-to-b from-white via-slate-50 to-white px-4 py-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_104px]">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                总任务 Query
+              </div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-700">
+                {queryText || "Idle，等待新的团队任务。"}
+              </div>
+              <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50/70 p-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-slate-700">任务拆解</span>
+                  <span className="text-[10px] text-slate-400">{decompositionItems.length} 项</span>
+                </div>
+                {decompositionItems.length === 0 ? (
+                  <div className="text-[11px] leading-5 text-slate-400">
+                    等待 Leader 拆解并派发子任务。
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {decompositionItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between gap-2 rounded-lg bg-white px-2.5 py-1.5"
+                      >
+                        <div className="min-w-0 truncate text-[11px] font-medium text-slate-700">
+                          {item.title}
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${item.badgeClass}`}>
+                          {item.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+              <div className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
+                {statusText}
+              </div>
+              <div className="mt-2 text-2xl font-semibold leading-none text-slate-900">{progress}%</div>
+              <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">overall</div>
+              <div className="mt-3 grid grid-cols-3 gap-1 text-center text-[10px]">
+                <KanbanCount label="T" value={kanbanCounts.todo} tone="todo" />
+                <KanbanCount label="D" value={kanbanCounts.doing} tone="doing" />
+                <KanbanCount label="✓" value={kanbanCounts.done} tone="done" />
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+            {(group?.route || []).length > 0 ? (
+              group!.route.map((member, index) => (
+                <React.Fragment key={`${group!.key}-route-${member}-${index}`}>
+                  {index > 0 && <span className="text-slate-300">→</span>}
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+                    {displayMemberName(member, memberByKey, leaderMemberId)}
+                  </span>
+                </React.Fragment>
+              ))
+            ) : (
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">Idle</span>
+            )}
+          </div>
+        </div>
+
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+          <div className="grid min-w-[520px] grid-cols-3 gap-2">
+            <KanbanColumn
+              title="Todo"
+              subtitle="已拆解 / 待领取"
+              cards={columns.todo}
+              tone="todo"
+              selectedCardId={selectedCard?.id}
+              onSelect={setSelectedCardId}
+            />
+            <KanbanColumn
+              title="Doing"
+              subtitle="执行中 / 有进展"
+              cards={columns.doing}
+              tone="doing"
+              selectedCardId={selectedCard?.id}
+              onSelect={setSelectedCardId}
+            />
+            <KanbanColumn
+              title="Done"
+              subtitle="已完成 / 已反馈"
+              cards={columns.done}
+              tone="done"
+              selectedCardId={selectedCard?.id}
+              onSelect={setSelectedCardId}
+            />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-slate-800">
+                {selectedCard ? "卡片详情" : "汇总结果"}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-400">
+                点击 Kanban 卡片可切换查看细节
+              </div>
+            </div>
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
+              {statusText}
+            </span>
+          </div>
+          {selectedCard ? (
+            <KanbanCardDetail card={selectedCard} />
+          ) : finalResult ? (
+            <div className="max-h-32 overflow-auto text-xs leading-5 text-slate-700">
+              <MarkdownContent text={finalResult} compact />
+            </div>
+          ) : (
+            <div className="text-xs leading-5 text-slate-500">
+              当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function selectActiveProcessGroup(groups: CollaborationGroup[]) {
+  return (
+    groups.find((item) =>
+      ["pending", "dispatched", "running", "observed", "replied"].includes(item.status),
+    ) || groups[0]
+  );
+}
+
+type ProcessStep = {
+  id: string;
+  actor: string;
+  to: string;
+  eventType: string;
+  content: string;
+  progress?: number;
+  time: number;
+};
+
+type KanbanColumnKey = "todo" | "doing" | "done";
+
+type KanbanTaskCard = {
+  id: string;
+  column: KanbanColumnKey;
+  title: string;
+  summary: string;
+  owner: string;
+  target?: string;
+  eventType: string;
+  time: number;
+  progress?: number;
+  statusLabel: string;
+};
+
+type KanbanColumns = Record<KanbanColumnKey, KanbanTaskCard[]>;
+
+type DecompositionItem = {
+  id: string;
+  title: string;
+  status: string;
+  badgeClass: string;
+};
+
+function buildProcessSteps(
+  group: CollaborationGroup,
+  memberById: Map<number, TeamMember>,
+  memberByKey: Map<string, TeamMember>,
+  leaderMemberId?: string,
+): ProcessStep[] {
+  const steps: ProcessStep[] = [];
+  if (group.task) {
+    const target =
+      memberById.get(group.task.target_member_id)?.member_key ||
+      `#${group.task.target_member_id}`;
+    steps.push({
+      id: `task-dispatch-${group.task.id}`,
+      actor: "ClawManager",
+      to: displayMemberName(target, memberByKey, leaderMemberId),
+      eventType: "task_assigned",
+      content: taskPromptText(group.task) || taskTitleText(group.task),
+      time: new Date(group.task.created_at).getTime(),
+    });
+  }
+
+  for (const item of group.items) {
+    if (isProtocolNoiseItem(item)) {
+      continue;
+    }
+    const actor = displayMemberName(item.actor || item.from || "system", memberByKey, leaderMemberId);
+    const to = item.to ? displayMemberName(item.to, memberByKey, leaderMemberId) : "";
+    steps.push({
+      id: `event-step-${item.event.id}`,
+      actor,
+      to,
+      eventType: item.eventType,
+      content: item.content || chatFallbackText(item, payloadNumber(item.payload, ["progress"]), payloadText(item.payload, ["status"])),
+      progress: payloadNumber(item.payload, ["progress"]),
+      time: item.timeMs,
+    });
+  }
+
+  return steps
+    .filter((step) => Number.isFinite(step.time))
+    .sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+}
+
+function isProtocolNoiseItem(item: CollaborationItem) {
+  const normalizedContent = item.content.trim().toLowerCase();
+  return item.eventType === "inbound" || normalizedContent === "inbound";
+}
+
+function buildKanbanColumns(
+  group: CollaborationGroup | undefined,
+  steps: ProcessStep[],
+  finalResult: string,
+  visualStatus: string,
+): KanbanColumns {
+  const columns: KanbanColumns = { todo: [], doing: [], done: [] };
+  if (!group) {
+    return columns;
+  }
+  const terminal = ["succeeded", "failed", "stale"].includes(visualStatus);
+  const cardByWorkKey = new Map<string, KanbanTaskCard>();
+  const delegatedTargets = steps
+    .filter((step) =>
+      (step.eventType === "task_assigned" || step.eventType === "outbound") &&
+      step.to &&
+      !isLeaderLikeName(step.to),
+    )
+    .map((step) => step.to);
+
+  for (const step of steps) {
+    if (isDispatchOnlyLeaderTerminalStep(step)) {
+      continue;
+    }
+    const workKey = kanbanWorkKey(step, delegatedTargets);
+    const previous = cardByWorkKey.get(workKey);
+    const column = terminal ? "done" : kanbanColumnForStep(step, visualStatus);
+    const card: KanbanTaskCard = {
+      id: previous?.id || `kanban-${workKey}`,
+      column,
+      title: kanbanStepTitle(step, previous),
+      summary: step.content,
+      owner: step.actor,
+      target: step.to,
+      eventType: step.eventType,
+      time: step.time,
+      progress: step.progress,
+      statusLabel: terminal && column === "done" && !isTerminalEventType(step.eventType)
+        ? "已完成"
+        : eventVerb(step.eventType),
+    };
+    if (!previous || step.time >= previous.time) {
+      cardByWorkKey.set(workKey, card);
+    }
+  }
+
+  for (const card of cardByWorkKey.values()) {
+    columns[card.column].push(card);
+  }
+
+  if (finalResult) {
+    columns.done.push({
+      id: "kanban-final-result",
+      column: "done",
+      title: "汇总总任务结果",
+      summary: finalResult,
+      owner: "Leader",
+      eventType: visualStatus === "failed" ? "task_failed" : "task_completed",
+      time: Math.max(...steps.map((step) => step.time), Date.now()),
+      progress: visualStatus === "failed" ? undefined : 100,
+      statusLabel: visualStatus === "failed" ? "失败汇总" : "最终汇总",
+    });
+  }
+
+  (Object.keys(columns) as KanbanColumnKey[]).forEach((key) => {
+    columns[key] = columns[key]
+      .filter((card, index, list) => list.findIndex((item) => item.id === card.id) === index)
+      .sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+  });
+
+  return columns;
+}
+
+function kanbanWorkKey(step: ProcessStep, delegatedTargets: string[] = []) {
+  if (step.eventType === "outbound" || step.eventType === "task_assigned") {
+    return sanitizeKanbanKey(step.to || step.actor || "assignment");
+  }
+  if ((isCompletionEvidenceStep(step) || isFailureEvidenceStep(step)) && isLeaderLikeName(step.actor)) {
+    const target = delegatedTargets.find((candidate) =>
+      mentionsDelegatedTarget(step.content, new Set([candidate])),
+    );
+    if (target) {
+      return sanitizeKanbanKey(target);
+    }
+  }
+  return sanitizeKanbanKey(step.actor || step.to || step.id);
+}
+
+function sanitizeKanbanKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/gi, "-").replace(/^-+|-+$/g, "") || "task";
+}
+
+function isTerminalEventType(eventType: string) {
+  return [
+    "task_completed",
+    "completion",
+    "task_failed",
+    "message_failed",
+    "task_stale",
+  ].includes(eventType);
+}
+
+function kanbanColumnForStep(step: ProcessStep, visualStatus: string): KanbanColumnKey {
+  if (isCompletionEvidenceStep(step) || isFailureEvidenceStep(step)) {
+    return "done";
+  }
+  if (step.eventType === "reply") {
+    return "doing";
+  }
+  if (
+    step.eventType === "task_received" ||
+    step.eventType === "task_started" ||
+    step.eventType === "progress" ||
+    step.eventType === "task_progress"
+  ) {
+    return "doing";
+  }
+  if (visualStatus === "running" && step.eventType !== "task_assigned" && step.eventType !== "outbound") {
+    return "doing";
+  }
+  return "todo";
+}
+
+function kanbanStepTitle(step: ProcessStep, previous?: KanbanTaskCard) {
+  if (previous && isTerminalEventType(step.eventType)) {
+    return `${previous.target || previous.owner} 反馈结果`;
+  }
+  switch (step.eventType) {
+    case "outbound":
+    case "task_assigned":
+      return step.to ? `拆解给 ${step.to}` : "拆解子任务";
+    case "task_received":
+      return `${step.actor} 领取任务`;
+    case "task_started":
+      return `${step.actor} 开始执行`;
+    case "progress":
+    case "task_progress":
+      return `${step.actor} 更新进展`;
+    case "reply":
+    case "completion":
+      return `${step.actor} 反馈结果`;
+    case "task_completed":
+      return `${step.actor} 完成任务`;
+    case "task_failed":
+    case "message_failed":
+      return `${step.actor} 执行失败`;
+    case "task_stale":
+      return "任务超时";
+    default:
+      return previous?.title || eventVerb(step.eventType);
+  }
+}
+
+function buildDecompositionItems(columns: KanbanColumns): DecompositionItem[] {
+  const cards = [...columns.todo, ...columns.doing, ...columns.done].filter(
+    (card) => card.id !== "kanban-final-result",
+  );
+  return cards.slice(0, 5).map((card) => ({
+    id: card.id,
+    title: card.title,
+    status: card.statusLabel,
+    badgeClass: kanbanCardStyle(card).badge,
+  }));
+}
+
+function processProgress(
+  group: CollaborationGroup,
+  steps: ProcessStep[],
+  visualStatus = group.status,
+) {
+  if (visualStatus === "succeeded") {
+    return 100;
+  }
+  if (visualStatus === "failed" || visualStatus === "stale") {
+    return 92;
+  }
+  const explicit = stepsProgress(steps);
+  if (explicit > 0) {
+    return Math.min(explicit, 88);
+  }
+  if (hasWorkerContentEvidence(steps)) {
+    return 82;
+  }
+  if (visualStatus === "running") {
+    return 66;
+  }
+  if (visualStatus === "dispatched" || visualStatus === "replied") {
+    return 38;
+  }
+  if (group.status === "running") {
+    return 58;
+  }
+  if (group.status === "dispatched" || group.status === "replied") {
+    return 34;
+  }
+  return steps.length > 0 ? 24 : 0;
+}
+
+function stepsProgress(steps: ProcessStep[]) {
+  return steps.reduce(
+    (max, step) =>
+      isDispatchOnlyLeaderTerminalStep(step)
+        ? max
+        : Math.max(max, step.progress || 0),
+    0,
+  );
+}
+
+function isDispatchOnlyLeaderTerminalStep(step: ProcessStep) {
+  return (isTerminalEventType(step.eventType) || step.eventType === "reply") &&
+    isLeaderLikeName(step.actor) &&
+    isDispatchOnlyResult(step.content);
+}
+
+function latestCompletionEvidenceStep(steps: ProcessStep[]) {
+  return [...steps]
+    .reverse()
+    .find((step) => isCompletionEvidenceStep(step));
+}
+
+function latestOutcomeEvidence(steps: ProcessStep[]) {
+  for (const step of [...steps].reverse()) {
+    if (isCompletionEvidenceStep(step)) {
+      return { status: "succeeded" as const, step };
+    }
+    if (step.eventType === "task_stale") {
+      return { status: "stale" as const, step };
+    }
+    if (isFailureEvidenceStep(step)) {
+      return { status: "failed" as const, step };
+    }
+  }
+  return undefined;
+}
+
+function isCompletionEvidenceStep(step: ProcessStep) {
+  if (!step.content || isDispatchOnlyLeaderTerminalStep(step)) {
+    return false;
+  }
+  if (isFinalResultText(step.content)) {
+    return true;
+  }
+  if (step.eventType === "task_completed" || step.eventType === "completion") {
+    return true;
+  }
+  return false;
+}
+
+function isFailureEvidenceStep(step: ProcessStep) {
+  if (!step.content && step.eventType !== "task_failed" && step.eventType !== "message_failed") {
+    return false;
+  }
+  if (step.content && isFinalResultText(step.content)) {
+    return false;
+  }
+  if (step.eventType === "task_failed") {
+    return step.content
+      ? /error|failed|failure|exception|timeout|forbidden|失败|错误|异常|超时/.test(step.content.toLowerCase())
+      : true;
+  }
+  if (step.eventType !== "message_failed") {
+    return false;
+  }
+  const normalized = step.content.toLowerCase();
+  return /error|failed|failure|exception|timeout|forbidden|失败|错误|异常|超时/.test(normalized);
+}
+
+function hasRuntimeActivityEvidence(steps: ProcessStep[]) {
+  return steps.some((step) =>
+    ["task_received", "task_started", "progress", "task_progress"].includes(step.eventType) ||
+    (step.eventType === "reply" && !isDispatchOnlyLeaderTerminalStep(step)),
+  );
+}
+
+function hasWorkerContentEvidence(steps: ProcessStep[]) {
+  return steps.some((step) =>
+    step.eventType === "reply" &&
+    Boolean(step.content.trim()) &&
+    !isLeaderLikeName(step.actor) &&
+    !isFinalResultText(step.content),
+  );
+}
+
+function isFinalResultText(value: string) {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  const compact = normalized.replace(/\s+/g, "");
+  if (!normalized || isDispatchOnlyResult(normalized)) {
+    return false;
+  }
+  return (
+    /\[DONE\]/i.test(normalized) ||
+    /task completed/i.test(normalized) ||
+    compact.includes("任务结果反馈") ||
+    compact.includes("任务输出") ||
+    compact.includes("查询完成") ||
+    compact.startsWith("已完成") ||
+    compact.includes("已完成任务") ||
+    compact.includes("完成任务") ||
+    compact.includes("完成管道交付")
+  );
+}
+
+function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []) {
+  const latestOutcome = latestOutcomeEvidence(steps);
+  const finalStep = latestOutcome?.status === "succeeded"
+    ? latestOutcome.step
+    : latestCompletionEvidenceStep(steps);
+  if (finalStep?.content) {
+    return finalStep.content;
+  }
+  if (group.task) {
+    const taskResult =
+      payloadText(group.task.result, ["summary", "result", "message", "text", "answer"]) ||
+      payloadText(group.task.payload, ["result", "answer"]);
+    if (taskResult && isFinalResultText(taskResult)) {
+      return taskResult;
+    }
+  }
+  return "";
+}
+
+function processVisualStatus(
+  group: CollaborationGroup,
+  finalResult: string,
+  steps: ProcessStep[] = [],
+) {
+  const latestOutcome = latestOutcomeEvidence(steps);
+  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
+    return "succeeded";
+  }
+  if (latestOutcome?.status === "failed") {
+    return "failed";
+  }
+  if (latestOutcome?.status === "stale" || group.status === "stale") {
+    return "stale";
+  }
+  if (hasWorkerContentEvidence(steps) || hasRuntimeActivityEvidence(steps)) {
+    return "running";
+  }
+  if (steps.some((step) => step.eventType === "task_assigned" || step.eventType === "outbound")) {
+    return "dispatched";
+  }
+  return group.status === "succeeded" ? "running" : group.status;
+}
+
+function mentionsDelegatedTarget(content: string, targets: Set<string>) {
+  const normalized = content.toLowerCase();
+  for (const target of targets) {
+    const compactTarget = target.toLowerCase();
+    const memberHint = compactTarget.match(/\(([^)]+)\)/)?.[1] || compactTarget;
+    if (normalized.includes(compactTarget) || normalized.includes(memberHint)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isLeaderLikeName(value: string) {
+  const normalized = value.toLowerCase();
+  return normalized === "clawmanager" || normalized.includes("leader") || normalized.includes("(leader)");
+}
+
+function isDispatchOnlyResult(value: string) {
+  const normalized = value.trim().replace(/\s+/g, "");
+  if (!normalized) {
+    return true;
+  }
+  return (
+    normalized === "结果已反馈。" ||
+    normalized === "结果已反馈" ||
+    normalized.includes("在线空闲，派单") ||
+    normalized.includes("在线空闲,派单") ||
+    normalized.includes("已派发") ||
+    normalized.includes("等待其查询并交付结果")
+  );
+}
+
+function processStatusText(status: string) {
+  switch (status) {
+    case "idle":
+      return "空闲";
+    case "pending":
+      return "等待调度";
+    case "dispatched":
+      return "已下发";
+    case "running":
+      return "执行中";
+    case "replied":
+      return "已有反馈";
+    case "succeeded":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "stale":
+      return "超时";
+    default:
+      return status || "观察中";
+  }
+}
+
+function KanbanColumn({
+  title,
+  subtitle,
+  cards,
+  tone,
+  selectedCardId,
+  onSelect,
+}: {
+  title: string;
+  subtitle: string;
+  cards: KanbanTaskCard[];
+  tone: KanbanColumnKey;
+  selectedCardId?: string;
+  onSelect: (id: string) => void;
+}) {
+  const style = kanbanColumnStyle(tone);
+  return (
+    <div className={`min-h-[220px] rounded-2xl border p-2.5 ${style.shell}`}>
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className={`h-2 w-2 rounded-full ${style.dot}`} />
+            <h3 className="text-xs font-semibold text-slate-900">{title}</h3>
+          </div>
+          <p className="mt-0.5 text-[10px] leading-4 text-slate-500">{subtitle}</p>
+        </div>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${style.count}`}>
+          {cards.length}
+        </span>
+      </div>
+
+      <div className="max-h-[260px] space-y-2 overflow-auto pr-1">
+        {cards.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-2.5 py-5 text-center text-[11px] leading-5 text-slate-400">
+            暂无卡片
+          </div>
+        ) : (
+          cards.map((card) => (
+            <KanbanCard
+              key={card.id}
+              card={card}
+              selected={selectedCardId === card.id}
+              onSelect={() => onSelect(card.id)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KanbanCard({
+  card,
+  selected,
+  onSelect,
+}: {
+  card: KanbanTaskCard;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const style = kanbanCardStyle(card);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`group w-full rounded-xl border bg-white px-2.5 py-2 text-left text-xs shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md ${
+        selected ? "border-slate-400 ring-2 ring-slate-200" : style.border
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <span className={`mt-1 h-7 w-1 shrink-0 rounded-full ${style.bar}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-1.5">
+            <div className="line-clamp-2 font-semibold leading-4 text-slate-900">
+              {card.title}
+            </div>
+            {card.column === "doing" && (
+              <span className="relative mt-1 flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sky-400 opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-sky-500" />
+              </span>
+            )}
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${style.badge}`}>
+              {card.statusLabel}
+            </span>
+            {card.progress !== undefined && (
+              <span className="text-[10px] text-slate-400">{card.progress}%</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function KanbanCardDetail({ card }: { card: KanbanTaskCard }) {
+  const style = kanbanCardStyle(card);
+  return (
+    <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold leading-5 text-slate-900">{card.title}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+            <span className={`rounded-full px-2 py-0.5 font-medium ${style.badge}`}>
+              {card.statusLabel}
+            </span>
+            <span>{card.owner}</span>
+            {card.target && (
+              <>
+                <span className="text-slate-300">→</span>
+                <span>{card.target}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <span className="shrink-0 text-[11px] text-slate-400">{formatChatTime(card.time)}</span>
+      </div>
+      <div className="mt-3 max-h-36 overflow-auto text-xs leading-5 text-slate-700">
+        <MarkdownContent text={card.summary || "暂无详情。"} compact />
+      </div>
+    </div>
+  );
+}
+
+function KanbanCount({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: KanbanColumnKey;
+}) {
+  const style = kanbanColumnStyle(tone);
+  return (
+    <div className={`rounded-lg px-1.5 py-1 ${style.count}`}>
+      <div className="font-semibold leading-none">{value}</div>
+      <div className="mt-0.5 opacity-75">{label}</div>
+    </div>
+  );
+}
+
+function kanbanColumnStyle(tone: KanbanColumnKey) {
+  switch (tone) {
+    case "todo":
+      return {
+        shell: "border-amber-100 bg-amber-50/55",
+        dot: "bg-amber-400",
+        count: "bg-amber-100 text-amber-700",
+      };
+    case "doing":
+      return {
+        shell: "border-sky-100 bg-sky-50/60",
+        dot: "bg-sky-500",
+        count: "bg-sky-100 text-sky-700",
+      };
+    case "done":
+      return {
+        shell: "border-emerald-100 bg-emerald-50/55",
+        dot: "bg-emerald-500",
+        count: "bg-emerald-100 text-emerald-700",
+      };
+  }
+}
+
+function kanbanCardStyle(card: KanbanTaskCard) {
+  if (card.eventType === "task_failed" || card.eventType === "message_failed" || card.eventType === "task_stale") {
+    return {
+      border: "border-rose-100",
+      bar: "bg-rose-500",
+      badge: "bg-rose-100 text-rose-700",
+    };
+  }
+  if (card.column === "done") {
+    return {
+      border: "border-emerald-100",
+      bar: "bg-emerald-500",
+      badge: "bg-emerald-100 text-emerald-700",
+    };
+  }
+  if (card.column === "doing") {
+    return {
+      border: "border-sky-100",
+      bar: "bg-sky-500",
+      badge: "bg-sky-100 text-sky-700",
+    };
+  }
+  return {
+    border: "border-amber-100",
+    bar: "bg-amber-400",
+    badge: "bg-amber-100 text-amber-700",
+  };
 }
 
 type TeamChatMessage = {
@@ -1448,7 +2386,7 @@ function buildTeamChatMessages(
     }
 
     for (const item of group.items) {
-      if (isTaskDispatchEcho(item, group.task) || isProtocolProgressEcho(item)) {
+      if (isTaskDispatchEcho(item, group.task) || isProtocolProgressEcho(item) || isProtocolNoiseItem(item)) {
         continue;
       }
       const message = chatMessageFromItem(item, memberByKey, leaderMemberId);
@@ -2261,11 +3199,21 @@ function MemberPill({ label, value }: { label: string; value: string }) {
   );
 }
 
-function MetaRow({ label, value }: { label: string; value: string }) {
+function MetaRow({
+  label,
+  value,
+  className = "",
+}: {
+  label: string;
+  value: string;
+  className?: string;
+}) {
   return (
-    <div>
-      <dt className="text-gray-500">{label}</dt>
-      <dd className="mt-1 break-all font-medium text-gray-900">{value}</dd>
+    <div className={`rounded-xl border border-[#f1e7e1] bg-white/80 px-3 py-2 ${className}`}>
+      <dt className="text-[11px] leading-4 text-gray-500">{label}</dt>
+      <dd className="mt-0.5 truncate font-medium leading-5 text-gray-900" title={value}>
+        {value}
+      </dd>
     </div>
   );
 }

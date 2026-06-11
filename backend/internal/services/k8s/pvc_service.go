@@ -217,7 +217,7 @@ func (s *PVCService) waitForTeamSharedPVCBinding(ctx context.Context, namespace,
 }
 
 func (s *PVCService) createPVForTeamSharedPVC(ctx context.Context, namespace, pvcName string, userID, teamID, storageSizeGB int, storageClass string) (*corev1.PersistentVolumeClaim, error) {
-	pvName := fmt.Sprintf("clawreef-pv-user-%d-team-%d-shared", userID, teamID)
+	pvName := s.client.GetTeamSharedPVName(userID, teamID)
 	hostPathPrefix := "/data/clawreef"
 	if s.client != nil && s.client.HostPathPrefix != "" {
 		hostPathPrefix = s.client.HostPathPrefix
@@ -413,7 +413,7 @@ func (s *PVCService) waitForPVCBinding(ctx context.Context, namespace, pvcName s
 
 // createPVForPVC creates a PV manually to bind to the PVC
 func (s *PVCService) createPVForPVC(ctx context.Context, namespace, pvcName string, userID, instanceID, storageSizeGB int, storageClass string) (*corev1.PersistentVolumeClaim, error) {
-	pvName := fmt.Sprintf("clawreef-pv-user-%d-instance-%d", userID, instanceID)
+	pvName := s.client.GetInstancePVName(userID, instanceID)
 	// Use configurable host path prefix for persistent storage
 	hostPathPrefix := "/data/clawreef"
 	if s.client != nil && s.client.HostPathPrefix != "" {
@@ -564,7 +564,7 @@ func (s *PVCService) DeletePVC(ctx context.Context, userID, instanceID int) erro
 
 	pvcName := s.client.GetPVCName(instanceID)
 	namespace := s.client.GetNamespace(userID)
-	pvName := fmt.Sprintf("clawreef-pv-user-%d-instance-%d", userID, instanceID)
+	pvName := s.client.GetInstancePVName(userID, instanceID)
 
 	// Get PVC first to find the associated PV
 	pvc, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
@@ -627,9 +627,7 @@ func (s *PVCService) DeletePVC(ctx context.Context, userID, instanceID int) erro
 	return nil
 }
 
-// DeleteTeamSharedPVC deletes a Team shared PVC and the predictable hostPath PV
-// used by the single-node manual storage fallback. It does not delete an
-// arbitrary bound PV because that may belong to a real RWX provisioner.
+// DeleteTeamSharedPVC deletes a Team shared PVC and its manual hostPath PV.
 func (s *PVCService) DeleteTeamSharedPVC(ctx context.Context, userID, teamID int) error {
 	if s.client == nil {
 		return fmt.Errorf("k8s client not initialized")
@@ -637,7 +635,14 @@ func (s *PVCService) DeleteTeamSharedPVC(ctx context.Context, userID, teamID int
 
 	pvcName := s.client.GetTeamSharedPVCName(teamID)
 	namespace := s.client.GetNamespace(userID)
-	pvName := fmt.Sprintf("clawreef-pv-user-%d-team-%d-shared", userID, teamID)
+	pvName := s.client.GetTeamSharedPVName(userID, teamID)
+	boundPVName := ""
+
+	if pvc, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{}); err == nil && pvc != nil {
+		boundPVName = pvc.Spec.VolumeName
+	} else if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to get Team shared PVC %s/%s before delete: %w", namespace, pvcName, err)
+	}
 
 	if err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvcName, metav1.DeleteOptions{}); err != nil {
 		if !errors.IsNotFound(err) {
@@ -647,6 +652,13 @@ func (s *PVCService) DeleteTeamSharedPVC(ctx context.Context, userID, teamID int
 	if err := s.client.Clientset.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{}); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete Team shared PV %s: %w", pvName, err)
+		}
+	}
+	if boundPVName != "" && boundPVName != pvName {
+		if err := s.client.Clientset.CoreV1().PersistentVolumes().Delete(ctx, boundPVName, metav1.DeleteOptions{}); err != nil {
+			if !errors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete bound Team shared PV %s: %w", boundPVName, err)
+			}
 		}
 	}
 	return nil

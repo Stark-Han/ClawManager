@@ -21,6 +21,7 @@ export type TeamAgentRuntimeContext = {
 export type AgencyAgentProfile = {
   key: AgencyAgentProfileKey;
   name: string;
+  displayName: string;
   sourceFile: string;
   roleHint: string;
   summary: string;
@@ -43,6 +44,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.agents-orchestrator": {
     key: "agency.agents-orchestrator",
     name: "Agents Orchestrator",
+    displayName: "智能体编排官",
     sourceFile: "specialized/agents-orchestrator.md",
     roleHint: "leader",
     summary:
@@ -66,8 +68,9 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.senior-developer": {
     key: "agency.senior-developer",
     name: "Senior Developer",
+    displayName: "资深开发工程师",
     sourceFile: "engineering/engineering-senior-developer.md",
-    roleHint: "developer",
+    roleHint: "senior-developer",
     summary:
       "Implements scoped engineering tasks, keeps changes practical, and reports concrete results and blockers.",
     systemPrompt:
@@ -84,6 +87,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.frontend-developer": {
     key: "agency.frontend-developer",
     name: "Frontend Developer",
+    displayName: "前端开发工程师",
     sourceFile: "engineering/engineering-frontend-developer.md",
     roleHint: "frontend-engineer",
     summary:
@@ -102,6 +106,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.backend-architect": {
     key: "agency.backend-architect",
     name: "Backend Architect",
+    displayName: "后端架构师",
     sourceFile: "engineering/engineering-backend-architect.md",
     roleHint: "backend-engineer",
     summary:
@@ -120,6 +125,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.software-architect": {
     key: "agency.software-architect",
     name: "Software Architect",
+    displayName: "软件架构师",
     sourceFile: "engineering/engineering-software-architect.md",
     roleHint: "architect",
     summary:
@@ -138,6 +144,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.product-manager": {
     key: "agency.product-manager",
     name: "Product Manager",
+    displayName: "产品经理",
     sourceFile: "product/product-manager.md",
     roleHint: "product-manager",
     summary:
@@ -156,6 +163,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.ui-designer": {
     key: "agency.ui-designer",
     name: "UI Designer",
+    displayName: "UI 设计师",
     sourceFile: "design/design-ui-designer.md",
     roleHint: "ui-ux-designer",
     summary:
@@ -174,6 +182,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.code-reviewer": {
     key: "agency.code-reviewer",
     name: "Code Reviewer",
+    displayName: "代码审查员",
     sourceFile: "engineering/engineering-code-reviewer.md",
     roleHint: "code-reviewer",
     summary:
@@ -192,6 +201,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.evidence-collector": {
     key: "agency.evidence-collector",
     name: "Evidence Collector",
+    displayName: "验收验证员",
     sourceFile: "testing/testing-evidence-collector.md",
     roleHint: "qa-engineer",
     summary:
@@ -210,6 +220,7 @@ export const AGENCY_AGENT_PROFILES: Record<
   "agency.api-tester": {
     key: "agency.api-tester",
     name: "API Tester",
+    displayName: "API 测试员",
     sourceFile: "testing/testing-api-tester.md",
     roleHint: "api-tester",
     summary:
@@ -278,10 +289,38 @@ export const buildAgencyAgentEnvironment = (
     ],
   };
   const value = JSON.stringify(payload);
+  const runtimeSystemPrompt = [
+    profile.systemPrompt,
+    `Team member context: member_id=${context.memberId}; display_name=${context.displayName}; role=${context.role}; runtime=${context.runtimeType}; is_leader=${context.isLeader}.`,
+    `Role summary: ${profile.summary}`,
+    "Collaboration rules:",
+    ...profile.collaborationRules.map((rule) => `- ${rule}`),
+    `Expected output contract: ${profile.outputContract.join(", ")}.`,
+  ].join("\n");
+  const persona = JSON.stringify({
+    schemaVersion: 1,
+    profileKey: profile.key,
+    name: profile.name,
+    displayName: profile.displayName,
+    roleHint: profile.roleHint,
+    summary: profile.summary,
+    memberId: context.memberId,
+    role: context.role,
+    runtimeType: context.runtimeType,
+    isLeader: context.isLeader,
+    systemPrompt: runtimeSystemPrompt,
+  });
 
   return {
     CLAWMANAGER_RUNTIME_AGENTS_JSON: value,
     CLAWMANAGER_OPENCLAW_AGENTS_JSON: value,
     CLAWMANAGER_HERMES_AGENTS_JSON: value,
+    CLAWMANAGER_RUNTIME_SYSTEM_PROMPT: runtimeSystemPrompt,
+    CLAWMANAGER_HERMES_SYSTEM_PROMPT: runtimeSystemPrompt,
+    CLAWMANAGER_AGENT_SYSTEM_PROMPT: runtimeSystemPrompt,
+    HERMES_SYSTEM_PROMPT: runtimeSystemPrompt,
+    CLAWMANAGER_RUNTIME_PERSONA_JSON: persona,
+    CLAWMANAGER_HERMES_PERSONA_JSON: persona,
+    CLAWMANAGER_AGENT_PERSONA_JSON: persona,
   };
 };

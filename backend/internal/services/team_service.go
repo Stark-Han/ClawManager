@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	teamSharedMountPath    = "/team"
-	teamConfigFileName     = "team.json"
-	teamConfigMountDirPath = "/etc/clawmanager/team"
-	teamConfigMountPath    = teamConfigMountDirPath + "/" + teamConfigFileName
-	teamSharedUID          = 1000
-	teamSharedGID          = 1000
-	teamSharedUmask        = "0002"
-	teamRedisURLSecretKey  = "CLAWMANAGER_TEAM_REDIS_URL"
-	teamTokenSecretKey     = "CLAWMANAGER_TEAM_TOKEN"
+	teamSharedMountPath     = "/team"
+	teamConfigFileName      = "team.json"
+	teamConfigMountDirPath  = "/etc/clawmanager/team"
+	teamConfigMountPath     = teamConfigMountDirPath + "/" + teamConfigFileName
+	teamHermesSoulMountPath = "/config/.hermes/SOUL.md"
+	teamSharedUID           = 1000
+	teamSharedGID           = 1000
+	teamSharedUmask         = "0002"
+	teamRedisURLSecretKey   = "CLAWMANAGER_TEAM_REDIS_URL"
+	teamTokenSecretKey      = "CLAWMANAGER_TEAM_TOKEN"
 
 	defaultTeamTaskStaleTimeout = 30 * time.Minute
 	teamTaskStaleSweepInterval  = 30 * time.Second
@@ -376,9 +377,16 @@ func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, memb
 	if err != nil {
 		return err
 	}
-	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), map[string]string{
+	data := map[string]string{
 		teamConfigFileName: rosterJSON,
-	}, map[string]string{
+	}
+	for _, member := range members {
+		if member.RuntimeType != "hermes" {
+			continue
+		}
+		data[teamMemberSoulConfigKey(member.MemberKey)] = buildTeamMemberSoulMarkdown(member)
+	}
+	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), data, map[string]string{
 		"app":        "clawreef",
 		"managed-by": "clawreef",
 		"team-id":    strconv.Itoa(team.ID),
@@ -454,26 +462,28 @@ func (s *teamService) buildTeamMemberInstanceRequest(team *models.Team, memberPl
 		StorageClass:         derefTeamString(team.StorageClass),
 		OpenClawConfigPlan:   req.OpenClawConfigPlan,
 		Team: &TeamInstanceConfig{
-			Environment:     s.teamMemberEnv(team, memberPlan.MemberKey, memberPlan.Role),
-			SecretName:      derefTeamString(team.TeamTokenSecretName),
-			SharedPVCName:   derefTeamString(team.SharedPVCName),
-			SharedMountPath: team.SharedMountPath,
-			ConfigMapName:   s.teamConfigMapName(team.ID),
-			ConfigMountPath: teamConfigMountDirPath,
-			SharedUID:       teamSharedUID,
-			SharedGID:       teamSharedGID,
-			SharedUmask:     teamSharedUmask,
+			Environment:      s.teamMemberEnv(team, memberPlan),
+			SecretName:       derefTeamString(team.TeamTokenSecretName),
+			SharedPVCName:    derefTeamString(team.SharedPVCName),
+			SharedMountPath:  team.SharedMountPath,
+			ConfigMapName:    s.teamConfigMapName(team.ID),
+			ConfigMountPath:  teamConfigMountDirPath,
+			PersonaConfigKey: teamMemberPersonaConfigKey(memberPlan),
+			SharedUID:        teamSharedUID,
+			SharedGID:        teamSharedGID,
+			SharedUmask:      teamSharedUmask,
 		},
 	}
 }
 
-func (s *teamService) teamMemberEnv(team *models.Team, memberKey, role string) map[string]string {
+func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember) map[string]string {
 	managerBaseURL, _ := defaultTeamManagerBaseURL()
-	return map[string]string{
+	memberContext := buildPlannedTeamMemberTaskContext(member)
+	env := map[string]string{
 		"CLAWMANAGER_TEAM_ENABLED":        "true",
 		"CLAWMANAGER_TEAM_ID":             strconv.Itoa(team.ID),
-		"CLAWMANAGER_TEAM_MEMBER_ID":      memberKey,
-		"CLAWMANAGER_TEAM_ROLE":           role,
+		"CLAWMANAGER_TEAM_MEMBER_ID":      member.MemberKey,
+		"CLAWMANAGER_TEAM_ROLE":           member.Role,
 		"CLAWMANAGER_TEAM_SHARED_DIR":     team.SharedMountPath,
 		"CLAWMANAGER_TEAM_SHARED_UID":     strconv.Itoa(teamSharedUID),
 		"CLAWMANAGER_TEAM_SHARED_GID":     strconv.Itoa(teamSharedGID),
@@ -484,12 +494,35 @@ func (s *teamService) teamMemberEnv(team *models.Team, memberKey, role string) m
 		"CLAWMANAGER_TEAM_CONFIG_PATH":    teamConfigMountPath,
 		"CLAWMANAGER_TEAM_AUTORUN":        "true",
 		"CLAWMANAGER_TEAM_CONSUMER_GROUP": "team-members",
-		"CLAWMANAGER_TEAM_INBOX_KEY":      teamInboxKey(team.ID, memberKey),
+		"CLAWMANAGER_TEAM_INBOX_KEY":      teamInboxKey(team.ID, member.MemberKey),
 		"CLAWMANAGER_TEAM_EVENTS_KEY":     teamEventsKey(team.ID),
 		"CLAWMANAGER_TEAM_PRESENCE_KEY":   teamPresenceKey(team.ID),
 		"CLAWMANAGER_TEAM_DLQ_KEY":        teamDLQKey(team.ID),
 		"CLAWMANAGER_TEAM_MANAGER_URL":    managerBaseURL,
 	}
+	if description := strings.TrimSpace(memberContext["description"]); description != "" {
+		env["CLAWMANAGER_TEAM_MEMBER_DESCRIPTION"] = description
+	}
+	if systemPrompt := strings.TrimSpace(memberContext["systemPrompt"]); systemPrompt != "" {
+		env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] = systemPrompt
+		env["HERMES_AGENT_HELP_GUIDANCE"] = systemPrompt
+	}
+	return env
+}
+
+func teamMemberPersonaConfigKey(member plannedTeamMember) string {
+	if member.RuntimeType != "hermes" {
+		return ""
+	}
+	return teamMemberSoulConfigKey(member.MemberKey)
+}
+
+func teamMemberSoulConfigKey(memberKey string) string {
+	key := normalizeTeamMemberKeyForInstanceName(memberKey)
+	if key == "" {
+		key = "member"
+	}
+	return fmt.Sprintf("hermes-soul-%s.md", key)
 }
 
 func (s *teamService) ListTeams(userID, offset, limit int) (*TeamListPayload, error) {
@@ -651,19 +684,26 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		}
 	}
 	now := time.Now().UTC()
+	rawPrompt := eventString(taskPayload, "prompt", "goal", "instruction", "instructions")
+	memberInstance, _ := s.teamMemberInstance(member)
+	memberContext := buildTeamMemberTaskContext(member, memberInstance)
+	runtimePrompt := buildTeamRuntimePrompt(rawPrompt, memberContext)
 	envelope := map[string]interface{}{
-		"v":           1,
-		"messageId":   messageID,
-		"teamId":      strconv.Itoa(teamID),
-		"from":        "clawmanager",
-		"to":          member.MemberKey,
-		"intent":      eventString(taskPayload, "intent"),
-		"taskId":      fmt.Sprintf("team-%d-task-%d", teamID, task.ID),
-		"title":       eventString(taskPayload, "title"),
-		"prompt":      eventString(taskPayload, "prompt", "goal", "instruction", "instructions"),
-		"contextRefs": normalizeContextRefs(taskPayload["contextRefs"]),
-		"metadata":    taskPayload,
-		"createdAt":   now.Format(time.RFC3339Nano),
+		"v":             1,
+		"messageId":     messageID,
+		"teamId":        strconv.Itoa(teamID),
+		"from":          "clawmanager",
+		"to":            member.MemberKey,
+		"intent":        eventString(taskPayload, "intent"),
+		"taskId":        fmt.Sprintf("team-%d-task-%d", teamID, task.ID),
+		"title":         eventString(taskPayload, "title"),
+		"prompt":        runtimePrompt,
+		"rawPrompt":     rawPrompt,
+		"contextRefs":   normalizeContextRefs(taskPayload["contextRefs"]),
+		"memberContext": memberContext,
+		"systemPrompt":  memberContext["systemPrompt"],
+		"metadata":      taskPayload,
+		"createdAt":     now.Format(time.RFC3339Nano),
 	}
 	if envelope["intent"] == "" {
 		envelope["intent"] = "run_task"
@@ -673,7 +713,8 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	}
 	if envelope["prompt"] == "" {
 		rawPayload, _ := marshalJSON(taskPayload)
-		envelope["prompt"] = rawPayload
+		envelope["prompt"] = buildTeamRuntimePrompt(rawPayload, memberContext)
+		envelope["rawPrompt"] = rawPayload
 	}
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
@@ -697,6 +738,242 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		return nil, err
 	}
 	return teamTaskPayload(*task)
+}
+
+func (s *teamService) teamMemberInstance(member *models.TeamMember) (*models.Instance, error) {
+	if s == nil || s.instanceService == nil || member == nil || member.InstanceID == nil || *member.InstanceID <= 0 {
+		return nil, nil
+	}
+	return s.instanceService.GetByID(*member.InstanceID)
+}
+
+func buildTeamMemberTaskContext(member *models.TeamMember, instance *models.Instance) map[string]string {
+	if member == nil {
+		return map[string]string{}
+	}
+	displayName := strings.TrimSpace(member.DisplayName)
+	if displayName == "" {
+		displayName = member.MemberKey
+	}
+	role := strings.TrimSpace(member.Role)
+	if role == "" {
+		role = "member"
+	}
+	description := derefTeamString(member.Description)
+	personaSystemPrompt, personaDescription := teamMemberPersonaFromInstance(instance)
+	if description == "" {
+		description = personaDescription
+	}
+	systemPrompt := buildTeamMemberSystemPrompt(displayName, member.MemberKey, role, description, personaSystemPrompt)
+	return map[string]string{
+		"memberId":     member.MemberKey,
+		"displayName":  displayName,
+		"role":         role,
+		"description":  description,
+		"systemPrompt": systemPrompt,
+	}
+}
+
+func buildPlannedTeamMemberTaskContext(member plannedTeamMember) map[string]string {
+	displayName := strings.TrimSpace(member.DisplayName)
+	if displayName == "" {
+		displayName = member.MemberKey
+	}
+	role := strings.TrimSpace(member.Role)
+	if role == "" {
+		role = "member"
+	}
+	description := strings.TrimSpace(derefTeamString(member.Request.Description))
+	personaSystemPrompt, personaDescription := teamMemberPersonaFromEnv(member.Request.EnvironmentOverrides)
+	if description == "" {
+		description = personaDescription
+	}
+	systemPrompt := buildTeamMemberSystemPrompt(displayName, member.MemberKey, role, description, personaSystemPrompt)
+	return map[string]string{
+		"memberId":     member.MemberKey,
+		"displayName":  displayName,
+		"role":         role,
+		"description":  description,
+		"systemPrompt": systemPrompt,
+	}
+}
+
+func buildTeamMemberSystemPrompt(displayName, memberID, role, description, personaSystemPrompt string) string {
+	systemPrompt := strings.TrimSpace(fmt.Sprintf(
+		"You are Team member %q (member_id=%s, role=%s). Follow this role for this task. Role responsibilities: %s",
+		displayName,
+		memberID,
+		role,
+		description,
+	))
+	if strings.TrimSpace(description) == "" {
+		systemPrompt = fmt.Sprintf(
+			"You are Team member %q (member_id=%s, role=%s). Follow this role for this task.",
+			displayName,
+			memberID,
+			role,
+		)
+	}
+	if personaSystemPrompt != "" {
+		systemPrompt = personaSystemPrompt + "\n\n" + systemPrompt
+	}
+	return systemPrompt
+}
+
+func buildTeamMemberSoulMarkdown(member plannedTeamMember) string {
+	context := buildPlannedTeamMemberTaskContext(member)
+	lines := []string{
+		fmt.Sprintf("# %s", strings.TrimSpace(context["displayName"])),
+		"",
+		"You are running as a ClawManager Team member. Treat this file as persistent identity and role guidance.",
+		"",
+		"## Team Identity",
+		fmt.Sprintf("- Member ID: %s", context["memberId"]),
+		fmt.Sprintf("- Display name: %s", context["displayName"]),
+		fmt.Sprintf("- Role: %s", context["role"]),
+	}
+	if description := strings.TrimSpace(context["description"]); description != "" {
+		lines = append(lines, fmt.Sprintf("- Responsibilities: %s", description))
+	}
+	lines = append(lines,
+		"",
+		"## Role Instructions",
+		strings.TrimSpace(context["systemPrompt"]),
+		"",
+		"## Collaboration Rules",
+		"- Only handle tasks addressed to your Team member inbox.",
+		"- Use /team for shared context, durable notes, and handoff artifacts.",
+		"- Report progress, blockers, verification evidence, and final results through the Team channel.",
+		"- If asked about your role, answer from this Team Identity and Role Instructions section.",
+		"",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func teamMemberPersonaFromInstance(instance *models.Instance) (string, string) {
+	if instance == nil {
+		return "", ""
+	}
+	overrides, err := parseEnvironmentOverridesJSON(instance.EnvironmentOverridesJSON)
+	if err != nil || len(overrides) == 0 {
+		return "", ""
+	}
+	return teamMemberPersonaFromEnv(overrides)
+}
+
+func teamMemberPersonaFromEnv(overrides map[string]string) (string, string) {
+	if len(overrides) == 0 {
+		return "", ""
+	}
+	systemPrompt := strings.TrimSpace(firstNonEmptyEnv(overrides,
+		"CLAWMANAGER_AGENT_SYSTEM_PROMPT",
+		"CLAWMANAGER_HERMES_SYSTEM_PROMPT",
+		"CLAWMANAGER_RUNTIME_SYSTEM_PROMPT",
+		"HERMES_SYSTEM_PROMPT",
+	))
+	description := ""
+	for _, key := range []string{
+		"CLAWMANAGER_AGENT_PERSONA_JSON",
+		"CLAWMANAGER_HERMES_PERSONA_JSON",
+		"CLAWMANAGER_RUNTIME_PERSONA_JSON",
+	} {
+		persona := parseTeamPersonaEnv(overrides[key])
+		if persona == nil {
+			continue
+		}
+		if systemPrompt == "" {
+			systemPrompt = strings.TrimSpace(persona.SystemPrompt)
+		}
+		if description == "" {
+			description = strings.TrimSpace(persona.Summary)
+		}
+	}
+	for _, key := range []string{
+		"CLAWMANAGER_HERMES_AGENTS_JSON",
+		"CLAWMANAGER_RUNTIME_AGENTS_JSON",
+		"CLAWMANAGER_OPENCLAW_AGENTS_JSON",
+	} {
+		agents := parseTeamAgentsEnv(overrides[key])
+		if agents == nil {
+			continue
+		}
+		if systemPrompt == "" {
+			systemPrompt = strings.TrimSpace(agents.SystemPrompt)
+		}
+		if description == "" {
+			description = strings.TrimSpace(agents.Summary)
+		}
+	}
+	return systemPrompt, description
+}
+
+type teamPersonaEnv struct {
+	SystemPrompt string `json:"systemPrompt"`
+	Summary      string `json:"summary"`
+}
+
+func parseTeamPersonaEnv(raw string) *teamPersonaEnv {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var persona teamPersonaEnv
+	if err := json.Unmarshal([]byte(raw), &persona); err != nil {
+		return nil
+	}
+	return &persona
+}
+
+type teamAgentsEnv struct {
+	Items []struct {
+		Content struct {
+			Config struct {
+				SystemPrompt string `json:"systemPrompt"`
+				Summary      string `json:"summary"`
+			} `json:"config"`
+		} `json:"content"`
+	} `json:"items"`
+}
+
+func parseTeamAgentsEnv(raw string) *teamPersonaEnv {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var payload teamAgentsEnv
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	for _, item := range payload.Items {
+		systemPrompt := strings.TrimSpace(item.Content.Config.SystemPrompt)
+		summary := strings.TrimSpace(item.Content.Config.Summary)
+		if systemPrompt != "" || summary != "" {
+			return &teamPersonaEnv{SystemPrompt: systemPrompt, Summary: summary}
+		}
+	}
+	return nil
+}
+
+func firstNonEmptyEnv(values map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(values[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func buildTeamRuntimePrompt(rawPrompt string, memberContext map[string]string) string {
+	prompt := strings.TrimSpace(rawPrompt)
+	if len(memberContext) == 0 {
+		return prompt
+	}
+	systemPrompt := strings.TrimSpace(memberContext["systemPrompt"])
+	if systemPrompt == "" {
+		return prompt
+	}
+	if prompt == "" {
+		return systemPrompt
+	}
+	return fmt.Sprintf("%s\n\nUser task:\n%s", systemPrompt, prompt)
 }
 
 func (s *teamService) DeleteTeam(userID, teamID int) error {

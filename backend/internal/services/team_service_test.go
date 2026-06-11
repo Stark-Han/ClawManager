@@ -15,7 +15,10 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	env := service.teamMemberEnv(&models.Team{
 		ID:              12,
 		SharedMountPath: "/team",
-	}, "leader", "lead")
+	}, plannedTeamMember{
+		MemberKey: "leader",
+		Role:      "lead",
+	})
 
 	if env["CLAWMANAGER_TEAM_ID"] != "12" {
 		t.Fatalf("expected Team id env, got %q", env["CLAWMANAGER_TEAM_ID"])
@@ -54,6 +57,37 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	}
 }
 
+func TestTeamMemberEnvInjectsRoleGuidance(t *testing.T) {
+	t.Setenv("CLAWMANAGER_TEAM_MANAGER_BASE_URL", "http://manager.example")
+	description := "Senior Developer: implements scoped changes and reports verification."
+
+	service := &teamService{}
+	env := service.teamMemberEnv(&models.Team{
+		ID:              12,
+		SharedMountPath: "/team",
+	}, plannedTeamMember{
+		MemberKey:   "worker",
+		DisplayName: "team-worker",
+		Role:        "senior-developer",
+		Request: CreateTeamMemberRequest{
+			Description: &description,
+		},
+	})
+
+	if env["CLAWMANAGER_TEAM_ROLE"] != "senior-developer" {
+		t.Fatalf("expected specific Team role env, got %q", env["CLAWMANAGER_TEAM_ROLE"])
+	}
+	if env["CLAWMANAGER_TEAM_MEMBER_DESCRIPTION"] != description {
+		t.Fatalf("expected description env, got %q", env["CLAWMANAGER_TEAM_MEMBER_DESCRIPTION"])
+	}
+	if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], "senior-developer") {
+		t.Fatalf("expected Team system prompt to include role, got %q", env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
+	}
+	if env["HERMES_AGENT_HELP_GUIDANCE"] != env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] {
+		t.Fatalf("expected Hermes guidance alias to match Team system prompt")
+	}
+}
+
 func TestBuildTeamMemberInstanceRequestUsesSharedPermissionDefaults(t *testing.T) {
 	service := &teamService{}
 	pvcName := "clawreef-team-7-shared"
@@ -82,6 +116,31 @@ func TestBuildTeamMemberInstanceRequestUsesSharedPermissionDefaults(t *testing.T
 	}
 	if req.Team.Environment["CLAWMANAGER_TEAM_CONFIG_PATH"] != "/etc/clawmanager/team/team.json" {
 		t.Fatalf("unexpected Team config env: %#v", req.Team.Environment)
+	}
+}
+
+func TestBuildTeamMemberInstanceRequestMountsHermesSoul(t *testing.T) {
+	service := &teamService{}
+	pvcName := "clawreef-team-7-shared"
+	secretName := "clawreef-team-7-bus"
+	req := service.buildTeamMemberInstanceRequest(&models.Team{
+		ID:                  7,
+		Name:                "Delivery",
+		SharedPVCName:       &pvcName,
+		SharedMountPath:     "/team",
+		TeamTokenSecretName: &secretName,
+	}, plannedTeamMember{
+		MemberKey:   "worker",
+		DisplayName: "team worker",
+		Role:        "senior-developer",
+		RuntimeType: "hermes",
+	})
+
+	if req.Team == nil {
+		t.Fatalf("expected Team instance config")
+	}
+	if req.Team.PersonaConfigKey != "hermes-soul-worker.md" {
+		t.Fatalf("expected Hermes persona config key, got %q", req.Team.PersonaConfigKey)
 	}
 }
 
@@ -204,6 +263,32 @@ func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(roster, `"runtimeType":"openclaw"`) {
 		t.Fatalf("roster missing member runtime type: %s", roster)
+	}
+}
+
+func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
+	description := "Senior Developer: owns implementation and verification."
+	member := plannedTeamMember{
+		MemberKey:   "worker",
+		DisplayName: "team-worker",
+		Role:        "senior-developer",
+		RuntimeType: "hermes",
+		Request: CreateTeamMemberRequest{
+			Description: &description,
+		},
+	}
+
+	soul := buildTeamMemberSoulMarkdown(member)
+	for _, expected := range []string{
+		"# team-worker",
+		"Member ID: worker",
+		"Role: senior-developer",
+		description,
+		"If asked about your role",
+	} {
+		if !strings.Contains(soul, expected) {
+			t.Fatalf("SOUL.md missing %q: %s", expected, soul)
+		}
 	}
 }
 

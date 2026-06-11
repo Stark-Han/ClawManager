@@ -10,8 +10,10 @@ import {
 } from "../../services/systemSettingsService";
 import { teamService } from "../../services/teamService";
 import {
+  AGENCY_AGENT_PROFILES,
   buildAgencyAgentEnvironment,
   getAgencyAgentProfile,
+  type AgencyAgentProfileKey,
 } from "../../lib/agencyAgentProfiles";
 import {
   BUILTIN_MEMBER_TEMPLATES,
@@ -52,6 +54,7 @@ const RESOURCE_PRESETS: Record<
 
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CUSTOM_MEMBER_TEMPLATES_STORAGE_KEY = "clawmanager.team.memberTemplates.v1";
+const AGENCY_AGENT_PROFILE_OPTIONS = Object.values(AGENCY_AGENT_PROFILES);
 
 const newDraftId = () =>
   `member-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -598,15 +601,37 @@ const CreateTeamPage: React.FC = () => {
     return undefined;
   };
 
+  const profileForMember = (member: TeamMemberDraft) =>
+    getAgencyAgentProfile(member.agentProfileKey);
+
+  const effectiveMemberRole = (member: TeamMemberDraft) => {
+    if (member.isLeader) {
+      return "leader";
+    }
+    const profile = profileForMember(member);
+    if (profile?.roleHint && profile.roleHint !== "leader") {
+      return profile.roleHint;
+    }
+    return member.role.trim() || "member";
+  };
+
+  const effectiveMemberDescription = (member: TeamMemberDraft) => {
+    const explicit = member.description.trim();
+    if (explicit) {
+      return explicit;
+    }
+    return profileForMember(member)?.summary || "";
+  };
+
   const buildMemberEnvironmentOverrides = (
     member: TeamMemberDraft,
     normalizedMemberId: string,
   ): Record<string, string> | undefined => {
-    const profile = getAgencyAgentProfile(member.agentProfileKey);
+    const profile = profileForMember(member);
     const profileEnv = buildAgencyAgentEnvironment(profile, {
       memberId: normalizedMemberId,
       displayName: member.name.trim() || normalizedMemberId,
-      role: member.isLeader ? "leader" : member.role.trim() || "member",
+      role: effectiveMemberRole(member),
       runtimeType: member.runtimeType,
       isLeader: member.isLeader,
     });
@@ -709,12 +734,13 @@ const CreateTeamPage: React.FC = () => {
       storage_class: storageClass.trim() || undefined,
       members: members.map((member) => {
         const normalizedMemberId = normalizeMemberId(member.memberId);
+        const memberDescription = effectiveMemberDescription(member);
         return {
           member_id: normalizedMemberId,
           name: member.name.trim() || undefined,
-          role: member.isLeader ? "leader" : member.role.trim() || "member",
+          role: effectiveMemberRole(member),
           runtime_type: member.runtimeType,
-          description: member.description.trim() || undefined,
+          description: memberDescription || undefined,
           is_leader: member.isLeader,
           cpu_cores: member.cpuCores,
           memory_gb: member.memoryGb,
@@ -1050,7 +1076,8 @@ const CreateTeamPage: React.FC = () => {
                           </div>
                           {templateMember.agentProfileKey && (
                             <div className="mt-1 truncate text-xs text-indigo-600">
-                              {getAgencyAgentProfile(templateMember.agentProfileKey)?.name ||
+                              {getAgencyAgentProfile(templateMember.agentProfileKey)?.displayName ||
+                                getAgencyAgentProfile(templateMember.agentProfileKey)?.name ||
                                 templateMember.agentProfileKey}
                             </div>
                           )}
@@ -1123,7 +1150,7 @@ const CreateTeamPage: React.FC = () => {
                       </button>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
                       <label className="block">
                         <span className="text-sm font-medium text-gray-700">
                           成员 ID
@@ -1215,6 +1242,43 @@ const CreateTeamPage: React.FC = () => {
                             ))
                           )}
                         </select>
+                      </label>
+                      <label className="block">
+                        <span className="text-sm font-medium text-gray-700">
+                          角色模板
+                        </span>
+                        <select
+                          value={member.agentProfileKey || ""}
+                          onChange={(event) => {
+                            const profile = getAgencyAgentProfile(event.target.value);
+                            updateMember(member.id, {
+                              agentProfileKey: event.target.value
+                                ? (event.target.value as AgencyAgentProfileKey)
+                                : undefined,
+                              role:
+                                profile && !member.isLeader && profile.roleHint !== "leader"
+                                  ? profile.roleHint
+                                  : member.role,
+                              description:
+                                profile && !member.description.trim()
+                                  ? profile.summary
+                                  : member.description,
+                            });
+                          }}
+                          className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                        >
+                          <option value="">不使用</option>
+                          {AGENCY_AGENT_PROFILE_OPTIONS.map((profile) => (
+                            <option key={profile.key} value={profile.key}>
+                              {profile.displayName}
+                            </option>
+                          ))}
+                        </select>
+                        {member.agentProfileKey && (
+                          <p className="mt-1 truncate text-xs text-gray-500">
+                            {getAgencyAgentProfile(member.agentProfileKey)?.summary}
+                          </p>
+                        )}
                       </label>
                     </div>
 
