@@ -59,6 +59,9 @@ Thumbs.db
 
 
 .codex-logs/
+.cache/
+.VSCodeCounter/
+.superpowers/
 dev_docs/
 devplan.md
 AGENTS.md

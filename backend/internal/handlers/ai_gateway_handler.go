@@ -77,6 +77,13 @@ func (h *AIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}
 		}
 	}
+	if !setStringMetadata(c, &req.InstanceMode, "instanceMode") ||
+		!setStringMetadata(c, &req.RuntimeType, "runtimeType") ||
+		!setStringMetadata(c, &req.GatewayID, "gatewayID") ||
+		!setInt64Metadata(c, &req.RuntimePodID, "runtimePodID") {
+		utils.Error(c, http.StatusForbidden, "Gateway token metadata does not match request")
+		return
+	}
 
 	if req.Stream {
 		traceID, err := h.service.StreamChatCompletions(c.Request.Context(), userID.(int), req, c.Writer)
@@ -106,4 +113,48 @@ func (h *AIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	c.Status(response.StatusCode)
 	_, _ = c.Writer.Write(response.Body)
+}
+
+func setStringMetadata(c *gin.Context, field **string, key string) bool {
+	raw, exists := c.Get(key)
+	if !exists {
+		return true
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if *field == nil {
+		*field = &value
+		return true
+	}
+	return strings.TrimSpace(**field) == value
+}
+
+func setInt64Metadata(c *gin.Context, field **int64, key string) bool {
+	raw, exists := c.Get(key)
+	if !exists {
+		return true
+	}
+	var value int64
+	switch typed := raw.(type) {
+	case int64:
+		value = typed
+	case int:
+		value = int64(typed)
+	default:
+		return true
+	}
+	if value <= 0 {
+		return true
+	}
+	if *field == nil {
+		*field = &value
+		return true
+	}
+	return **field == value
 }

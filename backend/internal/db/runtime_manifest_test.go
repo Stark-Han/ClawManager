@@ -1,0 +1,56 @@
+package db
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+func TestRuntimeManifestsStartHermesRuntime(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, manifest := range []string{
+		filepath.Join(repoRoot, "deployments", "k8s", "clawmanager.yaml"),
+		filepath.Join(repoRoot, "deployments", "k3s", "clawmanager.yaml"),
+	} {
+		t.Run(manifest, func(t *testing.T) {
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			pattern := regexp.MustCompile(`(?s)name:\s+hermes-runtime.*?spec:\s+replicas:\s+([0-9]+)`)
+			matches := pattern.FindSubmatch(raw)
+			if len(matches) != 2 {
+				t.Fatalf("could not find hermes-runtime replicas in %s", manifest)
+			}
+			if string(matches[1]) != "1" {
+				t.Fatalf("expected hermes-runtime replicas 1 in %s, got %s", manifest, matches[1])
+			}
+		})
+	}
+}
+
+func TestRuntimeManifestsSeedLiteDefaultImages(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, manifest := range []string{
+		filepath.Join(repoRoot, "deployments", "k8s", "clawmanager.yaml"),
+		filepath.Join(repoRoot, "deployments", "k3s", "clawmanager.yaml"),
+		filepath.Join(repoRoot, "backend", "deployments", "k8s", "clawreef-incluster.yaml"),
+	} {
+		t.Run(manifest, func(t *testing.T) {
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			for _, image := range []string{
+				"ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest",
+				"ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest",
+			} {
+				if !strings.Contains(string(raw), image) {
+					t.Fatalf("manifest %s must seed lite image %s", manifest, image)
+				}
+			}
+		})
+	}
+}

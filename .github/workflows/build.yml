@@ -8,6 +8,7 @@ on:
       - 'feature/**'
       - 'fix/**'
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -106,6 +107,7 @@ jobs:
         uses: helm/kind-action@v1.12.0
         with:
           cluster_name: clawmanager-ci
+          ignore_failed_clean: true
 
       - name: Load image into kind
         run: kind load docker-image clawmanager:ci --name clawmanager-ci
@@ -155,6 +157,12 @@ jobs:
               "",
               text,
               count=1,
+          )
+
+          text = re.sub(
+              r"(\n\s+- name: workspaces\s+)nfs:\s+server: workspace-store\.clawmanager-system\.svc\.cluster\.local\s+path: /exports/workspaces",
+              r"\1emptyDir: {}",
+              text,
           )
 
           path.write_text(text, encoding="utf-8")

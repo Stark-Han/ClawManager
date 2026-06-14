@@ -25,6 +25,7 @@ export interface TeamMember {
   display_name: string;
   role: string;
   runtime_type?: "openclaw" | "hermes";
+  instance_mode?: "lite" | "pro";
   description?: string;
   status:
     | "creating"
@@ -88,6 +89,8 @@ export interface CreateTeamMemberRequest {
   member_id?: string;
   name?: string;
   role: string;
+  mode?: "lite" | "pro";
+  instance_mode?: "lite" | "pro";
   runtime_type?: "openclaw" | "hermes";
   description?: string;
   cpu_cores?: number;

@@ -7,6 +7,10 @@ import type {
   InstanceStatus,
   InstanceRuntimeDetails,
   InstanceConfigRevision,
+  ExternalAccessStatusResult,
+  EnableShareLinkResult,
+  PasswordExternalAccessResult,
+  ExternalAccessRequest,
 } from "../types/instance";
 import type { InstanceSkill } from "../types/skill";
 
@@ -136,6 +140,37 @@ export const instanceService = {
   // Access instance with token
   getAccessUrl: (id: number, token: string): string => {
     return `/api/v1/instances/${id}/access?token=${token}`;
+  },
+
+  getExternalAccess: async (id: number): Promise<ExternalAccessStatusResult> => {
+    const response = await api.get(`/instances/${id}/external-access`);
+    return response.data.data;
+  },
+
+  enableExternalShareLink: async (
+    id: number,
+    data: ExternalAccessRequest,
+  ): Promise<EnableShareLinkResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/share-link`,
+      data,
+    );
+    return response.data.data;
+  },
+
+  createExternalAccessPassword: async (
+    id: number,
+    data: ExternalAccessRequest,
+  ): Promise<PasswordExternalAccessResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/password`,
+      data,
+    );
+    return response.data.data;
+  },
+
+  disableExternalAccess: async (id: number): Promise<void> => {
+    await api.delete(`/instances/${id}/external-access`);
   },
 
   exportOpenClawWorkspace: async (id: number): Promise<Blob> => {

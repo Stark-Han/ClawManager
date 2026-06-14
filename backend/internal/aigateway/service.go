@@ -72,6 +72,10 @@ type ChatCompletionRequest struct {
 	User              *string         `json:"user,omitempty"`
 	SessionID         *string         `json:"session_id,omitempty"`
 	InstanceID        *int            `json:"instance_id,omitempty"`
+	InstanceMode      *string         `json:"instance_mode,omitempty"`
+	RuntimeType       *string         `json:"runtime_type,omitempty"`
+	GatewayID         *string         `json:"gateway_id,omitempty"`
+	RuntimePodID      *int64          `json:"runtime_pod_id,omitempty"`
 	TraceID           *string         `json:"trace_id,omitempty"`
 	RequestID         *string         `json:"request_id,omitempty"`
 }
@@ -357,6 +361,10 @@ func (s *service) ChatCompletions(ctx context.Context, userID int, req ChatCompl
 			RequestID:    prepared.requestIDPtr,
 			UserID:       prepared.userIDPtr,
 			InstanceID:   prepared.req.InstanceID,
+			InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+			RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+			GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+			RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 			EventType:    "gateway.request.blocked",
 			TrafficClass: models.TrafficClassLLM,
 			Severity:     models.AuditSeverityWarn,
@@ -388,6 +396,10 @@ func (s *service) StreamChatCompletions(ctx context.Context, userID int, req Cha
 			RequestID:    prepared.requestIDPtr,
 			UserID:       prepared.userIDPtr,
 			InstanceID:   prepared.req.InstanceID,
+			InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+			RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+			GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+			RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 			EventType:    "gateway.request.blocked",
 			TrafficClass: models.TrafficClassLLM,
 			Severity:     models.AuditSeverityWarn,
@@ -449,6 +461,10 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 		RequestID:    prepared.requestIDPtr,
 		UserID:       prepared.userIDPtr,
 		InstanceID:   prepared.req.InstanceID,
+		InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+		RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+		GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+		RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 		EventType:    "gateway.request.received",
 		TrafficClass: models.TrafficClassLLM,
 		Severity:     models.AuditSeverityInfo,
@@ -465,6 +481,10 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 			RequestID:    prepared.requestIDPtr,
 			UserID:       prepared.userIDPtr,
 			InstanceID:   prepared.req.InstanceID,
+			InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+			RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+			GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+			RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 			EventType:    "gateway.risk.detected",
 			TrafficClass: models.TrafficClassLLM,
 			Severity:     models.AuditSeverityWarn,
@@ -477,7 +497,7 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 	resolvedModel, riskAction, resolveErr := s.resolveTargetModel(prepared.selectedModel, riskAnalysis)
 	if resolveErr != nil {
 		blockedInvocationID := s.recordBlockedInvocation(prepared.traceID, prepared.requestID, prepared.req, prepared.userID, prepared.selectedModel, resolveErr.Error())
-		if err := s.riskHitService.RecordHits(prepared.traceID, prepared.req.SessionID, prepared.requestIDPtr, prepared.userIDPtr, prepared.req.InstanceID, blockedInvocationID, riskAction, riskAnalysis.Hits); err != nil {
+		if err := s.riskHitService.RecordHits(prepared.traceID, prepared.req.SessionID, prepared.requestIDPtr, prepared.userIDPtr, prepared.req.InstanceID, blockedInvocationID, riskHitAttribution(prepared.req), riskAction, riskAnalysis.Hits); err != nil {
 			logPersistenceError("record blocked risk hits", prepared.traceID, err)
 		}
 		if err := s.auditEventService.RecordEvent(&models.AuditEvent{
@@ -486,6 +506,10 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 			RequestID:    prepared.requestIDPtr,
 			UserID:       prepared.userIDPtr,
 			InstanceID:   prepared.req.InstanceID,
+			InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+			RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+			GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+			RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 			InvocationID: blockedInvocationID,
 			EventType:    "gateway.request.blocked",
 			TrafficClass: models.TrafficClassLLM,
@@ -498,7 +522,7 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 	}
 
 	if riskAnalysis.IsSensitive {
-		if err := s.riskHitService.RecordHits(prepared.traceID, prepared.req.SessionID, prepared.requestIDPtr, prepared.userIDPtr, prepared.req.InstanceID, nil, riskAction, riskAnalysis.Hits); err != nil {
+		if err := s.riskHitService.RecordHits(prepared.traceID, prepared.req.SessionID, prepared.requestIDPtr, prepared.userIDPtr, prepared.req.InstanceID, nil, riskHitAttribution(prepared.req), riskAction, riskAnalysis.Hits); err != nil {
 			logPersistenceError("record risk hits", prepared.traceID, err)
 		}
 		if riskAction == models.RiskActionRouteSecureModel && resolvedModel != nil && resolvedModel.ID != prepared.selectedModel.ID {
@@ -508,6 +532,10 @@ func (s *service) prepareChatRequest(userID int, req ChatCompletionRequest) (*pr
 				RequestID:    prepared.requestIDPtr,
 				UserID:       prepared.userIDPtr,
 				InstanceID:   prepared.req.InstanceID,
+				InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+				RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+				GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+				RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 				EventType:    "gateway.request.rerouted",
 				TrafficClass: models.TrafficClassLLM,
 				Severity:     models.AuditSeverityWarn,
@@ -655,6 +683,10 @@ func (s *service) recordFailure(traceID, requestID string, req ChatCompletionReq
 		RequestID:           requestID,
 		UserID:              intPtr(userID),
 		InstanceID:          req.InstanceID,
+		InstanceMode:        runtimeAttributionString(req.InstanceMode),
+		RuntimeType:         runtimeAttributionString(req.RuntimeType),
+		GatewayID:           runtimeAttributionString(req.GatewayID),
+		RuntimePodID:        runtimeAttributionInt64(req.RuntimePodID),
 		ModelID:             intPtr(model.ID),
 		ProviderType:        model.ProviderType,
 		RequestedModel:      req.Model,
@@ -679,6 +711,10 @@ func (s *service) recordFailure(traceID, requestID string, req ChatCompletionReq
 		RequestID:    stringPtr(requestID),
 		UserID:       intPtr(userID),
 		InstanceID:   req.InstanceID,
+		InstanceMode: runtimeAttributionString(req.InstanceMode),
+		RuntimeType:  runtimeAttributionString(req.RuntimeType),
+		GatewayID:    runtimeAttributionString(req.GatewayID),
+		RuntimePodID: runtimeAttributionInt64(req.RuntimePodID),
 		InvocationID: intPtr(invocation.ID),
 		EventType:    "gateway.request.failed",
 		TrafficClass: models.TrafficClassLLM,
@@ -703,6 +739,10 @@ func (s *service) recordSuccess(prepared *preparedChatRequest, providerRequestBo
 		RequestID:           prepared.requestID,
 		UserID:              prepared.userIDPtr,
 		InstanceID:          prepared.req.InstanceID,
+		InstanceMode:        runtimeAttributionString(prepared.req.InstanceMode),
+		RuntimeType:         runtimeAttributionString(prepared.req.RuntimeType),
+		GatewayID:           runtimeAttributionString(prepared.req.GatewayID),
+		RuntimePodID:        runtimeAttributionInt64(prepared.req.RuntimePodID),
 		ModelID:             intPtr(prepared.resolvedModel.ID),
 		ProviderType:        prepared.resolvedModel.ProviderType,
 		RequestedModel:      prepared.req.Model,
@@ -750,6 +790,10 @@ func (s *service) recordSuccess(prepared *preparedChatRequest, providerRequestBo
 		RequestID:        prepared.requestIDPtr,
 		UserID:           prepared.userIDPtr,
 		InstanceID:       prepared.req.InstanceID,
+		InstanceMode:     runtimeAttributionString(prepared.req.InstanceMode),
+		RuntimeType:      runtimeAttributionString(prepared.req.RuntimeType),
+		GatewayID:        runtimeAttributionString(prepared.req.GatewayID),
+		RuntimePodID:     runtimeAttributionInt64(prepared.req.RuntimePodID),
 		InvocationID:     intPtr(invocation.ID),
 		ModelID:          intPtr(prepared.resolvedModel.ID),
 		ProviderType:     prepared.resolvedModel.ProviderType,
@@ -772,6 +816,10 @@ func (s *service) recordSuccess(prepared *preparedChatRequest, providerRequestBo
 		RequestID:    prepared.requestIDPtr,
 		UserID:       prepared.userIDPtr,
 		InstanceID:   prepared.req.InstanceID,
+		InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+		RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+		GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+		RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 		InvocationID: intPtr(invocation.ID),
 		EventType:    "gateway.request.completed",
 		TrafficClass: models.TrafficClassLLM,
@@ -787,6 +835,10 @@ func (s *service) recordSuccess(prepared *preparedChatRequest, providerRequestBo
 			RequestID:    prepared.requestIDPtr,
 			UserID:       prepared.userIDPtr,
 			InstanceID:   prepared.req.InstanceID,
+			InstanceMode: runtimeAttributionString(prepared.req.InstanceMode),
+			RuntimeType:  runtimeAttributionString(prepared.req.RuntimeType),
+			GatewayID:    runtimeAttributionString(prepared.req.GatewayID),
+			RuntimePodID: runtimeAttributionInt64(prepared.req.RuntimePodID),
 			InvocationID: intPtr(invocation.ID),
 			EventType:    "gateway.usage.estimated",
 			TrafficClass: models.TrafficClassLLM,
@@ -1312,6 +1364,10 @@ func buildOpenAICompatibleRequestBody(req ChatCompletionRequest, model *models.L
 	}
 	delete(payload, "session_id")
 	delete(payload, "instance_id")
+	delete(payload, "instance_mode")
+	delete(payload, "runtime_type")
+	delete(payload, "gateway_id")
+	delete(payload, "runtime_pod_id")
 	delete(payload, "trace_id")
 	delete(payload, "request_id")
 	modelPayload, err := json.Marshal(model.ProviderModelName)
@@ -1847,6 +1903,10 @@ func (s *service) recordBlockedInvocation(traceID, requestID string, req ChatCom
 		RequestID:           requestID,
 		UserID:              intPtr(userID),
 		InstanceID:          req.InstanceID,
+		InstanceMode:        runtimeAttributionString(req.InstanceMode),
+		RuntimeType:         runtimeAttributionString(req.RuntimeType),
+		GatewayID:           runtimeAttributionString(req.GatewayID),
+		RuntimePodID:        runtimeAttributionInt64(req.RuntimePodID),
 		ModelID:             intPtr(model.ID),
 		ProviderType:        model.ProviderType,
 		RequestedModel:      req.Model,
@@ -2040,6 +2100,68 @@ func randomHex(size int) string {
 
 func intPtr(value int) *int {
 	return &value
+}
+
+func runtimeAttributionString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func runtimeAttributionInt64(value *int64) *int64 {
+	if value == nil || *value <= 0 {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func applyInvocationRuntimeAttribution(invocation *models.ModelInvocation, req ChatCompletionRequest) {
+	if invocation == nil {
+		return
+	}
+	invocation.InstanceMode = runtimeAttributionString(req.InstanceMode)
+	invocation.RuntimeType = runtimeAttributionString(req.RuntimeType)
+	invocation.GatewayID = runtimeAttributionString(req.GatewayID)
+	invocation.RuntimePodID = runtimeAttributionInt64(req.RuntimePodID)
+}
+
+func applyAuditRuntimeAttribution(event *models.AuditEvent, req ChatCompletionRequest) {
+	if event == nil {
+		return
+	}
+	event.InstanceMode = runtimeAttributionString(req.InstanceMode)
+	event.RuntimeType = runtimeAttributionString(req.RuntimeType)
+	event.GatewayID = runtimeAttributionString(req.GatewayID)
+	event.RuntimePodID = runtimeAttributionInt64(req.RuntimePodID)
+}
+
+func applyCostRuntimeAttribution(record *models.CostRecord, req ChatCompletionRequest) {
+	if record == nil {
+		return
+	}
+	record.InstanceMode = runtimeAttributionString(req.InstanceMode)
+	record.RuntimeType = runtimeAttributionString(req.RuntimeType)
+	record.GatewayID = runtimeAttributionString(req.GatewayID)
+	record.RuntimePodID = runtimeAttributionInt64(req.RuntimePodID)
+}
+
+func riskHitAttribution(req ChatCompletionRequest) *services.RiskHitAttribution {
+	attribution := &services.RiskHitAttribution{
+		InstanceMode: runtimeAttributionString(req.InstanceMode),
+		RuntimeType:  runtimeAttributionString(req.RuntimeType),
+		GatewayID:    runtimeAttributionString(req.GatewayID),
+		RuntimePodID: runtimeAttributionInt64(req.RuntimePodID),
+	}
+	if attribution.InstanceMode == nil && attribution.RuntimeType == nil && attribution.GatewayID == nil && attribution.RuntimePodID == nil {
+		return nil
+	}
+	return attribution
 }
 
 func userIDOrZero(value *int) int {

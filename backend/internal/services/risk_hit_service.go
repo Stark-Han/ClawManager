@@ -10,8 +10,15 @@ import (
 
 // RiskHitService defines operations for persisted risk hits.
 type RiskHitService interface {
-	RecordHits(traceID string, sessionID, requestID *string, userID, instanceID, invocationID *int, action string, hits []RiskMatch) error
+	RecordHits(traceID string, sessionID, requestID *string, userID, instanceID, invocationID *int, attribution *RiskHitAttribution, action string, hits []RiskMatch) error
 	ListHitsByTraceID(traceID string) ([]models.RiskHit, error)
+}
+
+type RiskHitAttribution struct {
+	InstanceMode *string
+	RuntimeType  *string
+	GatewayID    *string
+	RuntimePodID *int64
 }
 
 type riskHitService struct {
@@ -23,7 +30,7 @@ func NewRiskHitService(repo repository.RiskHitRepository) RiskHitService {
 	return &riskHitService{repo: repo}
 }
 
-func (s *riskHitService) RecordHits(traceID string, sessionID, requestID *string, userID, instanceID, invocationID *int, action string, hits []RiskMatch) error {
+func (s *riskHitService) RecordHits(traceID string, sessionID, requestID *string, userID, instanceID, invocationID *int, attribution *RiskHitAttribution, action string, hits []RiskMatch) error {
 	traceID = strings.TrimSpace(traceID)
 	if traceID == "" || len(hits) == 0 {
 		return nil
@@ -39,12 +46,22 @@ func (s *riskHitService) RecordHits(traceID string, sessionID, requestID *string
 			RequestID:    requestID,
 			UserID:       userID,
 			InstanceID:   instanceID,
+			InstanceMode: nil,
+			RuntimeType:  nil,
+			GatewayID:    nil,
+			RuntimePodID: nil,
 			InvocationID: invocationID,
 			RuleID:       strings.TrimSpace(hit.RuleID),
 			RuleName:     strings.TrimSpace(hit.RuleName),
 			Severity:     strings.TrimSpace(hit.Severity),
 			Action:       action,
 			MatchSummary: strings.TrimSpace(hit.MatchSummary),
+		}
+		if attribution != nil {
+			record.InstanceMode = attribution.InstanceMode
+			record.RuntimeType = attribution.RuntimeType
+			record.GatewayID = attribution.GatewayID
+			record.RuntimePodID = attribution.RuntimePodID
 		}
 		if record.RuleID == "" || record.RuleName == "" || record.Severity == "" || record.MatchSummary == "" {
 			return fmt.Errorf("risk hit record is incomplete")

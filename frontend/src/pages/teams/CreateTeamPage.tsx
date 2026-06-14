@@ -10,6 +10,7 @@ import {
 } from "../../services/systemSettingsService";
 import { teamService } from "../../services/teamService";
 import type { CreateTeamRequest } from "../../types/team";
+import type { InstanceMode } from "../../types/instance";
 import type {
   OpenClawConfigCompilePreview,
   OpenClawConfigPlan,
@@ -27,6 +28,7 @@ type TeamMemberDraft = {
   name: string;
   role: string;
   runtimeType: RuntimeType;
+  instanceMode: InstanceMode;
   description: string;
   resourcePreset: ResourcePresetKey;
   isLeader: boolean;
@@ -40,7 +42,9 @@ type TeamMemberDraft = {
 
 type RuntimeType = "openclaw" | "hermes";
 type ResourcePresetKey = "small" | "medium" | "large" | "custom";
-type TeamMemberTemplateMember = Omit<TeamMemberDraft, "id">;
+type TeamMemberTemplateMember = Omit<TeamMemberDraft, "id" | "instanceMode"> & {
+  instanceMode?: InstanceMode;
+};
 type TeamMemberTemplate = {
   id: string;
   name: string;
@@ -53,6 +57,11 @@ type TeamMemberTemplate = {
 const RUNTIME_OPTIONS: Array<{ value: RuntimeType; label: string }> = [
   { value: "openclaw", label: "OpenClaw" },
   { value: "hermes", label: "Hermes" },
+];
+
+const INSTANCE_MODE_OPTIONS: Array<{ value: InstanceMode; label: string }> = [
+  { value: "lite", label: "Lite" },
+  { value: "pro", label: "Pro" },
 ];
 
 const RESOURCE_PRESETS: Record<
@@ -312,6 +321,7 @@ const defaultMember = (
   name: "",
   role: "developer",
   runtimeType: "openclaw",
+  instanceMode: "lite",
   description: "",
   resourcePreset: "small",
   isLeader: false,
@@ -634,6 +644,7 @@ const CreateTeamPage: React.FC = () => {
     isLeader: boolean,
   ): TeamMemberDraft => {
     const runtimeType = templateMember.runtimeType || "openclaw";
+    const instanceMode = templateMember.instanceMode || "lite";
     const runtimeImages = imageOptionsForRuntime(runtimeType);
     const templateImageAvailable = runtimeImages.some(
       (item) => item.image === templateMember.image,
@@ -651,6 +662,7 @@ const CreateTeamPage: React.FC = () => {
       memberId: uniqueMemberId(templateMember.memberId, usedIds, index),
       role: isLeader ? "leader" : role || "member",
       runtimeType,
+      instanceMode,
       isLeader,
       image,
     });
@@ -721,6 +733,7 @@ const CreateTeamPage: React.FC = () => {
       name: member.name.trim(),
       role: member.isLeader ? "leader" : member.role.trim() || "member",
       runtimeType: member.runtimeType,
+      instanceMode: member.instanceMode,
       description: member.description.trim(),
       resourcePreset: member.resourcePreset,
       isLeader: member.isLeader,
@@ -964,6 +977,8 @@ const CreateTeamPage: React.FC = () => {
         member_id: normalizeMemberId(member.memberId),
         name: member.name.trim() || undefined,
         role: member.isLeader ? "leader" : member.role.trim() || "member",
+        mode: member.instanceMode,
+        instance_mode: member.instanceMode,
         runtime_type: member.runtimeType,
         description: member.description.trim() || undefined,
         is_leader: member.isLeader,
@@ -1292,6 +1307,7 @@ const CreateTeamPage: React.FC = () => {
                           </div>
                           <div className="mt-1 truncate text-xs text-gray-500">
                             {templateMember.runtimeType} ·{" "}
+                            {templateMember.instanceMode || "lite"} ·{" "}
                             {templateMember.image || "默认镜像"} ·{" "}
                             {templateMember.cpuCores}C/{templateMember.memoryGb}G
                           </div>
@@ -1364,7 +1380,7 @@ const CreateTeamPage: React.FC = () => {
                       </button>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
                       <label className="block">
                         <span className="text-sm font-medium text-gray-700">
                           成员 ID
@@ -1427,6 +1443,26 @@ const CreateTeamPage: React.FC = () => {
                           className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                         >
                           {RUNTIME_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="text-sm font-medium text-gray-700">
+                          Mode
+                        </span>
+                        <select
+                          value={member.instanceMode}
+                          onChange={(event) =>
+                            updateMember(member.id, {
+                              instanceMode: event.target.value as InstanceMode,
+                            })
+                          }
+                          className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                        >
+                          {INSTANCE_MODE_OPTIONS.map((option) => (
                             <option key={option.value} value={option.value}>
                               {option.label}
                             </option>
@@ -1587,6 +1623,10 @@ const CreateTeamPage: React.FC = () => {
                   }
                 />
                 <SummaryRow label="成员数" value={`${members.length}`} />
+                <SummaryRow
+                  label="Lite / Pro"
+                  value={`${members.filter((member) => member.instanceMode === "lite").length} / ${members.filter((member) => member.instanceMode === "pro").length}`}
+                />
                 <SummaryRow
                   label="成员模板"
                   value={selectedTemplate?.name || "未选择"}

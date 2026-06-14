@@ -2,10 +2,14 @@ package k8s
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -103,6 +107,222 @@ func TestHostPathPVNodeAffinitySkipsUnschedulableAndNotReadyNodes(t *testing.T) 
 		t.Fatalf("hostPathPVNodeAffinity returned error: %v", err)
 	}
 	requireHostnameAffinity(t, affinity, "node-c-host")
+}
+
+func TestCreatePVForTeamSharedPVCUsesWorkspaceNFSWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	workspaceRoot := t.TempDir()
+	namespace := "clawmanager-user-1"
+	pvcName := "clawreef-team-28-shared"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            pvcName,
+			Namespace:       namespace,
+			UID:             types.UID("pvc-uid"),
+			ResourceVersion: "1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	clientset := fake.NewSimpleClientset(pvc)
+	service := &PVCService{
+		client: &Client{
+			Clientset:          clientset,
+			WorkspaceRoot:      workspaceRoot,
+			WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+			WorkspaceNFSPath:   "/",
+		},
+	}
+
+	if _, err := service.createPVForTeamSharedPVC(ctx, namespace, pvcName, 1, 28, 10, "manual"); err != nil {
+		t.Fatalf("createPVForTeamSharedPVC returned error: %v", err)
+	}
+
+	pv, err := clientset.CoreV1().PersistentVolumes().Get(ctx, "clawreef-pv-user-1-team-28-shared", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected Team shared PV: %v", err)
+	}
+	if pv.Spec.PersistentVolumeSource.NFS == nil {
+		t.Fatalf("expected NFS PV source, got %#v", pv.Spec.PersistentVolumeSource)
+	}
+	if pv.Spec.PersistentVolumeSource.NFS.Server != "workspace-store.clawmanager-system.svc.cluster.local" {
+		t.Fatalf("unexpected NFS server: %#v", pv.Spec.PersistentVolumeSource.NFS)
+	}
+	if pv.Spec.PersistentVolumeSource.NFS.Path != "/teams/user-1/team-28-shared" {
+		t.Fatalf("unexpected NFS path: %#v", pv.Spec.PersistentVolumeSource.NFS)
+	}
+	if pv.Spec.NodeAffinity != nil {
+		t.Fatalf("NFS-backed Team PV must not pin runtime sharing to one node: %#v", pv.Spec.NodeAffinity)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceRoot, "teams", "user-1", "team-28-shared")); err != nil {
+		t.Fatalf("expected runtime workspace team directory to be created: %v", err)
+	}
+}
+
+func TestCreatePVForTeamSharedPVCResolvesWorkspaceServiceDNS(t *testing.T) {
+	ctx := context.Background()
+	namespace := "clawmanager-user-1"
+	pvcName := "clawreef-team-28-shared"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            pvcName,
+			Namespace:       namespace,
+			UID:             types.UID("pvc-uid"),
+			ResourceVersion: "1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "workspace-store",
+			Namespace: "clawmanager-system",
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "10.96.0.44"},
+	}
+	clientset := fake.NewSimpleClientset(pvc, service)
+	pvcService := &PVCService{
+		client: &Client{
+			Clientset:          clientset,
+			WorkspaceRoot:      t.TempDir(),
+			WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+			WorkspaceNFSPath:   "/",
+		},
+	}
+
+	if _, err := pvcService.createPVForTeamSharedPVC(ctx, namespace, pvcName, 1, 28, 10, "manual"); err != nil {
+		t.Fatalf("createPVForTeamSharedPVC returned error: %v", err)
+	}
+
+	pv, err := clientset.CoreV1().PersistentVolumes().Get(ctx, "clawreef-pv-user-1-team-28-shared", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected Team shared PV: %v", err)
+	}
+	if pv.Spec.NFS == nil || pv.Spec.NFS.Server != "10.96.0.44" {
+		t.Fatalf("expected resolved ClusterIP NFS server, got %#v", pv.Spec.PersistentVolumeSource)
+	}
+}
+
+func TestCreateTeamSharedPVCCreatesWorkspaceDirectoryBeforeReturning(t *testing.T) {
+	ctx := context.Background()
+	workspaceRoot := t.TempDir()
+	client := &Client{
+		Clientset:          fake.NewSimpleClientset(),
+		Namespace:          "clawmanager",
+		StorageClass:       "manual",
+		WorkspaceRoot:      workspaceRoot,
+		WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+		WorkspaceNFSPath:   "/",
+	}
+	service := &PVCService{
+		client:           client,
+		namespaceService: &NamespaceService{client: client},
+	}
+
+	if _, err := service.CreateTeamSharedPVC(ctx, 1, 28, 10, "manual"); err != nil {
+		t.Fatalf("CreateTeamSharedPVC returned error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspaceRoot, "teams", "user-1", "team-28-shared")); err != nil {
+		t.Fatalf("expected Team shared runtime workspace directory before Lite gateways start: %v", err)
+	}
+}
+
+func TestCreateTeamSharedPVCCreatesWritableRuntimeSubdirectories(t *testing.T) {
+	ctx := context.Background()
+	workspaceRoot := t.TempDir()
+	client := &Client{
+		Clientset:          fake.NewSimpleClientset(),
+		Namespace:          "clawmanager",
+		StorageClass:       "manual",
+		WorkspaceRoot:      workspaceRoot,
+		WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+		WorkspaceNFSPath:   "/",
+	}
+	service := &PVCService{
+		client:           client,
+		namespaceService: &NamespaceService{client: client},
+	}
+
+	if _, err := service.CreateTeamSharedPVC(ctx, 1, 28, 10, "manual"); err != nil {
+		t.Fatalf("CreateTeamSharedPVC returned error: %v", err)
+	}
+
+	for _, name := range []string{"status", "inbox", "results", "tasks"} {
+		dir := filepath.Join(workspaceRoot, "teams", "user-1", "team-28-shared", name)
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("expected Team shared runtime subdirectory %s before gateways start: %v", name, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("expected %s to be a directory", dir)
+		}
+	}
+}
+
+func TestCreateTeamSharedPVCCreatesWorkspaceNFSPVBeforeReturning(t *testing.T) {
+	ctx := context.Background()
+	client := &Client{
+		Clientset:          fake.NewSimpleClientset(),
+		Namespace:          "clawmanager",
+		StorageClass:       "manual",
+		WorkspaceRoot:      t.TempDir(),
+		WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+		WorkspaceNFSPath:   "/",
+	}
+	service := &PVCService{
+		client:           client,
+		namespaceService: &NamespaceService{client: client},
+	}
+
+	if _, err := service.CreateTeamSharedPVC(ctx, 1, 28, 10, "manual"); err != nil {
+		t.Fatalf("CreateTeamSharedPVC returned error: %v", err)
+	}
+
+	pv, err := client.Clientset.CoreV1().PersistentVolumes().Get(ctx, "clawreef-pv-user-1-team-28-shared", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected Team shared NFS PV before Lite gateways start: %v", err)
+	}
+	if pv.Spec.NFS == nil || pv.Spec.NFS.Path != "/teams/user-1/team-28-shared" {
+		t.Fatalf("unexpected Team shared PV source: %#v", pv.Spec.PersistentVolumeSource)
+	}
+}
+
+func TestCreateTeamSharedPVCRejectsExistingNonWorkspaceNFSPV(t *testing.T) {
+	ctx := context.Background()
+	namespace := "clawmanager-user-1"
+	pvcName := "clawreef-team-28-shared"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			Labels:    map[string]string{"team-id": "28"},
+		},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "clawreef-pv-user-1-team-28-shared"},
+		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef: &corev1.ObjectReference{Namespace: namespace, Name: pvcName},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/data/clawreef/user-1/team-28-shared"},
+			},
+		},
+	}
+	client := &Client{
+		Clientset:          fake.NewSimpleClientset(pvc, pv),
+		Namespace:          "clawmanager",
+		StorageClass:       "manual",
+		WorkspaceRoot:      t.TempDir(),
+		WorkspaceNFSServer: "workspace-store.clawmanager-system.svc.cluster.local",
+		WorkspaceNFSPath:   "/",
+	}
+	service := &PVCService{
+		client:           client,
+		namespaceService: &NamespaceService{client: client},
+	}
+
+	_, err := service.CreateTeamSharedPVC(ctx, 1, 28, 10, "manual")
+	if err == nil || !strings.Contains(err.Error(), "workspace NFS") {
+		t.Fatalf("expected existing hostPath Team PV to be rejected, got %v", err)
+	}
 }
 
 func TestHostPathPVNodeAffinitySkipsHardTaintedNodes(t *testing.T) {

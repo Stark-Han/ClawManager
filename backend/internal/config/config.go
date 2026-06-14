@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -14,6 +16,7 @@ type Config struct {
 	Database      DatabaseConfig      `yaml:"database"`
 	JWT           JWTConfig           `yaml:"jwt"`
 	Kubernetes    KubernetesConfig    `yaml:"kubernetes"`
+	Runtime       RuntimePoolConfig   `yaml:"runtime"`
 	ObjectStorage ObjectStorageConfig `yaml:"objectStorage"`
 	SkillScanner  SkillScannerConfig  `yaml:"skillScanner"`
 }
@@ -42,12 +45,12 @@ type JWTConfig struct {
 
 // KubernetesConfig holds Kubernetes-related configuration
 type KubernetesConfig struct {
-	Mode         string                 `yaml:"mode"` // 连接模式: auto, incluster, outofcluster
-	OutOfCluster OutOfClusterConfig     `yaml:"outOfCluster"`
-	InCluster    InClusterConfig        `yaml:"inCluster"`
-	Common       CommonKubernetesConfig `yaml:"common"`
-	Runtime      RuntimeConfig          `yaml:"runtime"`
-	Logging      LoggingConfig          `yaml:"logging"`
+	Mode         string                  `yaml:"mode"` // 连接模式: auto, incluster, outofcluster
+	OutOfCluster OutOfClusterConfig      `yaml:"outOfCluster"`
+	InCluster    InClusterConfig         `yaml:"inCluster"`
+	Common       CommonKubernetesConfig  `yaml:"common"`
+	Runtime      KubernetesRuntimeConfig `yaml:"runtime"`
+	Logging      LoggingConfig           `yaml:"logging"`
 }
 
 // OutOfClusterConfig holds out-of-cluster Kubernetes configuration
@@ -82,8 +85,8 @@ type CommonKubernetesConfig struct {
 	AutoCreateNamespace bool   `yaml:"autoCreateNamespace"`
 }
 
-// RuntimeConfig holds runtime configuration
-type RuntimeConfig struct {
+// KubernetesRuntimeConfig holds Kubernetes runtime configuration
+type KubernetesRuntimeConfig struct {
 	Pod RuntimePodConfig `yaml:"pod"`
 	PVC RuntimePVCConfig `yaml:"pvc"`
 }
@@ -116,6 +119,26 @@ type RuntimePVCConfig struct {
 	HostPathPrefix       string `yaml:"hostPathPrefix"`
 }
 
+// RuntimePoolConfig holds shared V2 runtime pool configuration.
+type RuntimePoolConfig struct {
+	Namespace          string        `yaml:"namespace"`
+	WorkspaceRoot      string        `yaml:"workspaceRoot"`
+	WorkspaceNFSServer string        `yaml:"workspaceNfsServer"`
+	WorkspaceNFSPath   string        `yaml:"workspaceNfsPath"`
+	AgentControlToken  string        `yaml:"agentControlToken"`
+	AgentReportToken   string        `yaml:"agentReportToken"`
+	BackendReplicaID   string        `yaml:"backendReplicaId"`
+	RedisURL           string        `yaml:"redisUrl"`
+	SchedulerEnabled   bool          `yaml:"schedulerEnabled"`
+	HeartbeatTimeout   time.Duration `yaml:"heartbeatTimeout"`
+	SchedulerTick      time.Duration `yaml:"schedulerTick"`
+	OpenClawImage      string        `yaml:"openClawImage"`
+	HermesImage        string        `yaml:"hermesImage"`
+	MaxGatewaysPerPod  int           `yaml:"maxGatewaysPerPod"`
+	GatewayPortStart   int           `yaml:"gatewayPortStart"`
+	GatewayPortEnd     int           `yaml:"gatewayPortEnd"`
+}
+
 // LoggingConfig holds logging configuration
 type LoggingConfig struct {
 	Level       string `yaml:"level"`
@@ -135,14 +158,15 @@ type ObjectStorageConfig struct {
 }
 
 type SkillScannerConfig struct {
-	BaseURL   string `yaml:"baseUrl"`
-	APIKey    string `yaml:"apiKey"`
-	TimeoutSeconds int `yaml:"timeoutSeconds"`
-	Enabled   bool   `yaml:"enabled"`
+	BaseURL        string `yaml:"baseUrl"`
+	APIKey         string `yaml:"apiKey"`
+	TimeoutSeconds int    `yaml:"timeoutSeconds"`
+	Enabled        bool   `yaml:"enabled"`
 }
 
 // Load loads configuration from file and environment variables
 func Load() (*Config, error) {
+	runtimeNamespace := getEnv("RUNTIME_NAMESPACE", getEnv("K8S_NAMESPACE", "clawmanager-system"))
 	config := &Config{
 		Server: ServerConfig{
 			Address: ":9001",
@@ -177,7 +201,7 @@ func Load() (*Config, error) {
 				RetryCount:          3,
 				AutoCreateNamespace: true,
 			},
-			Runtime: RuntimeConfig{
+			Runtime: KubernetesRuntimeConfig{
 				Pod: RuntimePodConfig{
 					ImageRegistry: "docker.io/clawreef",
 					ContainerPort: 3001,
@@ -199,6 +223,24 @@ func Load() (*Config, error) {
 				LogAPICalls: false,
 			},
 		},
+		Runtime: RuntimePoolConfig{
+			Namespace:          runtimeNamespace,
+			WorkspaceRoot:      getEnv("RUNTIME_WORKSPACE_ROOT", "/workspaces"),
+			WorkspaceNFSServer: getEnv("RUNTIME_WORKSPACE_NFS_SERVER", defaultWorkspaceNFSServer(runtimeNamespace)),
+			WorkspaceNFSPath:   getEnv("RUNTIME_WORKSPACE_NFS_PATH", "/"),
+			AgentControlToken:  getEnv("RUNTIME_AGENT_CONTROL_TOKEN", ""),
+			AgentReportToken:   getEnv("RUNTIME_AGENT_REPORT_TOKEN", ""),
+			BackendReplicaID:   getEnv("HOSTNAME", "clawmanager-backend-local"),
+			RedisURL:           getEnv("PLATFORM_REDIS_URL", getEnv("TEAM_REDIS_URL", "")),
+			SchedulerEnabled:   getEnvBool("RUNTIME_SCHEDULER_ENABLED", true),
+			HeartbeatTimeout:   getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", 10*time.Second),
+			SchedulerTick:      getEnvDuration("RUNTIME_SCHEDULER_TICK", 2*time.Second),
+			OpenClawImage:      getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"),
+			HermesImage:        getEnv("HERMES_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
+			MaxGatewaysPerPod:  getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),
+			GatewayPortStart:   getEnvInt("RUNTIME_GATEWAY_PORT_START", 20000),
+			GatewayPortEnd:     getEnvInt("RUNTIME_GATEWAY_PORT_END", 20099),
+		},
 		ObjectStorage: ObjectStorageConfig{
 			Endpoint:       getEnv("OBJECT_STORAGE_ENDPOINT", ""),
 			Region:         getEnv("OBJECT_STORAGE_REGION", ""),
@@ -211,10 +253,10 @@ func Load() (*Config, error) {
 			LocalFallback:  getEnv("OBJECT_STORAGE_LOCAL_FALLBACK", ".data/object-storage"),
 		},
 		SkillScanner: SkillScannerConfig{
-			BaseURL: getEnv("SKILL_SCANNER_BASE_URL", ""),
-			APIKey: getEnv("SKILL_SCANNER_API_KEY", ""),
+			BaseURL:        getEnv("SKILL_SCANNER_BASE_URL", ""),
+			APIKey:         getEnv("SKILL_SCANNER_API_KEY", ""),
 			TimeoutSeconds: 30,
-			Enabled: strings.EqualFold(getEnv("SKILL_SCANNER_ENABLED", "false"), "true"),
+			Enabled:        strings.EqualFold(getEnv("SKILL_SCANNER_ENABLED", "false"), "true"),
 		},
 	}
 
@@ -308,6 +350,29 @@ func applyEnvOverrides(config *Config) {
 		config.Kubernetes.Runtime.PVC.HostPathPrefix = hostPathPrefix
 	}
 
+	config.Runtime.Namespace = getEnv("RUNTIME_NAMESPACE", getEnv("K8S_NAMESPACE", config.Runtime.Namespace))
+	config.Runtime.WorkspaceRoot = getEnv("RUNTIME_WORKSPACE_ROOT", config.Runtime.WorkspaceRoot)
+	config.Runtime.WorkspaceNFSServer = getEnv("RUNTIME_WORKSPACE_NFS_SERVER", config.Runtime.WorkspaceNFSServer)
+	config.Runtime.WorkspaceNFSPath = getEnv("RUNTIME_WORKSPACE_NFS_PATH", config.Runtime.WorkspaceNFSPath)
+	if strings.TrimSpace(config.Runtime.WorkspaceNFSServer) == "" {
+		config.Runtime.WorkspaceNFSServer = defaultWorkspaceNFSServer(config.Runtime.Namespace)
+	}
+	if strings.TrimSpace(config.Runtime.WorkspaceNFSPath) == "" {
+		config.Runtime.WorkspaceNFSPath = "/"
+	}
+	config.Runtime.AgentControlToken = getEnv("RUNTIME_AGENT_CONTROL_TOKEN", config.Runtime.AgentControlToken)
+	config.Runtime.AgentReportToken = getEnv("RUNTIME_AGENT_REPORT_TOKEN", config.Runtime.AgentReportToken)
+	config.Runtime.BackendReplicaID = getEnv("HOSTNAME", config.Runtime.BackendReplicaID)
+	config.Runtime.RedisURL = getEnv("PLATFORM_REDIS_URL", getEnv("TEAM_REDIS_URL", config.Runtime.RedisURL))
+	config.Runtime.SchedulerEnabled = getEnvBool("RUNTIME_SCHEDULER_ENABLED", config.Runtime.SchedulerEnabled)
+	config.Runtime.HeartbeatTimeout = getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", config.Runtime.HeartbeatTimeout)
+	config.Runtime.SchedulerTick = getEnvDuration("RUNTIME_SCHEDULER_TICK", config.Runtime.SchedulerTick)
+	config.Runtime.OpenClawImage = getEnv("OPENCLAW_RUNTIME_IMAGE", config.Runtime.OpenClawImage)
+	config.Runtime.HermesImage = getEnv("HERMES_RUNTIME_IMAGE", config.Runtime.HermesImage)
+	config.Runtime.MaxGatewaysPerPod = getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", config.Runtime.MaxGatewaysPerPod)
+	config.Runtime.GatewayPortStart = getEnvInt("RUNTIME_GATEWAY_PORT_START", config.Runtime.GatewayPortStart)
+	config.Runtime.GatewayPortEnd = getEnvInt("RUNTIME_GATEWAY_PORT_END", config.Runtime.GatewayPortEnd)
+
 	if endpoint := os.Getenv("OBJECT_STORAGE_ENDPOINT"); endpoint != "" {
 		config.ObjectStorage.Endpoint = endpoint
 	}
@@ -354,6 +419,50 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func defaultWorkspaceNFSServer(namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = "clawmanager-system"
+	}
+	return fmt.Sprintf("workspace-store.%s.svc.cluster.local", namespace)
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }
 
 // GetKubeconfigPath returns the kubeconfig path for out-of-cluster mode

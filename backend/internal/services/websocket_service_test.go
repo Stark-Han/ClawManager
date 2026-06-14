@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -86,3 +87,57 @@ func TestHubStopClosesClients(t *testing.T) {
 	}
 }
 
+func TestHubBroadcastRuntimeAdminFiltersToAdminRuntimeClients(t *testing.T) {
+	h := NewHub()
+	adminRuntime := &Client{
+		UserID: 1,
+		Role:   "admin",
+		Topic:  WebSocketTopicRuntimeAdmin,
+		Send:   make(chan []byte, 1),
+		hub:    h,
+	}
+	adminUserTopic := &Client{
+		UserID: 2,
+		Role:   "admin",
+		Topic:  WebSocketTopicUser,
+		Send:   make(chan []byte, 1),
+		hub:    h,
+	}
+	normalRuntime := &Client{
+		UserID: 3,
+		Role:   "user",
+		Topic:  WebSocketTopicRuntimeAdmin,
+		Send:   make(chan []byte, 1),
+		hub:    h,
+	}
+	h.clients[adminRuntime] = true
+	h.clients[adminUserTopic] = true
+	h.clients[normalRuntime] = true
+
+	h.BroadcastRuntimeAdmin("runtime_pod_metrics", map[string]any{"pod_id": int64(9)})
+
+	select {
+	case raw := <-adminRuntime.Send:
+		var msg Message
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("runtime admin message is not json: %v", err)
+		}
+		if msg.Type != "runtime_pod_metrics" {
+			t.Fatalf("message type = %q, want runtime_pod_metrics", msg.Type)
+		}
+	default:
+		t.Fatalf("admin runtime client did not receive runtime admin message")
+	}
+
+	select {
+	case raw := <-adminUserTopic.Send:
+		t.Fatalf("admin user-topic client received runtime admin message: %s", string(raw))
+	default:
+	}
+
+	select {
+	case raw := <-normalRuntime.Send:
+		t.Fatalf("normal runtime client received runtime admin message: %s", string(raw))
+	default:
+	}
+}

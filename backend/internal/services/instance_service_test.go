@@ -80,6 +80,79 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 	}
 }
 
+func TestBuildGatewayEnvEnsuresMissingGatewayToken(t *testing.T) {
+	t.Setenv("CLAWMANAGER_LLM_GATEWAY_BASE_URL", "http://gateway.example/api/v1/gateway/llm")
+
+	instanceRepo := &stubGatewayEnvInstanceRepository{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+	service := &instanceService{
+		instanceRepo: instanceRepo,
+		llmModelRepo: &stubLLMModelRepository{
+			active: []models.LLMModel{{DisplayName: "auto"}},
+		},
+	}
+	instance := &models.Instance{
+		ID:     68,
+		UserID: 1,
+		Type:   "openclaw",
+	}
+
+	env, err := service.BuildGatewayEnv(instance)
+	if err != nil {
+		t.Fatalf("BuildGatewayEnv returned error: %v", err)
+	}
+	if instance.AccessToken == nil || *instance.AccessToken == "" {
+		t.Fatal("BuildGatewayEnv did not provision instance access token")
+	}
+	if env["CLAWMANAGER_LLM_API_KEY"] != *instance.AccessToken {
+		t.Fatalf("CLAWMANAGER_LLM_API_KEY = %q, want provisioned token %q", env["CLAWMANAGER_LLM_API_KEY"], *instance.AccessToken)
+	}
+	if got := instanceRepo.updated[68]; got == nil || got.AccessToken == nil || *got.AccessToken != *instance.AccessToken {
+		t.Fatalf("repository update did not persist provisioned token: %#v", instanceRepo.updated[68])
+	}
+}
+
+func TestBuildGatewayEnvMergesEnvironmentOverrides(t *testing.T) {
+	t.Setenv("CLAWMANAGER_LLM_GATEWAY_BASE_URL", "http://gateway.example/api/v1/gateway/llm")
+	token := "igt_test_token"
+	raw, err := marshalEnvironmentOverrides(map[string]string{
+		"CLAWMANAGER_TEAM_ENABLED":   "true",
+		"CLAWMANAGER_TEAM_MEMBER_ID": "lite-worker",
+		"CUSTOM_GATEWAY_ENV":         "enabled",
+	})
+	if err != nil {
+		t.Fatalf("marshalEnvironmentOverrides returned error: %v", err)
+	}
+	service := &instanceService{
+		llmModelRepo: &stubLLMModelRepository{
+			active: []models.LLMModel{{DisplayName: "auto"}},
+		},
+	}
+
+	env, err := service.BuildGatewayEnv(&models.Instance{
+		ID:                       88,
+		Type:                     "openclaw",
+		RuntimeType:              RuntimeBackendGateway,
+		AccessToken:              &token,
+		EnvironmentOverridesJSON: raw,
+	})
+	if err != nil {
+		t.Fatalf("BuildGatewayEnv returned error: %v", err)
+	}
+
+	if env["CLAWMANAGER_TEAM_ENABLED"] != "true" || env["CLAWMANAGER_TEAM_MEMBER_ID"] != "lite-worker" {
+		t.Fatalf("expected Team environment overrides to be merged into gateway env, got %#v", env)
+	}
+	if env["CUSTOM_GATEWAY_ENV"] != "enabled" {
+		t.Fatalf("expected custom gateway environment override to be merged, got %#v", env)
+	}
+	if env["CLAWMANAGER_LLM_API_KEY"] != token {
+		t.Fatalf("expected gateway token env to remain available")
+	}
+	if env["CLAWMANAGER_RUNTIME_TYPE"] != RuntimeBackendGateway {
+		t.Fatalf("expected runtime type marker %q, got %q", RuntimeBackendGateway, env["CLAWMANAGER_RUNTIME_TYPE"])
+	}
+}
+
 func TestBuildGatewayEnvSkipsUnmanagedRuntime(t *testing.T) {
 	token := "igt_test_token"
 	service := &instanceService{}
@@ -94,6 +167,20 @@ func TestBuildGatewayEnvSkipsUnmanagedRuntime(t *testing.T) {
 	if len(env) != 0 {
 		t.Fatalf("expected unmanaged runtime to receive no gateway env, got %#v", env)
 	}
+}
+
+type stubGatewayEnvInstanceRepository struct {
+	*fakeRuntimeInstanceRepo
+	updated map[int]*models.Instance
+}
+
+func (r *stubGatewayEnvInstanceRepository) Update(instance *models.Instance) error {
+	if r.updated == nil {
+		r.updated = map[int]*models.Instance{}
+	}
+	copy := *instance
+	r.updated[instance.ID] = &copy
+	return nil
 }
 
 func TestBuildAgentEnvInjectsHermesAgentConfig(t *testing.T) {

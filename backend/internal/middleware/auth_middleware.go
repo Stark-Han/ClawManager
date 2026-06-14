@@ -51,7 +51,11 @@ func Auth() gin.HandlerFunc {
 }
 
 // GatewayAuth accepts either a normal user access JWT or an instance lifecycle gateway token.
-func GatewayAuth(instanceRepo repository.InstanceRepository) gin.HandlerFunc {
+func GatewayAuth(instanceRepo repository.InstanceRepository, bindingRepos ...repository.InstanceRuntimeBindingRepository) gin.HandlerFunc {
+	var bindingRepo repository.InstanceRuntimeBindingRepository
+	if len(bindingRepos) > 0 {
+		bindingRepo = bindingRepos[0]
+	}
 	return func(c *gin.Context) {
 		tokenString, ok := extractToken(c)
 		if !ok {
@@ -90,8 +94,31 @@ func GatewayAuth(instanceRepo repository.InstanceRepository) gin.HandlerFunc {
 
 		c.Set("userID", instance.UserID)
 		c.Set("instanceID", instance.ID)
+		c.Set("instanceMode", gatewayInstanceMode(instance.InstanceMode, instance.RuntimeType))
+		c.Set("runtimeType", strings.TrimSpace(instance.RuntimeType))
+		if bindingRepo != nil {
+			if binding, err := bindingRepo.GetRunningByInstanceID(c.Request.Context(), instance.ID); err == nil && binding != nil {
+				c.Set("gatewayID", strings.TrimSpace(binding.GatewayID))
+				c.Set("runtimePodID", binding.RuntimePodID)
+			}
+		}
 		c.Set("gatewayAuthType", "instance")
 		c.Next()
+	}
+}
+
+func gatewayInstanceMode(instanceMode, runtimeType string) string {
+	mode := strings.ToLower(strings.TrimSpace(instanceMode))
+	if mode == "lite" || mode == "pro" {
+		return mode
+	}
+	switch strings.ToLower(strings.TrimSpace(runtimeType)) {
+	case "gateway":
+		return "lite"
+	case "desktop", "shell":
+		return "pro"
+	default:
+		return mode
 	}
 }
 

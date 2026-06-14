@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -79,11 +81,13 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 	currentGPU := 0
 	existingNames := map[string]struct{}{}
 	for _, existing := range existingInstances {
-		currentCPU += existing.CPUCores
-		currentMemory += existing.MemoryGB
-		currentStorage += existing.DiskGB
-		if existing.GPUEnabled {
-			currentGPU += existing.GPUCount
+		if instanceModeUsesDedicatedResources(modeForExistingInstance(&existing)) {
+			currentCPU += existing.CPUCores
+			currentMemory += existing.MemoryGB
+			currentStorage += existing.DiskGB
+			if existing.GPUEnabled {
+				currentGPU += existing.GPUCount
+			}
 		}
 		existingNames[strings.TrimSpace(strings.ToLower(existing.Name))] = struct{}{}
 	}
@@ -102,11 +106,13 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 			return fmt.Errorf("instance name already exists")
 		}
 		requestNames[normalizedName] = struct{}{}
-		requestedCPU += req.CPUCores
-		requestedMemory += req.MemoryGB
-		requestedStorage += req.DiskGB
-		if req.GPUEnabled {
-			requestedGPU += req.GPUCount
+		if instanceModeUsesDedicatedResources(resolveCreateInstanceMode(req)) {
+			requestedCPU += req.CPUCores
+			requestedMemory += req.MemoryGB
+			requestedStorage += req.DiskGB
+			if req.GPUEnabled {
+				requestedGPU += req.GPUCount
+			}
 		}
 	}
 
@@ -130,8 +136,10 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 type CreateInstanceRequest struct {
 	Name                 string              `json:"name" validate:"required,min=3,max=50"`
 	Description          *string             `json:"description,omitempty"`
-	Type                 string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
-	RuntimeType          string              `json:"runtime_type" validate:"omitempty,oneof=desktop shell"`
+	Type                 string              `json:"type" validate:"required,oneof=openclaw hermes"`
+	Mode                 string              `json:"mode" validate:"omitempty,oneof=lite pro"`
+	InstanceMode         string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
+	RuntimeType          string              `json:"runtime_type" validate:"omitempty,oneof=gateway desktop shell"`
 	CPUCores             float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB             int                 `json:"memory_gb" validate:"required,min=1,max=128"`
 	DiskGB               int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
@@ -159,6 +167,14 @@ type TeamInstanceConfig struct {
 	SharedUmask     string
 }
 
+type instanceModeLimitConfig struct {
+	Capacity     *int
+	MaxCPU       *float64
+	MaxMemoryGB  *int
+	MaxStorageGB *int
+	MaxGPUCount  *int
+}
+
 // UpdateInstanceRequest holds data for updating an instance
 type UpdateInstanceRequest struct {
 	Name        *string `json:"name,omitempty" validate:"omitempty,min=3,max=50"`
@@ -167,14 +183,17 @@ type UpdateInstanceRequest struct {
 
 // InstanceStatus holds the status of an instance
 type InstanceStatus struct {
-	InstanceID   int        `json:"instance_id"`
-	Status       string     `json:"status"`
-	PodName      *string    `json:"pod_name,omitempty"`
-	PodNamespace *string    `json:"pod_namespace,omitempty"`
-	PodIP        *string    `json:"pod_ip,omitempty"`
-	PodStatus    string     `json:"pod_status,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
+	InstanceID          int        `json:"instance_id"`
+	Status              string     `json:"status"`
+	Availability        string     `json:"availability,omitempty"`
+	AgentType           string     `json:"agent_type,omitempty"`
+	WorkspaceUsageBytes int64      `json:"workspace_usage_bytes,omitempty"`
+	PodName             *string    `json:"pod_name,omitempty"`
+	PodNamespace        *string    `json:"pod_namespace,omitempty"`
+	PodIP               *string    `json:"pod_ip,omitempty"`
+	PodStatus           string     `json:"pod_status,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
 }
 
 // instanceService implements InstanceService
@@ -184,7 +203,12 @@ type instanceService struct {
 	llmModelRepo          repository.LLMModelRepository
 	openClawConfigService OpenClawConfigService
 	allowPrivilegedPods   bool
+	runtimePodRepo        repository.RuntimePodRepository
+	bindingRepo           repository.InstanceRuntimeBindingRepository
+	agentClient           RuntimeAgentClient
+	workspaceRoot         string
 	podService            *k8s.PodService
+	deploymentService     *k8s.InstanceDeploymentService
 	pvcService            *k8s.PVCService
 	serviceService        *k8s.ServiceService
 	networkPolicyService  *k8s.NetworkPolicyService
@@ -203,6 +227,17 @@ func WithPrivilegedInstancePods(allowed bool) InstanceServiceOption {
 	}
 }
 
+func WithV2RuntimeLifecycle(runtimePodRepo repository.RuntimePodRepository, bindingRepo repository.InstanceRuntimeBindingRepository, agentClient RuntimeAgentClient, workspaceRoot string) InstanceServiceOption {
+	return func(s *instanceService) {
+		s.runtimePodRepo = runtimePodRepo
+		s.bindingRepo = bindingRepo
+		s.agentClient = agentClient
+		if strings.TrimSpace(workspaceRoot) != "" {
+			s.workspaceRoot = strings.TrimSpace(workspaceRoot)
+		}
+	}
+}
+
 // NewInstanceService creates a new instance service
 func NewInstanceService(instanceRepo repository.InstanceRepository, quotaRepo repository.QuotaRepository, llmModelRepo repository.LLMModelRepository, openClawConfigService OpenClawConfigService, options ...InstanceServiceOption) InstanceService {
 	service := &instanceService{
@@ -210,7 +245,9 @@ func NewInstanceService(instanceRepo repository.InstanceRepository, quotaRepo re
 		quotaRepo:             quotaRepo,
 		llmModelRepo:          llmModelRepo,
 		openClawConfigService: openClawConfigService,
+		workspaceRoot:         "/workspaces",
 		podService:            k8s.NewPodService(),
+		deploymentService:     k8s.NewInstanceDeploymentService(),
 		pvcService:            k8s.NewPVCService(),
 		serviceService:        k8s.NewServiceService(),
 		networkPolicyService:  k8s.NewNetworkPolicyService(),
@@ -227,6 +264,7 @@ func NewInstanceService(instanceRepo repository.InstanceRepository, quotaRepo re
 func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models.Instance, error) {
 	ctx := context.Background()
 	req.Name = strings.TrimSpace(req.Name)
+	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	environmentOverrides, err := normalizeEnvironmentOverrides(req.EnvironmentOverrides)
 	if err != nil {
 		return nil, err
@@ -244,6 +282,11 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 
 	if quota == nil {
 		return nil, fmt.Errorf("user quota not found")
+	}
+	instanceMode := resolveCreateInstanceMode(req)
+	modeRuntimeType, _ := RuntimeTypeForInstanceMode(instanceMode)
+	if !hasExplicitCreateInstanceMode(req) && normalizeInstanceRuntimeType(req.RuntimeType) == RuntimeBackendShell {
+		modeRuntimeType = RuntimeBackendShell
 	}
 
 	// Check instance count limit
@@ -266,11 +309,13 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	currentStorage := 0
 	currentGPU := 0
 	for _, existing := range existingInstances {
-		currentCPU += existing.CPUCores
-		currentMemory += existing.MemoryGB
-		currentStorage += existing.DiskGB
-		if existing.GPUEnabled {
-			currentGPU += existing.GPUCount
+		if instanceModeUsesDedicatedResources(modeForExistingInstance(&existing)) {
+			currentCPU += existing.CPUCores
+			currentMemory += existing.MemoryGB
+			currentStorage += existing.DiskGB
+			if existing.GPUEnabled {
+				currentGPU += existing.GPUCount
+			}
 		}
 	}
 
@@ -282,43 +327,58 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		return nil, fmt.Errorf("instance name already exists")
 	}
 
-	// Check CPU limit
-	if currentCPU+req.CPUCores > quota.MaxCPUCores {
-		return nil, fmt.Errorf("CPU cores exceed quota: current %v, requested %v, max %v", currentCPU, req.CPUCores, quota.MaxCPUCores)
-	}
-
-	// Check memory limit
-	if currentMemory+req.MemoryGB > quota.MaxMemoryGB {
-		return nil, fmt.Errorf("memory exceed quota: current %dGB, requested %dGB, max %dGB", currentMemory, req.MemoryGB, quota.MaxMemoryGB)
-	}
-
-	// Check storage limit
-	if currentStorage+req.DiskGB > quota.MaxStorageGB {
-		return nil, fmt.Errorf("storage exceed quota: current %dGB, requested %dGB, max %dGB", currentStorage, req.DiskGB, quota.MaxStorageGB)
-	}
-
-	// Check GPU limit
 	requestedGPU := 0
 	if req.GPUEnabled {
 		requestedGPU = req.GPUCount
 	}
-	if currentGPU+requestedGPU > quota.MaxGPUCount {
-		return nil, fmt.Errorf("GPU count exceed quota: current %d, requested %d, max %d", currentGPU, requestedGPU, quota.MaxGPUCount)
+	if instanceModeUsesDedicatedResources(instanceMode) {
+		// Check CPU limit
+		if currentCPU+req.CPUCores > quota.MaxCPUCores {
+			return nil, fmt.Errorf("CPU cores exceed quota: current %v, requested %v, max %v", currentCPU, req.CPUCores, quota.MaxCPUCores)
+		}
+
+		// Check memory limit
+		if currentMemory+req.MemoryGB > quota.MaxMemoryGB {
+			return nil, fmt.Errorf("memory exceed quota: current %dGB, requested %dGB, max %dGB", currentMemory, req.MemoryGB, quota.MaxMemoryGB)
+		}
+
+		// Check storage limit
+		if currentStorage+req.DiskGB > quota.MaxStorageGB {
+			return nil, fmt.Errorf("storage exceed quota: current %dGB, requested %dGB, max %dGB", currentStorage, req.DiskGB, quota.MaxStorageGB)
+		}
+
+		// Check GPU limit
+		if currentGPU+requestedGPU > quota.MaxGPUCount {
+			return nil, fmt.Errorf("GPU count exceed quota: current %d, requested %d, max %d", currentGPU, requestedGPU, quota.MaxGPUCount)
+		}
+	}
+	if err := s.enforceInstanceModeLimits(ctx, instanceMode, req.CPUCores, req.MemoryGB, req.DiskGB, requestedGPU); err != nil {
+		return nil, err
+	}
+	if runtimeType, isV2 := NormalizeV2RuntimeType(req.Type); isV2 && instanceMode == InstanceModeLite {
+		return s.createV2Instance(ctx, userID, req, runtimeType, environmentOverridesJSON)
 	}
 
 	runtimeConfig := buildRuntimeConfig(req.Type, req.OSType, req.OSVersion, req.ImageRegistry, req.ImageTag)
 	runtimeType := normalizeInstanceRuntimeType(req.RuntimeType)
+	if modeRuntimeType != "" {
+		runtimeType = modeRuntimeType
+	}
 	if (req.ImageRegistry == nil || strings.TrimSpace(*req.ImageRegistry) == "") && (req.ImageTag == nil || strings.TrimSpace(*req.ImageTag) == "") {
 		if selection, ok := runtimeImageOverride(req.Type); ok {
 			image := selection.Image
 			req.ImageRegistry = &image
 			req.ImageTag = nil
-			runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
+			if modeRuntimeType == "" {
+				runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
+			}
 			runtimeConfig = buildRuntimeConfig(req.Type, req.OSType, req.OSVersion, req.ImageRegistry, req.ImageTag)
 		}
 	} else if req.ImageRegistry != nil {
 		if selection, ok := runtimeImageOverrideForImage(req.Type, *req.ImageRegistry); ok {
-			runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
+			if modeRuntimeType == "" {
+				runtimeType = normalizeInstanceRuntimeType(selection.RuntimeType)
+			}
 		}
 	}
 
@@ -334,6 +394,7 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		Description:              req.Description,
 		Type:                     req.Type,
 		RuntimeType:              runtimeType,
+		InstanceMode:             InstanceModeForRuntimeType(runtimeType),
 		Status:                   "creating",
 		CPUCores:                 req.CPUCores,
 		MemoryGB:                 req.MemoryGB,
@@ -506,18 +567,29 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 		SecurityMode:         s.securityModeForInstance(instance.Type),
 	}
 
-	pod, err := s.podService.CreatePod(ctx, podConfig)
-	if err != nil {
-		// Rollback: delete PVC and instance record
-		s.pvcService.DeletePVC(ctx, userID, instance.ID)
-		if bootstrapSnapshot != nil {
-			_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
-		}
-		s.instanceRepo.Delete(instance.ID)
-		return nil, fmt.Errorf("failed to create pod: %w", err)
-	}
-
+	var workloadNamespace string
+	var workloadName string
 	if instanceUsesDesktopRuntime(instance) {
+		if s.deploymentService == nil {
+			s.pvcService.DeletePVC(ctx, userID, instance.ID)
+			if bootstrapSnapshot != nil {
+				_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, fmt.Errorf("instance deployment service is not configured"))
+			}
+			s.instanceRepo.Delete(instance.ID)
+			return nil, fmt.Errorf("instance deployment service is not configured")
+		}
+		deployment, err := s.deploymentService.EnsureDeployment(ctx, podConfig, 1)
+		if err != nil {
+			s.pvcService.DeletePVC(ctx, userID, instance.ID)
+			if bootstrapSnapshot != nil {
+				_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+			}
+			s.instanceRepo.Delete(instance.ID)
+			return nil, fmt.Errorf("failed to create deployment: %w", err)
+		}
+		workloadNamespace = deployment.Namespace
+		workloadName = deployment.Name
+
 		// Create Service for browser desktop access.
 		serviceConfig := k8s.ServiceConfig{
 			InstanceID:      instance.ID,
@@ -529,8 +601,8 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 
 		serviceInfo, err := s.serviceService.CreateService(ctx, serviceConfig)
 		if err != nil {
-			// Rollback: delete pod, PVC and instance record
-			s.podService.DeletePod(ctx, userID, instance.ID)
+			// Rollback: delete Deployment, PVC and instance record.
+			_ = s.deploymentService.DeleteDeployment(ctx, userID, instance.ID)
 			s.pvcService.DeletePVC(ctx, userID, instance.ID)
 			if bootstrapSnapshot != nil {
 				_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
@@ -541,12 +613,25 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 
 		fmt.Printf("Instance %d: Service created successfully (ClusterIP: %s)\n", instance.ID, serviceInfo.ClusterIP)
 	} else {
+		pod, err := s.podService.CreatePod(ctx, podConfig)
+		if err != nil {
+			// Rollback: delete PVC and instance record.
+			s.pvcService.DeletePVC(ctx, userID, instance.ID)
+			if bootstrapSnapshot != nil {
+				_ = s.openClawConfigService.MarkSnapshotFailed(bootstrapSnapshot, err)
+			}
+			s.instanceRepo.Delete(instance.ID)
+			return nil, fmt.Errorf("failed to create pod: %w", err)
+		}
+		workloadNamespace = pod.Namespace
+		workloadName = pod.Name
 		fmt.Printf("Instance %d: Shell runtime selected, skipping desktop service creation\n", instance.ID)
 	}
 
-	// Update instance with pod info
-	podNamespace := pod.Namespace
-	podName := pod.Name
+	// Update instance with initial workload info. For Pro instances this is the
+	// stable Deployment name; sync later records the active Pod name/IP.
+	podNamespace := workloadNamespace
+	podName := workloadName
 	instance.PodNamespace = &podNamespace
 	instance.PodName = &podName
 	instance.Status = "creating"
@@ -573,6 +658,54 @@ func (s *instanceService) Create(userID int, req CreateInstanceRequest) (*models
 	GetHub().BroadcastInstanceStatus(userID, instance)
 	fmt.Printf("Instance %d status broadcast complete\n", instance.ID)
 
+	return instance, nil
+}
+
+func (s *instanceService) createV2Instance(ctx context.Context, userID int, req CreateInstanceRequest, runtimeType string, environmentOverridesJSON *string) (*models.Instance, error) {
+	now := time.Now()
+	workspaceRoot := s.runtimeWorkspaceRoot()
+	instance := &models.Instance{
+		UserID:                   userID,
+		Name:                     strings.TrimSpace(req.Name),
+		Description:              trimOptionalString(req.Description),
+		Type:                     runtimeType,
+		RuntimeType:              RuntimeBackendGateway,
+		InstanceMode:             InstanceModeLite,
+		Status:                   "creating",
+		CPUCores:                 req.CPUCores,
+		MemoryGB:                 req.MemoryGB,
+		DiskGB:                   req.DiskGB,
+		GPUEnabled:               req.GPUEnabled,
+		GPUCount:                 req.GPUCount,
+		OSType:                   req.OSType,
+		OSVersion:                req.OSVersion,
+		ImageRegistry:            req.ImageRegistry,
+		ImageTag:                 req.ImageTag,
+		EnvironmentOverridesJSON: environmentOverridesJSON,
+		StorageClass:             strings.TrimSpace(req.StorageClass),
+		MountPath:                workspaceRoot,
+		RuntimeGeneration:        1,
+		CreatedAt:                now,
+		UpdatedAt:                now,
+		StartedAt:                &now,
+	}
+
+	if err := s.instanceRepo.Create(instance); err != nil {
+		return nil, fmt.Errorf("failed to create instance record: %w", err)
+	}
+
+	workspacePath, err := ensureRuntimeWorkspaceDirectories(workspaceRoot, runtimeType, userID, instance.ID)
+	if err != nil {
+		_ = s.instanceRepo.Delete(instance.ID)
+		return nil, fmt.Errorf("failed to create instance workspace: %w", err)
+	}
+	if err := s.instanceRepo.SetWorkspacePath(ctx, instance.ID, workspacePath); err != nil {
+		_ = s.instanceRepo.Delete(instance.ID)
+		return nil, fmt.Errorf("failed to persist instance workspace path: %w", err)
+	}
+	instance.WorkspacePath = &workspacePath
+
+	GetHub().BroadcastInstanceStatus(userID, instance)
 	return instance, nil
 }
 
@@ -625,6 +758,13 @@ func (s *instanceService) Start(instanceID int) error {
 
 	if instance.Status == "running" {
 		return fmt.Errorf("instance is already running")
+	}
+	if err := s.enforceInstanceModeLimits(ctx, modeForExistingInstance(instance), instance.CPUCores, instance.MemoryGB, instance.DiskGB, instance.GPUCount); err != nil {
+		return err
+	}
+
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok {
+		return s.startV2Instance(ctx, instance, runtimeType)
 	}
 
 	if _, err := s.ensureGatewayToken(instance); err != nil {
@@ -686,12 +826,19 @@ func (s *instanceService) Start(instanceID int) error {
 		SecurityMode:       s.securityModeForInstance(instance.Type),
 	}
 
-	pod, err := s.podService.CreatePod(ctx, podConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create pod: %w", err)
-	}
-
+	var workloadNamespace string
+	var workloadName string
 	if instanceUsesDesktopRuntime(instance) {
+		if s.deploymentService == nil {
+			return fmt.Errorf("instance deployment service is not configured")
+		}
+		deployment, err := s.deploymentService.EnsureDeployment(ctx, podConfig, 1)
+		if err != nil {
+			return fmt.Errorf("failed to ensure deployment: %w", err)
+		}
+		workloadNamespace = deployment.Namespace
+		workloadName = deployment.Name
+
 		// Ensure Service exists (create if not exists)
 		serviceExists, _ := s.serviceService.ServiceExists(ctx, instance.UserID, instance.ID)
 		if !serviceExists {
@@ -708,12 +855,19 @@ func (s *instanceService) Start(instanceID int) error {
 				// Don't fail if service creation fails, pod is already running
 			}
 		}
+	} else {
+		pod, err := s.podService.CreatePod(ctx, podConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create pod: %w", err)
+		}
+		workloadNamespace = pod.Namespace
+		workloadName = pod.Name
 	}
 
 	// Update instance status
 	now := time.Now()
-	podNamespace := pod.Namespace
-	podName := pod.Name
+	podNamespace := workloadNamespace
+	podName := workloadName
 	instance.PodNamespace = &podNamespace
 	instance.PodName = &podName
 	instance.Status = "creating"
@@ -790,6 +944,25 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 		"OPENAI_API_KEY":             token,
 		"OPENAI_MODEL":               modelInjection.defaultModel,
 	}, nil
+}
+
+func (s *instanceService) BuildGatewayEnv(instance *models.Instance) (map[string]string, error) {
+	if instance == nil || !supportsManagedRuntimeIntegration(instance.Type) {
+		return s.buildGatewayEnv(instance)
+	}
+	if instance.AccessToken == nil || strings.TrimSpace(*instance.AccessToken) == "" {
+		if s == nil || s.instanceRepo == nil {
+			return nil, fmt.Errorf("instance repository is not configured")
+		}
+		if _, err := s.ensureGatewayToken(instance); err != nil {
+			return nil, err
+		}
+	}
+	gatewayEnv, err := s.buildGatewayEnv(instance)
+	if err != nil {
+		return nil, err
+	}
+	return buildInstanceGatewayEnv(instance, gatewayEnv)
 }
 
 func (s *instanceService) ensureAgentBootstrapToken(instance *models.Instance) (string, error) {
@@ -964,6 +1137,130 @@ func mergeEnvMaps(base map[string]string, overlay map[string]string) map[string]
 	return merged
 }
 
+func (s *instanceService) startV2Instance(ctx context.Context, instance *models.Instance, runtimeType string) error {
+	if err := s.ensureV2Workspace(ctx, instance, runtimeType); err != nil {
+		return err
+	}
+	nextGeneration := instance.RuntimeGeneration + 1
+	if nextGeneration <= 0 {
+		nextGeneration = 1
+	}
+	if err := s.instanceRepo.UpdateRuntimeState(ctx, instance.ID, "creating", nextGeneration, nil); err != nil {
+		return fmt.Errorf("failed to mark v2 instance creating: %w", err)
+	}
+	instance.Status = "creating"
+	instance.RuntimeGeneration = nextGeneration
+	instance.RuntimeErrorMessage = nil
+	now := time.Now()
+	instance.StartedAt = &now
+	instance.UpdatedAt = now
+	GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+	return nil
+}
+
+func (s *instanceService) stopV2Instance(ctx context.Context, instance *models.Instance) error {
+	if err := s.instanceRepo.UpdateRuntimeState(ctx, instance.ID, "stopped", instance.RuntimeGeneration, nil); err != nil {
+		return fmt.Errorf("failed to mark v2 instance stopped: %w", err)
+	}
+	now := time.Now()
+	instance.Status = "stopped"
+	instance.StoppedAt = &now
+	instance.PodName = nil
+	instance.PodNamespace = nil
+	instance.PodIP = nil
+	instance.UpdatedAt = now
+	GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+	return s.cleanupV2GatewayBinding(ctx, instance)
+}
+
+func (s *instanceService) deleteV2Instance(ctx context.Context, instance *models.Instance) error {
+	if instance.Status != "deleting" {
+		now := time.Now()
+		instance.Status = "deleting"
+		instance.UpdatedAt = now
+		if err := s.instanceRepo.Update(instance); err != nil {
+			return fmt.Errorf("failed to mark v2 instance as deleting: %w", err)
+		}
+		GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+	}
+
+	cleanupErr := s.cleanupV2GatewayBinding(ctx, instance)
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	if err := s.instanceRepo.Delete(instance.ID); err != nil {
+		return fmt.Errorf("failed to delete v2 instance record: %w", err)
+	}
+	return nil
+}
+
+func (s *instanceService) cleanupV2GatewayBinding(ctx context.Context, instance *models.Instance) error {
+	if s.bindingRepo == nil {
+		return nil
+	}
+	binding, err := s.bindingRepo.GetByInstanceID(ctx, instance.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get v2 runtime binding: %w", err)
+	}
+	if binding == nil {
+		return nil
+	}
+
+	if s.runtimePodRepo != nil {
+		pod, podErr := s.runtimePodRepo.GetByID(ctx, binding.RuntimePodID)
+		if podErr != nil {
+			return fmt.Errorf("failed to get runtime pod %d for v2 cleanup: %w", binding.RuntimePodID, podErr)
+		} else if pod == nil {
+			return fmt.Errorf("runtime pod %d is not available for v2 cleanup", binding.RuntimePodID)
+		} else if pod != nil && pod.AgentEndpoint != nil && strings.TrimSpace(*pod.AgentEndpoint) != "" && s.agentClient != nil && binding.GatewayID != "" {
+			if err := s.agentClient.DeleteGateway(ctx, strings.TrimSpace(*pod.AgentEndpoint), binding.GatewayID); err != nil {
+				return fmt.Errorf("failed to delete v2 gateway: %w", err)
+			}
+		}
+	}
+
+	if err := s.bindingRepo.DeleteByInstanceIDAndReleaseSlot(ctx, instance.ID, binding.RuntimePodID); err != nil {
+		return fmt.Errorf("failed to delete v2 runtime binding and release slot: %w", err)
+	}
+	return nil
+}
+
+func (s *instanceService) ensureV2Workspace(ctx context.Context, instance *models.Instance, runtimeType string) error {
+	if instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != "" {
+		return nil
+	}
+	workspacePath, err := ensureRuntimeWorkspaceDirectories(s.runtimeWorkspaceRoot(), runtimeType, instance.UserID, instance.ID)
+	if err != nil {
+		return fmt.Errorf("failed to create instance workspace: %w", err)
+	}
+	if err := s.instanceRepo.SetWorkspacePath(ctx, instance.ID, workspacePath); err != nil {
+		return fmt.Errorf("failed to persist instance workspace path: %w", err)
+	}
+	instance.WorkspacePath = &workspacePath
+	return nil
+}
+
+func ensureRuntimeWorkspaceDirectories(root, runtimeType string, userID, instanceID int) (string, error) {
+	workspacePath := RuntimeWorkspacePathWithRoot(root, runtimeType, userID, instanceID)
+	if err := os.MkdirAll(workspacePath, 0750); err != nil {
+		return "", err
+	}
+
+	// Allow the isolated gateway UID to traverse to its own workspace without
+	// granting read/list access to sibling user or instance directories.
+	userRoot := path.Dir(workspacePath)
+	runtimeRoot := path.Dir(userRoot)
+	for _, dir := range []string{runtimeRoot, userRoot} {
+		if err := os.Chmod(dir, 0711); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chmod(workspacePath, 0750); err != nil {
+		return "", err
+	}
+	return workspacePath, nil
+}
+
 // Stop stops an instance
 func (s *instanceService) Stop(instanceID int) error {
 	ctx := context.Background()
@@ -977,13 +1274,29 @@ func (s *instanceService) Stop(instanceID int) error {
 		return fmt.Errorf("instance not found")
 	}
 
+	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		return s.stopV2Instance(ctx, instance)
+	}
+
 	if instance.Status != "running" {
 		return fmt.Errorf("instance is not running")
 	}
 
-	// Delete pod
-	if err := s.podService.DeletePod(ctx, instance.UserID, instance.ID); err != nil {
-		return fmt.Errorf("failed to delete pod: %w", err)
+	if instanceUsesDesktopRuntime(instance) {
+		if s.deploymentService == nil {
+			return fmt.Errorf("instance deployment service is not configured")
+		}
+		if err := s.deploymentService.ScaleDeployment(ctx, instance.UserID, instance.ID, 0); err != nil {
+			fmt.Printf("Warning: failed to stop deployment for instance %d, falling back to pod delete: %v\n", instance.ID, err)
+			if podErr := s.podService.DeletePod(ctx, instance.UserID, instance.ID); podErr != nil {
+				return fmt.Errorf("failed to stop deployment: %w", err)
+			}
+		}
+	} else {
+		// Delete shell pod
+		if err := s.podService.DeletePod(ctx, instance.UserID, instance.ID); err != nil {
+			return fmt.Errorf("failed to delete pod: %w", err)
+		}
 	}
 
 	// Update instance status
@@ -1027,6 +1340,10 @@ func (s *instanceService) Delete(instanceID int) error {
 
 	if instance == nil {
 		return fmt.Errorf("instance not found")
+	}
+
+	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		return s.deleteV2Instance(context.Background(), instance)
 	}
 
 	if instance.Status != "deleting" {
@@ -1300,6 +1617,18 @@ func (s *instanceService) GetInstanceStatus(instanceID int) (*InstanceStatus, er
 		return nil, fmt.Errorf("instance not found")
 	}
 
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok {
+		return &InstanceStatus{
+			InstanceID:          instance.ID,
+			Status:              instance.Status,
+			Availability:        s.v2InstanceAvailability(ctx, instance),
+			AgentType:           runtimeType,
+			WorkspaceUsageBytes: instance.WorkspaceUsageBytes,
+			CreatedAt:           instance.CreatedAt,
+			StartedAt:           instance.StartedAt,
+		}, nil
+	}
+
 	status := &InstanceStatus{
 		InstanceID:   instance.ID,
 		Status:       instance.Status,
@@ -1332,6 +1661,13 @@ func (s *instanceService) ForceSyncInstance(instanceID int) error {
 
 	if instance == nil {
 		return fmt.Errorf("instance not found")
+	}
+
+	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		return nil
+	}
+	if instanceUsesDesktopRuntime(instance) {
+		return s.forceSyncDeploymentInstance(ctx, instance)
 	}
 
 	fmt.Printf("Force syncing instance %d (current status: %s, user: %d)\n", instanceID, instance.Status, instance.UserID)
@@ -1452,6 +1788,60 @@ func (s *instanceService) ForceSyncInstance(instanceID int) error {
 	return nil
 }
 
+func (s *instanceService) forceSyncDeploymentInstance(ctx context.Context, instance *models.Instance) error {
+	if s.deploymentService == nil {
+		return fmt.Errorf("instance deployment service is not configured")
+	}
+	deployment, err := s.deploymentService.GetDeployment(ctx, instance.UserID, instance.ID)
+	if err != nil {
+		if instance.Status == "running" || instance.Status == "creating" {
+			nextStatus := "stopped"
+			if instance.Status == "creating" {
+				nextStatus = "error"
+			}
+			instance.Status = nextStatus
+			instance.PodName = nil
+			instance.PodNamespace = nil
+			instance.PodIP = nil
+			instance.UpdatedAt = time.Now()
+			if err := s.instanceRepo.Update(instance); err != nil {
+				return fmt.Errorf("failed to update instance status: %w", err)
+			}
+			GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+		}
+		return nil
+	}
+
+	needsUpdate := false
+	desiredStatus := mapDeploymentToInstanceStatus(deployment)
+	if instance.Status != desiredStatus {
+		instance.Status = desiredStatus
+		needsUpdate = true
+	}
+	if pod, podErr := s.deploymentService.GetActivePod(ctx, instance.UserID, instance.ID); podErr == nil && pod != nil {
+		if pod.Status.PodIP != "" && (instance.PodIP == nil || *instance.PodIP != pod.Status.PodIP) {
+			instance.PodIP = &pod.Status.PodIP
+			needsUpdate = true
+		}
+		if instance.PodName == nil || *instance.PodName != pod.Name {
+			instance.PodName = &pod.Name
+			needsUpdate = true
+		}
+		if instance.PodNamespace == nil || *instance.PodNamespace != pod.Namespace {
+			instance.PodNamespace = &pod.Namespace
+			needsUpdate = true
+		}
+	}
+	if needsUpdate {
+		instance.UpdatedAt = time.Now()
+		if err := s.instanceRepo.Update(instance); err != nil {
+			return fmt.Errorf("failed to update instance: %w", err)
+		}
+		GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+	}
+	return nil
+}
+
 func additionalServicePorts(primaryPort int32) []int32 {
 	if primaryPort == 3000 || primaryPort == 8082 {
 		return []int32{3000, 8082}
@@ -1462,10 +1852,12 @@ func additionalServicePorts(primaryPort int32) []int32 {
 
 func normalizeInstanceRuntimeType(runtimeType string) string {
 	switch strings.ToLower(strings.TrimSpace(runtimeType)) {
+	case RuntimeBackendGateway:
+		return RuntimeBackendGateway
 	case "shell":
-		return "shell"
+		return RuntimeBackendShell
 	default:
-		return "desktop"
+		return RuntimeBackendDesktop
 	}
 }
 
@@ -1473,5 +1865,182 @@ func instanceUsesDesktopRuntime(instance *models.Instance) bool {
 	if instance == nil {
 		return true
 	}
-	return normalizeInstanceRuntimeType(instance.RuntimeType) == "desktop"
+	return normalizeInstanceRuntimeType(instance.RuntimeType) == RuntimeBackendDesktop
+}
+
+func resolveCreateInstanceMode(req CreateInstanceRequest) string {
+	if mode, ok := NormalizeInstanceMode(req.Mode); ok {
+		return mode
+	}
+	if mode, ok := NormalizeInstanceMode(req.InstanceMode); ok {
+		return mode
+	}
+	if strings.TrimSpace(req.RuntimeType) == "" {
+		return InstanceModeLite
+	}
+	return InstanceModeForRuntimeType(normalizeInstanceRuntimeType(req.RuntimeType))
+}
+
+func hasExplicitCreateInstanceMode(req CreateInstanceRequest) bool {
+	if _, ok := NormalizeInstanceMode(req.Mode); ok {
+		return true
+	}
+	if _, ok := NormalizeInstanceMode(req.InstanceMode); ok {
+		return true
+	}
+	return false
+}
+
+func modeForExistingInstance(instance *models.Instance) string {
+	if instance == nil {
+		return InstanceModeLite
+	}
+	if mode, ok := NormalizeInstanceMode(instance.InstanceMode); ok {
+		return mode
+	}
+	return InstanceModeForRuntimeType(normalizeInstanceRuntimeType(instance.RuntimeType))
+}
+
+func instanceModeUsesDedicatedResources(mode string) bool {
+	normalized, ok := NormalizeInstanceMode(mode)
+	return ok && normalized == InstanceModePro
+}
+
+func (s *instanceService) enforceInstanceModeLimits(ctx context.Context, mode string, cpuCores float64, memoryGB, storageGB, gpuCount int) error {
+	normalizedMode, ok := NormalizeInstanceMode(mode)
+	if !ok {
+		return fmt.Errorf("unsupported instance mode %q", mode)
+	}
+	limits := loadInstanceModeLimitConfig(normalizedMode)
+	if limits.Capacity != nil {
+		if *limits.Capacity <= 0 {
+			return fmt.Errorf("%s instance mode is disabled", normalizedMode)
+		}
+		if s == nil || s.instanceRepo == nil {
+			return fmt.Errorf("instance repository is not configured")
+		}
+		count, err := s.instanceRepo.CountActiveByMode(ctx, normalizedMode)
+		if err != nil {
+			return err
+		}
+		if count >= *limits.Capacity {
+			return fmt.Errorf("%s instance capacity reached: %d/%d", normalizedMode, count, *limits.Capacity)
+		}
+	}
+	if !instanceModeUsesDedicatedResources(normalizedMode) {
+		return nil
+	}
+	if limits.MaxCPU != nil && cpuCores > *limits.MaxCPU {
+		return fmt.Errorf("%s CPU cores exceed mode limit: requested %g, max %g", normalizedMode, cpuCores, *limits.MaxCPU)
+	}
+	if limits.MaxMemoryGB != nil && memoryGB > *limits.MaxMemoryGB {
+		return fmt.Errorf("%s memory exceeds mode limit: requested %dGB, max %dGB", normalizedMode, memoryGB, *limits.MaxMemoryGB)
+	}
+	if limits.MaxStorageGB != nil && storageGB > *limits.MaxStorageGB {
+		return fmt.Errorf("%s storage exceeds mode limit: requested %dGB, max %dGB", normalizedMode, storageGB, *limits.MaxStorageGB)
+	}
+	if limits.MaxGPUCount != nil && gpuCount > *limits.MaxGPUCount {
+		return fmt.Errorf("%s GPU count exceeds mode limit: requested %d, max %d", normalizedMode, gpuCount, *limits.MaxGPUCount)
+	}
+	return nil
+}
+
+func loadInstanceModeLimitConfig(mode string) instanceModeLimitConfig {
+	prefix := "CLAWMANAGER_" + strings.ToUpper(mode) + "_"
+	return instanceModeLimitConfig{
+		Capacity:     optionalIntEnv(prefix + "CAPACITY"),
+		MaxCPU:       optionalFloatEnv(prefix + "MAX_CPU_CORES"),
+		MaxMemoryGB:  optionalIntEnv(prefix + "MAX_MEMORY_GB"),
+		MaxStorageGB: optionalIntEnv(prefix + "MAX_STORAGE_GB"),
+		MaxGPUCount:  optionalIntEnv(prefix + "MAX_GPU_COUNT"),
+	}
+}
+
+func optionalIntEnv(key string) *int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func optionalFloatEnv(key string) *float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func (s *instanceService) runtimeWorkspaceRoot() string {
+	if s != nil && strings.TrimSpace(s.workspaceRoot) != "" {
+		return strings.TrimSpace(s.workspaceRoot)
+	}
+	return "/workspaces"
+}
+
+func v2RuntimeTypeForInstance(instance *models.Instance) (string, bool) {
+	if instance == nil {
+		return "", false
+	}
+	runtimeType, ok := NormalizeV2RuntimeType(instance.Type)
+	if !ok {
+		return "", false
+	}
+	if strings.EqualFold(strings.TrimSpace(instance.RuntimeType), RuntimeBackendGateway) {
+		return runtimeType, true
+	}
+	if mode, ok := NormalizeInstanceMode(instance.InstanceMode); ok && mode == InstanceModeLite {
+		return runtimeType, true
+	}
+	return "", false
+}
+
+func availabilityForStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running":
+		return "available"
+	case "creating":
+		return "starting"
+	default:
+		return "unavailable"
+	}
+}
+
+func (s *instanceService) v2InstanceAvailability(ctx context.Context, instance *models.Instance) string {
+	base := availabilityForStatus(instance.Status)
+	if base != "available" {
+		return base
+	}
+	if s == nil || s.bindingRepo == nil || s.runtimePodRepo == nil {
+		return "unavailable"
+	}
+	binding, err := s.bindingRepo.GetRunningByInstanceID(ctx, instance.ID)
+	if err != nil || binding == nil || binding.GatewayPort <= 0 {
+		return "unavailable"
+	}
+	pod, err := s.runtimePodRepo.GetByID(ctx, binding.RuntimePodID)
+	if err != nil || pod == nil || pod.PodIP == nil || strings.TrimSpace(*pod.PodIP) == "" {
+		return "unavailable"
+	}
+	return "available"
+}
+
+func trimOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }

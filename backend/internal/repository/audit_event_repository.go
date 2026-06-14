@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
   request_id VARCHAR(100) NULL,
   user_id INT NULL,
   instance_id INT NULL,
+  instance_mode VARCHAR(16) NULL,
+  runtime_type VARCHAR(32) NULL,
+  gateway_id VARCHAR(128) NULL,
+  runtime_pod_id BIGINT NULL,
   invocation_id INT NULL,
   event_type VARCHAR(100) NOT NULL,
   traffic_class VARCHAR(50) NOT NULL,
@@ -46,6 +50,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   INDEX idx_audit_events_trace_id (trace_id),
   INDEX idx_audit_events_request_id (request_id),
   INDEX idx_audit_events_user_id (user_id),
+  INDEX idx_audit_events_gateway_id (gateway_id),
   INDEX idx_audit_events_invocation_id (invocation_id),
   INDEX idx_audit_events_event_type (event_type),
   INDEX idx_audit_events_created_at (created_at)

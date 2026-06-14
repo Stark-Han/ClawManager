@@ -692,9 +692,15 @@ const TeamDetailPage: React.FC = () => {
   const events = loadedEvents.length > 0 ? loadedEvents : details?.events || [];
   const selectedMemberInstanceResolved =
     selectedMemberInstance?.id === selectedDesktopMember?.instance_id;
-  const selectedAccessRuntimeType = selectedMemberInstanceResolved && selectedMemberInstance
-    ? selectedMemberInstance.runtime_type
-    : null;
+  const selectedAccessRuntimeType =
+    selectedMemberInstanceResolved &&
+    selectedMemberInstance &&
+    selectedMemberInstance.runtime_type !== "gateway"
+      ? selectedMemberInstance.runtime_type
+      : null;
+  const selectedMemberIsGateway =
+    selectedMemberInstanceResolved &&
+    selectedMemberInstance?.runtime_type === "gateway";
   const currentUserLabel = useMemo(() => {
     const username = typeof user?.username === "string" ? user.username.trim() : "";
     const email = typeof user?.email === "string" ? user.email.trim() : "";
@@ -926,7 +932,17 @@ const TeamDetailPage: React.FC = () => {
                   实例详情
                 </Link>
               </div>
-              {!selectedAccessRuntimeType && !memberInstanceError ? (
+              {selectedMemberIsGateway ? (
+                <div className="app-panel flex min-h-[420px] flex-1 flex-col items-center justify-center gap-3 border-dashed p-8 text-center text-sm text-gray-500">
+                  <p>Lite 成员实例请从实例详情打开。</p>
+                  <Link
+                    to={`/instances/${selectedDesktopMember.instance_id}`}
+                    className="inline-flex items-center justify-center rounded-xl border border-[#eadfd8] bg-white px-4 py-2 text-sm font-medium text-[#5f5957] hover:bg-[#fff8f5]"
+                  >
+                    打开实例详情
+                  </Link>
+                </div>
+              ) : !selectedAccessRuntimeType && !memberInstanceError ? (
                 <div className="app-panel flex min-h-[420px] flex-1 items-center justify-center border-dashed p-8 text-sm text-gray-500">
                   {memberInstanceLoading ? "正在加载成员访问方式..." : "正在准备成员访问方式..."}
                 </div>
@@ -991,6 +1007,7 @@ const TeamDetailPage: React.FC = () => {
                     <th className="px-5 py-3">成员</th>
                     <th className="px-5 py-3">角色</th>
                     <th className="px-5 py-3">Runtime</th>
+                    <th className="px-5 py-3">Mode</th>
                     <th className="px-5 py-3">职责</th>
                     <th className="px-5 py-3">状态</th>
                     <th
@@ -1018,6 +1035,9 @@ const TeamDetailPage: React.FC = () => {
                       <td className="px-5 py-4 text-gray-600">{member.role}</td>
                       <td className="px-5 py-4 text-gray-600">
                         {member.runtime_type || "openclaw"}
+                      </td>
+                      <td className="px-5 py-4 text-gray-600">
+                        {member.instance_mode || "lite"}
                       </td>
                       <td className="min-w-[280px] max-w-md px-5 py-4">
                         <DescriptionPreview text={member.description} />

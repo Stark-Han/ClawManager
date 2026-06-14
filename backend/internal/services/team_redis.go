@@ -70,6 +70,25 @@ func (b *redisBus) XAdd(ctx context.Context, key string, fields map[string]strin
 	return id, nil
 }
 
+func (b *redisBus) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = time.Second
+	}
+	reply, err := b.do(ctx, "SET", key, value, "NX", "PX", fmt.Sprintf("%d", ttl.Milliseconds()))
+	if err != nil {
+		return false, err
+	}
+	if reply == nil {
+		return false, nil
+	}
+	return reply == "OK", nil
+}
+
+func (b *redisBus) Del(ctx context.Context, key string) error {
+	_, err := b.do(ctx, "DEL", key)
+	return err
+}
+
 func (b *redisBus) XRead(ctx context.Context, key, lastID string, block time.Duration) ([]redisStreamMessage, error) {
 	blockMillis := int(block / time.Millisecond)
 	if blockMillis <= 0 {

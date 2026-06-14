@@ -20,10 +20,10 @@ var orderedSystemImageTypes = []string{
 }
 
 var supportedSystemImageTypes = map[string]string{
-	"openclaw": "OpenClaw Desktop",
+	"openclaw": "OpenClaw Pro",
 	"ubuntu":   "Ubuntu Desktop",
 	"webtop":   "Webtop Desktop",
-	"hermes":   "Hermes Runtime",
+	"hermes":   "Hermes Pro",
 	"debian":   "Debian Desktop",
 	"centos":   "CentOS Desktop",
 	"custom":   "Custom Image",
@@ -39,11 +39,11 @@ var defaultSystemImageSettings = map[string]string{
 	"custom":   "registry.example.com/your-custom-image:latest",
 }
 
-var defaultShellSystemImageSettings = map[string]string{
-	"openclaw": "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-shell:latest",
+var defaultGatewaySystemImageSettings = map[string]string{
+	"openclaw": "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest",
 	"ubuntu":   "ubuntu:22.04",
 	"webtop":   "ubuntu:22.04",
-	"hermes":   "ghcr.io/yuan-lab-llm/agentsruntime/hermes-shell:latest",
+	"hermes":   "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest",
 	"debian":   "debian:12",
 	"centos":   "quay.io/centos/centos:stream9",
 	"custom":   "registry.example.com/your-custom-shell-image:latest",
@@ -55,8 +55,9 @@ var defaultEnabledSystemImageTypes = map[string]bool{
 	"hermes":   true,
 }
 
-var defaultEnabledShellSystemImageTypes = map[string]bool{
+var defaultEnabledGatewaySystemImageTypes = map[string]bool{
 	"openclaw": true,
+	"hermes":   true,
 }
 
 // RuntimeImageConfig is the runtime card selected for an instance type.
@@ -320,10 +321,16 @@ func displayNameForSystemImageType(instanceType string) string {
 func displayNameForSystemImagePreset(instanceType, runtimeType string) string {
 	normalizedRuntimeType := normalizeSystemImageRuntimeType(runtimeType)
 	if instanceType == "openclaw" {
-		if normalizedRuntimeType == "shell" {
-			return "OpenClaw Shell"
+		if normalizedRuntimeType == "gateway" {
+			return "OpenClaw Lite"
 		}
-		return "OpenClaw Desktop"
+		return "OpenClaw Pro"
+	}
+	if instanceType == "hermes" {
+		if normalizedRuntimeType == "gateway" {
+			return "Hermes Lite"
+		}
+		return "Hermes Pro"
 	}
 	return displayNameForSystemImageType(instanceType)
 }
@@ -337,12 +344,12 @@ func defaultSystemImagePresetsForType(instanceType string) []models.SystemImageS
 		IsEnabled:    defaultEnabledSystemImageTypes[instanceType],
 	}}
 
-	if image := strings.TrimSpace(defaultShellSystemImageSettings[instanceType]); image != "" {
-		if defaultEnabledShellSystemImageTypes[instanceType] {
+	if image := strings.TrimSpace(defaultGatewaySystemImageSettings[instanceType]); image != "" {
+		if defaultEnabledGatewaySystemImageTypes[instanceType] {
 			settings = append(settings, models.SystemImageSetting{
 				InstanceType: instanceType,
-				RuntimeType:  "shell",
-				DisplayName:  displayNameForSystemImagePreset(instanceType, "shell"),
+				RuntimeType:  "gateway",
+				DisplayName:  displayNameForSystemImagePreset(instanceType, "gateway"),
 				Image:        image,
 				IsEnabled:    true,
 			})
@@ -359,8 +366,8 @@ func isSupportedSystemImageType(instanceType string) bool {
 
 func normalizeSystemImageRuntimeType(runtimeType string) string {
 	normalized := strings.TrimSpace(strings.ToLower(runtimeType))
-	if normalized == "shell" {
-		return "shell"
+	if normalized == "gateway" || normalized == "shell" {
+		return "gateway"
 	}
 	return "desktop"
 }
@@ -370,7 +377,10 @@ func validateSystemImageRuntimeType(runtimeType string) (string, error) {
 	if normalized == "" {
 		return "desktop", nil
 	}
-	if normalized != "desktop" && normalized != "shell" {
+	if normalized == "shell" {
+		return "gateway", nil
+	}
+	if normalized != "desktop" && normalized != "gateway" {
 		return "", errors.New("unsupported runtime type")
 	}
 	return normalized, nil

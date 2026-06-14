@@ -36,7 +36,7 @@ func (r *systemImageSettingRepository) ensureTable() {
 CREATE TABLE IF NOT EXISTS system_image_settings (
   id INT AUTO_INCREMENT PRIMARY KEY,
   instance_type VARCHAR(50) NOT NULL,
-  runtime_type ENUM('desktop', 'shell') NOT NULL DEFAULT 'desktop',
+  runtime_type ENUM('desktop', 'shell', 'gateway') NOT NULL DEFAULT 'desktop',
   display_name VARCHAR(255) NOT NULL,
   image VARCHAR(500) NOT NULL,
   is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS system_image_settings (
 
 	r.ensureIsEnabledColumn()
 	r.ensureRuntimeTypeColumn()
+	r.ensureRuntimeTypeAllowsGateway()
 	r.ensureInstanceTypeIsNotUnique()
 	r.ensureInstanceTypeIndex()
 }
@@ -96,8 +97,31 @@ WHERE table_schema = DATABASE()
 	}
 
 	if count == 0 {
-		if _, err := r.sess.SQL().Exec("ALTER TABLE system_image_settings ADD COLUMN runtime_type ENUM('desktop', 'shell') NOT NULL DEFAULT 'desktop' AFTER instance_type"); err != nil {
+		if _, err := r.sess.SQL().Exec("ALTER TABLE system_image_settings ADD COLUMN runtime_type ENUM('desktop', 'shell', 'gateway') NOT NULL DEFAULT 'desktop' AFTER instance_type"); err != nil {
 			panic(fmt.Errorf("failed to ensure system_image_settings.runtime_type column: %w", err))
+		}
+	}
+}
+
+func (r *systemImageSettingRepository) ensureRuntimeTypeAllowsGateway() {
+	var columnType string
+	row, err := r.sess.SQL().QueryRow(`
+SELECT COLUMN_TYPE
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'system_image_settings'
+  AND column_name = 'runtime_type'
+`)
+	if err != nil {
+		panic(fmt.Errorf("failed to inspect system_image_settings runtime_type enum: %w", err))
+	}
+	if err := row.Scan(&columnType); err != nil {
+		panic(fmt.Errorf("failed to scan system_image_settings runtime_type enum: %w", err))
+	}
+
+	if !strings.Contains(columnType, "'gateway'") {
+		if _, err := r.sess.SQL().Exec("ALTER TABLE system_image_settings MODIFY COLUMN runtime_type ENUM('desktop', 'shell', 'gateway') NOT NULL DEFAULT 'desktop'"); err != nil {
+			panic(fmt.Errorf("failed to allow system_image_settings.runtime_type gateway: %w", err))
 		}
 	}
 }

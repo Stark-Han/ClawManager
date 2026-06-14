@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,81 @@ func TestBuildTeamMemberInstanceRequestUsesSharedPermissionDefaults(t *testing.T
 	}
 }
 
+func TestBuildTeamMemberInstanceRequestSupportsLiteMode(t *testing.T) {
+	service := &teamService{runtimeWorkspaceRoot: "/workspaces"}
+	team := &models.Team{
+		UserID:          1,
+		ID:              8,
+		Name:            "Lite Team",
+		SharedMountPath: "/team",
+	}
+	memberPlan := plannedTeamMember{
+		Request: CreateTeamMemberRequest{
+			Mode:         "Lite",
+			InstanceMode: "Lite",
+		},
+		MemberKey:    "lite-worker",
+		DisplayName:  "lite worker",
+		Role:         "developer",
+		RuntimeType:  "openclaw",
+		InstanceMode: InstanceModeLite,
+	}
+	req := service.buildTeamMemberInstanceRequest(team, memberPlan)
+
+	if req.Mode != InstanceModeLite || req.InstanceMode != InstanceModeLite {
+		t.Fatalf("expected Team member instance request to preserve lite mode, got mode=%q instance_mode=%q", req.Mode, req.InstanceMode)
+	}
+	if req.RuntimeType != RuntimeBackendGateway {
+		t.Fatalf("expected lite Team member to target gateway runtime, got %q", req.RuntimeType)
+	}
+
+	rosterJSON := `{"teamId":"8","members":[{"memberId":"lite-worker"}]}`
+	liteReq := service.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, &teamRuntimeSecrets{
+		RedisURL: "redis://team-redis:6379/0",
+		Token:    "team_test_token",
+	}, rosterJSON)
+	if liteReq.EnvironmentOverrides[teamRedisURLSecretKey] != "redis://team-redis:6379/0" ||
+		liteReq.EnvironmentOverrides[teamTokenSecretKey] != "team_test_token" {
+		t.Fatalf("expected Lite Team runtime secrets in gateway env overrides, got %#v", liteReq.EnvironmentOverrides)
+	}
+	if !strings.Contains(liteReq.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"], `"sharedDir":"/workspaces/teams/user-1/team-8-shared"`) {
+		t.Fatalf("expected Lite Team roster JSON to include runtime shared dir, got %#v", liteReq.EnvironmentOverrides)
+	}
+}
+
+func TestBuildTeamMemberInstanceRequestPointsLiteSharedDirAtRuntimeWorkspace(t *testing.T) {
+	service := &teamService{runtimeWorkspaceRoot: "/workspaces"}
+	team := &models.Team{
+		UserID:          1,
+		ID:              28,
+		Name:            "Mixed Team",
+		SharedMountPath: "/team",
+	}
+	memberPlan := plannedTeamMember{
+		MemberKey:    "backend",
+		DisplayName:  "backend",
+		Role:         "developer",
+		RuntimeType:  "openclaw",
+		InstanceMode: InstanceModeLite,
+	}
+
+	req := service.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, &teamRuntimeSecrets{
+		RedisURL: "redis://team-redis:6379/0",
+		Token:    "team_test_token",
+	}, `{"sharedDir":"/team"}`)
+
+	wantSharedDir := "/workspaces/teams/user-1/team-28-shared"
+	if req.EnvironmentOverrides["CLAWMANAGER_TEAM_SHARED_DIR"] != wantSharedDir {
+		t.Fatalf("expected Lite shared dir %q, got %#v", wantSharedDir, req.EnvironmentOverrides)
+	}
+	if !strings.Contains(req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"], `"sharedDir":"`+wantSharedDir+`"`) {
+		t.Fatalf("expected Lite roster JSON to use runtime shared dir, got %s", req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"])
+	}
+	if req.Team.SharedMountPath != "/team" {
+		t.Fatalf("Pro Team mount path should remain /team, got %q", req.Team.SharedMountPath)
+	}
+}
+
 func TestNewRedisBusParsesURLWithoutNetwork(t *testing.T) {
 	bus, err := newRedisBus("redis://:pass@redis.example:6380/3")
 	if err != nil {
@@ -141,13 +217,16 @@ func TestPlanTeamMembersRequiresExactlyOneLeader(t *testing.T) {
 func TestPlanTeamMembersSupportsHermesRuntime(t *testing.T) {
 	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
 		{MemberID: "lead", Role: "leader"},
-		{MemberID: "hermes-writer", Role: "writer", RuntimeType: "Hermes"},
+		{MemberID: "hermes-writer", Role: "writer", RuntimeType: "Hermes", InstanceMode: "Pro"},
 	})
 	if err != nil {
 		t.Fatalf("planTeamMembers returned error: %v", err)
 	}
 	if plans[1].RuntimeType != "hermes" {
 		t.Fatalf("expected Hermes runtime to be normalized, got %#v", plans[1])
+	}
+	if plans[1].InstanceMode != InstanceModePro {
+		t.Fatalf("expected Pro instance mode to be normalized, got %#v", plans[1])
 	}
 
 	_, err = planTeamMembers("team", []CreateTeamMemberRequest{
@@ -156,6 +235,14 @@ func TestPlanTeamMembersSupportsHermesRuntime(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported team member runtime type") {
 		t.Fatalf("expected unsupported runtime validation error, got %v", err)
+	}
+
+	_, err = planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "lead", Role: "leader"},
+		{MemberID: "worker", Role: "developer", Mode: "mini"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported team member instance mode") {
+		t.Fatalf("expected unsupported instance mode validation error, got %v", err)
 	}
 }
 
@@ -205,6 +292,9 @@ func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
 	if !strings.Contains(roster, `"runtimeType":"openclaw"`) {
 		t.Fatalf("roster missing member runtime type: %s", roster)
 	}
+	if !strings.Contains(roster, `"instanceMode":"lite"`) {
+		t.Fatalf("roster missing member instance mode: %s", roster)
+	}
 }
 
 func TestBuildInitialLeaderTaskPayloadDescribesRosterAndTeamSend(t *testing.T) {
@@ -233,6 +323,107 @@ func TestBuildInitialLeaderTaskPayloadDescribesRosterAndTeamSend(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("bootstrap prompt missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestBuildTeamTaskEnvelopeIncludesCompletionContract(t *testing.T) {
+	task := &models.TeamTask{ID: 67}
+	payload := map[string]interface{}{
+		"intent": "team_bootstrap_introduction",
+		"title":  "Introduce the team",
+		"prompt": "Generate the team report.",
+	}
+
+	envelope := buildTeamTaskEnvelope(31, "leader", task, "team-31-bootstrap-introduction", payload, time.Unix(123, 0).UTC())
+
+	if envelope["replyTo"] != "clawmanager" {
+		t.Fatalf("expected replyTo clawmanager, got %#v", envelope["replyTo"])
+	}
+	if envelope["requiresCompletion"] != true {
+		t.Fatalf("expected requiresCompletion=true, got %#v", envelope["requiresCompletion"])
+	}
+	if envelope["completionTool"] != "team_complete_task" {
+		t.Fatalf("expected completion tool team_complete_task, got %#v", envelope["completionTool"])
+	}
+	resultSink, ok := envelope["resultSink"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected resultSink map, got %#v", envelope["resultSink"])
+	}
+	if resultSink["type"] != "redis_stream" || resultSink["eventsKey"] != "claw:team:31:events" {
+		t.Fatalf("unexpected resultSink: %#v", resultSink)
+	}
+	if resultSink["successEvent"] != "task_completed" || resultSink["failureEvent"] != "task_failed" {
+		t.Fatalf("unexpected resultSink events: %#v", resultSink)
+	}
+	prompt, ok := envelope["prompt"].(string)
+	if !ok {
+		t.Fatalf("expected prompt string, got %#v", envelope["prompt"])
+	}
+	for _, expected := range []string{"Generate the team report.", "team_complete_task", "resultMarkdown", "task_completed"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("completion prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestProjectTeamEventTreatsFinalReplyAsTaskCompleted(t *testing.T) {
+	taskID := 67
+	messageID := "team-31-bootstrap-introduction"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":          "reply",
+		"messageId":      messageID,
+		"memberId":       "leader",
+		"taskId":         "team-31-task-67",
+		"final":          true,
+		"summary":        "Team report ready",
+		"resultMarkdown": "Full report",
+		"text":           "Full report",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178655-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected final reply to mark task succeeded, got %#v", repo.updatedTask)
+	}
+	if repo.updatedTask.ResultJSON == nil || !strings.Contains(*repo.updatedTask.ResultJSON, "Full report") {
+		t.Fatalf("expected reply payload to become task result, got %#v", repo.updatedTask.ResultJSON)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Availability != models.TeamMemberAvailabilityIdle {
+		t.Fatalf("expected member to become idle, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" {
+		t.Fatalf("expected stored event type task_completed, got %#v", repo.createdEvents)
 	}
 }
 
@@ -342,4 +533,112 @@ func TestMergeMissingEventFieldsEnrichesOutboundPayload(t *testing.T) {
 	if !teamEventHasBody(merged) {
 		t.Fatalf("expected enriched event to have displayable body: %#v", merged)
 	}
+}
+
+type teamRepositoryStub struct {
+	teamsByID        map[int]*models.Team
+	membersByID      map[int]*models.TeamMember
+	membersByKey     map[string]*models.TeamMember
+	tasksByID        map[int]*models.TeamTask
+	tasksByMessageID map[string]*models.TeamTask
+	createdEvents    []models.TeamEvent
+	updatedTask      *models.TeamTask
+	updatedMember    *models.TeamMember
+	updatedTeam      *models.Team
+}
+
+func (s *teamRepositoryStub) CreateTeam(team *models.Team) error { return nil }
+func (s *teamRepositoryStub) UpdateTeam(team *models.Team) error {
+	clone := *team
+	s.updatedTeam = &clone
+	return nil
+}
+func (s *teamRepositoryStub) GetTeamByID(id int) (*models.Team, error) {
+	if s.teamsByID != nil {
+		return s.teamsByID[id], nil
+	}
+	return nil, nil
+}
+func (s *teamRepositoryStub) GetTeamByUserIDAndName(userID int, name string) (*models.Team, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) ExistsByUserIDAndName(userID int, name string) (bool, error) {
+	return false, nil
+}
+func (s *teamRepositoryStub) ListTeamsByUserID(userID int, offset, limit int) ([]models.Team, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) ListActiveTeams() ([]models.Team, error) { return nil, nil }
+func (s *teamRepositoryStub) CountTeamsByUserID(userID int) (int, error) {
+	return 0, nil
+}
+func (s *teamRepositoryStub) CreateMember(member *models.TeamMember) error { return nil }
+func (s *teamRepositoryStub) UpdateMember(member *models.TeamMember) error {
+	clone := *member
+	s.updatedMember = &clone
+	return nil
+}
+func (s *teamRepositoryStub) GetMemberByID(id int) (*models.TeamMember, error) {
+	if s.membersByID != nil {
+		return s.membersByID[id], nil
+	}
+	return nil, nil
+}
+func (s *teamRepositoryStub) GetMemberByTeamKey(teamID int, memberKey string) (*models.TeamMember, error) {
+	if s.membersByKey == nil {
+		return nil, nil
+	}
+	member := s.membersByKey[memberKey]
+	if member == nil || member.TeamID != teamID {
+		return nil, nil
+	}
+	return member, nil
+}
+func (s *teamRepositoryStub) ListMembersByTeamID(teamID int) ([]models.TeamMember, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) CreateTask(task *models.TeamTask) error { return nil }
+func (s *teamRepositoryStub) UpdateTask(task *models.TeamTask) error {
+	clone := *task
+	s.updatedTask = &clone
+	return nil
+}
+func (s *teamRepositoryStub) GetTaskByID(id int) (*models.TeamTask, error) {
+	if s.tasksByID != nil {
+		return s.tasksByID[id], nil
+	}
+	return nil, nil
+}
+func (s *teamRepositoryStub) GetTaskByMessageID(teamID int, messageID string) (*models.TeamTask, error) {
+	if s.tasksByMessageID == nil {
+		return nil, nil
+	}
+	task := s.tasksByMessageID[messageID]
+	if task == nil || task.TeamID != teamID {
+		return nil, nil
+	}
+	return task, nil
+}
+func (s *teamRepositoryStub) ListTasksByTeamID(teamID int, limit int) ([]models.TeamTask, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) ListTasksBeforeID(teamID, beforeID, limit int) ([]models.TeamTask, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) ListStaleCandidateTasks(cutoff time.Time, limit int) ([]models.TeamTask, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) CreateEvent(event *models.TeamEvent) error {
+	clone := *event
+	s.createdEvents = append(s.createdEvents, clone)
+	return nil
+}
+func (s *teamRepositoryStub) EventExistsByStreamID(teamID int, streamID string) (bool, error) {
+	return false, nil
+}
+func (s *teamRepositoryStub) ListEventsByTeamID(teamID int, limit int) ([]models.TeamEvent, error) {
+	return nil, nil
+}
+func (s *teamRepositoryStub) ListEventsBeforeID(teamID, beforeID, limit int) ([]models.TeamEvent, error) {
+	return nil, nil
 }

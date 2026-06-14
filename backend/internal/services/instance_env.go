@@ -129,3 +129,21 @@ func buildInstancePodEnv(instance *models.Instance, runtimeEnv, gatewayEnv, agen
 
 	return resolved, nil
 }
+
+func buildInstanceGatewayEnv(instance *models.Instance, gatewayEnv map[string]string) (map[string]string, error) {
+	if instance == nil {
+		return nil, fmt.Errorf("instance is required")
+	}
+
+	overrides, err := parseEnvironmentOverridesJSON(instance.EnvironmentOverridesJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	resolved := mergeEnvMaps(gatewayEnv, nil)
+	resolved = withInstanceProxyEnv(instance.Type, instance.ID, resolved)
+	resolved["CLAWMANAGER_RUNTIME_TYPE"] = normalizeInstanceRuntimeType(instance.RuntimeType)
+	resolved = mergeEnvMaps(resolved, overrides)
+
+	return resolved, nil
+}

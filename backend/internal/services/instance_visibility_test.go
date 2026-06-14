@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"testing"
 
 	"clawreef/internal/models"
@@ -44,11 +45,29 @@ func (r *stubInstanceVisibilityRepo) GetByUserID(userID, offset, limit int) ([]m
 func (r *stubInstanceVisibilityRepo) CountByUserID(userID int) (int, error) {
 	return len(r.byUser(userID)), nil
 }
+func (r *stubInstanceVisibilityRepo) CountActiveByMode(context.Context, string) (int, error) {
+	return 0, nil
+}
 func (r *stubInstanceVisibilityRepo) ExistsByUserIDAndName(int, string) (bool, error) {
 	return false, nil
 }
 func (r *stubInstanceVisibilityRepo) GetAllRunning() ([]models.Instance, error) {
 	return nil, nil
+}
+func (r *stubInstanceVisibilityRepo) GetV2DesiredRunning(context.Context, int) ([]models.Instance, error) {
+	panic("not used")
+}
+func (r *stubInstanceVisibilityRepo) GetV2Creating(context.Context, int) ([]models.Instance, error) {
+	panic("not used")
+}
+func (r *stubInstanceVisibilityRepo) UpdateRuntimeState(context.Context, int, string, int, *string) error {
+	panic("not used")
+}
+func (r *stubInstanceVisibilityRepo) SetWorkspacePath(context.Context, int, string) error {
+	panic("not used")
+}
+func (r *stubInstanceVisibilityRepo) UpdateWorkspaceUsage(context.Context, int, int64) error {
+	panic("not used")
 }
 func (r *stubInstanceVisibilityRepo) Update(*models.Instance) error { panic("not used") }
 func (r *stubInstanceVisibilityRepo) Delete(int) error              { panic("not used") }

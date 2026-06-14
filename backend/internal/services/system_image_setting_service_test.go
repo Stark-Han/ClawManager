@@ -150,7 +150,7 @@ func TestSystemImageSettingServiceGetRuntimeImageFallsBackToDefaultWhenNoRowsExi
 	}
 }
 
-func TestSystemImageSettingServiceListIncludesOpenClawShellDefault(t *testing.T) {
+func TestSystemImageSettingServiceListIncludesOpenClawGatewayDefault(t *testing.T) {
 	service := NewSystemImageSettingService(&stubSystemImageSettingRepository{})
 
 	items, err := service.List()
@@ -160,34 +160,63 @@ func TestSystemImageSettingServiceListIncludesOpenClawShellDefault(t *testing.T)
 
 	found := false
 	for _, item := range items {
-		if item.InstanceType == "openclaw" && item.RuntimeType == "shell" {
+		if item.InstanceType == "openclaw" && item.RuntimeType == "gateway" {
 			found = true
-			if item.Image != defaultShellSystemImageSettings["openclaw"] {
-				t.Fatalf("expected default openclaw shell image %q, got %q", defaultShellSystemImageSettings["openclaw"], item.Image)
+			if item.Image != defaultGatewaySystemImageSettings["openclaw"] {
+				t.Fatalf("expected default openclaw gateway image %q, got %q", defaultGatewaySystemImageSettings["openclaw"], item.Image)
 			}
 			if !item.IsEnabled {
-				t.Fatalf("expected default openclaw shell image to be enabled")
+				t.Fatalf("expected default openclaw gateway image to be enabled")
 			}
 		}
 	}
 
 	if !found {
-		t.Fatalf("expected default openclaw shell runtime image")
+		t.Fatalf("expected default openclaw gateway runtime image")
 	}
 }
 
-func TestSystemImageSettingServiceGetRuntimeImageForImageFallsBackToOpenClawShellDefault(t *testing.T) {
+func TestSystemImageSettingServiceListIncludesHermesLiteDefault(t *testing.T) {
 	service := NewSystemImageSettingService(&stubSystemImageSettingRepository{})
 
-	selection, ok := service.GetRuntimeImageForImage("openclaw", defaultShellSystemImageSettings["openclaw"])
+	items, err := service.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+
+	found := false
+	for _, item := range items {
+		if item.InstanceType == "hermes" && item.RuntimeType == "gateway" {
+			found = true
+			if item.Image != defaultGatewaySystemImageSettings["hermes"] {
+				t.Fatalf("expected default hermes lite image %q, got %q", defaultGatewaySystemImageSettings["hermes"], item.Image)
+			}
+			if item.DisplayName != "Hermes Lite" {
+				t.Fatalf("expected Hermes Lite display name, got %q", item.DisplayName)
+			}
+			if !item.IsEnabled {
+				t.Fatalf("expected default hermes lite image to be enabled")
+			}
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected default hermes lite runtime image")
+	}
+}
+
+func TestSystemImageSettingServiceGetRuntimeImageForImageFallsBackToOpenClawGatewayDefault(t *testing.T) {
+	service := NewSystemImageSettingService(&stubSystemImageSettingRepository{})
+
+	selection, ok := service.GetRuntimeImageForImage("openclaw", defaultGatewaySystemImageSettings["openclaw"])
 	if !ok {
-		t.Fatalf("expected default openclaw shell runtime image to resolve")
+		t.Fatalf("expected default openclaw gateway runtime image to resolve")
 	}
-	if selection.RuntimeType != "shell" {
-		t.Fatalf("expected runtime type shell, got %q", selection.RuntimeType)
+	if selection.RuntimeType != "gateway" {
+		t.Fatalf("expected runtime type gateway, got %q", selection.RuntimeType)
 	}
-	if selection.Image != defaultShellSystemImageSettings["openclaw"] {
-		t.Fatalf("expected shell image %q, got %q", defaultShellSystemImageSettings["openclaw"], selection.Image)
+	if selection.Image != defaultGatewaySystemImageSettings["openclaw"] {
+		t.Fatalf("expected gateway image %q, got %q", defaultGatewaySystemImageSettings["openclaw"], selection.Image)
 	}
 }
 
@@ -195,20 +224,70 @@ func TestSystemImageSettingServiceGetRuntimeImageForImageUsesCardRuntimeType(t *
 	repo := &stubSystemImageSettingRepository{
 		items: []models.SystemImageSetting{
 			{ID: 1, InstanceType: "openclaw", RuntimeType: "desktop", DisplayName: "OpenClaw Desktop", Image: "registry/openclaw-desktop:latest", IsEnabled: true},
-			{ID: 2, InstanceType: "openclaw", RuntimeType: "shell", DisplayName: "OpenClaw Shell", Image: "registry/openclaw-shell:latest", IsEnabled: true},
+			{ID: 2, InstanceType: "openclaw", RuntimeType: "gateway", DisplayName: "OpenClaw Lite", Image: "registry/openclaw-lite:latest", IsEnabled: true},
 		},
 		nextID: 2,
 	}
 
 	service := NewSystemImageSettingService(repo)
-	selection, ok := service.GetRuntimeImageForImage("openclaw", "registry/openclaw-shell:latest")
+	selection, ok := service.GetRuntimeImageForImage("openclaw", "registry/openclaw-lite:latest")
 	if !ok {
-		t.Fatalf("expected selected shell runtime image to resolve")
+		t.Fatalf("expected selected gateway runtime image to resolve")
 	}
-	if selection.RuntimeType != "shell" {
-		t.Fatalf("expected runtime type shell, got %q", selection.RuntimeType)
+	if selection.RuntimeType != "gateway" {
+		t.Fatalf("expected runtime type gateway, got %q", selection.RuntimeType)
 	}
-	if selection.Image != "registry/openclaw-shell:latest" {
-		t.Fatalf("expected shell image to resolve, got %q", selection.Image)
+	if selection.Image != "registry/openclaw-lite:latest" {
+		t.Fatalf("expected gateway image to resolve, got %q", selection.Image)
+	}
+}
+
+func TestSystemImageSettingServiceSaveAcceptsGatewayRuntimeType(t *testing.T) {
+	repo := &stubSystemImageSettingRepository{}
+	service := NewSystemImageSettingService(repo)
+
+	saved, err := service.Save(&models.SystemImageSetting{
+		InstanceType: "OpenClaw",
+		RuntimeType:  "gateway",
+		DisplayName:  "OpenClaw Lite",
+		Image:        "registry/openclaw-lite:v2",
+	})
+	if err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+
+	if saved.InstanceType != "openclaw" {
+		t.Fatalf("expected normalized instance type openclaw, got %q", saved.InstanceType)
+	}
+	if saved.RuntimeType != "gateway" {
+		t.Fatalf("expected gateway runtime type, got %q", saved.RuntimeType)
+	}
+}
+
+func TestSystemImageSettingServiceNormalizesLegacyShellRuntimeTypeToGateway(t *testing.T) {
+	repo := &stubSystemImageSettingRepository{
+		items: []models.SystemImageSetting{
+			{ID: 1, InstanceType: "hermes", RuntimeType: "shell", DisplayName: "Hermes Lite", Image: "registry/hermes-lite:legacy", IsEnabled: true},
+		},
+		nextID: 1,
+	}
+	service := NewSystemImageSettingService(repo)
+
+	items, err := service.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	for _, item := range items {
+		if item.ID == 1 && item.RuntimeType != "gateway" {
+			t.Fatalf("expected legacy shell row to be exposed as gateway, got %q", item.RuntimeType)
+		}
+	}
+
+	selection, ok := service.GetRuntimeImageForImage("hermes", "registry/hermes-lite:legacy")
+	if !ok {
+		t.Fatalf("expected legacy shell image to resolve")
+	}
+	if selection.RuntimeType != "gateway" {
+		t.Fatalf("expected legacy shell image to resolve as gateway, got %q", selection.RuntimeType)
 	}
 }
