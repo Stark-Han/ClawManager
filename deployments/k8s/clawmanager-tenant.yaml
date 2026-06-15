@@ -1120,9 +1120,9 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: CLAWMANAGER_TEAM_REDIS_URL
-              value: "redis://clawmanager-team-redis:6379/0"
+              value: "redis://clawmanager-team-redis.clawmanager{TENANT_SUFFIX}-system.svc.cluster.local:6379/0"
             - name: CLAWMANAGER_TEAM_MANAGER_BASE_URL
-              value: "http://clawmanager-gateway:9001"
+              value: "http://clawmanager-gateway.clawmanager{TENANT_SUFFIX}-system.svc.cluster.local:9001"
             - name: SKILL_SCANNER_ENABLED
               value: "true"
             - name: SKILL_SCANNER_BASE_URL

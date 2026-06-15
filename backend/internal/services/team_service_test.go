@@ -174,6 +174,64 @@ func TestDefaultTeamRedisURLUsesClusterServiceFallback(t *testing.T) {
 	}
 }
 
+func TestProjectTeamTaskRuntimeStateUsesExplicitCompletionSignals(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	resultJSON := `{"status":"done","resultMarkdown":"finished"}`
+	task := &models.TeamTask{Status: models.TeamTaskStatusFailed}
+
+	projection := projectTeamTaskRuntimeState(task, map[string]interface{}{
+		"status":         "done",
+		"resultMarkdown": "finished",
+	}, "completion", &resultJSON, now)
+
+	if !projection.changed || projection.status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected succeeded projection, got %#v", projection)
+	}
+	if task.Status != models.TeamTaskStatusSucceeded || task.FinishedAt == nil || task.ResultJSON == nil {
+		t.Fatalf("expected task to be completed with result, got %#v", task)
+	}
+}
+
+func TestProjectTeamTaskRuntimeStateDoesNotLetLateFailureOverrideSuccess(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	task := &models.TeamTask{Status: models.TeamTaskStatusSucceeded}
+
+	projection := projectTeamTaskRuntimeState(task, map[string]interface{}{
+		"status": "failed",
+		"error":  "late failure",
+	}, "task_failed", nil, now)
+
+	if projection.changed || task.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("late failure must not override success, projection=%#v task=%#v", projection, task)
+	}
+}
+
+func TestProjectTeamTaskRuntimeStateDoesNotTreatPlainReplyAsCompletion(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	task := &models.TeamTask{Status: models.TeamTaskStatusRunning}
+
+	projection := projectTeamTaskRuntimeState(task, map[string]interface{}{
+		"message": "worker 正在整理结果",
+	}, "reply", nil, now)
+
+	if projection.changed || task.Status != models.TeamTaskStatusRunning || task.FinishedAt != nil {
+		t.Fatalf("plain reply must not complete task, projection=%#v task=%#v", projection, task)
+	}
+}
+
+func TestProjectTeamTaskRuntimeStateDoesNotDowngradeTerminalTaskToRunning(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	task := &models.TeamTask{Status: models.TeamTaskStatusSucceeded}
+
+	projection := projectTeamTaskRuntimeState(task, map[string]interface{}{
+		"progress": 30,
+	}, "task_started", nil, now)
+
+	if projection.changed || task.Status != models.TeamTaskStatusSucceeded || task.StartedAt != nil {
+		t.Fatalf("running signal must not downgrade terminal task, projection=%#v task=%#v", projection, task)
+	}
+}
+
 func TestPlanTeamMembersRequiresExactlyOneLeader(t *testing.T) {
 	_, err := planTeamMembers("team", []CreateTeamMemberRequest{
 		{MemberID: "worker", Role: "developer"},

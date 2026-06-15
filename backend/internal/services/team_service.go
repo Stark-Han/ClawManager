@@ -1,11 +1,16 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"os"
+	posixpath "path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +19,10 @@ import (
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -48,6 +57,13 @@ type TeamService interface {
 	GetTeam(userID, teamID int) (*TeamDetailsPayload, error)
 	ListTeamTasks(userID, teamID, beforeID, limit int) (*TeamTasksHistoryPayload, error)
 	ListTeamEvents(userID, teamID, beforeID, limit int) (*TeamEventsHistoryPayload, error)
+	ListWorkspaceFiles(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceListPayload, error)
+	PreviewWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspacePreviewPayload, error)
+	DownloadWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceDownloadPayload, error)
+	CreateWorkspaceFolder(ctx context.Context, userID, teamID int, req TeamWorkspaceFolderRequest) error
+	RenameWorkspaceEntry(ctx context.Context, userID, teamID int, req TeamWorkspaceRenameRequest) error
+	DeleteWorkspaceEntry(ctx context.Context, userID, teamID int, relPath string) error
+	UploadWorkspaceFiles(ctx context.Context, userID, teamID int, targetPath string, files []*multipart.FileHeader, relativePaths []string) error
 	DispatchTask(userID, teamID int, req DispatchTeamTaskRequest) (*TeamTaskPayload, error)
 	DeleteTeam(userID, teamID int) error
 	DeleteMember(userID, teamID int, memberID string) error
@@ -113,6 +129,44 @@ type TeamEventsHistoryPayload struct {
 	NextBeforeID *int               `json:"next_before_id,omitempty"`
 }
 
+type TeamWorkspaceFileEntry struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at,omitempty"`
+	Previewable bool `json:"previewable"`
+}
+
+type TeamWorkspaceListPayload struct {
+	Path    string                   `json:"path"`
+	Root    string                   `json:"root"`
+	Entries []TeamWorkspaceFileEntry `json:"entries"`
+}
+
+type TeamWorkspacePreviewPayload struct {
+	Path    string `json:"path"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+type TeamWorkspaceDownloadPayload struct {
+	Path        string
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
+type TeamWorkspaceFolderRequest struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+type TeamWorkspaceRenameRequest struct {
+	Path    string `json:"path"`
+	NewName string `json:"new_name"`
+}
+
 type TeamTaskPayload struct {
 	models.TeamTask
 	Payload map[string]interface{} `json:"payload,omitempty"`
@@ -130,6 +184,7 @@ type teamService struct {
 	pvcService       *k8s.PVCService
 	secretService    *k8s.SecretService
 	configMapService *k8s.ConfigMapService
+	podService       *k8s.PodService
 
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -155,6 +210,7 @@ func NewTeamService(repo repository.TeamRepository, instanceService InstanceServ
 		pvcService:       k8s.NewPVCService(),
 		secretService:    k8s.NewSecretService(),
 		configMapService: k8s.NewConfigMapService(),
+		podService:       k8s.NewPodService(),
 		ctx:              ctx,
 		cancel:           cancel,
 		consumers:        map[int]struct{}{},
@@ -607,6 +663,292 @@ func (s *teamService) ListTeamEvents(userID, teamID, beforeID, limit int) (*Team
 		HasMore:      hasMore,
 		NextBeforeID: nextTeamEventBeforeID(payload),
 	}, nil
+}
+
+func (s *teamService) ListWorkspaceFiles(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceListPayload, error) {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	cleanPath, err := cleanTeamWorkspacePath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	target := teamWorkspaceFullPath(team, cleanPath)
+	script := fmt.Sprintf(`set -eu
+target=%s
+if [ ! -d "$target" ]; then exit 44; fi
+for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+  [ -e "$entry" ] || continue
+  name="${entry##*/}"
+  [ "$name" = "." ] && continue
+  [ "$name" = ".." ] && continue
+  if [ -d "$entry" ]; then kind=directory; size=0; else kind=file; size=$(stat -c %%s "$entry" 2>/dev/null || wc -c < "$entry" | tr -d ' '); fi
+  mtime=$(stat -c %%Y "$entry" 2>/dev/null || echo 0)
+  printf '%%s\t%%s\t%%s\t%%s\n' "$kind" "$name" "$size" "$mtime"
+done`, shellQuote(target))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
+		return nil, formatExecError("list Team workspace", err, stderr.String())
+	}
+	entries := parseTeamWorkspaceList(cleanPath, stdout.String())
+	return &TeamWorkspaceListPayload{
+		Path:    cleanPath,
+		Root:    team.SharedMountPath,
+		Entries: entries,
+	}, nil
+}
+
+func (s *teamService) PreviewWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspacePreviewPayload, error) {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	cleanPath, err := cleanTeamWorkspacePath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "" || !isPreviewableWorkspaceFile(cleanPath) {
+		return nil, fmt.Errorf("only md and txt files can be previewed")
+	}
+	target := teamWorkspaceFullPath(team, cleanPath)
+	script := fmt.Sprintf(`set -eu
+target=%s
+[ -f "$target" ] || exit 44
+size=$(stat -c %%s "$target" 2>/dev/null || wc -c < "$target" | tr -d ' ')
+[ "$size" -le 1048576 ] || exit 45
+cat "$target"`, shellQuote(target))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
+		return nil, formatExecError("preview Team workspace file", err, stderr.String())
+	}
+	return &TeamWorkspacePreviewPayload{
+		Path:    cleanPath,
+		Name:    posixpath.Base(cleanPath),
+		Content: stdout.String(),
+	}, nil
+}
+
+func (s *teamService) DownloadWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceDownloadPayload, error) {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	cleanPath, err := cleanTeamWorkspacePath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	if cleanPath == "" {
+		return nil, fmt.Errorf("file path is required")
+	}
+	target := teamWorkspaceFullPath(team, cleanPath)
+	checkScript := fmt.Sprintf(`set -eu
+target=%s
+if [ -f "$target" ]; then
+  printf file
+elif [ -d "$target" ]; then
+  printf directory
+else
+  exit 44
+fi`, shellQuote(target))
+	var checkStdout bytes.Buffer
+	var checkStderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", checkScript}, nil, &checkStdout, &checkStderr); err != nil {
+		return nil, formatExecError("inspect Team workspace entry", err, checkStderr.String())
+	}
+	entryType := strings.TrimSpace(checkStdout.String())
+	if entryType == "directory" {
+		script := fmt.Sprintf(`set -eu
+target=%s
+parent=$(dirname "$target")
+name=$(basename "$target")
+cd "$parent"
+if command -v zip >/dev/null 2>&1; then
+  zip -rq - "$name"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$name" <<'PY'
+import os
+import sys
+import zipfile
+
+root = sys.argv[1]
+with zipfile.ZipFile(sys.stdout.buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+    for current, dirs, files in os.walk(root):
+        dirs.sort()
+        files.sort()
+        if not files and not dirs:
+            archive.write(current, current)
+        for filename in files:
+            path = os.path.join(current, filename)
+            archive.write(path, path)
+PY
+else
+  echo "zip or python3 is required to download folders" >&2
+  exit 45
+fi`, shellQuote(target))
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
+			return nil, formatExecError("download Team workspace folder", err, stderr.String())
+		}
+		return &TeamWorkspaceDownloadPayload{
+			Path:        cleanPath,
+			Name:        posixpath.Base(cleanPath) + ".zip",
+			ContentType: "application/zip",
+			Data:        stdout.Bytes(),
+		}, nil
+	}
+	if entryType != "file" {
+		return nil, fmt.Errorf("unsupported workspace entry type")
+	}
+	script := fmt.Sprintf(`set -eu
+target=%s
+[ -f "$target" ] || exit 44
+cat "$target"`, shellQuote(target))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
+		return nil, formatExecError("download Team workspace file", err, stderr.String())
+	}
+	return &TeamWorkspaceDownloadPayload{
+		Path:        cleanPath,
+		Name:        posixpath.Base(cleanPath),
+		ContentType: "application/octet-stream",
+		Data:        stdout.Bytes(),
+	}, nil
+}
+
+func (s *teamService) CreateWorkspaceFolder(ctx context.Context, userID, teamID int, req TeamWorkspaceFolderRequest) error {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return err
+	}
+	parent, err := cleanTeamWorkspacePath(req.Path)
+	if err != nil {
+		return err
+	}
+	name, err := cleanWorkspaceEntryName(req.Name)
+	if err != nil {
+		return err
+	}
+	target := teamWorkspaceFullPath(team, joinTeamWorkspacePath(parent, name))
+	script := fmt.Sprintf(`set -eu
+target=%s
+mkdir -p "$target"
+chown -R 1000:1000 "$target" 2>/dev/null || true`, shellQuote(target))
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
+		return formatExecError("create Team workspace folder", err, stderr.String())
+	}
+	return nil
+}
+
+func (s *teamService) RenameWorkspaceEntry(ctx context.Context, userID, teamID int, req TeamWorkspaceRenameRequest) error {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return err
+	}
+	cleanPath, err := cleanTeamWorkspacePath(req.Path)
+	if err != nil {
+		return err
+	}
+	if cleanPath == "" {
+		return fmt.Errorf("path is required")
+	}
+	newName, err := cleanWorkspaceEntryName(req.NewName)
+	if err != nil {
+		return err
+	}
+	parent := posixpath.Dir(cleanPath)
+	if parent == "." {
+		parent = ""
+	}
+	source := teamWorkspaceFullPath(team, cleanPath)
+	target := teamWorkspaceFullPath(team, joinTeamWorkspacePath(parent, newName))
+	script := fmt.Sprintf(`set -eu
+source=%s
+target=%s
+[ -e "$source" ] || exit 44
+[ ! -e "$target" ] || exit 46
+mv "$source" "$target"`, shellQuote(source), shellQuote(target))
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
+		return formatExecError("rename Team workspace entry", err, stderr.String())
+	}
+	return nil
+}
+
+func (s *teamService) DeleteWorkspaceEntry(ctx context.Context, userID, teamID int, relPath string) error {
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return err
+	}
+	cleanPath, err := cleanTeamWorkspacePath(relPath)
+	if err != nil {
+		return err
+	}
+	if cleanPath == "" {
+		return fmt.Errorf("cannot delete workspace root")
+	}
+	target := teamWorkspaceFullPath(team, cleanPath)
+	script := fmt.Sprintf(`set -eu
+target=%s
+[ -e "$target" ] || exit 44
+rm -rf -- "$target"`, shellQuote(target))
+	var stderr bytes.Buffer
+	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
+		return formatExecError("delete Team workspace entry", err, stderr.String())
+	}
+	return nil
+}
+
+func (s *teamService) UploadWorkspaceFiles(ctx context.Context, userID, teamID int, targetPath string, files []*multipart.FileHeader, relativePaths []string) error {
+	if len(files) == 0 {
+		return fmt.Errorf("no files uploaded")
+	}
+	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
+	if err != nil {
+		return err
+	}
+	basePath, err := cleanTeamWorkspacePath(targetPath)
+	if err != nil {
+		return err
+	}
+	for index, fileHeader := range files {
+		if fileHeader == nil {
+			continue
+		}
+		uploadName := fileHeader.Filename
+		if index < len(relativePaths) && strings.TrimSpace(relativePaths[index]) != "" {
+			uploadName = relativePaths[index]
+		}
+		uploadPath, err := cleanTeamWorkspacePath(uploadName)
+		if err != nil {
+			return err
+		}
+		if uploadPath == "" {
+			return fmt.Errorf("uploaded file name is required")
+		}
+		destination := teamWorkspaceFullPath(team, joinTeamWorkspacePath(basePath, uploadPath))
+		file, err := fileHeader.Open()
+		if err != nil {
+			return fmt.Errorf("failed to open uploaded file: %w", err)
+		}
+		script := fmt.Sprintf(`set -eu
+target=%s
+mkdir -p "$(dirname "$target")"
+cat > "$target"
+chown 1000:1000 "$target" 2>/dev/null || true`, shellQuote(destination))
+		var stderr bytes.Buffer
+		execErr := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, file, nil, &stderr)
+		_ = file.Close()
+		if execErr != nil {
+			return formatExecError("upload Team workspace file", execErr, stderr.String())
+		}
+	}
+	return nil
 }
 
 func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskRequest) (*TeamTaskPayload, error) {
@@ -1321,6 +1663,141 @@ func (s *teamService) redisBusForTeam(ctx context.Context, team *models.Team) (*
 	return newRedisBus(redisURL)
 }
 
+type teamTaskProjectionResult struct {
+	status  string
+	changed bool
+}
+
+func projectTeamTaskRuntimeState(task *models.TeamTask, payload map[string]interface{}, eventType string, payloadJSON *string, now time.Time) teamTaskProjectionResult {
+	if task == nil {
+		return teamTaskProjectionResult{}
+	}
+	status := normalizedTeamTaskEventStatus(payload)
+	completed := isTeamTaskCompletionSignal(eventType, status)
+	failed := isTeamTaskFailureSignal(eventType, status)
+	running := isTeamTaskRunningSignal(eventType, status, payload)
+
+	result := teamTaskProjectionResult{}
+	setStatus := func(next string) {
+		result.status = next
+		if task.Status != next {
+			task.Status = next
+			result.changed = true
+		}
+	}
+	setStarted := func() {
+		if task.StartedAt == nil {
+			task.StartedAt = &now
+			result.changed = true
+		}
+	}
+	setFinished := func() {
+		if task.FinishedAt == nil || !task.FinishedAt.Equal(now) {
+			task.FinishedAt = &now
+			result.changed = true
+		}
+	}
+
+	if completed {
+		setStatus(models.TeamTaskStatusSucceeded)
+		setFinished()
+		if payloadJSON != nil && (task.ResultJSON == nil || *task.ResultJSON != *payloadJSON) {
+			task.ResultJSON = payloadJSON
+			result.changed = true
+		}
+		if task.ErrorMessage != nil {
+			task.ErrorMessage = nil
+			result.changed = true
+		}
+		return result
+	}
+
+	if failed && task.Status != models.TeamTaskStatusSucceeded {
+		setStatus(models.TeamTaskStatusFailed)
+		setFinished()
+		if errText := eventString(payload, "error_message", "error", "reason", "diagnostic", "lastSummary", "last_summary", "summary"); errText != "" {
+			if task.ErrorMessage == nil || *task.ErrorMessage != errText {
+				task.ErrorMessage = &errText
+				result.changed = true
+			}
+		}
+		return result
+	}
+
+	if isTerminalTeamTaskStatus(task.Status) {
+		return result
+	}
+
+	switch eventType {
+	case "task_received":
+		if task.Status == models.TeamTaskStatusPending {
+			setStatus(models.TeamTaskStatusDispatched)
+		}
+	case "task_started":
+		setStatus(models.TeamTaskStatusRunning)
+		setStarted()
+	default:
+		if running {
+			setStatus(models.TeamTaskStatusRunning)
+			setStarted()
+		}
+	}
+	return result
+}
+
+func normalizedTeamTaskEventStatus(payload map[string]interface{}) string {
+	raw := eventString(payload, "task_status", "taskStatus", "result_status", "resultStatus", "status", "state")
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	raw = strings.ReplaceAll(raw, "-", "_")
+	raw = strings.ReplaceAll(raw, " ", "_")
+	return raw
+}
+
+func isTeamTaskCompletionSignal(eventType, status string) bool {
+	switch eventType {
+	case "task_completed", "completion":
+		return true
+	}
+	switch status {
+	case "succeeded", "success", "completed", "complete", "done", "finished", "ok":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTeamTaskFailureSignal(eventType, status string) bool {
+	switch eventType {
+	case "task_failed", "message_failed":
+		return true
+	}
+	switch status {
+	case "failed", "failure", "error", "errored", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTeamTaskRunningSignal(eventType, status string, payload map[string]interface{}) bool {
+	switch eventType {
+	case "task_started", "task_progress", "progress":
+		return true
+	}
+	switch status {
+	case "running", "in_progress", "processing", "busy", "working":
+		return true
+	}
+	progress := eventInt(payload, "progress")
+	return progress > 0 && progress < 100
+}
+
+func isTerminalTeamTaskStatus(status string) bool {
+	return status == models.TeamTaskStatusSucceeded ||
+		status == models.TeamTaskStatusFailed ||
+		status == models.TeamTaskStatusStale
+}
+
 func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message redisStreamMessage) error {
 	if exists, err := s.repo.EventExistsByStreamID(team.ID, message.ID); err != nil || exists {
 		return err
@@ -1394,37 +1871,21 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	}
 
 	now := time.Now().UTC()
+	taskProjection := teamTaskProjectionResult{}
 	if task != nil {
-		switch eventType {
-		case "task_received":
-			if task.Status == models.TeamTaskStatusPending {
-				task.Status = models.TeamTaskStatusDispatched
+		taskProjection = projectTeamTaskRuntimeState(task, payload, eventType, payloadJSON, now)
+		if taskProjection.changed {
+			task.UpdatedAt = now
+			if err := s.repo.UpdateTask(task); err != nil {
+				return err
 			}
-		case "task_started":
-			if task.Status != models.TeamTaskStatusStale {
-				task.Status = models.TeamTaskStatusRunning
-				task.StartedAt = &now
-			}
-		case "task_completed":
-			task.Status = models.TeamTaskStatusSucceeded
-			task.FinishedAt = &now
-			task.ResultJSON = payloadJSON
-		case "task_failed", "message_failed":
-			task.Status = models.TeamTaskStatusFailed
-			task.FinishedAt = &now
-			if errText := eventString(payload, "error_message", "error"); errText != "" {
-				task.ErrorMessage = &errText
-			}
-		}
-		task.UpdatedAt = now
-		if err := s.repo.UpdateTask(task); err != nil {
-			return err
 		}
 	}
 	if member != nil {
 		member.LastSeenAt = &now
 		applyTeamMemberRuntimeProjection(member, payload, eventType)
-		if task != nil && (eventType == "task_received" || eventType == "task_started") {
+		taskIsActive := task != nil && !isTerminalTeamTaskStatus(task.Status)
+		if taskIsActive && (eventType == "task_received" || eventType == "task_started" || taskProjection.status == models.TeamTaskStatusRunning || taskProjection.status == models.TeamTaskStatusDispatched) {
 			member.Status = models.TeamMemberStatusBusy
 			if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown {
 				member.Availability = models.TeamMemberAvailabilityBusy
@@ -1432,10 +1893,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.CurrentTaskID = &task.ID
 			member.Progress = eventInt(payload, "progress")
 		}
-		if eventType == "task_completed" || eventType == "task_failed" || eventType == "message_failed" {
+		taskProjectedTerminal := taskProjection.status == models.TeamTaskStatusSucceeded || taskProjection.status == models.TeamTaskStatusFailed
+		terminalEventWithoutTask := task == nil && (eventType == "task_completed" || eventType == "completion" || eventType == "task_failed" || eventType == "message_failed")
+		if taskProjectedTerminal || terminalEventWithoutTask {
 			member.Status = models.TeamMemberStatusIdle
 			member.CurrentTaskID = nil
-			if eventType == "task_completed" {
+			if taskProjection.status == models.TeamTaskStatusSucceeded || (task == nil && (eventType == "task_completed" || eventType == "completion")) {
 				member.Progress = 100
 				if member.Availability != models.TeamMemberAvailabilityBlocked {
 					member.Availability = models.TeamMemberAvailabilityIdle
@@ -1452,6 +1915,13 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 					}
 				}
 			}
+		}
+		if task != nil && task.Status == models.TeamTaskStatusSucceeded {
+			member.Status = models.TeamMemberStatusIdle
+			member.CurrentTaskID = nil
+			member.Progress = 100
+			member.Availability = models.TeamMemberAvailabilityIdle
+			member.BlockedReason = nil
 		}
 		member.UpdatedAt = now
 		if err := s.repo.UpdateMember(member); err != nil {
@@ -1814,6 +2284,160 @@ func normalizeContextRefs(value interface{}) []string {
 		}
 	}
 	return refs
+}
+
+func (s *teamService) workspaceProxyInstance(userID, teamID int) (*models.Team, int, error) {
+	team, err := s.requireOwnedTeam(userID, teamID)
+	if err != nil {
+		return nil, 0, err
+	}
+	members, err := s.repo.ListMembersByTeamID(teamID)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, member := range activeTeamMembers(members) {
+		if member.InstanceID == nil {
+			continue
+		}
+		instance, err := s.instanceService.GetByID(*member.InstanceID)
+		if err != nil || instance == nil || instance.UserID != userID {
+			continue
+		}
+		if instance.Status == "running" || member.Status == models.TeamMemberStatusIdle || member.Status == models.TeamMemberStatusBusy {
+			return team, instance.ID, nil
+		}
+	}
+	for _, member := range activeTeamMembers(members) {
+		if member.InstanceID != nil {
+			instance, err := s.instanceService.GetByID(*member.InstanceID)
+			if err == nil && instance != nil && instance.UserID == userID {
+				return team, instance.ID, nil
+			}
+		}
+	}
+	return nil, 0, fmt.Errorf("no available Team member instance for workspace access")
+}
+
+func (s *teamService) execTeamWorkspace(ctx context.Context, userID, instanceID int, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if s.podService == nil || s.podService.GetClient() == nil || s.podService.GetClient().Clientset == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	pod, err := s.podService.GetPod(ctx, userID, instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to get pod: %w", err)
+	}
+	req := s.podService.GetClient().Clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod.Name).
+		Namespace(pod.Namespace).
+		SubResource("exec")
+	req.VersionedParams(&corev1.PodExecOptions{
+		Container: "desktop",
+		Command:   command,
+		Stdin:     stdin != nil,
+		Stdout:    stdout != nil,
+		Stderr:    stderr != nil,
+		TTY:       false,
+	}, scheme.ParameterCodec)
+	exec, err := remotecommand.NewSPDYExecutor(s.podService.GetClient().Config, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("failed to initialize exec stream: %w", err)
+	}
+	return exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+		Tty:    false,
+	})
+}
+
+func cleanTeamWorkspacePath(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	value = strings.TrimPrefix(value, "/")
+	if value == "" || value == "." {
+		return "", nil
+	}
+	cleaned := posixpath.Clean(value)
+	if cleaned == "." {
+		return "", nil
+	}
+	for _, segment := range strings.Split(cleaned, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", fmt.Errorf("invalid workspace path")
+		}
+	}
+	return cleaned, nil
+}
+
+func cleanWorkspaceEntryName(raw string) (string, error) {
+	name := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if name == "" || strings.Contains(name, "/") || name == "." || name == ".." {
+		return "", fmt.Errorf("invalid file or folder name")
+	}
+	return name, nil
+}
+
+func joinTeamWorkspacePath(base, child string) string {
+	if strings.TrimSpace(base) == "" {
+		return child
+	}
+	if strings.TrimSpace(child) == "" {
+		return base
+	}
+	return posixpath.Clean(base + "/" + child)
+}
+
+func teamWorkspaceFullPath(team *models.Team, relPath string) string {
+	root := strings.TrimRight(strings.TrimSpace(team.SharedMountPath), "/")
+	if root == "" {
+		root = teamSharedMountPath
+	}
+	if relPath == "" {
+		return root
+	}
+	return root + "/" + relPath
+}
+
+func parseTeamWorkspaceList(parentPath, raw string) []TeamWorkspaceFileEntry {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	entries := make([]TeamWorkspaceFileEntry, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		size, _ := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		mtimeUnix, _ := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+		name := parts[1]
+		entryPath := joinTeamWorkspacePath(parentPath, name)
+		modifiedAt := ""
+		if mtimeUnix > 0 {
+			modifiedAt = time.Unix(mtimeUnix, 0).UTC().Format(time.RFC3339)
+		}
+		entries = append(entries, TeamWorkspaceFileEntry{
+			Name:       name,
+			Path:       entryPath,
+			Type:       parts[0],
+			Size:       size,
+			ModifiedAt: modifiedAt,
+			Previewable: parts[0] == "file" && isPreviewableWorkspaceFile(name),
+		})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Type != entries[j].Type {
+			return entries[i].Type == "directory"
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+	return entries
+}
+
+func isPreviewableWorkspaceFile(path string) bool {
+	name := strings.ToLower(strings.TrimSpace(path))
+	return strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt")
 }
 
 func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plannedTeamMember, error) {

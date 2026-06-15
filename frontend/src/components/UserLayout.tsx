@@ -7,6 +7,7 @@ import LanguageSwitcher from './LanguageSwitcher';
 interface UserLayoutProps {
   children: React.ReactNode;
   title?: string;
+  titleAccessory?: React.ReactNode;
 }
 
 interface UserNavItem {
@@ -16,7 +17,7 @@ interface UserNavItem {
   exact?: boolean;
 }
 
-const UserLayout: React.FC<UserLayoutProps> = ({ children, title }) => {
+const UserLayout: React.FC<UserLayoutProps> = ({ children, title, titleAccessory }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
@@ -123,8 +124,9 @@ const UserLayout: React.FC<UserLayoutProps> = ({ children, title }) => {
 
         {title && (
           <div className="app-subheader">
-            <div className={`${shellContainerClass} py-4`}>
+            <div className={`${shellContainerClass} flex flex-col gap-3 py-4`}>
               <h1 className="text-2xl font-bold text-[#171212]">{title}</h1>
+              {titleAccessory}
             </div>
           </div>
         )}
@@ -271,13 +273,18 @@ const UserLayout: React.FC<UserLayoutProps> = ({ children, title }) => {
         <div className="flex min-w-0 flex-1 flex-col">
           {title && (
             <div className="app-subheader">
-              <div className={`${shellContainerClass} flex h-[104px] items-center`}>
-                <div>
+              <div className={`${shellContainerClass} flex min-h-[104px] items-center justify-between gap-6 py-4`}>
+                <div className="min-w-0">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#b46c50]">
                     Workspace
                   </div>
-                  <h1 className="mt-1 text-[2rem] font-bold tracking-[-0.04em] text-[#171212]">{title}</h1>
+                  <h1 className="mt-1 truncate text-[2rem] font-bold tracking-[-0.04em] text-[#171212]">{title}</h1>
                 </div>
+                {titleAccessory && (
+                  <div className="flex shrink-0 justify-end">
+                    {titleAccessory}
+                  </div>
+                )}
               </div>
             </div>
           )}

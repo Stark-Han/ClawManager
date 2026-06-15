@@ -1,12 +1,15 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { InstanceAccess } from "../../components/InstanceAccess";
 import UserLayout from "../../components/UserLayout";
 import { useAuth } from "../../contexts/AuthContext";
-import { instanceService } from "../../services/instanceService";
 import { teamService } from "../../services/teamService";
-import type { Instance } from "../../types/instance";
-import type { TeamDetails, TeamEvent, TeamMember, TeamTask } from "../../types/team";
+import type {
+  TeamDetails,
+  TeamEvent,
+  TeamMember,
+  TeamTask,
+  TeamWorkspaceFileEntry,
+} from "../../types/team";
 
 const statusStyle = (status: string) => {
   switch (status) {
@@ -271,6 +274,45 @@ type CollaborationGroup = {
   task?: TeamTask;
   items: CollaborationItem[];
 };
+
+type TeamSidePanelView = "kanban" | "files";
+type KanbanDetailSize = "short" | "medium" | "long";
+type WorkspacePreviewState = {
+  path: string;
+  name: string;
+  content: string;
+};
+
+const teamWorkspaceHeight = (view: TeamSidePanelView, detailSize: KanbanDetailSize) => {
+  if (view === "files") {
+    return 760;
+  }
+  switch (detailSize) {
+    case "long":
+      return 1040;
+    case "medium":
+      return 900;
+    default:
+      return 780;
+  }
+};
+
+const groupStartTime = (group: CollaborationGroup) => {
+  const taskTime = group.task?.created_at ? new Date(group.task.created_at).getTime() : 0;
+  if (Number.isFinite(taskTime) && taskTime > 0) {
+    return taskTime;
+  }
+  const itemTimes = group.items
+    .map((item) => item.timeMs)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return itemTimes.length > 0 ? Math.min(...itemTimes) : group.latestAt;
+};
+
+const groupQueryText = (group: CollaborationGroup) =>
+  (group.task ? taskPromptText(group.task) : "") ||
+  group.title ||
+  group.label ||
+  "未命名任务";
 
 const eventTimeValue = (event: TeamEvent) =>
   event.occurred_at || event.created_at;
@@ -598,21 +640,17 @@ const TeamDetailPage: React.FC = () => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [targetMember, setTargetMember] = useState("");
-  const [taskTitle, setTaskTitle] = useState("server-smoke");
+  const [targetMember] = useState("");
+  const [taskTitle] = useState("server-smoke");
   const [taskPrompt, setTaskPrompt] = useState("");
   const [dispatching, setDispatching] = useState(false);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
-  const [desktopMemberId, setDesktopMemberId] = useState<number | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [selectedMemberInstance, setSelectedMemberInstance] =
-    useState<Instance | null>(null);
-  const [memberInstanceLoading, setMemberInstanceLoading] = useState(false);
-  const [memberInstanceError, setMemberInstanceError] = useState<string | null>(
-    null,
-  );
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [sidePanelView, setSidePanelView] = useState<TeamSidePanelView>("kanban");
+  const [kanbanDetailSize, setKanbanDetailSize] = useState<KanbanDetailSize>("short");
+  const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreviewState | null>(null);
 
   useEffect(() => {
     setLoadedTasks([]);
@@ -622,6 +660,7 @@ const TeamDetailPage: React.FC = () => {
     taskHistoryExhausted.current = false;
     eventHistoryExhausted.current = false;
     setHistoryError(null);
+    setSelectedGroupKey(null);
   }, [teamId]);
 
   const loadTeam = useCallback(
@@ -632,9 +671,7 @@ const TeamDetailPage: React.FC = () => {
         return;
       }
       try {
-        if (options?.background) {
-          setRefreshing(true);
-        } else {
+        if (!options?.background) {
           setLoading(true);
         }
         const data = await teamService.getTeam(teamId);
@@ -652,17 +689,10 @@ const TeamDetailPage: React.FC = () => {
             : current || (data.events?.length || 0) >= TEAM_EVENT_HISTORY_PAGE_SIZE,
         );
         setError(null);
-        setTargetMember((current) => current || "");
-        setDesktopMemberId((current) =>
-          current && data.members.some((member) => member.id === current)
-            ? current
-            : data.leader?.id || data.members[0]?.id || null,
-        );
       } catch (err: any) {
         setError(err.response?.data?.error || "加载 Team 失败");
       } finally {
         setLoading(false);
-        setRefreshing(false);
       }
     },
     [teamId],
@@ -685,16 +715,8 @@ const TeamDetailPage: React.FC = () => {
     return result;
   }, [details?.members]);
 
-  const leader = details?.leader || details?.members.find((member) => member.role === "leader");
-  const selectedDesktopMember =
-    details?.members.find((member) => member.id === desktopMemberId) || leader;
   const tasks = loadedTasks.length > 0 ? loadedTasks : details?.tasks || [];
   const events = loadedEvents.length > 0 ? loadedEvents : details?.events || [];
-  const selectedMemberInstanceResolved =
-    selectedMemberInstance?.id === selectedDesktopMember?.instance_id;
-  const selectedAccessRuntimeType = selectedMemberInstanceResolved && selectedMemberInstance
-    ? selectedMemberInstance.runtime_type
-    : null;
   const currentUserLabel = useMemo(() => {
     const username = typeof user?.username === "string" ? user.username.trim() : "";
     const email = typeof user?.email === "string" ? user.email.trim() : "";
@@ -708,48 +730,12 @@ const TeamDetailPage: React.FC = () => {
     [events, tasks, memberById],
   );
   const activeProcessGroup = useMemo(
-    () => selectActiveProcessGroup(collaborationGroups),
-    [collaborationGroups],
+    () =>
+      collaborationGroups.find((group) => group.key === selectedGroupKey) ||
+      selectActiveProcessGroup(collaborationGroups),
+    [collaborationGroups, selectedGroupKey],
   );
-
-  useEffect(() => {
-    const instanceId = selectedDesktopMember?.instance_id;
-    if (!instanceId) {
-      setSelectedMemberInstance(null);
-      setMemberInstanceError(null);
-      setMemberInstanceLoading(false);
-      return;
-    }
-
-    let disposed = false;
-    setMemberInstanceLoading(true);
-    setMemberInstanceError(null);
-
-    void instanceService
-      .getInstance(instanceId)
-      .then((instance) => {
-        if (!disposed) {
-          setSelectedMemberInstance(instance);
-        }
-      })
-      .catch((err: any) => {
-        if (!disposed) {
-          setSelectedMemberInstance(null);
-          setMemberInstanceError(
-            err.response?.data?.error || "加载成员实例访问方式失败",
-          );
-        }
-      })
-      .finally(() => {
-        if (!disposed) {
-          setMemberInstanceLoading(false);
-        }
-      });
-
-    return () => {
-      disposed = true;
-    };
-  }, [selectedDesktopMember?.instance_id]);
+  const mainWorkspaceHeight = teamWorkspaceHeight(sidePanelView, kanbanDetailSize);
 
   const handleDeleteTeam = async () => {
     if (!teamId || !window.confirm(`删除 Team「${details?.team.name || teamId}」？`)) {
@@ -781,6 +767,42 @@ const TeamDetailPage: React.FC = () => {
     }
   };
 
+  const handlePreviewWorkspacePath = useCallback(
+    async (workspacePath: string) => {
+      if (!details?.team.id) {
+        return;
+      }
+      const relPath = workspaceLinkToRelativePath(workspacePath);
+      if (!relPath || !isPreviewableWorkspacePath(relPath)) {
+        window.alert("当前文件不支持在线预览");
+        return;
+      }
+      try {
+        const result = await teamService.previewWorkspaceFile(details.team.id, relPath);
+        setWorkspacePreview({
+          path: result.path,
+          name: result.name,
+          content: result.content,
+        });
+      } catch (err: any) {
+        window.alert(err.response?.data?.error || "预览文件失败");
+      }
+    },
+    [details?.team.id],
+  );
+
+  const handleDownloadWorkspacePreview = useCallback(async () => {
+    if (!details?.team.id || !workspacePreview) {
+      return;
+    }
+    try {
+      const blob = await teamService.downloadWorkspaceFile(details.team.id, workspacePreview.path);
+      downloadBlob(blob, workspacePreview.name);
+    } catch (err: any) {
+      window.alert(err.response?.data?.error || "下载文件失败");
+    }
+  }, [details?.team.id, workspacePreview]);
+
   const handleDispatch = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!teamId || !taskPrompt.trim()) {
@@ -790,6 +812,7 @@ const TeamDetailPage: React.FC = () => {
     try {
       setDispatching(true);
       setDispatchError(null);
+      setSelectedGroupKey(null);
       await teamService.dispatchTask(teamId, {
         target_member_id: targetMember.trim(),
         payload: {
@@ -859,33 +882,27 @@ const TeamDetailPage: React.FC = () => {
   }
 
   return (
-    <UserLayout title={details.team.name}>
-      <div className="space-y-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="flex flex-wrap items-center gap-3">
-              <span
-                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(details.team.status)}`}
-              >
-                {details.team.status}
-              </span>
-              <span className="text-sm text-gray-500">
-                Team #{details.team.id}
-              </span>
-              {refreshing && (
-                <span className="text-sm text-gray-400">刷新中...</span>
-              )}
-            </div>
-            <p className="mt-2 text-sm text-gray-600">
-              Leader：{details.leader_member_id || "-"} · 共享目录：
-              {details.team.shared_mount_path}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
+    <UserLayout
+      title={details.team.name}
+      titleAccessory={
+        <div className="flex max-w-full flex-wrap items-center justify-end gap-2 rounded-2xl border border-[#f1e7e1] bg-white/80 px-3 py-2 shadow-[0_14px_34px_-30px_rgba(72,44,24,0.45)] backdrop-blur">
+          <span
+            className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(details.team.status)}`}
+          >
+            {details.team.status}
+          </span>
+          <span className="text-sm font-medium text-gray-700">
+            Team #{details.team.id}
+          </span>
+          <span className="hidden text-sm text-gray-300 sm:inline">·</span>
+          <span className="max-w-[220px] truncate text-sm text-gray-600 xl:max-w-[320px]">
+            共享目录：{details.team.shared_mount_path}
+          </span>
+          <div className="ml-1 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void loadTeam({ background: true })}
-              className="inline-flex items-center justify-center rounded-xl border border-[#eadfd8] bg-white px-4 py-2 text-sm font-medium text-[#5f5957] hover:bg-[#fff8f5]"
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-[#eadfd8] bg-white px-4 text-sm font-medium text-[#5f5957] hover:bg-[#fff8f5]"
             >
               刷新
             </button>
@@ -893,103 +910,83 @@ const TeamDetailPage: React.FC = () => {
               type="button"
               onClick={handleDeleteTeam}
               disabled={actionLoading === "delete-team"}
-              className="inline-flex items-center justify-center rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {actionLoading === "delete-team" ? "删除中..." : "删除 Team"}
             </button>
-            <Link to="/teams" className="app-button-secondary">
+            <Link
+              to="/teams"
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-[#eadfd8] bg-white px-4 text-sm font-medium text-[#5f5957] hover:bg-[#fff8f5]"
+            >
               返回列表
             </Link>
           </div>
         </div>
-
-        <section className="app-panel p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">成员桌面</h2>
-            <select
-              value={desktopMemberId ?? ""}
-              onChange={(event) => setDesktopMemberId(Number(event.target.value))}
-              className="rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+      }
+    >
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-[minmax(0,1.18fr)_minmax(560px,0.86fr)]">
+          <div className="min-w-0 self-start">
+            <div
+              className="transition-[height] duration-300"
+              style={{ height: mainWorkspaceHeight }}
             >
-              {details.members.map((member) => (
-                <option key={member.id} value={member.id}>
-                  {member.member_key} · {member.role}
-                </option>
-              ))}
-            </select>
-          </div>
-        </section>
-
-        <div className="grid grid-cols-1 items-stretch gap-6 xl:h-[clamp(620px,calc((100vw-360px)*0.45),860px)] xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
-          {selectedDesktopMember?.instance_id ? (
-            <section className="flex h-full min-w-0 flex-col gap-3">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <h2 className="text-lg font-semibold text-gray-900">
-                  {selectedDesktopMember.role === "leader" ? "Leader" : selectedDesktopMember.member_key} 桌面
-                </h2>
-                <Link
-                  to={`/instances/${selectedDesktopMember.instance_id}`}
-                  className="inline-flex items-center justify-center rounded-xl border border-[#eadfd8] bg-white px-4 py-2 text-sm font-medium text-[#5f5957] hover:bg-[#fff8f5]"
-                >
-                  实例详情
-                </Link>
-              </div>
-              {!selectedAccessRuntimeType && !memberInstanceError ? (
-                <div className="app-panel flex min-h-[420px] flex-1 items-center justify-center border-dashed p-8 text-sm text-gray-500">
-                  {memberInstanceLoading ? "正在加载成员访问方式..." : "正在准备成员访问方式..."}
-                </div>
-              ) : memberInstanceError ? (
-                <div className="app-panel flex min-h-[420px] flex-1 items-center justify-center border-dashed p-8 text-center text-sm text-red-600">
-                  {memberInstanceError}
-                </div>
-              ) : (
-                <InstanceAccess
-                  key={`${selectedDesktopMember.instance_id}-${selectedAccessRuntimeType}`}
-                  instanceId={selectedDesktopMember.instance_id}
-                  instanceName={selectedDesktopMember.display_name}
-                  runtimeType={selectedAccessRuntimeType || "desktop"}
-                  containerClassName="min-h-0 xl:flex-1 flex flex-col"
-                  frameHeightClassName="h-[54vh] min-h-[420px] max-h-[720px] xl:h-auto xl:min-h-0 xl:max-h-none xl:flex-1"
-                  isRunning={
-                    selectedDesktopMember.status !== "creating" &&
-                    selectedDesktopMember.status !== "failed" &&
-                    selectedDesktopMember.status !== "offline" &&
-                    selectedDesktopMember.status !== "deleting" &&
-                    selectedDesktopMember.status !== "deleted"
-                  }
-                />
-              )}
-            </section>
-          ) : (
-            <div className="app-panel border-dashed p-8 text-center text-sm text-gray-500">
-              所选成员实例还没有就绪。
+              <CollaborationPanel
+                team={details.team}
+                groups={collaborationGroups}
+                members={details.members}
+                memberById={memberById}
+                leaderMemberId={details.leader_member_id}
+                currentUserLabel={currentUserLabel}
+                currentUserKey={currentUserKey}
+                taskPrompt={taskPrompt}
+                dispatching={dispatching}
+                dispatchError={dispatchError}
+                historyLoading={historyLoading}
+                historyError={historyError}
+                hasMoreHistory={hasMoreTasks || hasMoreEvents}
+                activeGroupKey={activeProcessGroup?.key}
+                onTaskPromptChange={setTaskPrompt}
+                onDispatch={handleDispatch}
+                onLoadMoreHistory={handleLoadMoreHistory}
+                onSelectGroup={setSelectedGroupKey}
+                sidePanelView={sidePanelView}
+                onSidePanelViewChange={setSidePanelView}
+                onWorkspaceFileOpen={handlePreviewWorkspacePath}
+              />
             </div>
-          )}
+          </div>
 
-          <CollaborationPanel
-            team={details.team}
-            groups={collaborationGroups}
-            members={details.members}
-            memberById={memberById}
-            leaderMemberId={details.leader_member_id}
-            currentUserLabel={currentUserLabel}
-            currentUserKey={currentUserKey}
-            taskPrompt={taskPrompt}
-            dispatching={dispatching}
-            dispatchError={dispatchError}
-            historyLoading={historyLoading}
-            historyError={historyError}
-            hasMoreHistory={hasMoreTasks || hasMoreEvents}
-            onTaskPromptChange={setTaskPrompt}
-            onDispatch={handleDispatch}
-            onLoadMoreHistory={handleLoadMoreHistory}
-          />
+          <aside
+            className="self-start transition-[height] duration-300"
+            style={{ height: mainWorkspaceHeight }}
+          >
+            {sidePanelView === "files" ? (
+              <TeamWorkspaceBrowser
+                teamId={details.team.id}
+                rootPath={details.team.shared_mount_path}
+                heightClass="h-full"
+              />
+            ) : (
+              <InteractionProcessPanel
+                group={activeProcessGroup}
+                memberById={memberById}
+                leaderMemberId={details.leader_member_id}
+                compact
+                expanded
+                heightClass="h-full"
+                showToggle={false}
+                onDetailSizeChange={setKanbanDetailSize}
+                onWorkspaceFileOpen={handlePreviewWorkspacePath}
+              />
+            )}
+          </aside>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(520px,0.95fr)]">
+        <div className="grid grid-cols-1 gap-6">
           <section className="app-panel overflow-hidden">
             <div className="border-b border-[#f1e7e1] px-5 py-4">
-              <h2 className="text-lg font-semibold text-gray-900">成员</h2>
+              <h2 className="text-lg font-semibold text-gray-900">成员与团队配置</h2>
             </div>
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-[#f1e7e1] text-sm">
@@ -1071,13 +1068,24 @@ const TeamDetailPage: React.FC = () => {
                       </td>
                       <td className="px-5 py-4">
                         <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setDesktopMemberId(member.id)}
-                            className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs font-medium text-[#5f5957] hover:bg-[#fff8f5]"
-                          >
-                            桌面
-                          </button>
+                          {member.instance_id ? (
+                            <Link
+                              to={`/instances/${member.instance_id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs font-medium text-[#5f5957] hover:bg-[#fff8f5]"
+                            >
+                              访问桌面
+                            </Link>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled
+                              className="rounded-lg border border-[#eadfd8] bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-400"
+                            >
+                              访问桌面
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={
@@ -1098,101 +1106,32 @@ const TeamDetailPage: React.FC = () => {
                 </tbody>
               </table>
             </div>
+            <TeamConfigSummary details={details} />
           </section>
-
-          <aside className="space-y-4">
-            <InteractionProcessPanel
-              group={activeProcessGroup}
-              memberById={memberById}
-              leaderMemberId={details.leader_member_id}
-            />
-
-            <section className="app-panel p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-base font-semibold text-gray-900">调试派发</h2>
-                  <p className="mt-0.5 text-xs leading-5 text-gray-500">
-                    留空目标投给 Leader；直选成员用于 smoke、调试或外部集成。
-                  </p>
-                </div>
-                <span className="rounded-full border border-[#f1e7e1] bg-[#fff8f5] px-2.5 py-1 text-[11px] font-medium text-[#9b5f47]">
-                  Debug
-                </span>
-              </div>
-              <form onSubmit={handleDispatch} className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block min-w-0">
-                  <span className="text-xs font-medium text-gray-600">目标成员</span>
-                  <select
-                    value={targetMember}
-                    onChange={(event) => setTargetMember(event.target.value)}
-                    className="mt-1 block h-9 w-full rounded-xl border border-[#eadfd8] px-3 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
-                  >
-                    <option value="">
-                      默认 Leader（{details.leader_member_id || "-"}）
-                    </option>
-                    {details.members.map((member) => (
-                      <option key={member.id} value={member.member_key}>
-                        {member.member_key} · {member.role}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block min-w-0">
-                  <span className="text-xs font-medium text-gray-600">标题</span>
-                  <input
-                    value={taskTitle}
-                    onChange={(event) => setTaskTitle(event.target.value)}
-                    className="mt-1 block h-9 w-full rounded-xl border border-[#eadfd8] px-3 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
-                  />
-                </label>
-                <label className="block min-w-0">
-                  <span className="text-xs font-medium text-gray-600">内容</span>
-                  <textarea
-                    value={taskPrompt}
-                    onChange={(event) => setTaskPrompt(event.target.value)}
-                    rows={2}
-                    className="mt-1 block h-[72px] w-full resize-none rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
-                  />
-                </label>
-                <div className="flex min-w-0 flex-col justify-end gap-2">
-                  <button
-                    type="submit"
-                    disabled={dispatching}
-                    className="inline-flex h-10 items-center justify-center rounded-xl bg-gradient-to-r from-[#f26148] to-[#e11d2e] px-4 text-sm font-semibold text-white shadow-[0_14px_30px_-20px_rgba(225,29,46,0.75)] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {dispatching ? "派发中..." : "派发"}
-                  </button>
-                  <div className="truncate text-[11px] text-gray-400">
-                    Enter 从群聊发送；此处用于直接派发。
-                  </div>
-                </div>
-                {dispatchError && (
-                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 sm:col-span-2">
-                    {dispatchError}
-                  </p>
-                )}
-              </form>
-            </section>
-
-            <MetaPanel details={details} />
-          </aside>
         </div>
 
       </div>
+      {workspacePreview && (
+        <WorkspacePreviewModal
+          preview={workspacePreview}
+          onClose={() => setWorkspacePreview(null)}
+          onDownload={() => void handleDownloadWorkspacePreview()}
+        />
+      )}
     </UserLayout>
   );
 };
 
-function MetaPanel({ details }: { details: TeamDetails }) {
+function TeamConfigSummary({ details }: { details: TeamDetails }) {
   return (
-    <section className="app-panel p-4">
+    <div className="border-t border-[#f1e7e1] bg-[#fffaf7] px-5 py-4">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-gray-900">运行信息</h2>
+        <h3 className="text-sm font-semibold text-gray-900">团队配置概览</h3>
         <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-500">
           Runtime
         </span>
       </div>
-      <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+      <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-5">
         <MetaRow label="通信模式" value={details.team.communication_mode} />
         <MetaRow label="共享 PVC" value={details.team.shared_pvc_name || "-"} />
         <MetaRow
@@ -1203,11 +1142,594 @@ function MetaPanel({ details }: { details: TeamDetails }) {
         <MetaRow
           label="Events ID"
           value={details.team.redis_events_last_id}
-          className="col-span-2"
         />
       </dl>
+    </div>
+  );
+}
+
+function TeamWorkspaceBrowser({
+  teamId,
+  rootPath,
+  heightClass = "h-[320px]",
+}: {
+  teamId: number;
+  rootPath: string;
+  heightClass?: string;
+}) {
+  const [path, setPath] = useState("");
+  const [entries, setEntries] = useState<TeamWorkspaceFileEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [preview, setPreview] = useState<WorkspacePreviewState | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+
+  const loadFiles = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const result = await teamService.listWorkspaceFiles(teamId, path);
+      setEntries(result.entries || []);
+    } catch (err: any) {
+      setError(err.response?.data?.error || "加载共享目录失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [path, teamId]);
+
+  useEffect(() => {
+    void loadFiles();
+  }, [loadFiles]);
+
+  const runAction = async (key: string, action: () => Promise<void>) => {
+    try {
+      setActionLoading(key);
+      setError(null);
+      await action();
+      await loadFiles();
+    } catch (err: any) {
+      setError(err.response?.data?.error || "操作失败");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleCreateFolder = () => {
+    const name = window.prompt("新建文件夹名称");
+    if (!name?.trim()) {
+      return;
+    }
+    void runAction("mkdir", () =>
+      teamService.createWorkspaceFolder(teamId, { path, name: name.trim() }),
+    );
+  };
+
+  const handleRename = (entry: TeamWorkspaceFileEntry) => {
+    const newName = window.prompt("重命名为", entry.name);
+    if (!newName?.trim() || newName.trim() === entry.name) {
+      return;
+    }
+    void runAction(`rename-${entry.path}`, () =>
+      teamService.renameWorkspaceEntry(teamId, {
+        path: entry.path,
+        new_name: newName.trim(),
+      }),
+    );
+  };
+
+  const handleDelete = (entry: TeamWorkspaceFileEntry) => {
+    if (!window.confirm(`删除「${entry.name}」？`)) {
+      return;
+    }
+    void runAction(`delete-${entry.path}`, () =>
+      teamService.deleteWorkspaceEntry(teamId, entry.path),
+    );
+  };
+
+  const handlePreview = async (entry: TeamWorkspaceFileEntry) => {
+    try {
+      setActionLoading(`preview-${entry.path}`);
+      setError(null);
+      const result = await teamService.previewWorkspaceFile(teamId, entry.path);
+      setPreview({ path: result.path, name: result.name, content: result.content });
+    } catch (err: any) {
+      setError(err.response?.data?.error || "预览文件失败");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleDownload = async (entry: TeamWorkspaceFileEntry) => {
+    try {
+      setActionLoading(`download-${entry.path}`);
+      setError(null);
+      const blob = await teamService.downloadWorkspaceFile(teamId, entry.path);
+      downloadBlob(blob, workspaceDownloadName(entry));
+    } catch (err: any) {
+      setError(err.response?.data?.error || "下载文件失败");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleDownloadPreview = async () => {
+    if (!preview) {
+      return;
+    }
+    try {
+      setActionLoading(`download-${preview.path}`);
+      setError(null);
+      const blob = await teamService.downloadWorkspaceFile(teamId, preview.path);
+      downloadBlob(blob, preview.name);
+    } catch (err: any) {
+      setError(err.response?.data?.error || "下载文件失败");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleUpload = async (fileList: FileList | null, mode: "file" | "folder") => {
+    if (!fileList || fileList.length === 0) {
+      return;
+    }
+    const files = Array.from(fileList);
+    const relativePaths = files.map((file) =>
+      mode === "folder"
+        ? (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+        : file.name,
+    );
+    await runAction("upload", () =>
+      teamService.uploadWorkspaceFiles(teamId, path, files, relativePaths),
+    );
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    if (folderInputRef.current) {
+      folderInputRef.current.value = "";
+    }
+  };
+
+  const crumbs = workspaceBreadcrumbs(path);
+
+  return (
+    <section className={`app-panel flex flex-col overflow-hidden rounded-[14px] border-slate-200 bg-white shadow-[0_24px_56px_-44px_rgba(15,23,42,0.55)] transition-[height] duration-300 ${heightClass}`}>
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+        <div className="min-w-0 flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
+          <button
+            type="button"
+            onClick={() => setPath("")}
+            className="rounded-lg text-slate-800 hover:text-red-600"
+          >
+            Workspace
+          </button>
+          <span className="text-slate-300">/</span>
+          {crumbs.length === 0 ? (
+            <span className="truncate text-slate-500">{rootPath || "/team"}</span>
+          ) : (
+            crumbs.map((crumb) => (
+              <React.Fragment key={crumb.path || "root"}>
+                <button
+                  type="button"
+                  onClick={() => setPath(crumb.path)}
+                  className="max-w-[120px] truncate rounded-lg text-slate-700 hover:text-red-600"
+                >
+                  {crumb.label}
+                </button>
+                <span className="text-slate-300">/</span>
+              </React.Fragment>
+            ))
+          )}
+        </div>
+        <div className="relative flex shrink-0 items-center gap-2">
+          <WorkspaceIconButton title="刷新" onClick={() => void loadFiles()}>
+            <Icon name="refresh" />
+          </WorkspaceIconButton>
+          <WorkspaceIconButton title="新建文件夹" onClick={handleCreateFolder}>
+            <Icon name="folder-plus" />
+          </WorkspaceIconButton>
+          <WorkspaceIconButton title="上传" onClick={() => setUploadMenuOpen((value) => !value)}>
+            <Icon name="upload" />
+          </WorkspaceIconButton>
+          {uploadMenuOpen && (
+            <div className="absolute right-0 top-11 z-30 w-40 overflow-hidden rounded-xl border border-slate-200 bg-white py-1.5 shadow-[0_18px_44px_-28px_rgba(15,23,42,0.75)]">
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadMenuOpen(false);
+                  fileInputRef.current?.click();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+              >
+                <Icon name="upload-file" />
+                上传文件
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setUploadMenuOpen(false);
+                  folderInputRef.current?.click();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+              >
+                <Icon name="folder-upload" />
+                上传文件夹
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => void handleUpload(event.target.files, "file")}
+      />
+      <input
+        ref={(node) => {
+          folderInputRef.current = node;
+          if (node) {
+            node.setAttribute("webkitdirectory", "");
+            node.setAttribute("directory", "");
+          }
+        }}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => void handleUpload(event.target.files, "folder")}
+      />
+
+      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_82px_130px_176px] border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-[0.04em] text-slate-500">
+        <div>Name</div>
+        <div>Size</div>
+        <div>Modified</div>
+        <div className="text-right">Actions</div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {error && (
+          <div className="mx-4 mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+        {loading ? (
+          <div className="p-8 text-center text-sm text-slate-400">加载共享目录...</div>
+        ) : entries.length === 0 ? (
+          <div className="p-8 text-center text-sm text-slate-400">当前目录为空</div>
+        ) : (
+          entries.map((entry) => (
+            <div
+              key={entry.path}
+              className="grid grid-cols-[minmax(0,1fr)_82px_130px_176px] items-center border-b border-slate-100 px-4 py-3 text-sm transition hover:bg-slate-50/70"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  if (entry.type === "directory") {
+                    setPath(entry.path);
+                  } else if (entry.previewable) {
+                    void handlePreview(entry);
+                  }
+                }}
+                className="flex min-w-0 items-center gap-2 text-left font-semibold text-slate-800"
+              >
+                <Icon name={entry.type === "directory" ? "folder" : "file"} />
+                <span className="truncate">{entry.name}</span>
+              </button>
+              <div className="text-slate-500">{entry.type === "directory" ? "-" : formatWorkspaceSize(entry.size)}</div>
+              <div className="truncate text-slate-500">{formatWorkspaceModified(entry.modified_at)}</div>
+              <div className="flex justify-end gap-1.5">
+                {entry.type === "file" && entry.previewable && (
+                  <WorkspaceIconButton
+                    title="预览"
+                    compact
+                    disabled={actionLoading === `preview-${entry.path}`}
+                    onClick={() => void handlePreview(entry)}
+                  >
+                    <Icon name="eye" />
+                  </WorkspaceIconButton>
+                )}
+                <WorkspaceIconButton
+                  title={entry.type === "directory" ? "下载文件夹" : "下载"}
+                  compact
+                  disabled={actionLoading === `download-${entry.path}`}
+                  onClick={() => void handleDownload(entry)}
+                >
+                  <Icon name="download" />
+                </WorkspaceIconButton>
+                <WorkspaceIconButton
+                  title="重命名"
+                  compact
+                  disabled={actionLoading === `rename-${entry.path}`}
+                  onClick={() => handleRename(entry)}
+                >
+                  <Icon name="edit" />
+                </WorkspaceIconButton>
+                <WorkspaceIconButton
+                  title="删除"
+                  compact
+                  danger
+                  disabled={actionLoading === `delete-${entry.path}`}
+                  onClick={() => handleDelete(entry)}
+                >
+                  <Icon name="trash" />
+                </WorkspaceIconButton>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {preview && (
+        <WorkspacePreviewModal
+          preview={preview}
+          onClose={() => setPreview(null)}
+          onDownload={() => void handleDownloadPreview()}
+        />
+      )}
     </section>
   );
+}
+
+function WorkspacePreviewModal({
+  preview,
+  onClose,
+  onDownload,
+}: {
+  preview: WorkspacePreviewState;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(preview.content);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1600);
+    } catch {
+      setCopyState("failed");
+      window.setTimeout(() => setCopyState("idle"), 1600);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
+      <div className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Preview</div>
+            <div className="mt-1 truncate text-base font-semibold text-slate-900">{preview.name}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={onDownload}
+              className="rounded-xl border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+            >
+              下载
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCopy()}
+              className="rounded-xl border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+            >
+              {copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制全部"}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 overflow-auto bg-slate-50 p-5">
+          <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-4 text-sm leading-6 text-slate-800 shadow-inner">
+            {preview.content}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceIconButton({
+  title,
+  children,
+  compact = false,
+  danger = false,
+  disabled = false,
+  onClick,
+}: {
+  title: string;
+  children: React.ReactNode;
+  compact?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const tone = danger
+    ? "border-red-200 text-red-500 hover:bg-red-50"
+    : "border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900";
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex items-center justify-center rounded-lg border bg-white transition disabled:cursor-wait disabled:opacity-50 ${tone} ${
+        compact ? "h-8 w-8" : "h-9 w-9"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Icon({ name }: { name: string }) {
+  const common = "h-4 w-4 shrink-0";
+  switch (name) {
+    case "refresh":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+          <path d="M20 4v6h-6" />
+        </svg>
+      );
+    case "folder-plus":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+          <path d="M12 11v5" />
+          <path d="M9.5 13.5h5" />
+        </svg>
+      );
+    case "upload":
+    case "upload-file":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 16V4" />
+          <path d="m7 9 5-5 5 5" />
+          <path d="M20 16v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-3" />
+        </svg>
+      );
+    case "folder-upload":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+          <path d="M12 16v-5" />
+          <path d="m9.5 13.5 2.5-2.5 2.5 2.5" />
+        </svg>
+      );
+    case "folder":
+      return (
+        <svg className={`${common} text-slate-500`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        </svg>
+      );
+    case "file":
+      return (
+        <svg className={`${common} text-slate-500`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
+          <path d="M14 3v6h6" />
+        </svg>
+      );
+    case "eye":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      );
+    case "download":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 4v12" />
+          <path d="m7 11 5 5 5-5" />
+          <path d="M5 20h14" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="m19 6-1 14H6L5 6" />
+          <path d="M10 11v5" />
+          <path d="M14 11v5" />
+        </svg>
+      );
+    default:
+      return (
+        <svg className={common} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+      );
+  }
+}
+
+function workspaceBreadcrumbs(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  return parts.map((part, index) => ({
+    label: part,
+    path: parts.slice(0, index + 1).join("/"),
+  }));
+}
+
+function workspaceDownloadName(entry: TeamWorkspaceFileEntry) {
+  return entry.type === "directory" ? `${entry.name}.zip` : entry.name;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function workspaceLinkToRelativePath(raw: string) {
+  const normalized = raw.trim().replace(/\\/g, "/").replace(/[，。；;,.、)）\]}]+$/g, "");
+  if (normalized === "/team" || normalized === "team") {
+    return "";
+  }
+  if (normalized.startsWith("/team/")) {
+    return normalized.slice("/team/".length);
+  }
+  if (normalized.startsWith("team/")) {
+    return normalized.slice("team/".length);
+  }
+  return normalized.replace(/^\/+/, "");
+}
+
+function isPreviewableWorkspacePath(path: string) {
+  return /\.(md|txt)$/i.test(path.trim());
+}
+
+function isTeamWorkspaceLink(path: string) {
+  const normalized = path.trim().replace(/\\/g, "/");
+  return normalized.startsWith("/team/") || normalized.startsWith("team/");
+}
+
+function formatWorkspaceSize(size: number) {
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatWorkspaceModified(value?: string) {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function DescriptionPreview({ text }: { text?: string }) {
@@ -1254,9 +1776,14 @@ function CollaborationPanel({
   historyLoading,
   historyError,
   hasMoreHistory,
+  activeGroupKey,
   onTaskPromptChange,
   onDispatch,
   onLoadMoreHistory,
+  onSelectGroup,
+  sidePanelView,
+  onSidePanelViewChange,
+  onWorkspaceFileOpen,
 }: {
   team: TeamDetails["team"];
   groups: CollaborationGroup[];
@@ -1271,9 +1798,14 @@ function CollaborationPanel({
   historyLoading: boolean;
   historyError: string | null;
   hasMoreHistory: boolean;
+  activeGroupKey?: string;
   onTaskPromptChange: (value: string) => void;
   onDispatch: (event: React.FormEvent) => void;
   onLoadMoreHistory: () => void;
+  onSelectGroup: (groupKey: string) => void;
+  sidePanelView: TeamSidePanelView;
+  onSidePanelViewChange: (view: TeamSidePanelView) => void;
+  onWorkspaceFileOpen?: (path: string) => void;
 }) {
   const messages = buildTeamChatMessages(
     groups,
@@ -1285,11 +1817,35 @@ function CollaborationPanel({
   const onlineCount = members.filter(
     (member) => !["offline", "deleted", "deleting"].includes(member.status),
   ).length;
+  const messageAnchorRefs = useRef(new Map<string, HTMLDivElement | null>());
+  const firstMessageByGroup = useMemo(() => {
+    const result = new Map<string, string>();
+    for (const message of messages) {
+      if (message.threadKey && !result.has(message.threadKey)) {
+        result.set(message.threadKey, message.id);
+      }
+    }
+    return result;
+  }, [messages]);
+  const queryAnchors = useMemo(
+    () =>
+      groups
+        .filter((group) => group.task || group.items.length > 0)
+        .sort((a, b) => groupStartTime(a) - groupStartTime(b)),
+    [groups],
+  );
+  const handleSelectAnchor = (groupKey: string) => {
+    onSelectGroup(groupKey);
+    window.setTimeout(() => {
+      const target = messageAnchorRefs.current.get(groupKey);
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  };
 
   return (
-    <section className="app-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[22px]">
+    <section className="app-panel relative flex h-full min-h-0 flex-col overflow-hidden rounded-[22px]">
       <div className="shrink-0 border-b border-[#e8e8e8] bg-white px-4 py-3">
-        <div className="flex items-start">
+        <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="text-base font-semibold leading-6 text-gray-950">团队群聊</h2>
             <div className="mt-0.5 truncate text-xs text-gray-500">
@@ -1299,6 +1855,25 @@ function CollaborationPanel({
               <span className="h-2 w-2 rounded-full bg-emerald-400" />
               <span>{onlineCount}人在线</span>
             </div>
+          </div>
+          <div className="flex shrink-0 rounded-full border border-[#eadfd8] bg-[#fff8f5] p-1">
+            {([
+              ["kanban", "看板"],
+              ["files", "文件"],
+            ] as const).map(([view, label]) => (
+              <button
+                key={view}
+                type="button"
+                onClick={() => onSidePanelViewChange(view)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  sidePanelView === view
+                    ? "bg-white text-gray-950 shadow-sm"
+                    : "text-gray-500 hover:text-gray-800"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -1341,16 +1916,47 @@ function CollaborationPanel({
               </div>
             )}
             <TimeDivider value={messages[0]?.time} />
-            {messages.map((message) =>
-              message.kind === "system" ? (
-                <SystemChatLine key={message.id} message={message} />
-              ) : (
-                <TeamChatMessageRow key={message.id} message={message} />
-              ),
-            )}
+            {messages.map((message) => {
+              const isFirstGroupMessage =
+                message.threadKey &&
+                firstMessageByGroup.get(message.threadKey) === message.id;
+              return (
+                <div
+                  key={message.id}
+                  ref={(node) => {
+                    if (!message.threadKey || !isFirstGroupMessage) {
+                      return;
+                    }
+                    if (node) {
+                      messageAnchorRefs.current.set(message.threadKey, node);
+                    } else {
+                      messageAnchorRefs.current.delete(message.threadKey);
+                    }
+                  }}
+                  className={isFirstGroupMessage ? "scroll-mt-4" : undefined}
+                >
+                  {message.kind === "system" ? (
+                    <SystemChatLine message={message} />
+                  ) : (
+                    <TeamChatMessageRow
+                      message={message}
+                      onWorkspaceFileOpen={onWorkspaceFileOpen}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
+
+      {queryAnchors.length >= 3 && (
+        <QuestionAnchorRail
+          groups={queryAnchors}
+          activeGroupKey={activeGroupKey}
+          onSelect={handleSelectAnchor}
+        />
+      )}
 
       <div className="shrink-0 border-t border-[#dddddd] bg-white px-3 py-2.5">
         {dispatchError && (
@@ -1397,10 +2003,24 @@ function InteractionProcessPanel({
   group,
   memberById,
   leaderMemberId,
+  compact = false,
+  expanded: controlledExpanded,
+  onExpandedChange,
+  heightClass,
+  showToggle = true,
+  onDetailSizeChange,
+  onWorkspaceFileOpen,
 }: {
   group?: CollaborationGroup;
   memberById: Map<number, TeamMember>;
   leaderMemberId?: string;
+  compact?: boolean;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  heightClass?: string;
+  showToggle?: boolean;
+  onDetailSizeChange?: (size: KanbanDetailSize) => void;
+  onWorkspaceFileOpen?: (path: string) => void;
 }) {
   const memberByKey = new Map(
     [...memberById.values()].map((member) => [member.member_key, member]),
@@ -1427,24 +2047,37 @@ function InteractionProcessPanel({
   const defaultCardId =
     columns.doing[0]?.id || columns.done[0]?.id || columns.todo[0]?.id || "";
   const [selectedCardId, setSelectedCardId] = useState(defaultCardId);
+  const [internalExpanded, setInternalExpanded] = useState(false);
+  const expanded = controlledExpanded ?? internalExpanded;
+  const setExpanded = onExpandedChange ?? setInternalExpanded;
   const allCards = [...columns.todo, ...columns.doing, ...columns.done];
   const selectedCard =
     allCards.find((card) => card.id === selectedCardId) ||
     allCards.find((card) => card.id === defaultCardId);
+  const selectedDetailSize = kanbanDetailSizeForText(selectedCard?.summary || finalResult || "");
 
   useEffect(() => {
     setSelectedCardId(defaultCardId);
   }, [defaultCardId, group?.key]);
+
+  useEffect(() => {
+    if (!onDetailSizeChange) {
+      return;
+    }
+    const detailText = selectedCard?.summary || finalResult || "";
+    onDetailSizeChange(kanbanDetailSizeForText(detailText));
+  }, [finalResult, onDetailSizeChange, selectedCard?.id, selectedCard?.summary]);
   const progressStyle =
     visualStatus === "failed" || visualStatus === "stale"
       ? "from-rose-500 via-orange-400 to-amber-400"
       : isTerminal
         ? "from-emerald-500 via-teal-400 to-cyan-400"
         : "from-sky-500 via-indigo-500 to-violet-500";
+  const routeMembers = group?.route || [];
 
   return (
-    <section className="app-panel overflow-hidden rounded-[22px] border-slate-200 shadow-[0_24px_56px_-42px_rgba(15,23,42,0.7)]">
-      <div className="bg-[linear-gradient(135deg,#111827,#1f2937_48%,#0f766e)] px-4 py-3.5 text-white">
+    <section className={`app-panel flex flex-col overflow-hidden rounded-[22px] border-slate-200 shadow-[0_24px_56px_-42px_rgba(15,23,42,0.7)] transition-[height] duration-300 ${heightClass || (compact ? (expanded ? "h-[760px]" : "h-[480px]") : "h-[420px]")}`}>
+      <div className={`bg-[linear-gradient(135deg,#111827,#1f2937_48%,#0f766e)] text-white ${compact ? "px-4 py-3" : "px-4 py-3.5"}`}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -1473,10 +2106,35 @@ function InteractionProcessPanel({
             <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-300">
               {queryText || "用户提交 query 后，这里会展示拆解、执行和汇总。"}
             </div>
+            <div className="mt-1.5 flex max-w-full flex-nowrap items-center gap-1 overflow-hidden text-[10px] leading-4 text-cyan-100/80">
+              {routeMembers.length > 0 ? (
+                routeMembers.map((member, index) => (
+                  <React.Fragment key={`${group?.key || "idle"}-header-route-${member}-${index}`}>
+                    {index > 0 && <span className="text-cyan-100/45">→</span>}
+                    <span className="max-w-[128px] truncate rounded-full bg-white/10 px-1.5 py-0.5 text-cyan-50 ring-1 ring-white/10">
+                      {displayMemberName(member, memberByKey, leaderMemberId)}
+                    </span>
+                  </React.Fragment>
+                ))
+              ) : (
+                <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-cyan-50 ring-1 ring-white/10">
+                  Idle
+                </span>
+              )}
+            </div>
           </div>
           <div className="shrink-0 text-right">
             <div className="text-xl font-semibold leading-none">{progress}%</div>
             <div className="mt-1 text-[11px] text-slate-300">overall</div>
+            {compact && showToggle && (
+              <button
+                type="button"
+                onClick={() => setExpanded(!expanded)}
+                className="mt-2 rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-100 ring-1 ring-white/15 hover:bg-white/15"
+              >
+                {expanded ? "收起" : "展开"}
+              </button>
+            )}
           </div>
         </div>
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/15">
@@ -1487,18 +2145,66 @@ function InteractionProcessPanel({
         </div>
       </div>
 
-      <div className="space-y-3 bg-gradient-to-b from-white via-slate-50 to-white px-4 py-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_104px]">
+      <div className={`min-h-0 flex-1 bg-gradient-to-b from-white via-slate-50 to-white ${expanded ? "flex flex-col gap-2 overflow-hidden px-3 py-2.5" : "space-y-3 overflow-auto px-4 py-3"}`}>
+        {compact && !expanded ? (
+          <div className="space-y-3">
+            <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                    当前任务
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-700">
+                    {queryText || "Idle，等待新的团队任务。"}
+                  </div>
+                </div>
+                <div className="grid shrink-0 grid-cols-3 gap-1 text-center text-[10px]">
+                  <KanbanCount label="T" value={kanbanCounts.todo} tone="todo" />
+                  <KanbanCount label="D" value={kanbanCounts.doing} tone="doing" />
+                  <KanbanCount label="✓" value={kanbanCounts.done} tone="done" />
+                </div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {decompositionItems.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-400">
+                    暂无拆解步骤
+                  </div>
+                ) : (
+                  decompositionItems.slice(0, 3).map((item) => (
+                    <div key={item.id} className="rounded-xl bg-slate-50 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 truncate text-xs font-semibold text-slate-800">{item.title}</div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${item.badgeClass}`}>
+                          {item.status}
+                        </span>
+                      </div>
+                      <div className="mt-1 truncate text-[11px] text-slate-500">
+                        {item.route}
+                      </div>
+                      {item.summary && (
+                        <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">
+                          {item.summary}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+        <div className="shrink-0 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_92px]">
             <div className="min-w-0">
               <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                 总任务 Query
               </div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-700">
+              <div className="mt-1 line-clamp-1 text-xs leading-5 text-slate-700">
                 {queryText || "Idle，等待新的团队任务。"}
               </div>
-              <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50/70 p-2.5">
-                <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="mt-2 rounded-xl border border-slate-100 bg-slate-50/70 p-1.5">
+                <div className="mb-1 flex items-center justify-between gap-2">
                   <span className="text-[11px] font-semibold text-slate-700">任务拆解</span>
                   <span className="text-[10px] text-slate-400">{decompositionItems.length} 项</span>
                 </div>
@@ -1507,55 +2213,46 @@ function InteractionProcessPanel({
                     等待 Leader 拆解并派发子任务。
                   </div>
                 ) : (
-                  <div className="space-y-1.5">
+                  <div className="space-y-1">
                     {decompositionItems.map((item) => (
                       <div
                         key={item.id}
-                        className="flex items-center justify-between gap-2 rounded-lg bg-white px-2.5 py-1.5"
+                        className="rounded-lg bg-white px-2 py-1"
                       >
-                        <div className="min-w-0 truncate text-[11px] font-medium text-slate-700">
-                          {item.title}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0 truncate text-[11px] font-medium text-slate-700">
+                            {item.title}
+                          </div>
+                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${item.badgeClass}`}>
+                            {item.status}
+                          </span>
                         </div>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${item.badgeClass}`}>
-                          {item.status}
-                        </span>
+                        {item.summary && (
+                          <div className="mt-1 line-clamp-1 text-[10px] leading-4 text-slate-500">{item.summary}</div>
+                        )}
                       </div>
                     ))}
                   </div>
                 )}
               </div>
             </div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
               <div className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
                 {statusText}
               </div>
-              <div className="mt-2 text-2xl font-semibold leading-none text-slate-900">{progress}%</div>
+              <div className="mt-2 text-xl font-semibold leading-none text-slate-900">{progress}%</div>
               <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">overall</div>
-              <div className="mt-3 grid grid-cols-3 gap-1 text-center text-[10px]">
+              <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[10px]">
                 <KanbanCount label="T" value={kanbanCounts.todo} tone="todo" />
                 <KanbanCount label="D" value={kanbanCounts.doing} tone="doing" />
                 <KanbanCount label="✓" value={kanbanCounts.done} tone="done" />
               </div>
             </div>
           </div>
-          <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
-            {(group?.route || []).length > 0 ? (
-              group!.route.map((member, index) => (
-                <React.Fragment key={`${group!.key}-route-${member}-${index}`}>
-                  {index > 0 && <span className="text-slate-300">→</span>}
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
-                    {displayMemberName(member, memberByKey, leaderMemberId)}
-                  </span>
-                </React.Fragment>
-              ))
-            ) : (
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">Idle</span>
-            )}
-          </div>
         </div>
 
-        <div className="-mx-1 overflow-x-auto px-1 pb-1">
-          <div className="grid min-w-[520px] grid-cols-3 gap-2">
+        <div className="shrink-0 overflow-hidden">
+          <div className="grid grid-cols-3 gap-2">
             <KanbanColumn
               title="Todo"
               subtitle="已拆解 / 待领取"
@@ -1583,8 +2280,8 @@ function InteractionProcessPanel({
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-          <div className="mb-2 flex items-center justify-between gap-3">
+        <div className={`flex min-h-[112px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-2.5 shadow-sm ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
+          <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
             <div>
               <div className="text-xs font-semibold text-slate-800">
                 {selectedCard ? "卡片详情" : "汇总结果"}
@@ -1597,20 +2294,120 @@ function InteractionProcessPanel({
               {statusText}
             </span>
           </div>
-          {selectedCard ? (
-            <KanbanCardDetail card={selectedCard} />
-          ) : finalResult ? (
-            <div className="max-h-32 overflow-auto text-xs leading-5 text-slate-700">
-              <MarkdownContent text={finalResult} compact />
-            </div>
-          ) : (
-            <div className="text-xs leading-5 text-slate-500">
-              当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
-            </div>
-          )}
+          <div className="min-h-0">
+            {selectedCard ? (
+              <KanbanCardDetail
+                card={selectedCard}
+                size={selectedDetailSize}
+                onWorkspaceFileOpen={onWorkspaceFileOpen}
+              />
+            ) : finalResult ? (
+              <div className={`overflow-auto pb-4 pr-1 text-xs leading-5 text-slate-700 ${kanbanDetailBodyMaxHeight(selectedDetailSize)}`}>
+                <MarkdownContent
+                  text={finalResult}
+                  compact
+                  onWorkspaceFileOpen={onWorkspaceFileOpen}
+                />
+              </div>
+            ) : (
+              <div className="text-xs leading-5 text-slate-500">
+                当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
+              </div>
+            )}
+          </div>
         </div>
+          </>
+        )}
       </div>
     </section>
+  );
+}
+
+function QuestionAnchorRail({
+  groups,
+  activeGroupKey,
+  onSelect,
+}: {
+  groups: CollaborationGroup[];
+  activeGroupKey?: string;
+  onSelect: (groupKey: string) => void;
+}) {
+  const visibleGroups = groups.slice(-12);
+  const hiddenCount = Math.max(groups.length - visibleGroups.length, 0);
+
+  return (
+    <div className="absolute right-3 top-1/2 z-20 hidden -translate-y-1/2 xl:block">
+      <div className="group/anchors relative flex items-center">
+        <div className="flex flex-col items-end gap-2.5 px-1 py-2">
+          {hiddenCount > 0 && (
+            <div className="mb-0.5 h-px w-7 bg-slate-300/70" title={`还有 ${hiddenCount} 条更早的问题`} />
+          )}
+          {visibleGroups.map((group) => {
+            const active = group.key === activeGroupKey;
+            return (
+              <button
+                key={group.key}
+                type="button"
+                title={groupQueryText(group)}
+                onClick={() => onSelect(group.key)}
+                className={`h-px rounded-full transition-all ${
+                  active
+                    ? "w-9 bg-slate-950"
+                    : "w-7 bg-slate-300 hover:w-9 hover:bg-slate-700"
+                }`}
+              />
+            );
+          })}
+        </div>
+
+        <div className="pointer-events-none absolute right-10 top-1/2 w-80 -translate-y-1/2 opacity-0 transition duration-150 group-hover/anchors:pointer-events-auto group-hover/anchors:opacity-100">
+          <div className="rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.75)] backdrop-blur">
+            <div className="mb-2 flex items-center justify-between gap-2 px-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                历史问题
+              </div>
+              <div className="text-[11px] text-slate-400">{groups.length} 条</div>
+            </div>
+            <div className="max-h-80 space-y-1 overflow-auto pr-1">
+              {groups.map((group, index) => {
+                const active = group.key === activeGroupKey;
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    onClick={() => onSelect(group.key)}
+                    className={`w-full rounded-xl border px-3 py-2 text-left transition ${
+                      active
+                        ? "border-slate-900 bg-slate-950 text-white shadow-sm"
+                        : "border-transparent bg-slate-50 text-slate-700 hover:border-slate-200 hover:bg-white"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`text-[10px] ${active ? "text-slate-300" : "text-slate-400"}`}>
+                        Q{index + 1}
+                      </span>
+                      <span
+                        className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
+                          active ? "border-white/20 text-slate-200" : statusStyle(group.status)
+                        }`}
+                      >
+                        {group.status}
+                      </span>
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-xs leading-5">
+                      {groupQueryText(group)}
+                    </div>
+                    <div className={`mt-1 text-[10px] ${active ? "text-slate-300" : "text-slate-400"}`}>
+                      {formatDateTime(new Date(groupStartTime(group)).toISOString())}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1652,6 +2449,8 @@ type KanbanColumns = Record<KanbanColumnKey, KanbanTaskCard[]>;
 type DecompositionItem = {
   id: string;
   title: string;
+  route: string;
+  summary: string;
   status: string;
   badgeClass: string;
 };
@@ -1728,9 +2527,9 @@ function buildKanbanColumns(
     if (isDispatchOnlyLeaderTerminalStep(step)) {
       continue;
     }
-    const workKey = kanbanWorkKey(step, delegatedTargets);
+    const workKey = kanbanWorkKey(step, delegatedTargets, steps);
     const previous = cardByWorkKey.get(workKey);
-    const column = terminal ? "done" : kanbanColumnForStep(step, visualStatus);
+    const column = terminal ? "done" : kanbanColumnForStep(step, visualStatus, steps);
     const card: KanbanTaskCard = {
       id: previous?.id || `kanban-${workKey}`,
       column,
@@ -1777,11 +2576,11 @@ function buildKanbanColumns(
   return columns;
 }
 
-function kanbanWorkKey(step: ProcessStep, delegatedTargets: string[] = []) {
+function kanbanWorkKey(step: ProcessStep, delegatedTargets: string[] = [], steps: ProcessStep[] = []) {
   if (step.eventType === "outbound" || step.eventType === "task_assigned") {
     return sanitizeKanbanKey(step.to || step.actor || "assignment");
   }
-  if ((isCompletionEvidenceStep(step) || isFailureEvidenceStep(step)) && isLeaderLikeName(step.actor)) {
+  if ((isCompletionEvidenceStep(step, steps) || isFailureEvidenceStep(step)) && isLeaderLikeName(step.actor)) {
     const target = delegatedTargets.find((candidate) =>
       mentionsDelegatedTarget(step.content, new Set([candidate])),
     );
@@ -1806,8 +2605,8 @@ function isTerminalEventType(eventType: string) {
   ].includes(eventType);
 }
 
-function kanbanColumnForStep(step: ProcessStep, visualStatus: string): KanbanColumnKey {
-  if (isCompletionEvidenceStep(step) || isFailureEvidenceStep(step)) {
+function kanbanColumnForStep(step: ProcessStep, visualStatus: string, steps: ProcessStep[] = []): KanbanColumnKey {
+  if (isCompletionEvidenceStep(step, steps) || isFailureEvidenceStep(step)) {
     return "done";
   }
   if (step.eventType === "reply") {
@@ -1864,9 +2663,49 @@ function buildDecompositionItems(columns: KanbanColumns): DecompositionItem[] {
   return cards.slice(0, 5).map((card) => ({
     id: card.id,
     title: card.title,
+    route: card.target && card.target !== card.owner ? `${card.owner} → ${card.target}` : "",
+    summary: card.summary,
     status: card.statusLabel,
     badgeClass: kanbanCardStyle(card).badge,
   }));
+}
+
+function kanbanDetailSizeForText(value: string): KanbanDetailSize {
+  const normalized = value.trim();
+  if (!normalized) {
+    return "short";
+  }
+  const lineCount = normalized.split(/\r?\n/).filter((line) => line.trim()).length;
+  const weightedLength = normalized.length + lineCount * 44;
+  if (weightedLength > 760) {
+    return "long";
+  }
+  if (weightedLength > 220) {
+    return "medium";
+  }
+  return "short";
+}
+
+function kanbanDetailPanelMaxHeight(size: KanbanDetailSize) {
+  switch (size) {
+    case "long":
+      return "max-h-[500px]";
+    case "medium":
+      return "max-h-[360px]";
+    default:
+      return "max-h-[180px]";
+  }
+}
+
+function kanbanDetailBodyMaxHeight(size: KanbanDetailSize) {
+  switch (size) {
+    case "long":
+      return "max-h-[320px]";
+    case "medium":
+      return "max-h-[220px]";
+    default:
+      return "max-h-[88px]";
+  }
 }
 
 function processProgress(
@@ -1921,12 +2760,12 @@ function isDispatchOnlyLeaderTerminalStep(step: ProcessStep) {
 function latestCompletionEvidenceStep(steps: ProcessStep[]) {
   return [...steps]
     .reverse()
-    .find((step) => isCompletionEvidenceStep(step));
+    .find((step) => isCompletionEvidenceStep(step, steps));
 }
 
 function latestOutcomeEvidence(steps: ProcessStep[]) {
   for (const step of [...steps].reverse()) {
-    if (isCompletionEvidenceStep(step)) {
+    if (isCompletionEvidenceStep(step, steps)) {
       return { status: "succeeded" as const, step };
     }
     if (step.eventType === "task_stale") {
@@ -1939,7 +2778,7 @@ function latestOutcomeEvidence(steps: ProcessStep[]) {
   return undefined;
 }
 
-function isCompletionEvidenceStep(step: ProcessStep) {
+function isCompletionEvidenceStep(step: ProcessStep, steps: ProcessStep[] = []) {
   if (!step.content || isDispatchOnlyLeaderTerminalStep(step)) {
     return false;
   }
@@ -1949,7 +2788,35 @@ function isCompletionEvidenceStep(step: ProcessStep) {
   if (step.eventType === "task_completed" || step.eventType === "completion") {
     return true;
   }
+  if (step.eventType === "reply" && isSubstantiveFinalAnswerText(step.content)) {
+    if (!isLeaderLikeName(step.actor)) {
+      return false;
+    }
+    return !hasDelegatedWorkBeforeStep(step, steps) || hasNonLeaderCompletionBeforeStep(step, steps);
+  }
   return false;
+}
+
+function hasDelegatedWorkBeforeStep(step: ProcessStep, steps: ProcessStep[]) {
+  return steps.some(
+    (candidate) =>
+      candidate.time <= step.time &&
+      (candidate.eventType === "task_assigned" || candidate.eventType === "outbound") &&
+      candidate.to &&
+      !isLeaderLikeName(candidate.to),
+  );
+}
+
+function hasNonLeaderCompletionBeforeStep(step: ProcessStep, steps: ProcessStep[]) {
+  return steps.some(
+    (candidate) =>
+      candidate.time <= step.time &&
+      !isLeaderLikeName(candidate.actor) &&
+      !isDispatchOnlyLeaderTerminalStep(candidate) &&
+      (isFinalResultText(candidate.content) ||
+        candidate.eventType === "task_completed" ||
+        candidate.eventType === "completion"),
+  );
 }
 
 function isFailureEvidenceStep(step: ProcessStep) {
@@ -2006,6 +2873,28 @@ function isFinalResultText(value: string) {
   );
 }
 
+function isSubstantiveFinalAnswerText(value: string) {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  const compact = normalized.replace(/\s+/g, "");
+  if (!normalized || isDispatchOnlyResult(normalized)) {
+    return false;
+  }
+  if (
+    /^(收到|好的|好|ok|okay|处理中|正在|准备|等待|我将|让我|先看|稍等)/i.test(normalized) ||
+    compact.includes("现在整理") ||
+    compact.includes("正在整理") ||
+    compact.includes("稍后") ||
+    compact.includes("等待其") ||
+    compact.includes("派单")
+  ) {
+    return false;
+  }
+  if (isFinalResultText(normalized)) {
+    return true;
+  }
+  return compact.length >= 36 || /[#*>|`]|。|：|:/.test(normalized) && compact.length >= 24;
+}
+
 function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []) {
   const latestOutcome = latestOutcomeEvidence(steps);
   const finalStep = latestOutcome?.status === "succeeded"
@@ -2016,9 +2905,9 @@ function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []
   }
   if (group.task) {
     const taskResult =
-      payloadText(group.task.result, ["summary", "result", "message", "text", "answer"]) ||
-      payloadText(group.task.payload, ["result", "answer"]);
-    if (taskResult && isFinalResultText(taskResult)) {
+      payloadText(group.task.result, ["resultMarkdown", "result_markdown", "summary", "result", "message", "text", "answer"]) ||
+      payloadText(group.task.payload, ["resultMarkdown", "result_markdown", "result", "answer"]);
+    if (taskResult && (group.task.status === "succeeded" || isFinalResultText(taskResult))) {
       return taskResult;
     }
   }
@@ -2030,15 +2919,30 @@ function processVisualStatus(
   finalResult: string,
   steps: ProcessStep[] = [],
 ) {
+  if (group.task?.status === "succeeded") {
+    return "succeeded";
+  }
   const latestOutcome = latestOutcomeEvidence(steps);
   if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
     return "succeeded";
+  }
+  if (group.task?.status === "failed") {
+    return "failed";
+  }
+  if (group.task?.status === "stale") {
+    return "stale";
   }
   if (latestOutcome?.status === "failed") {
     return "failed";
   }
   if (latestOutcome?.status === "stale" || group.status === "stale") {
     return "stale";
+  }
+  if (group.task?.status === "running") {
+    return "running";
+  }
+  if (group.task?.status === "dispatched") {
+    return "dispatched";
   }
   if (hasWorkerContentEvidence(steps) || hasRuntimeActivityEvidence(steps)) {
     return "running";
@@ -2121,23 +3025,23 @@ function KanbanColumn({
 }) {
   const style = kanbanColumnStyle(tone);
   return (
-    <div className={`min-h-[220px] rounded-2xl border p-2.5 ${style.shell}`}>
-      <div className="mb-2 flex items-start justify-between gap-2">
+    <div className={`min-h-[138px] rounded-xl border p-1.5 ${style.shell}`}>
+      <div className="mb-1 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className={`h-2 w-2 rounded-full ${style.dot}`} />
-            <h3 className="text-xs font-semibold text-slate-900">{title}</h3>
+            <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+            <h3 className="text-[11px] font-semibold text-slate-900">{title}</h3>
           </div>
-          <p className="mt-0.5 text-[10px] leading-4 text-slate-500">{subtitle}</p>
+          <p className="mt-0.5 text-[10px] leading-3 text-slate-500">{subtitle}</p>
         </div>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${style.count}`}>
+        <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${style.count}`}>
           {cards.length}
         </span>
       </div>
 
-      <div className="max-h-[260px] space-y-2 overflow-auto pr-1">
+      <div className="space-y-1 overflow-hidden">
         {cards.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-2.5 py-5 text-center text-[11px] leading-5 text-slate-400">
+          <div className="rounded-lg border border-dashed border-slate-200 bg-white/70 px-2 py-2.5 text-center text-[11px] leading-5 text-slate-400">
             暂无卡片
           </div>
         ) : (
@@ -2169,15 +3073,15 @@ function KanbanCard({
     <button
       type="button"
       onClick={onSelect}
-      className={`group w-full rounded-xl border bg-white px-2.5 py-2 text-left text-xs shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md ${
+      className={`group w-full rounded-lg border bg-white px-1.5 py-1 text-left text-xs shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-md ${
         selected ? "border-slate-400 ring-2 ring-slate-200" : style.border
       }`}
     >
-      <div className="flex items-start gap-2">
-        <span className={`mt-1 h-7 w-1 shrink-0 rounded-full ${style.bar}`} />
+      <div className="flex items-start gap-1.5">
+        <span className={`mt-1 h-5 w-1 shrink-0 rounded-full ${style.bar}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-1.5">
-            <div className="line-clamp-2 font-semibold leading-4 text-slate-900">
+            <div className="line-clamp-1 text-[11px] font-semibold leading-4 text-slate-900">
               {card.title}
             </div>
             {card.column === "doing" && (
@@ -2187,8 +3091,8 @@ function KanbanCard({
               </span>
             )}
           </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${style.badge}`}>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none ${style.badge}`}>
               {card.statusLabel}
             </span>
             {card.progress !== undefined && (
@@ -2201,19 +3105,27 @@ function KanbanCard({
   );
 }
 
-function KanbanCardDetail({ card }: { card: KanbanTaskCard }) {
+function KanbanCardDetail({
+  card,
+  size,
+  onWorkspaceFileOpen,
+}: {
+  card: KanbanTaskCard;
+  size: KanbanDetailSize;
+  onWorkspaceFileOpen?: (path: string) => void;
+}) {
   const style = kanbanCardStyle(card);
   return (
-    <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-3">
-      <div className="flex items-start justify-between gap-3">
+    <div className="flex min-h-0 flex-col rounded-xl border border-slate-100 bg-slate-50/80 p-2.5">
+      <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-semibold leading-5 text-slate-900">{card.title}</div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+          <div className="truncate text-xs font-semibold leading-5 text-slate-900">{card.title}</div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
             <span className={`rounded-full px-2 py-0.5 font-medium ${style.badge}`}>
               {card.statusLabel}
             </span>
             <span>{card.owner}</span>
-            {card.target && (
+            {card.target && card.target !== card.owner && (
               <>
                 <span className="text-slate-300">→</span>
                 <span>{card.target}</span>
@@ -2223,8 +3135,12 @@ function KanbanCardDetail({ card }: { card: KanbanTaskCard }) {
         </div>
         <span className="shrink-0 text-[11px] text-slate-400">{formatChatTime(card.time)}</span>
       </div>
-      <div className="mt-3 max-h-36 overflow-auto text-xs leading-5 text-slate-700">
-        <MarkdownContent text={card.summary || "暂无详情。"} compact />
+      <div className={`mt-2 min-h-0 overflow-auto pb-5 pr-1 text-xs leading-5 text-slate-700 ${kanbanDetailBodyMaxHeight(size)}`}>
+        <MarkdownContent
+          text={card.summary || "暂无详情。"}
+          compact
+          onWorkspaceFileOpen={onWorkspaceFileOpen}
+        />
       </div>
     </div>
   );
@@ -2674,7 +3590,13 @@ function TimeDivider({ value }: { value?: number }) {
   );
 }
 
-function TeamChatMessageRow({ message }: { message: TeamChatMessage }) {
+function TeamChatMessageRow({
+  message,
+  onWorkspaceFileOpen,
+}: {
+  message: TeamChatMessage;
+  onWorkspaceFileOpen?: (path: string) => void;
+}) {
   const bubbleClass =
     message.tone === "assignment"
       ? "relative overflow-hidden border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 text-gray-950 shadow-[0_14px_28px_-22px_rgba(180,83,9,0.8)]"
@@ -2708,7 +3630,11 @@ function TeamChatMessageRow({ message }: { message: TeamChatMessage }) {
               <span>{isFeedback ? "任务结果反馈" : "任务下发"}</span>
             </div>
           )}
-          <MarkdownContent text={message.content} compact />
+          <MarkdownContent
+            text={message.content}
+            compact
+            onWorkspaceFileOpen={onWorkspaceFileOpen}
+          />
         </div>
       </div>
     </div>
@@ -2790,7 +3716,15 @@ function chatFallbackText(
   }
 }
 
-function MarkdownContent({ text, compact = false }: { text: string; compact?: boolean }) {
+function MarkdownContent({
+  text,
+  compact = false,
+  onWorkspaceFileOpen,
+}: {
+  text: string;
+  compact?: boolean;
+  onWorkspaceFileOpen?: (path: string) => void;
+}) {
   const lines = text.split(/\r?\n/);
   const nodes: React.ReactNode[] = [];
 
@@ -2810,19 +3744,25 @@ function MarkdownContent({ text, compact = false }: { text: string; compact?: bo
           separatorLine={separator}
           rowLines={tableLines.slice(1)}
           keyPrefix={`table-${index}`}
+          onWorkspaceFileOpen={onWorkspaceFileOpen}
         />,
       );
       index = rowIndex - 1;
       continue;
     }
 
-    nodes.push(renderMarkdownLine(lines[index], index, compact));
+    nodes.push(renderMarkdownLine(lines[index], index, compact, onWorkspaceFileOpen));
   }
 
   return <div className={compact ? "space-y-1.5" : "space-y-2"}>{nodes}</div>;
 }
 
-function renderMarkdownLine(line: string, index: number, compact: boolean) {
+function renderMarkdownLine(
+  line: string,
+  index: number,
+  compact: boolean,
+  onWorkspaceFileOpen?: (path: string) => void,
+) {
   const trimmed = line.trim();
   if (!trimmed) {
     return <div key={index} className={compact ? "h-0.5" : "h-1"} />;
@@ -2834,7 +3774,7 @@ function renderMarkdownLine(line: string, index: number, compact: boolean) {
   if (heading) {
     return (
       <div key={index} className="font-semibold text-gray-900">
-        {renderInlineMarkdown(heading[2] || "", `h-${index}`)}
+        {renderInlineMarkdown(heading[2] || "", `h-${index}`, onWorkspaceFileOpen)}
       </div>
     );
   }
@@ -2845,7 +3785,7 @@ function renderMarkdownLine(line: string, index: number, compact: boolean) {
         <span className="mt-0.5 inline-flex h-5 min-w-[1.25rem] shrink-0 items-center justify-center rounded-full border border-[#eadfd8] bg-white px-1 text-[11px] font-semibold text-[#8b5a45]">
           {ordered[1]}
         </span>
-        <span className="min-w-0">{renderInlineMarkdown(ordered[2] || "", `o-${index}`)}</span>
+        <span className="min-w-0">{renderInlineMarkdown(ordered[2] || "", `o-${index}`, onWorkspaceFileOpen)}</span>
       </div>
     );
   }
@@ -2854,13 +3794,13 @@ function renderMarkdownLine(line: string, index: number, compact: boolean) {
     return (
       <div key={index} className="flex gap-2">
         <span className="mt-[0.65em] h-1.5 w-1.5 shrink-0 rounded-full bg-gray-400" />
-        <span>{renderInlineMarkdown(bullet[1] || "", `b-${index}`)}</span>
+        <span>{renderInlineMarkdown(bullet[1] || "", `b-${index}`, onWorkspaceFileOpen)}</span>
       </div>
     );
   }
   return (
     <p key={index} className="whitespace-pre-wrap break-words">
-      {renderInlineMarkdown(line, `p-${index}`)}
+      {renderInlineMarkdown(line, `p-${index}`, onWorkspaceFileOpen)}
     </p>
   );
 }
@@ -2890,11 +3830,13 @@ function MarkdownTable({
   separatorLine,
   rowLines,
   keyPrefix,
+  onWorkspaceFileOpen,
 }: {
   headerLine: string;
   separatorLine: string;
   rowLines: string[];
   keyPrefix: string;
+  onWorkspaceFileOpen?: (path: string) => void;
 }) {
   const headers = splitMarkdownTableRow(headerLine);
   const alignments = splitMarkdownTableRow(separatorLine).map((cell) => {
@@ -2921,7 +3863,7 @@ function MarkdownTable({
                 key={`${keyPrefix}-h-${cellIndex}`}
                 className={`border-b border-[#e5e7eb] px-2.5 py-2 font-semibold ${alignments[cellIndex] || "text-left"}`}
               >
-                {renderInlineMarkdown(header, `${keyPrefix}-h-${cellIndex}`)}
+                {renderInlineMarkdown(header, `${keyPrefix}-h-${cellIndex}`, onWorkspaceFileOpen)}
               </th>
             ))}
           </tr>
@@ -2934,7 +3876,7 @@ function MarkdownTable({
                   key={`${keyPrefix}-r-${rowIndex}-${cellIndex}`}
                   className={`px-2.5 py-2 text-gray-800 ${alignments[cellIndex] || "text-left"}`}
                 >
-                  {renderInlineMarkdown(row[cellIndex] || "", `${keyPrefix}-r-${rowIndex}-${cellIndex}`)}
+                  {renderInlineMarkdown(row[cellIndex] || "", `${keyPrefix}-r-${rowIndex}-${cellIndex}`, onWorkspaceFileOpen)}
                 </td>
               ))}
             </tr>
@@ -2945,9 +3887,13 @@ function MarkdownTable({
   );
 }
 
-function renderInlineMarkdown(text: string, keyPrefix: string) {
+function renderInlineMarkdown(
+  text: string,
+  keyPrefix: string,
+  onWorkspaceFileOpen?: (path: string) => void,
+) {
   const nodes: React.ReactNode[] = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const pattern = /(`[^`]+`|\/team\/[^\s`<>"')\]}]+|\bteam\/[^\s`<>"')\]}]+|\*\*[^*]+\*\*|\*[^*]+\*)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
@@ -2957,11 +3903,51 @@ function renderInlineMarkdown(text: string, keyPrefix: string) {
     const token = match[0];
     const key = `${keyPrefix}-${match.index}`;
     if (token.startsWith("`")) {
-      nodes.push(
-        <code key={key} className="rounded bg-white px-1 py-0.5 font-mono text-xs text-gray-700">
-          {token.slice(1, -1)}
-        </code>,
-      );
+      const codeValue = token.slice(1, -1);
+      const workspacePath = workspaceLinkToRelativePath(codeValue);
+      if (
+        onWorkspaceFileOpen &&
+        isTeamWorkspaceLink(codeValue) &&
+        isPreviewableWorkspacePath(workspacePath)
+      ) {
+        nodes.push(
+          <button
+            key={key}
+            type="button"
+            onClick={() => onWorkspaceFileOpen(codeValue)}
+            className="rounded bg-cyan-50 px-1 py-0.5 font-mono text-xs font-semibold text-cyan-700 underline decoration-cyan-300 underline-offset-2 hover:bg-cyan-100"
+          >
+            {codeValue}
+          </button>,
+        );
+      } else {
+        nodes.push(
+          <code key={key} className="rounded bg-white px-1 py-0.5 font-mono text-xs text-gray-700">
+            {codeValue}
+          </code>,
+        );
+      }
+    } else if (isTeamWorkspaceLink(token)) {
+      const displayToken = token.replace(/[，。；;,.、)）\]}]+$/g, "");
+      const suffix = token.slice(displayToken.length);
+      const workspacePath = workspaceLinkToRelativePath(displayToken);
+      if (onWorkspaceFileOpen && isPreviewableWorkspacePath(workspacePath)) {
+        nodes.push(
+          <button
+            key={key}
+            type="button"
+            onClick={() => onWorkspaceFileOpen(displayToken)}
+            className="rounded-md bg-cyan-50 px-1.5 py-0.5 font-mono text-xs font-semibold text-cyan-700 underline decoration-cyan-300 underline-offset-2 hover:bg-cyan-100"
+          >
+            {displayToken}
+          </button>,
+        );
+        if (suffix) {
+          nodes.push(suffix);
+        }
+      } else {
+        nodes.push(token);
+      }
     } else if (token.startsWith("**")) {
       nodes.push(
         <strong key={key} className="font-semibold text-gray-900">

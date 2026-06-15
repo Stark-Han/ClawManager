@@ -139,6 +139,27 @@ export interface TeamListResponse {
   limit: number;
 }
 
+export interface TeamWorkspaceFileEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  size: number;
+  modified_at?: string;
+  previewable: boolean;
+}
+
+export interface TeamWorkspaceListResponse {
+  path: string;
+  root: string;
+  entries: TeamWorkspaceFileEntry[];
+}
+
+export interface TeamWorkspacePreviewResponse {
+  path: string;
+  name: string;
+  content: string;
+}
+
 export interface DispatchTeamTaskRequest {
   target_member_id: string;
   message_id?: string;
