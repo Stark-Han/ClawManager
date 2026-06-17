@@ -87,10 +87,59 @@ spec:
               value: "/data/clawreef"
             - name: CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB
               value: "500"
+            - name: CLAWMANAGER_DESKTOP_DIRECT_PROXY
+              value: "false"
+            - name: CLAWMANAGER_LEADER_ELECTION
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PLATFORM_REDIS_URL
+              value: "redis://clawmanager-team-redis.clawmanager-system.svc.cluster.local:6379/0"
+            - name: TEAM_REDIS_URL
+              value: "redis://clawmanager-team-redis.clawmanager-system.svc.cluster.local:6379/0"
             - name: CLAWMANAGER_TEAM_REDIS_URL
               value: "redis://clawmanager-team-redis.clawmanager-system.svc.cluster.local:6379/0"
             - name: CLAWMANAGER_TEAM_MANAGER_BASE_URL
               value: "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001"
+            - name: RUNTIME_NAMESPACE
+              value: "clawmanager-system"
+            - name: RUNTIME_WORKSPACE_ROOT
+              value: "/workspaces"
+            - name: RUNTIME_WORKSPACE_NFS_SERVER
+              value: "workspace-store.clawmanager-system.svc.cluster.local"
+            - name: RUNTIME_WORKSPACE_NFS_PATH
+              value: "/"
+            - name: RUNTIME_MAX_GATEWAYS_PER_POD
+              value: "100"
+            - name: RUNTIME_GATEWAY_PORT_START
+              value: "20000"
+            - name: RUNTIME_GATEWAY_PORT_END
+              value: "20099"
+            - name: RUNTIME_SCHEDULER_ENABLED
+              value: "true"
+            - name: RUNTIME_HEARTBEAT_TIMEOUT
+              value: "10s"
+            - name: RUNTIME_AGENT_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-secrets
+                  key: runtime-agent-control-token
+            - name: RUNTIME_AGENT_REPORT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-secrets
+                  key: runtime-agent-report-token
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-secrets
+                  key: openclaw-gateway-token
             - name: SKILL_SCANNER_ENABLED
               value: "true"
             - name: SKILL_SCANNER_BASE_URL
@@ -105,6 +154,8 @@ spec:
             - name: tls-cert
               mountPath: /var/run/clawreef-tls
               readOnly: true
+            - name: workspaces
+              mountPath: /workspaces
           readinessProbe:
             httpGet:
               scheme: HTTPS
@@ -124,3 +175,7 @@ spec:
           secret:
             secretName: clawmanager-tls
             optional: true
+        - name: workspaces
+          nfs:
+            server: workspace-store.clawmanager-system.svc.cluster.local
+            path: /exports/workspaces
