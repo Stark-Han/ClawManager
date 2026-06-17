@@ -17,6 +17,8 @@ const InstanceManagementPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | Instance['status']>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | Instance['type']>('all');
+  const [modeFilter, setModeFilter] = useState<'all' | Instance['instance_mode']>('all');
+  const [runtimeFilter, setRuntimeFilter] = useState<'all' | Instance['runtime_type']>('all');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [pendingDeleteInstance, setPendingDeleteInstance] = useState<Instance | null>(null);
 
@@ -32,8 +34,8 @@ const InstanceManagementPage: React.FC = () => {
       ]);
       setInstances(instancesData.instances || []);
       setUsers(usersData.users || []);
-    } catch (err: any) {
-      setError(err.response?.data?.error || t('admin.failedToLoadInstances'));
+    } catch (err: unknown) {
+      setError(getAdminErrorMessage(err, t('admin.failedToLoadInstances')));
     } finally {
       if (!options?.silent) {
         setLoading(false);
@@ -71,6 +73,12 @@ const InstanceManagementPage: React.FC = () => {
       if (typeFilter !== 'all' && instance.type !== typeFilter) {
         return false;
       }
+      if (modeFilter !== 'all' && instance.instance_mode !== modeFilter) {
+        return false;
+      }
+      if (runtimeFilter !== 'all' && instance.runtime_type !== runtimeFilter) {
+        return false;
+      }
       if (!searchQuery) {
         return true;
       }
@@ -80,6 +88,8 @@ const InstanceManagementPage: React.FC = () => {
       return [
         instance.name,
         instance.type,
+        instance.instance_mode,
+        instance.runtime_type,
         instance.os_type,
         instance.os_version,
         instance.pod_name || '',
@@ -89,10 +99,30 @@ const InstanceManagementPage: React.FC = () => {
         String(instance.user_id),
       ].some((value) => value.toLowerCase().includes(query));
     });
-  }, [instances, searchQuery, statusFilter, typeFilter, userMap]);
+  }, [instances, modeFilter, runtimeFilter, searchQuery, statusFilter, typeFilter, userMap]);
 
   const typeOptions = useMemo(() => {
     return Array.from(new Set(instances.map((instance) => instance.type))).sort();
+  }, [instances]);
+
+  const modeStats = useMemo(() => {
+    return instances.reduce(
+      (stats, instance) => {
+        const mode = instance.instance_mode === 'pro' ? 'pro' : 'lite';
+        stats[mode].total += 1;
+        if (instance.status === 'running') {
+          stats[mode].running += 1;
+        }
+        if (instance.status === 'creating') {
+          stats[mode].creating += 1;
+        }
+        return stats;
+      },
+      {
+        lite: { total: 0, running: 0, creating: 0 },
+        pro: { total: 0, running: 0, creating: 0 },
+      },
+    );
   }, [instances]);
 
   const handleAction = async (instance: Instance, action: 'start' | 'stop' | 'restart' | 'delete' | 'sync') => {
@@ -113,7 +143,7 @@ const InstanceManagementPage: React.FC = () => {
       }
 
       await loadData();
-    } catch (err: any) {
+    } catch (err: unknown) {
       const fallbackMap = {
         start: t('admin.failedToStartInstance'),
         stop: t('admin.failedToStopInstance'),
@@ -121,7 +151,7 @@ const InstanceManagementPage: React.FC = () => {
         sync: t('admin.failedToSyncInstance'),
         delete: t('admin.failedToDeleteInstance'),
       } as const;
-      setError(err.response?.data?.error || fallbackMap[action]);
+      setError(getAdminErrorMessage(err, fallbackMap[action]));
     } finally {
       setActionLoading(null);
     }
@@ -142,6 +172,26 @@ const InstanceManagementPage: React.FC = () => {
       default:
         return 'bg-gray-100 text-gray-700';
     }
+  };
+
+  const getModeBadge = (mode: Instance['instance_mode']) => {
+    return mode === 'pro'
+      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+      : 'border-sky-200 bg-sky-50 text-sky-700';
+  };
+
+  const formatMode = (mode: Instance['instance_mode']) => {
+    return mode === 'pro' ? 'Pro' : 'Lite';
+  };
+
+  const formatRuntime = (runtimeType: Instance['runtime_type']) => {
+    if (runtimeType === 'gateway') {
+      return 'Gateway';
+    }
+    if (runtimeType === 'shell') {
+      return 'Shell';
+    }
+    return 'Desktop';
   };
 
   const formatResources = (instance: Instance) => {
@@ -213,6 +263,25 @@ const InstanceManagementPage: React.FC = () => {
                 </option>
               ))}
             </select>
+            <select
+              value={modeFilter}
+              onChange={(e) => setModeFilter(e.target.value as 'all' | Instance['instance_mode'])}
+              className="app-input"
+            >
+              <option value="all">All modes</option>
+              <option value="lite">Lite</option>
+              <option value="pro">Pro</option>
+            </select>
+            <select
+              value={runtimeFilter}
+              onChange={(e) => setRuntimeFilter(e.target.value as 'all' | Instance['runtime_type'])}
+              className="app-input"
+            >
+              <option value="all">All backends</option>
+              <option value="gateway">Gateway</option>
+              <option value="desktop">Desktop</option>
+              <option value="shell">Shell</option>
+            </select>
             <button
               onClick={() => void loadData()}
               className="app-button-secondary"
@@ -220,6 +289,41 @@ const InstanceManagementPage: React.FC = () => {
               {t('common.refresh')}
             </button>
           </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          {(['lite', 'pro'] as const).map((mode) => {
+            const stats = modeStats[mode];
+            return (
+              <section key={mode} className="app-panel p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-[#171212]">{formatMode(mode)}</div>
+                    <div className="mt-1 text-xs text-[#8f8681]">
+                      {mode === 'lite' ? 'Gateway runtime' : 'Desktop deployment'}
+                    </div>
+                  </div>
+                  <span className={`inline-flex rounded-md border px-2 py-1 text-xs font-medium ${getModeBadge(mode)}`}>
+                    {stats.running} running
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-3 text-sm">
+                  <div>
+                    <div className="text-xs text-[#8f8681]">Total</div>
+                    <div className="mt-1 font-semibold text-[#171212]">{stats.total}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#8f8681]">Running</div>
+                    <div className="mt-1 font-semibold text-[#171212]">{stats.running}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#8f8681]">Creating</div>
+                    <div className="mt-1 font-semibold text-[#171212]">{stats.creating}</div>
+                  </div>
+                </div>
+              </section>
+            );
+          })}
         </div>
 
         {error && (
@@ -267,8 +371,14 @@ const InstanceManagementPage: React.FC = () => {
                         <div className="mt-1 text-xs text-[#8f8681]">{t('admin.userIdLabel')}: {instance.user_id}</div>
                       </td>
                       <td className="px-5 py-4 align-top">
-                        <div className="font-medium capitalize text-[#171212]">{instance.type}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium capitalize text-[#171212]">{instance.type}</span>
+                          <span className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-medium ${getModeBadge(instance.instance_mode)}`}>
+                            {formatMode(instance.instance_mode)}
+                          </span>
+                        </div>
                         <div className="mt-1 text-xs text-[#8f8681]">{instance.os_type} {instance.os_version}</div>
+                        <div className="mt-1 text-xs text-[#8f8681]">{formatRuntime(instance.runtime_type)}</div>
                       </td>
                       <td className="px-5 py-4 align-top">
                         <div className="font-medium text-[#171212]">{formatResources(instance)}</div>
@@ -277,7 +387,10 @@ const InstanceManagementPage: React.FC = () => {
                         </div>
                       </td>
                       <td className="px-5 py-4 align-top">
-                        <div className="text-sm text-[#171212]">{instance.pod_name || '-'}</div>
+                        <div className="text-sm text-[#171212]">
+                          {instance.instance_mode === 'lite' ? 'Gateway binding' : 'Deployment'}
+                        </div>
+                        <div className="mt-1 text-xs text-[#8f8681]">{instance.pod_name || '-'}</div>
                         <div className="mt-1 text-xs text-[#8f8681]">{instance.pod_namespace || '-'}</div>
                         <div className="mt-1 text-xs text-[#8f8681]">{instance.pod_ip || '-'}</div>
                       </td>
@@ -342,6 +455,14 @@ const InstanceManagementPage: React.FC = () => {
     </AdminLayout>
   );
 };
+
+function getAdminErrorMessage(err: unknown, fallback: string) {
+  const responseError = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+  if (responseError) {
+    return responseError;
+  }
+  return err instanceof Error ? err.message : fallback;
+}
 
 export default InstanceManagementPage;
 

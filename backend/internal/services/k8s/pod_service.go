@@ -63,6 +63,7 @@ type PodConfig struct {
 	ConfigMapFileMounts  []ConfigMapFileMount
 	VolumeInitScripts    []VolumeInitScript
 	FSGroup              *int64
+	NodeSelector         map[string]string
 	VolumeOwnershipFixes []VolumeOwnershipFix
 	SHMSizeGB            int
 	SecurityMode         PodSecurityMode
@@ -166,6 +167,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 		Spec: corev1.PodSpec{
 			RestartPolicy:   corev1.RestartPolicyAlways,
 			SecurityContext: buildPodSecurityContext(config.FSGroup),
+			NodeSelector:    copyStringMap(config.NodeSelector),
 			Containers: []corev1.Container{
 				{
 					Name:            "desktop",

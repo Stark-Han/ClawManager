@@ -4,11 +4,11 @@ interface WebSocketMessage {
   type: string;
   user_id?: number;
   instance_id?: number;
-  data: any;
+  data: unknown;
   timestamp: string;
 }
 
-interface InstanceStatusUpdate {
+export interface InstanceStatusUpdate {
   instance_id: number;
   status: string;
   pod_name?: string;
@@ -18,13 +18,27 @@ interface InstanceStatusUpdate {
 
 type MessageHandler = (message: WebSocketMessage) => void;
 
-export function useWebSocket() {
+type WebSocketTopic = "user" | "runtime_admin";
+
+interface UseWebSocketOptions {
+  topic?: WebSocketTopic;
+}
+
+export interface RuntimeAdminMessage {
+  type: "runtime_pod_metrics" | "runtime_pod_state" | "runtime_rollout";
+  data: unknown;
+  timestamp: string;
+}
+
+export function useWebSocket(options: UseWebSocketOptions = {}) {
   const [isConnected, setIsConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messageHandlers = useRef<Set<MessageHandler>>(new Set());
+  const connectRef = useRef<() => void>(() => {});
   const token = localStorage.getItem('access_token');
+  const topic = options.topic ?? "user";
 
   const connect = useCallback(() => {
     if (!token || ws.current?.readyState === WebSocket.OPEN) {
@@ -34,7 +48,11 @@ export function useWebSocket() {
     // Build WebSocket URL with token
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = window.location.host;
-    const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws?token=${token}`;
+    const params = new URLSearchParams({ token });
+    if (topic !== "user") {
+      params.set("topic", topic);
+    }
+    const wsUrl = `${wsProtocol}//${wsHost}/api/v1/ws?${params.toString()}`;
 
     try {
       ws.current = new WebSocket(wsUrl);
@@ -77,7 +95,7 @@ export function useWebSocket() {
         if (!reconnectTimeout.current) {
           reconnectTimeout.current = setTimeout(() => {
             reconnectTimeout.current = null;
-            connect();
+            connectRef.current();
           }, 3000);
         }
       };
@@ -88,7 +106,11 @@ export function useWebSocket() {
     } catch (err) {
       console.error('Failed to create WebSocket connection:', err);
     }
-  }, [token]);
+  }, [token, topic]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeout.current) {
@@ -103,7 +125,7 @@ export function useWebSocket() {
     setIsConnected(false);
   }, []);
 
-  const sendMessage = useCallback((data: any) => {
+  const sendMessage = useCallback((data: unknown) => {
     if (ws.current?.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify(data));
     } else {
@@ -128,8 +150,6 @@ export function useWebSocket() {
   useEffect(() => {
     if (token) {
       connect();
-    } else {
-      disconnect();
     }
 
     return () => {
@@ -182,6 +202,30 @@ export function useInstanceStatusWebSocket(
       cleanup();
     };
   }, [onStatusUpdate, addMessageHandler, removeMessageHandler]);
+
+  return { isConnected };
+}
+
+export function useRuntimeAdminWebSocket(
+  onRuntimeEvent?: (message: RuntimeAdminMessage) => void,
+) {
+  const { addMessageHandler, isConnected } = useWebSocket({ topic: "runtime_admin" });
+
+  useEffect(() => {
+    if (!onRuntimeEvent) return;
+
+    const handler = (message: WebSocketMessage) => {
+      if (
+        message.type === "runtime_pod_metrics" ||
+        message.type === "runtime_pod_state" ||
+        message.type === "runtime_rollout"
+      ) {
+        onRuntimeEvent(message as RuntimeAdminMessage);
+      }
+    };
+
+    return addMessageHandler(handler);
+  }, [onRuntimeEvent, addMessageHandler]);
 
   return { isConnected };
 }

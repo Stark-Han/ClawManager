@@ -4,16 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"clawreef/internal/models"
+	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
 
 	"github.com/gorilla/websocket"
@@ -21,14 +25,19 @@ import (
 
 // InstanceProxyService handles proxying requests to instance pods
 type InstanceProxyService struct {
-	serviceService *k8s.ServiceService
-	accessService  *InstanceAccessService
-	httpClient     *http.Client
-	serviceCache   map[serviceCacheKey]serviceCacheEntry
-	serviceLookups map[serviceCacheKey]*serviceLookupCall
-	cacheMu        sync.RWMutex
-	lookupMu       sync.Mutex
-	serviceTTL     time.Duration
+	serviceService       *k8s.ServiceService
+	accessService        *InstanceAccessService
+	instanceRepo         repository.InstanceRepository
+	runtimePodRepo       repository.RuntimePodRepository
+	bindingRepo          repository.InstanceRuntimeBindingRepository
+	httpClient           *http.Client
+	openClawGatewayToken string
+	openClawProxyOrigin  string
+	serviceCache         map[serviceCacheKey]serviceCacheEntry
+	serviceLookups       map[serviceCacheKey]*serviceLookupCall
+	cacheMu              sync.RWMutex
+	lookupMu             sync.Mutex
+	serviceTTL           time.Duration
 }
 
 type serviceCacheKey struct {
@@ -50,8 +59,20 @@ type serviceLookupCall struct {
 
 const defaultServiceCacheTTL = 30 * time.Second
 
+var ErrInstanceGatewayUnavailable = errors.New("instance gateway is not available")
+
+type InstanceProxyServiceOption func(*InstanceProxyService)
+
+func WithInstanceProxyRuntimeRepositories(instanceRepo repository.InstanceRepository, runtimePodRepo repository.RuntimePodRepository, bindingRepo repository.InstanceRuntimeBindingRepository) InstanceProxyServiceOption {
+	return func(s *InstanceProxyService) {
+		s.instanceRepo = instanceRepo
+		s.runtimePodRepo = runtimePodRepo
+		s.bindingRepo = bindingRepo
+	}
+}
+
 // NewInstanceProxyService creates a new instance proxy service
-func NewInstanceProxyService(accessService *InstanceAccessService) *InstanceProxyService {
+func NewInstanceProxyService(accessService *InstanceAccessService, options ...InstanceProxyServiceOption) *InstanceProxyService {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
@@ -63,7 +84,7 @@ func NewInstanceProxyService(accessService *InstanceAccessService) *InstanceProx
 		ForceAttemptHTTP2:     true,
 	}
 
-	return &InstanceProxyService{
+	service := &InstanceProxyService{
 		serviceService: k8s.NewServiceService(),
 		accessService:  accessService,
 		httpClient: &http.Client{
@@ -73,10 +94,18 @@ func NewInstanceProxyService(accessService *InstanceAccessService) *InstanceProx
 				return http.ErrUseLastResponse
 			},
 		},
-		serviceCache:   make(map[serviceCacheKey]serviceCacheEntry),
-		serviceLookups: make(map[serviceCacheKey]*serviceLookupCall),
-		serviceTTL:     defaultServiceCacheTTL,
+		openClawGatewayToken: strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
+		openClawProxyOrigin:  resolveOpenClawProxyOriginFromEnv(),
+		serviceCache:         make(map[serviceCacheKey]serviceCacheEntry),
+		serviceLookups:       make(map[serviceCacheKey]*serviceLookupCall),
+		serviceTTL:           defaultServiceCacheTTL,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service
 }
 
 // ProxyRequest proxies a request to an instance
@@ -102,27 +131,22 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		return fmt.Errorf("token does not match instance")
 	}
 
-	// Extract the actual path from the request (remove the proxy prefix)
-	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
-	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
-	shouldRewriteHTML := s.shouldRewriteHTML(accessToken.InstanceType)
+	effectiveRequestPath := canonicalProxyEntryRequestPath(r.URL.Path, accessToken, instanceID)
 
-	// Get service info for the instance (create if not exists)
-	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
-	if err != nil {
-		return fmt.Errorf("failed to get or create service: %w", err)
-	}
+	// Extract the actual path from the request (remove the proxy prefix)
+	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType)
+	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
+	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType)
 
 	// Build target URL
-	targetURL := &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, false),
-		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
-		Path:   targetPath,
+	targetURL, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
+	if err != nil {
+		return err
 	}
 
 	// Copy query parameters (excluding token)
 	queryParams := r.URL.Query()
-	queryParams.Del("token")
+	removeProxyAccessTokenQuery(queryParams, token)
 	if len(queryParams) > 0 {
 		targetURL.RawQuery = queryParams.Encode()
 	}
@@ -148,6 +172,9 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", requestScheme(r))
 	proxyReq.Header.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
+	if token := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType); token != "" {
+		proxyReq.Header.Set("Authorization", "Bearer "+token)
+	}
 	if shouldRewriteHTML {
 		proxyReq.Header.Del("Accept-Encoding")
 	}
@@ -179,7 +206,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 			return fmt.Errorf("failed to close upstream html body: %w", closeErr)
 		}
 
-		modifiedBody := injectProxyBase(string(body), fmt.Sprintf("/api/v1/instances/%d/proxy/", instanceID))
+		modifiedBody := injectProxyBase(string(body), proxyBaseForRequestPath(effectiveRequestPath, instanceID))
 		resp.Body = io.NopCloser(bytes.NewReader([]byte(modifiedBody)))
 		resp.ContentLength = int64(len(modifiedBody))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(modifiedBody)))
@@ -238,22 +265,14 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 
-	// Get service info for the instance
-	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
+	targetURL, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
 	if err != nil {
-		return fmt.Errorf("failed to get or create service: %w", err)
-	}
-
-	// WebSocket upstream uses ws/wss explicitly.
-	targetURL := &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, true),
-		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
-		Path:   targetPath,
+		return err
 	}
 
 	// Copy query parameters (excluding token)
 	queryParams := r.URL.Query()
-	queryParams.Del("token")
+	removeProxyAccessTokenQuery(queryParams, token)
 	if len(queryParams) > 0 {
 		targetURL.RawQuery = queryParams.Encode()
 	}
@@ -270,8 +289,14 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	upstreamHeader.Del("Sec-Websocket-Key")
 	upstreamHeader.Del("Sec-Websocket-Version")
 	upstreamHeader.Del("Sec-Websocket-Extensions")
+	upstreamHeader.Set("X-Forwarded-For", r.RemoteAddr)
+	upstreamHeader.Set("X-Forwarded-Host", r.Host)
 	upstreamHeader.Set("X-Forwarded-Proto", requestScheme(r))
 	upstreamHeader.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
+	if token := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType); token != "" {
+		upstreamHeader.Set("Authorization", "Bearer "+token)
+		upstreamHeader.Set("Origin", s.openClawWebSocketOrigin(targetURL))
+	}
 
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
@@ -364,6 +389,112 @@ func (s *InstanceProxyService) removeHopByHopHeaders(header http.Header) {
 	}
 }
 
+func (s *InstanceProxyService) managedRuntimeGatewayBearerToken(ctx context.Context, instanceID int, instanceType string) string {
+	if s == nil || s.instanceRepo == nil {
+		return ""
+	}
+	normalizedType, managedType := NormalizeV2RuntimeType(instanceType)
+	if !managedType {
+		return ""
+	}
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil || instance == nil {
+		return ""
+	}
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == normalizedType {
+		if instance.AccessToken != nil && strings.TrimSpace(*instance.AccessToken) != "" {
+			return strings.TrimSpace(*instance.AccessToken)
+		}
+	}
+	if normalizedType == RuntimeTypeOpenClaw && s.openClawGatewayToken != "" {
+		return s.openClawGatewayToken
+	}
+	return ""
+}
+
+func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, false); ok || err != nil {
+		return targetURL, err
+	}
+	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create service: %w", err)
+	}
+	return &url.URL{
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, false),
+		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
+		Path:   targetPath,
+	}, nil
+}
+
+func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, true); ok || err != nil {
+		return targetURL, err
+	}
+	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create service: %w", err)
+	}
+	return &url.URL{
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, true),
+		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
+		Path:   targetPath,
+	}, nil
+}
+
+func (s *InstanceProxyService) resolveV2ProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPath, requestPath string, websocket bool) (*url.URL, bool, error) {
+	if s.instanceRepo == nil || s.bindingRepo == nil || s.runtimePodRepo == nil {
+		return nil, false, nil
+	}
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get instance for proxy: %w", err)
+	}
+	if instance == nil {
+		return nil, false, ErrInstanceGatewayUnavailable
+	}
+	if instance.UserID != accessToken.UserID {
+		return nil, false, fmt.Errorf("token does not match instance owner")
+	}
+	if _, ok := v2RuntimeTypeForInstance(instance); !ok {
+		return nil, false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(instance.Status), "running") {
+		return nil, true, ErrInstanceGatewayUnavailable
+	}
+
+	binding, err := s.bindingRepo.GetRunningByInstanceID(ctx, instanceID)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: %v", ErrInstanceGatewayUnavailable, err)
+	}
+	if binding == nil {
+		return nil, true, ErrInstanceGatewayUnavailable
+	}
+	if binding.Generation != instance.RuntimeGeneration {
+		return nil, true, ErrInstanceGatewayUnavailable
+	}
+	pod, err := s.runtimePodRepo.GetByID(ctx, binding.RuntimePodID)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: %v", ErrInstanceGatewayUnavailable, err)
+	}
+	if pod == nil || pod.PodIP == nil || strings.TrimSpace(*pod.PodIP) == "" || binding.GatewayPort <= 0 {
+		return nil, true, ErrInstanceGatewayUnavailable
+	}
+	scheme := "http"
+	if websocket {
+		scheme = "ws"
+	}
+	upstreamPath := stripInstanceProxyPrefix(targetPath, instanceID)
+	if shouldPreserveOpenClawControlUIPath(instance) {
+		upstreamPath = openClawControlUIRequestPath(requestPath, instanceID)
+	}
+	return &url.URL{
+		Scheme: scheme,
+		Host:   net.JoinHostPort(strings.TrimSpace(*pod.PodIP), strconv.Itoa(binding.GatewayPort)),
+		Path:   upstreamPath,
+	}, true, nil
+}
+
 // getOrCreateService gets service info or creates the service if it doesn't exist
 func (s *InstanceProxyService) getOrCreateService(ctx context.Context, userID, instanceID int, targetPort int32) (*k8s.ServiceInfo, error) {
 	cacheKey := serviceCacheKey{
@@ -445,13 +576,78 @@ func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID 
 	return requestPath
 }
 
+func stripInstanceProxyPrefix(requestPath string, instanceID int) string {
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	if strings.HasPrefix(requestPath, prefix) {
+		path := strings.TrimPrefix(requestPath, prefix)
+		if path == "" {
+			return "/"
+		}
+		return path
+	}
+	return requestPath
+}
+
+func canonicalProxyEntryRequestPath(requestPath string, accessToken *AccessToken, instanceID int) string {
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	path := strings.TrimSpace(requestPath)
+	if path != prefix && path != prefix+"/" {
+		return requestPath
+	}
+	if accessToken == nil || strings.TrimSpace(accessToken.AccessURL) == "" {
+		return requestPath
+	}
+	parsed, err := url.Parse(accessToken.AccessURL)
+	if err != nil {
+		return requestPath
+	}
+	entryPath := strings.TrimSpace(parsed.Path)
+	if entryPath == "" || entryPath == prefix || entryPath == prefix+"/" {
+		return requestPath
+	}
+	if strings.HasPrefix(entryPath, prefix+"/") {
+		return entryPath
+	}
+	return requestPath
+}
+
+func shouldPreserveOpenClawControlUIPath(instance *models.Instance) bool {
+	if instance == nil || !strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeOpenClaw) {
+		return false
+	}
+	_, ok := v2RuntimeTypeForInstance(instance)
+	return ok
+}
+
+func openClawControlUIRequestPath(requestPath string, instanceID int) string {
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	path := strings.TrimSpace(requestPath)
+	if path == "" || path == prefix {
+		return prefix + "/"
+	}
+	if strings.HasPrefix(path, prefix) {
+		return path
+	}
+	if strings.HasPrefix(path, "/") {
+		return prefix + path
+	}
+	return prefix + "/" + path
+}
+
 // GetProxyURL generates a proxy URL for frontend
 func (s *InstanceProxyService) GetProxyURL(instanceID int, token string) string {
-	if token == "" {
-		return fmt.Sprintf("/api/v1/instances/%d/proxy/", instanceID)
-	}
+	return proxyURLWithPath(instanceID, "/", token)
+}
 
-	return fmt.Sprintf("/api/v1/instances/%d/proxy/?token=%s", instanceID, token)
+// GetProxyURLForInstance generates the best frontend entry URL for an instance.
+func (s *InstanceProxyService) GetProxyURLForInstance(instance *models.Instance, token string) string {
+	if instance == nil {
+		return ""
+	}
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeHermes {
+		return proxyURLWithPath(instance.ID, "/chat", token)
+	}
+	return proxyURLWithPath(instance.ID, "/", token)
 }
 
 // GetTargetPortForInstance returns the service target port used by the instance type.
@@ -526,6 +722,18 @@ func (s *InstanceProxyService) shouldRewriteHTML(instanceType string) bool {
 	return !usesWebtopImage(instanceType)
 }
 
+func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string) bool {
+	if s != nil && s.instanceRepo != nil && strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeHermes) {
+		instance, err := s.instanceRepo.GetByID(instanceID)
+		if err == nil && instance != nil {
+			if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeHermes {
+				return true
+			}
+		}
+	}
+	return s.shouldRewriteHTML(instanceType)
+}
+
 func (s *InstanceProxyService) getCachedService(key serviceCacheKey) *k8s.ServiceInfo {
 	s.cacheMu.RLock()
 	entry, ok := s.serviceCache[key]
@@ -591,6 +799,114 @@ func injectProxyBase(html, proxyBase string) string {
 	}
 
 	return baseTag + html
+}
+
+func proxyURLWithPath(instanceID int, targetPath, token string) string {
+	path := strings.TrimSpace(targetPath)
+	if path == "" || path == "/" {
+		path = "/"
+	} else {
+		path = "/" + strings.TrimLeft(path, "/")
+		if !strings.HasSuffix(path, "/") {
+			path += "/"
+		}
+	}
+
+	raw := fmt.Sprintf("/api/v1/instances/%d/proxy%s", instanceID, path)
+	if token == "" {
+		return raw
+	}
+	return fmt.Sprintf("%s?token=%s", raw, url.QueryEscape(token))
+}
+
+func removeProxyAccessTokenQuery(query url.Values, accessToken string) {
+	values := query["token"]
+	if len(values) == 0 {
+		return
+	}
+	filtered := values[:0]
+	for _, value := range values {
+		if value != accessToken {
+			filtered = append(filtered, value)
+		}
+	}
+	if len(filtered) == 0 {
+		query.Del("token")
+		return
+	}
+	query["token"] = filtered
+}
+
+func proxyBaseForRequestPath(requestPath string, instanceID int) string {
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	path := strings.TrimSpace(requestPath)
+	if strings.HasPrefix(path, prefix) {
+		path = strings.TrimPrefix(path, prefix)
+	}
+	if path == "" || path == "/" {
+		return fmt.Sprintf("%s/", prefix)
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if !strings.HasSuffix(path, "/") {
+		lastSlash := strings.LastIndex(path, "/")
+		if lastSlash >= 0 {
+			path = path[:lastSlash+1]
+		} else {
+			path = "/"
+		}
+	}
+	return prefix + path
+}
+
+func websocketUpstreamOrigin(targetURL *url.URL) string {
+	if targetURL == nil {
+		return ""
+	}
+	scheme := targetURL.Scheme
+	switch scheme {
+	case "ws":
+		scheme = "http"
+	case "wss":
+		scheme = "https"
+	}
+	if scheme == "" || targetURL.Host == "" {
+		return ""
+	}
+	return scheme + "://" + targetURL.Host
+}
+
+func (s *InstanceProxyService) openClawWebSocketOrigin(targetURL *url.URL) string {
+	if s != nil && s.openClawProxyOrigin != "" {
+		return s.openClawProxyOrigin
+	}
+	return websocketUpstreamOrigin(targetURL)
+}
+
+func resolveOpenClawProxyOriginFromEnv() string {
+	for _, key := range []string{
+		"OPENCLAW_PROXY_ORIGIN",
+		"CLAWMANAGER_TEAM_MANAGER_BASE_URL",
+		"CLAWMANAGER_BACKEND_URL",
+	} {
+		if origin := originFromURLString(os.Getenv(key)); origin != "" {
+			return origin
+		}
+	}
+	return ""
+}
+
+func originFromURLString(rawURL string) string {
+	value := strings.TrimSpace(rawURL)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 func (s *InstanceProxyService) rewriteRedirectLocation(instanceID int, location string) string {

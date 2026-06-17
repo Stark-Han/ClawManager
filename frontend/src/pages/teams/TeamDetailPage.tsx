@@ -995,6 +995,7 @@ const TeamDetailPage: React.FC = () => {
                     <th className="px-5 py-3">成员</th>
                     <th className="px-5 py-3">角色</th>
                     <th className="px-5 py-3">Runtime</th>
+                    <th className="px-5 py-3">Mode</th>
                     <th className="px-5 py-3">职责</th>
                     <th className="px-5 py-3">状态</th>
                     <th
@@ -1022,6 +1023,9 @@ const TeamDetailPage: React.FC = () => {
                       <td className="px-5 py-4 text-gray-600">{member.role}</td>
                       <td className="px-5 py-4 text-gray-600">
                         {member.runtime_type || "openclaw"}
+                      </td>
+                      <td className="px-5 py-4 text-gray-600">
+                        {member.instance_mode || "lite"}
                       </td>
                       <td className="min-w-[280px] max-w-md px-5 py-4">
                         <DescriptionPreview text={member.description} />

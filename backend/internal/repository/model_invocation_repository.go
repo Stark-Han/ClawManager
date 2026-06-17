@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS model_invocations (
   request_id VARCHAR(100) NOT NULL,
   user_id INT NULL,
   instance_id INT NULL,
+  instance_mode VARCHAR(16) NULL,
+  runtime_type VARCHAR(32) NULL,
+  gateway_id VARCHAR(128) NULL,
+  runtime_pod_id BIGINT NULL,
   model_id INT NULL,
   provider_type VARCHAR(100) NOT NULL,
   requested_model VARCHAR(255) NOT NULL,
@@ -62,6 +66,7 @@ CREATE TABLE IF NOT EXISTS model_invocations (
   INDEX idx_model_invocations_request_id (request_id),
   INDEX idx_model_invocations_user_id (user_id),
   INDEX idx_model_invocations_instance_id (instance_id),
+  INDEX idx_model_invocations_gateway_id (gateway_id),
   INDEX idx_model_invocations_model_id (model_id),
   INDEX idx_model_invocations_status (status),
   INDEX idx_model_invocations_created_at (created_at)

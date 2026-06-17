@@ -37,7 +37,9 @@ Examples of platform-driven runtime actions include:
 
 ## Related Guides
 
+- [ClawManager Agent V2 Development Guide](./clawmanager-agent-v2-development-guide.md)
 - [Runtime Agent Integration Guide](./runtime-agent-integration-guide.md)
+- [Hermes Lite / Pro Agent Development Guide](./hermes-lite-pro-agent-development.md)
 - [Hermes Runtime Image and Agent Development Guide](./hermes-runtime-agent-development.md)
 - [Admin and User Guide](./admin-user-guide.md)
 - [Resource Management Guide](./resource-management.md)

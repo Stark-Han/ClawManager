@@ -1,8 +1,11 @@
 package services
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"clawreef/internal/models"
 )
 
 func TestBuildBaseDirExpr_UsesEnvVarWithFallback(t *testing.T) {
@@ -107,6 +110,47 @@ func TestBuildHermesImportCommand_PreservesMountedHermesDirectory(t *testing.T) 
 	}
 	if !strings.Contains(script, `chown -R abc:abc "$target_dir"`) {
 		t.Errorf("expected Hermes import to restore runtime user ownership, got: %s", script)
+	}
+}
+
+func TestWorkspaceSpecForLiteUsesRuntimeWorkspacePath(t *testing.T) {
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.byID[123] = &models.Instance{
+		ID:                123,
+		UserID:            45,
+		Type:              RuntimeTypeOpenClaw,
+		RuntimeType:       RuntimeBackendGateway,
+		InstanceMode:      InstanceModeLite,
+		RuntimeGeneration: 2,
+	}
+	service := &openClawTransferService{instanceRepo: instanceRepo}
+
+	spec, err := service.workspaceSpecForInstance(context.Background(), 45, 123, openClawWorkspaceSpec())
+	if err != nil {
+		t.Fatalf("workspaceSpecForInstance returned error: %v", err)
+	}
+	if got, want := spec.baseDirExpr, RuntimeWorkspacePath(RuntimeTypeOpenClaw, 45, 123); got != want {
+		t.Fatalf("base dir = %q, want %q", got, want)
+	}
+}
+
+func TestWorkspaceSpecForProKeepsDesktopConfigPath(t *testing.T) {
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.byID[124] = &models.Instance{
+		ID:           124,
+		UserID:       45,
+		Type:         RuntimeTypeOpenClaw,
+		RuntimeType:  RuntimeBackendDesktop,
+		InstanceMode: InstanceModePro,
+	}
+	service := &openClawTransferService{instanceRepo: instanceRepo}
+
+	spec, err := service.workspaceSpecForInstance(context.Background(), 45, 124, openClawWorkspaceSpec())
+	if err != nil {
+		t.Fatalf("workspaceSpecForInstance returned error: %v", err)
+	}
+	if got, want := spec.baseDirExpr, buildBaseDirExpr(); got != want {
+		t.Fatalf("base dir = %q, want %q", got, want)
 	}
 }
 

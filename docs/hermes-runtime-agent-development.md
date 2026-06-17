@@ -2,6 +2,8 @@
 
 This guide is for Hermes image and agent developers. It explains how to build a ClawManager-managed Hermes runtime image on top of Webtop, and how the embedded Hermes agent should integrate with ClawManager Agent Control Plane so Hermes can behave like OpenClaw: report live runtime status, report health and system metrics, sync skill inventory, upload skill packages, and poll runtime commands.
 
+> Mode note: this document describes the Hermes Pro Webtop/instance-agent path. For Hermes Lite, implement Runtime Pod Agent V2 instead. See [Hermes Lite / Pro Agent 开发说明](./hermes-lite-pro-agent-development.md).
+
 ## Goals
 
 A Hermes image must satisfy two layers of requirements:

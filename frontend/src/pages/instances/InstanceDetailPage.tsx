@@ -1,181 +1,274 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  ArrowLeft,
+  Ban,
+  BarChart3,
+  Clock3,
+  Copy,
+  Cpu,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  HardDrive,
+  KeyRound,
+  MemoryStick,
+  Network,
+  Play,
+  Plus,
+  RotateCw,
+  Square,
+  Trash2,
+  X,
+} from "lucide-react";
 import ConfirmDialog from "../../components/ConfirmDialog";
-import { InstanceAccess } from "../../components/InstanceAccess";
+import { InstanceServiceFrame } from "../../components/InstanceServiceFrame";
 import UserLayout from "../../components/UserLayout";
+import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
 import { useI18n } from "../../contexts/I18nContext";
+import { useInstanceStatusWebSocket } from "../../hooks/useWebSocket";
+import type { InstanceStatusUpdate } from "../../hooks/useWebSocket";
 import { instanceService } from "../../services/instanceService";
 import { skillService } from "../../services/skillService";
 import type {
-  AgentInfo,
+  ExternalAccessExpirationMode,
+  ExternalAccessExpirationPreset,
+  ExternalAccessRequest,
   Instance,
+  InstanceAvailability,
+  InstanceExternalAccess,
   InstanceRuntimeCommand,
   InstanceRuntimeDetails,
   InstanceStatus,
-  RuntimeStatus,
 } from "../../types/instance";
 import type { InstanceSkill, Skill } from "../../types/skill";
 
-const META_POLL_INTERVAL_MS = 8000;
+const META_POLL_INTERVAL_MS = 5000;
 const RUNTIME_POLL_INTERVAL_MS = 5000;
-const RUNTIME_BURST_POLL_INTERVAL_MS = 1000;
-const RUNTIME_BURST_WINDOW_MS = 15000;
-const METRIC_WINDOW_MS = 5 * 60 * 1000;
-const INSTANCE_SKILL_PAGE_SIZE = 5;
 
-const supportsRuntimeWorkspace = (type: string) =>
-  type === "openclaw" || type === "hermes";
-
-const supportsRuntimeSkillManagement = (type: string) =>
-  type === "openclaw" || type === "hermes";
-
-const runtimeWorkspaceDirectory = (type: string) =>
-  type === "hermes" ? ".hermes" : ".openclaw";
-
-const runtimeProductName = (type: string) =>
-  type === "hermes" ? "Hermes" : "OpenClaw";
-
-// describeOpenClawError extracts a user-facing message from an axios error.
-// When the server returned a structured JSON body it surfaces the `error`
-// field; otherwise it falls back to the HTTP status (e.g. plain-HTML 413
-// from nginx) or the raw error message.
-function describeOpenClawError(
-  err: any,
-  t: (key: string, variables?: Record<string, string | number>) => string,
-): string {
-  const data = err?.response?.data;
-  if (typeof data === "string" && data.trim() !== "") {
-    // Strip HTML tags so nginx's default error page is not dumped verbatim.
-    const stripped = data.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-    if (stripped !== "") return stripped;
+function availabilityForStatus(status: string): InstanceAvailability {
+  if (status === "running") {
+    return "available";
   }
-  if (data && typeof data === "object" && typeof data.error === "string") {
-    return data.error;
+  if (status === "creating") {
+    return "starting";
   }
-  const status = err?.response?.status;
-  if (status === 413) {
-    return t("instances.openClawArchiveTooLarge");
-  }
-  if (typeof status === "number") {
-    return `HTTP ${status}`;
-  }
-  return err?.message || "unknown error";
+  return "unavailable";
 }
 
-type TimelineItem = {
-  id: string;
-  title: string;
-  detail: string;
-  timestamp: number;
-  stampLabel: string;
-  tone: string;
-  section: string;
-};
-
-type MetricSample = {
-  ts: number;
-  value: number;
-};
-
-type MetricHistory = {
-  cpu: MetricSample[];
-  memory: MetricSample[];
-  disk: MetricSample[];
-  networkDown: MetricSample[];
-  networkUp: MetricSample[];
-};
-
-type MetricCurve = {
-  label: string;
-  value: string;
-  detail: string;
-  accent: string;
-  points: MetricSample[];
-  secondaryAccent?: string;
-  secondaryPoints?: MetricSample[];
-  legend?: Array<{ label: string; accent: string }>;
-  preNormalized?: boolean;
-};
-
-type CpuInfo = {
-  cores?: number;
-  available_cores?: number;
-  usage_percent?: number;
-  used_cores?: number;
-  usage_ready?: boolean;
-  load?: {
-    "1m"?: number;
-    "5m"?: number;
-    "15m"?: number;
-  };
-};
-
-type TranslateFn = (
-  key: string,
-  variables?: Record<string, string | number>,
-) => string;
-
-function statusStyle(status: string) {
-  switch (status) {
-    case "running":
-    case "online":
-    case "ready":
-      return {
-        shell: "border-[#bde8ca] bg-[#edfdf2] text-[#177245]",
-        dot: "bg-[#22c55e]",
-      };
-    case "stopped":
-    case "offline":
-      return {
-        shell: "border-[#d9e0e7] bg-[#f6f8fb] text-[#556070]",
-        dot: "bg-[#94a3b8]",
-      };
-    case "creating":
+function availabilityLabel(availability: InstanceAvailability) {
+  switch (availability) {
+    case "available":
+      return "Available";
     case "starting":
-    case "configuring":
-    case "pending":
-      return {
-        shell: "border-[#f6df9f] bg-[#fff8dd] text-[#9a6a00]",
-        dot: "bg-[#eab308]",
-      };
-    case "error":
+      return "Starting";
+    default:
+      return "Unavailable";
+  }
+}
+
+function availabilityClass(availability: InstanceAvailability) {
+  switch (availability) {
+    case "available":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "starting":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    default:
+      return "border-slate-200 bg-slate-50 text-slate-600";
+  }
+}
+
+function typeLabel(type: string) {
+  return type === "hermes" ? "Hermes" : type === "openclaw" ? "OpenClaw" : type;
+}
+
+function formatBytes(value?: number) {
+  if (!value || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function supportsWorkspace(instance: Instance) {
+  return instance.type === "openclaw" || instance.type === "hermes" || Boolean(instance.workspace_path);
+}
+
+function getErrorMessage(err: unknown, fallback: string) {
+  const responseError = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+  if (responseError) {
+    return responseError;
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
+function absoluteExternalURL(value?: string) {
+  if (!value) {
+    return "";
+  }
+  try {
+    return new URL(value, window.location.origin).toString();
+  } catch {
+    return value;
+  }
+}
+
+const externalExpirationOptions: {
+  value: ExternalAccessExpirationPreset | "custom" | "permanent";
+  label: string;
+}[] = [
+  { value: "1h", label: "1 hour" },
+  { value: "24h", label: "24 hours" },
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "custom", label: "Custom" },
+  { value: "permanent", label: "Permanent" },
+];
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string" && value.trim() !== "") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function formatPercent(value: number | null) {
+  if (value === null) {
+    return "--";
+  }
+  return `${Math.max(0, Math.min(100, value)).toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatDateTime(value: string | undefined, locale: string) {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString(locale);
+}
+
+function resourcePercent(used: number | null, total: number | null) {
+  if (used === null || total === null || total <= 0) {
+    return null;
+  }
+  return (used / total) * 100;
+}
+
+function resourceRows(runtimeDetails: InstanceRuntimeDetails | null, instance: Instance) {
+  const systemInfo = asRecord(runtimeDetails?.runtime?.system_info);
+  const cpuInfo = asRecord(systemInfo?.cpu);
+  const memoryInfo = asRecord(systemInfo?.memory);
+  const diskInfo = asRecord(systemInfo?.disk);
+  const networkInfo = asRecord(systemInfo?.network);
+
+  const cpuPercent = firstNumber(
+    cpuInfo?.usage_percent,
+    cpuInfo?.percent,
+    cpuInfo?.used_percent,
+  );
+  const memoryTotal = firstNumber(memoryInfo?.total_bytes, memoryInfo?.total);
+  const memoryUsed = firstNumber(memoryInfo?.used_bytes, memoryInfo?.used);
+  const diskTotal = firstNumber(diskInfo?.total_bytes, diskInfo?.total);
+  const diskUsed = firstNumber(diskInfo?.used_bytes, diskInfo?.used);
+  const networkDown = firstNumber(
+    networkInfo?.rx_bytes_per_second,
+    networkInfo?.download_bytes_per_second,
+    networkInfo?.bytes_recv_per_second,
+  );
+  const networkUp = firstNumber(
+    networkInfo?.tx_bytes_per_second,
+    networkInfo?.upload_bytes_per_second,
+    networkInfo?.bytes_sent_per_second,
+  );
+
+  return [
+    {
+      label: "CPU",
+      value: cpuPercent === null ? `${instance.cpu_cores} cores` : formatPercent(cpuPercent),
+      detail: cpuPercent === null ? "Requested capacity" : "Runtime usage",
+      percent: cpuPercent,
+      icon: Cpu,
+    },
+    {
+      label: "Memory",
+      value:
+        memoryUsed !== null && memoryTotal !== null
+          ? `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}`
+          : `${instance.memory_gb} GB`,
+      detail:
+        memoryUsed !== null && memoryTotal !== null
+          ? "Runtime usage"
+          : "Requested capacity",
+      percent: resourcePercent(memoryUsed, memoryTotal),
+      icon: MemoryStick,
+    },
+    {
+      label: "Disk",
+      value:
+        diskUsed !== null && diskTotal !== null
+          ? `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}`
+          : `${instance.disk_gb} GB`,
+      detail:
+        diskUsed !== null && diskTotal !== null
+          ? "Runtime usage"
+          : "Requested capacity",
+      percent: resourcePercent(diskUsed, diskTotal),
+      icon: HardDrive,
+    },
+    {
+      label: "Network",
+      value:
+        networkDown !== null || networkUp !== null
+          ? `${formatBytes(networkDown ?? 0)}/s down, ${formatBytes(networkUp ?? 0)}/s up`
+          : "--",
+      detail: "Live throughput",
+      percent: null,
+      icon: Network,
+    },
+  ];
+}
+
+function eventTime(command: InstanceRuntimeCommand) {
+  return command.finished_at || command.started_at || command.dispatched_at || command.issued_at;
+}
+
+function eventTone(status: string) {
+  switch (status.toLowerCase()) {
+    case "completed":
+    case "succeeded":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
     case "failed":
-    case "crashed":
-      return {
-        shell: "border-[#f2c2c2] bg-[#fff0f0] text-[#b42318]",
-        dot: "bg-[#ef4444]",
-      };
+    case "timeout":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "running":
+    case "dispatched":
+      return "border-indigo-200 bg-indigo-50 text-indigo-700";
     default:
-      return {
-        shell: "border-[#d9e0e7] bg-[#f6f8fb] text-[#556070]",
-        dot: "bg-[#94a3b8]",
-      };
-  }
-}
-
-function skillRiskLabel(t: TranslateFn, riskLevel?: string | null) {
-  switch ((riskLevel || "").toLowerCase()) {
-    case "none":
-      return t("instances.skillRiskNone");
-    case "low":
-      return t("instances.skillRiskLow");
-    case "medium":
-      return t("instances.skillRiskMedium");
-    case "high":
-      return t("instances.skillRiskHigh");
-    default:
-      return t("instances.skillRiskUnknown");
-  }
-}
-
-function skillSourceLabel(t: TranslateFn, sourceType?: string | null) {
-  switch ((sourceType || "").toLowerCase()) {
-    case "uploaded":
-      return t("instances.skillSourceUploaded");
-    case "discovered":
-      return t("instances.skillSourceDiscovered");
-    default:
-      return sourceType || t("instances.notAvailable");
+      return "border-slate-200 bg-slate-50 text-slate-600";
   }
 }
 
@@ -187,46 +280,37 @@ const InstanceDetailPage: React.FC = () => {
 
   const [instance, setInstance] = useState<Instance | null>(null);
   const [status, setStatus] = useState<InstanceStatus | null>(null);
-  const [runtimeDetails, setRuntimeDetails] =
-    useState<InstanceRuntimeDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [metaRefreshing, setMetaRefreshing] = useState(false);
-  const [runtimeRefreshing, setRuntimeRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const [runtimeBurstUntil, setRuntimeBurstUntil] = useState<number>(0);
-  const [metricSessionStartedAt, setMetricSessionStartedAt] = useState<number>(
-    () => Date.now(),
-  );
-  const [metricHistory, setMetricHistory] = useState<MetricHistory>({
-    cpu: [],
-    memory: [],
-    disk: [],
-    networkDown: [],
-    networkUp: [],
-  });
+  const [externalAccess, setExternalAccess] = useState<InstanceExternalAccess | null>(null);
+  const [externalShareURL, setExternalShareURL] = useState("");
+  const [externalPassword, setExternalPassword] = useState("");
+  const [externalPasswordVisible, setExternalPasswordVisible] = useState(false);
+  const [externalAccessPanelOpen, setExternalAccessPanelOpen] = useState(false);
+  const [externalActionLoading, setExternalActionLoading] = useState<string | null>(null);
+  const [externalError, setExternalError] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<string | null>(null);
+  const [externalExpiresMode, setExternalExpiresMode] =
+    useState<ExternalAccessExpirationMode>("preset");
+  const [externalExpiresPreset, setExternalExpiresPreset] =
+    useState<ExternalAccessExpirationPreset>("24h");
+  const [externalCustomExpiresAt, setExternalCustomExpiresAt] = useState("");
+  const [runtimeDetails, setRuntimeDetails] = useState<InstanceRuntimeDetails | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [instanceSkills, setInstanceSkills] = useState<InstanceSkill[]>([]);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState<number | "">("");
-  const [instanceSkillPage, setInstanceSkillPage] = useState(1);
-  const importInputRef = useRef<HTMLInputElement | null>(null);
-  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
-  const timelineItemRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const lastNetworkCounterRef = useRef<{
-    ts: number;
-    down: number | null;
-    up: number | null;
-  } | null>(null);
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [skillError, setSkillError] = useState<string | null>(null);
 
   const fetchMeta = useCallback(
     async (targetInstanceId: number, options?: { background?: boolean }) => {
-      const background = options?.background ?? false;
-      if (background) {
-        setMetaRefreshing(true);
-      }
-
       try {
+        if (!options?.background) {
+          setLoading(true);
+        }
         const [instanceData, statusData] = await Promise.all([
           instanceService.getInstance(targetInstanceId),
           instanceService.getInstanceStatus(targetInstanceId),
@@ -234,64 +318,66 @@ const InstanceDetailPage: React.FC = () => {
         setInstance(instanceData);
         setStatus(statusData);
         setError(null);
-      } catch (err: any) {
-        if (!background) {
-          setError(err.response?.data?.error || t("instances.failedToLoad"));
-        } else {
-          console.error("Failed to refresh instance metadata", err);
-        }
+      } catch (err: unknown) {
+        setError(getErrorMessage(err, t("instances.failedToLoad")));
       } finally {
-        if (background) {
-          setMetaRefreshing(false);
+        if (!options?.background) {
+          setLoading(false);
         }
       }
     },
     [t],
   );
 
-  const fetchRuntime = useCallback(
-    async (targetInstanceId: number, options?: { background?: boolean }) => {
-      const background = options?.background ?? false;
-      if (background) {
-        setRuntimeRefreshing(true);
-      }
+  const fetchExternalAccess = useCallback(async (targetInstanceId: number) => {
+    try {
+      const result = await instanceService.getExternalAccess(targetInstanceId);
+      const access = result.external_access ?? null;
+      setExternalAccess(access);
+      setExternalShareURL(access?.enabled ? absoluteExternalURL(result.share_url) : "");
+      setExternalPassword(access?.enabled && access.auth_mode === "password" ? result.password ?? "" : "");
+      setExternalPasswordVisible(false);
+      setExternalError(null);
+    } catch (err: unknown) {
+      setExternalError(getErrorMessage(err, "Failed to load external access"));
+    }
+  }, []);
 
-      try {
-        const runtimeData =
-          await instanceService.getRuntimeDetails(targetInstanceId);
-        setRuntimeDetails(runtimeData);
-        setError(null);
-      } catch (err: any) {
-        if (!background) {
-          setError(err.response?.data?.error || t("instances.failedToLoad"));
-        } else {
-          console.error("Failed to refresh runtime details", err);
-        }
-      } finally {
-        if (background) {
-          setRuntimeRefreshing(false);
-        }
-      }
-    },
-    [t],
-  );
+  const fetchRuntimeDetails = useCallback(async (targetInstanceId: number) => {
+    try {
+      const data = await instanceService.getRuntimeDetails(targetInstanceId);
+      setRuntimeDetails(data);
+      setRuntimeError(null);
+    } catch (err: unknown) {
+      setRuntimeError(getErrorMessage(err, "Failed to load runtime details"));
+    }
+  }, []);
 
-  const runtimePollInterval =
-    runtimeBurstUntil > Date.now()
-      ? RUNTIME_BURST_POLL_INTERVAL_MS
-      : RUNTIME_POLL_INTERVAL_MS;
-
-  useEffect(() => {
-    setMetricSessionStartedAt(Date.now());
-    setMetricHistory({
-      cpu: [],
-      memory: [],
-      disk: [],
-      networkDown: [],
-      networkUp: [],
-    });
-    lastNetworkCounterRef.current = null;
-  }, [instanceId]);
+  const fetchSkills = useCallback(async (targetInstanceId: number) => {
+    try {
+      setSkillLoading(true);
+      const [attached, reusable] = await Promise.all([
+        skillService.listInstanceSkills(targetInstanceId),
+        skillService.listSkills(),
+      ]);
+      const attachedIds = new Set(attached.map((item) => item.skill_id));
+      setInstanceSkills(attached);
+      setAvailableSkills(
+        reusable.filter(
+          (skill) =>
+            skill.status === "active" &&
+            !attachedIds.has(skill.id) &&
+            skill.risk_level !== "medium" &&
+            skill.risk_level !== "high",
+        ),
+      );
+      setSkillError(null);
+    } catch (err: unknown) {
+      setSkillError(getErrorMessage(err, "Failed to load skills"));
+    } finally {
+      setSkillLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!instanceId || Number.isNaN(instanceId)) {
@@ -299,199 +385,91 @@ const InstanceDetailPage: React.FC = () => {
       setLoading(false);
       return;
     }
-
-    let disposed = false;
-
-    const hydrate = async () => {
-      setLoading(true);
-      try {
-        const [instanceData, statusData, runtimeData] = await Promise.all([
-          instanceService.getInstance(instanceId),
-          instanceService.getInstanceStatus(instanceId),
-          instanceService.getRuntimeDetails(instanceId),
-        ]);
-        if (disposed) {
-          return;
-        }
-        setInstance(instanceData);
-        setStatus(statusData);
-        setRuntimeDetails(runtimeData);
-        setError(null);
-      } catch (err: any) {
-        if (disposed) {
-          return;
-        }
-        setError(err.response?.data?.error || t("instances.failedToLoad"));
-      } finally {
-        if (!disposed) {
-          setLoading(false);
-        }
-      }
-    };
-
-    void hydrate();
-
-    return () => {
-      disposed = true;
-    };
-  }, [instanceId, t]);
+    void fetchMeta(instanceId);
+    void fetchExternalAccess(instanceId);
+  }, [fetchExternalAccess, fetchMeta, instanceId, t]);
 
   useEffect(() => {
     if (!instanceId || Number.isNaN(instanceId)) {
       return;
     }
-    const loadSkills = async () => {
-      try {
-        const [instanceSkillItems, reusableSkills] = await Promise.all([
-          skillService.listInstanceSkills(instanceId),
-          skillService.listSkills(),
-        ]);
-        setInstanceSkills(instanceSkillItems);
-        setAvailableSkills(
-          reusableSkills.filter(
-            (item) =>
-              item.status === "active" &&
-              item.risk_level !== "medium" &&
-              item.risk_level !== "high",
-          ),
-        );
-      } catch (skillError) {
-        console.error("Failed to load skill data", skillError);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) {
+        void fetchMeta(instanceId, { background: true });
       }
-    };
-    void loadSkills();
-  }, [instanceId]);
-
-  useEffect(() => {
-    setInstanceSkillPage(1);
-  }, [instanceSkills.length]);
-
-  useEffect(() => {
-    if (!instanceId || Number.isNaN(instanceId)) {
-      return;
-    }
-
-    const metaTimer = window.setInterval(() => {
-      if (document.hidden) {
-        return;
-      }
-      void fetchMeta(instanceId, { background: true });
     }, META_POLL_INTERVAL_MS);
 
-    return () => {
-      window.clearInterval(metaTimer);
-    };
+    return () => window.clearInterval(timer);
   }, [fetchMeta, instanceId]);
 
-  useEffect(() => {
-    if (!instanceId || Number.isNaN(instanceId)) {
-      return;
-    }
-
-    const runtimeTimer = window.setInterval(() => {
-      if (document.hidden) {
-        return;
-      }
-      void fetchRuntime(instanceId, { background: true });
-    }, runtimePollInterval);
-
-    return () => {
-      window.clearInterval(runtimeTimer);
-    };
-  }, [fetchRuntime, instanceId, runtimePollInterval]);
-
-  useEffect(() => {
-    if (runtimeBurstUntil <= Date.now()) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setRuntimeBurstUntil(0);
-    }, runtimeBurstUntil - Date.now());
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [runtimeBurstUntil]);
-
-  const instanceSkillTotalPages = Math.max(
-    1,
-    Math.ceil(instanceSkills.length / INSTANCE_SKILL_PAGE_SIZE),
+  useInstanceStatusWebSocket(
+    useCallback(
+      (update: InstanceStatusUpdate) => {
+        if (!instanceId || update.instance_id !== instanceId) {
+          return;
+        }
+        setStatus((current) => ({
+          ...(current ?? { instance_id: instanceId, created_at: "" }),
+          status: update.status,
+          availability: availabilityForStatus(update.status),
+        }));
+        setInstance((current) =>
+          current ? { ...current, status: update.status as Instance["status"] } : current,
+        );
+      },
+      [instanceId],
+    ),
   );
-  const currentInstanceSkillPage = Math.min(
-    instanceSkillPage,
-    instanceSkillTotalPages,
-  );
-  const paginatedInstanceSkills = instanceSkills.slice(
-    (currentInstanceSkillPage - 1) * INSTANCE_SKILL_PAGE_SIZE,
-    currentInstanceSkillPage * INSTANCE_SKILL_PAGE_SIZE,
+
+  const isDedicatedInstance = useMemo(
+    () =>
+      Boolean(
+        instance &&
+          (instance.instance_mode === "pro" || instance.runtime_type !== "gateway"),
+      ),
+    [instance],
   );
 
   useEffect(() => {
-    const snapshot = extractMetricSnapshot(runtimeDetails?.runtime?.system_info);
-    if (!snapshot) {
+    if (!instanceId || Number.isNaN(instanceId) || !isDedicatedInstance) {
+      setRuntimeDetails(null);
+      setRuntimeError(null);
+      setInstanceSkills([]);
+      setAvailableSkills([]);
+      setSelectedSkillId("");
       return;
     }
+    void fetchRuntimeDetails(instanceId);
+    void fetchSkills(instanceId);
+  }, [fetchRuntimeDetails, fetchSkills, instanceId, isDedicatedInstance]);
 
-    const reportedTimestamp = runtimeDetails?.runtime?.last_reported_at
-      ? new Date(runtimeDetails.runtime.last_reported_at).getTime()
-      : Date.now();
-    const ts = Number.isFinite(reportedTimestamp)
-      ? reportedTimestamp
-      : Date.now();
-    const previousNetwork = lastNetworkCounterRef.current;
-    let networkDownSample: number | null = null;
-    let networkUpSample: number | null = null;
-
-    if (
-      previousNetwork &&
-      snapshot.networkDownTotal !== null &&
-      snapshot.networkUpTotal !== null
-    ) {
-      const elapsedSeconds = Math.max((ts - previousNetwork.ts) / 1000, 1);
-      if (
-        previousNetwork.down !== null &&
-        snapshot.networkDownTotal >= previousNetwork.down
-      ) {
-        networkDownSample =
-          (snapshot.networkDownTotal - previousNetwork.down) / elapsedSeconds;
-      }
-      if (
-        previousNetwork.up !== null &&
-        snapshot.networkUpTotal >= previousNetwork.up
-      ) {
-        networkUpSample =
-          (snapshot.networkUpTotal - previousNetwork.up) / elapsedSeconds;
-      }
-    }
-
-    lastNetworkCounterRef.current = {
-      ts,
-      down: snapshot.networkDownTotal,
-      up: snapshot.networkUpTotal,
-    };
-
-    setMetricHistory((current) => ({
-      cpu: appendMetricSample(current.cpu, snapshot.cpuPercent, ts),
-      memory: appendMetricSample(current.memory, snapshot.memoryPercent, ts),
-      disk: appendMetricSample(current.disk, snapshot.diskPercent, ts),
-      networkDown: appendMetricSample(current.networkDown, networkDownSample, ts),
-      networkUp: appendMetricSample(current.networkUp, networkUpSample, ts),
-    }));
-  }, [runtimeDetails]);
-
-  const refreshAll = useCallback(async () => {
-    if (!instanceId) {
+  useEffect(() => {
+    if (!instanceId || Number.isNaN(instanceId) || !isDedicatedInstance) {
       return;
     }
-    await Promise.all([
-      fetchMeta(instanceId, { background: true }),
-      fetchRuntime(instanceId, { background: true }),
-    ]);
-  }, [fetchMeta, fetchRuntime, instanceId]);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) {
+        void fetchRuntimeDetails(instanceId);
+      }
+    }, RUNTIME_POLL_INTERVAL_MS);
 
-  const handleAction = async (action: string) => {
-    if (!instance) return;
+    return () => window.clearInterval(timer);
+  }, [fetchRuntimeDetails, instanceId, isDedicatedInstance]);
+
+  const availability = useMemo<InstanceAvailability>(() => {
+    if (status?.availability) {
+      return status.availability;
+    }
+    if (status?.status) {
+      return availabilityForStatus(status.status);
+    }
+    return instance ? availabilityForStatus(instance.status) : "unavailable";
+  }, [instance, status]);
+
+  const handleAction = async (action: "start" | "stop" | "restart" | "delete") => {
+    if (!instance) {
+      return;
+    }
 
     try {
       setActionLoading(action);
@@ -510,173 +488,131 @@ const InstanceDetailPage: React.FC = () => {
           setShowDeleteDialog(false);
           navigate("/instances");
           return;
-        default:
+      }
+      await fetchMeta(instance.id, { background: true });
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, t("instances.failedToLoad")));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const buildExternalAccessRequest = (): ExternalAccessRequest | null => {
+    if (externalExpiresMode === "permanent") {
+      return { expires_mode: "permanent" };
+    }
+    if (externalExpiresMode === "custom") {
+      if (!externalCustomExpiresAt) {
+        setExternalError("Custom expiration time is required");
+        return null;
+      }
+      return {
+        expires_mode: "custom",
+        expires_at: new Date(externalCustomExpiresAt).toISOString(),
+      };
+    }
+    return {
+      expires_mode: "preset",
+      expires_preset: externalExpiresPreset,
+    };
+  };
+
+  const handleExternalAction = async (action: "share-link" | "password" | "disable") => {
+    if (!instance) {
+      return;
+    }
+    try {
+      setExternalActionLoading(action);
+      setExternalError(null);
+      if (action === "share-link") {
+        const request = buildExternalAccessRequest();
+        if (!request) {
           return;
-      }
-      await refreshAll();
-    } catch (err: any) {
-      alert(
-        err.response?.data?.error ||
-          t(
-            `instances.failedTo${action.charAt(0).toUpperCase()}${action.slice(1)}`,
-          ),
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRuntimeCommand = async (
-    command:
-      | "start"
-      | "stop"
-      | "restart"
-      | "collect-system-info"
-      | "health-check",
-  ) => {
-    if (!instance) return;
-
-    try {
-      setActionLoading(`runtime-${command}`);
-      setRuntimeBurstUntil(Date.now() + RUNTIME_BURST_WINDOW_MS);
-      await instanceService.createRuntimeCommand(instance.id, command);
-      await fetchRuntime(instance.id, { background: true });
-      window.setTimeout(() => {
-        void fetchRuntime(instance.id, { background: true });
-      }, 800);
-      window.setTimeout(() => {
-        void fetchRuntime(instance.id, { background: true });
-      }, 2000);
-      window.setTimeout(() => {
-        void fetchRuntime(instance.id, { background: true });
-      }, 5000);
-    } catch (err: any) {
-      alert(
-        err.response?.data?.error ||
-          t("instances.runtimeCommandFailed", { command }),
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleExportWorkspace = async () => {
-    if (!instance) return;
-
-    const directory = runtimeWorkspaceDirectory(instance.type);
-    const runtime = runtimeProductName(instance.type);
-
-    try {
-      setActionLoading("export-workspace");
-      const blob =
-        instance.type === "hermes"
-          ? await instanceService.exportHermesWorkspace(instance.id)
-          : await instanceService.exportOpenClawWorkspace(instance.id);
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${instance.name || `${instance.type}-workspace`}${directory}.tar.gz`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (err: any) {
-      alert(
-        t("instances.exportRuntimeWorkspaceFailed", {
-          runtime,
-          directory,
-          message: describeOpenClawError(err, t),
-        }),
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleImportWorkspace = async (file?: File | null) => {
-    if (!instance || !file) return;
-
-    const directory = runtimeWorkspaceDirectory(instance.type);
-    const runtime = runtimeProductName(instance.type);
-
-    try {
-      setActionLoading("import-workspace");
-      if (instance.type === "hermes") {
-        await instanceService.importHermesWorkspace(instance.id, file);
+        }
+        const result = await instanceService.enableExternalShareLink(instance.id, request);
+        setExternalAccess(result.access);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalPassword("");
+        setExternalPasswordVisible(false);
+        setExternalAccessPanelOpen(true);
+      } else if (action === "password") {
+        const request = buildExternalAccessRequest();
+        if (!request) {
+          return;
+        }
+        const result = await instanceService.createExternalAccessPassword(instance.id, request);
+        setExternalAccess(result.access);
+        setExternalPassword(result.password);
+        setExternalPasswordVisible(false);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalAccessPanelOpen(true);
       } else {
-        await instanceService.importOpenClawWorkspace(instance.id, file);
+        await instanceService.disableExternalAccess(instance.id);
+        await fetchExternalAccess(instance.id);
+        setExternalShareURL("");
+        setExternalPassword("");
+        setExternalPasswordVisible(false);
+        setExternalAccessPanelOpen(false);
       }
-      await fetchRuntime(instance.id, { background: true });
-      alert(
-        t("instances.importRuntimeWorkspaceSuccess", {
-          runtime,
-          directory,
-        }),
-      );
-    } catch (err: any) {
-      alert(
-        t("instances.importRuntimeWorkspaceFailed", {
-          runtime,
-          directory,
-          message: describeOpenClawError(err, t),
-        }),
-      );
+    } catch (err: unknown) {
+      setExternalError(getErrorMessage(err, "External access update failed"));
+      setExternalAccessPanelOpen(true);
     } finally {
-      if (importInputRef.current) {
-        importInputRef.current.value = "";
-      }
-      setActionLoading(null);
+      setExternalActionLoading(null);
     }
   };
 
-  const refreshSkills = useCallback(async () => {
-    if (!instanceId || Number.isNaN(instanceId)) {
-      return;
-    }
-    const items = await skillService.listInstanceSkills(instanceId);
-    setInstanceSkills(items);
-  }, [instanceId]);
-
-  const handleAttachSkill = async () => {
-    if (!instanceId || Number.isNaN(instanceId) || selectedSkillId === "") {
+  const copyExternalValue = async (key: string, value: string) => {
+    if (!value) {
       return;
     }
     try {
-      setActionLoading("attach-skill");
-      await skillService.attachSkillToInstance(instanceId, Number(selectedSkillId));
+      await navigator.clipboard.writeText(value);
+      setCopyState(key);
+      window.setTimeout(() => setCopyState((current) => (current === key ? null : current)), 1800);
+    } catch (err: unknown) {
+      setExternalError(getErrorMessage(err, "Copy failed"));
+    }
+  };
+
+  const attachSelectedSkill = async () => {
+    if (!instance || selectedSkillId === "") {
+      return;
+    }
+    try {
+      setSkillLoading(true);
+      setSkillError(null);
+      await skillService.attachSkillToInstance(instance.id, selectedSkillId);
       setSelectedSkillId("");
-      await refreshSkills();
-      setRuntimeBurstUntil(Date.now() + RUNTIME_BURST_WINDOW_MS);
-    } catch (err: any) {
-      alert(err.response?.data?.error || t("instances.failedToAttachSkill"));
+      await fetchSkills(instance.id);
+    } catch (err: unknown) {
+      setSkillError(getErrorMessage(err, "Failed to attach skill"));
     } finally {
-      setActionLoading(null);
+      setSkillLoading(false);
     }
   };
 
-  const handleRemoveSkill = async (skillId: number) => {
-    if (!instanceId || Number.isNaN(instanceId)) {
+  const removeInstanceSkill = async (skillId: number) => {
+    if (!instance) {
       return;
     }
     try {
-      setActionLoading(`remove-skill-${skillId}`);
-      await skillService.removeSkillFromInstance(instanceId, skillId);
-      await refreshSkills();
-      setRuntimeBurstUntil(Date.now() + RUNTIME_BURST_WINDOW_MS);
-    } catch (err: any) {
-      alert(err.response?.data?.error || t("instances.failedToRemoveSkill"));
+      setSkillLoading(true);
+      setSkillError(null);
+      await skillService.removeSkillFromInstance(instance.id, skillId);
+      await fetchSkills(instance.id);
+    } catch (err: unknown) {
+      setSkillError(getErrorMessage(err, "Failed to remove skill"));
     } finally {
-      setActionLoading(null);
+      setSkillLoading(false);
     }
   };
 
   if (loading) {
     return (
-      <UserLayout>
-        <div className="flex min-h-[60vh] items-center justify-center">
-          <div className="text-lg text-gray-600">
-            {t("instances.loadingInstance")}
-          </div>
+      <UserLayout title={t("instances.details")}>
+        <div className="flex h-64 items-center justify-center text-sm text-slate-500">
+          {t("common.loading")}
         </div>
       </UserLayout>
     );
@@ -684,86 +620,500 @@ const InstanceDetailPage: React.FC = () => {
 
   if (error || !instance) {
     return (
-      <UserLayout>
-        <div className="flex min-h-[60vh] items-center justify-center">
-          <div className="text-center">
-            <p className="mb-4 text-red-600">
-              {error || t("instances.instanceNotFound")}
-            </p>
-            <button
-              onClick={() => navigate("/instances")}
-              className="text-indigo-600 hover:text-indigo-800"
-            >
-              {t("instances.backToInstances")}
-            </button>
-          </div>
+      <UserLayout title={t("instances.details")}>
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error || t("instances.instanceNotFound")}
         </div>
       </UserLayout>
     );
   }
 
+  const renderHeaderSection = (actionAccessory?: React.ReactNode) => (
+    <div className="flex shrink-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="min-w-0">
+        <Link
+          to="/instances"
+          className="mb-3 inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-950"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          {t("instances.back")}
+        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="truncate text-2xl font-semibold text-slate-950">{instance.name}</h1>
+          <span
+            className={`inline-flex rounded-md border px-2 py-1 text-xs font-medium ${availabilityClass(
+              availability,
+            )}`}
+          >
+            {availabilityLabel(availability)}
+          </span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-500">
+          <span>{typeLabel(instance.type)}</span>
+          <span>Mode {instance.instance_mode === "pro" ? "Pro" : "Lite"}</span>
+          <span>Runtime {instance.runtime_type}</span>
+          <span>{formatBytes(status?.workspace_usage_bytes ?? instance.workspace_usage_bytes)}</span>
+          <span>{formatDateTime(instance.updated_at, locale)}</span>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-start gap-2 lg:items-end">
+        <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+          {actionAccessory}
+          {instance.status === "running" ? (
+            <button
+              type="button"
+              className="app-button-secondary"
+              onClick={() => void handleAction("stop")}
+              disabled={actionLoading === "stop"}
+            >
+              <Square className="h-4 w-4" />
+              {t("common.stop")}
+            </button>
+          ) : instance.status === "stopped" ? (
+            <button
+              type="button"
+              className="app-button-primary"
+              onClick={() => void handleAction("start")}
+              disabled={actionLoading === "start"}
+            >
+              <Play className="h-4 w-4" />
+              {t("common.start")}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="app-button-secondary"
+            onClick={() => void handleAction("restart")}
+            disabled={actionLoading === "restart" || instance.status === "deleting"}
+          >
+            <RotateCw className="h-4 w-4" />
+            {t("common.restart")}
+          </button>
+          <button
+            type="button"
+            className="app-button-secondary border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800"
+            onClick={() => setShowDeleteDialog(true)}
+            disabled={instance.status === "deleting"}
+          >
+            <Trash2 className="h-4 w-4" />
+            {t("common.delete")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const shareLinkControl = instance.runtime_type.toLowerCase() !== "shell" && (
+    <div className="relative">
+      <button
+        type="button"
+        data-share-enabled={externalAccess?.enabled ? "true" : "false"}
+        data-share-auth={externalAccess?.enabled ? externalAccess.auth_mode : "disabled"}
+        className={`app-button-secondary ${
+          externalAccess?.enabled
+            ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-100 hover:text-emerald-800"
+            : ""
+        }`}
+        disabled={externalActionLoading !== null}
+        onClick={() => setExternalAccessPanelOpen((open) => !open)}
+      >
+        <ExternalLink className="h-4 w-4" />
+        Share Link
+        {externalAccess?.enabled && (
+          <span
+            className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded bg-white/80 px-1.5 py-0.5 text-[11px] font-semibold"
+            title={externalAccess.auth_mode === "password" ? "Key authentication enabled" : "Share link enabled"}
+          >
+            {externalAccess.auth_mode === "password" ? (
+              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              "On"
+            )}
+          </span>
+        )}
+      </button>
+      {externalAccessPanelOpen && (
+        <div
+          data-panel="share-link-popover"
+          className="absolute right-0 top-full z-20 mt-2 w-[min(92vw,34rem)] rounded-lg border border-slate-200 bg-white p-4 text-left shadow-lg"
+        >
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-semibold text-slate-950">Share Link</div>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+                {externalAccess?.enabled && (
+                  <span>
+                    {externalAccess.expires_at
+                      ? `Expires ${new Date(externalAccess.expires_at).toLocaleString(locale)}`
+                      : "Permanent"}
+                  </span>
+                )}
+                {externalAccess?.last_used_at && (
+                  <span>Last used {new Date(externalAccess.last_used_at).toLocaleString(locale)}</span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="cm-icon-button h-8 w-8 shrink-0"
+              title="Close"
+              onClick={() => setExternalAccessPanelOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {externalError && <div className="mb-2 text-xs text-red-600">{externalError}</div>}
+          <div className="grid gap-3 text-xs">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <select
+                value={
+                  externalExpiresMode === "permanent"
+                    ? "permanent"
+                    : externalExpiresMode === "custom"
+                      ? "custom"
+                      : externalExpiresPreset
+                }
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === "permanent") {
+                    setExternalExpiresMode("permanent");
+                    return;
+                  }
+                  if (value === "custom") {
+                    setExternalExpiresMode("custom");
+                    return;
+                  }
+                  setExternalExpiresMode("preset");
+                  setExternalExpiresPreset(value as ExternalAccessExpirationPreset);
+                }}
+                className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                disabled={externalActionLoading !== null}
+                aria-label="Share link expiration"
+              >
+                {externalExpirationOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {externalExpiresMode === "custom" && (
+                <input
+                  type="datetime-local"
+                  value={externalCustomExpiresAt}
+                  onChange={(event) => setExternalCustomExpiresAt(event.target.value)}
+                  className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                  disabled={externalActionLoading !== null}
+                  aria-label="Custom share link expiration"
+                />
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="app-button-primary"
+                disabled={externalActionLoading !== null}
+                onClick={() => void handleExternalAction("share-link")}
+              >
+                <ExternalLink className="h-4 w-4" />
+                Create Link
+              </button>
+              <button
+                type="button"
+                className="app-button-secondary"
+                disabled={externalActionLoading !== null}
+                onClick={() => void handleExternalAction("password")}
+              >
+                <KeyRound className="h-4 w-4" />
+                Create Password
+              </button>
+              {externalAccess?.enabled && (
+                <button
+                  type="button"
+                  className="app-button-secondary border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800"
+                  disabled={externalActionLoading !== null}
+                  onClick={() => void handleExternalAction("disable")}
+                >
+                  <Ban className="h-4 w-4" />
+                  Disable
+                </button>
+              )}
+            </div>
+            {externalShareURL && (
+              <div className="grid gap-1.5">
+                <label className="text-xs font-semibold uppercase text-slate-500">
+                  Short Link
+                </label>
+                <div className="flex min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
+                  <input
+                    type="text"
+                    readOnly
+                    aria-label="Share link URL"
+                    value={externalShareURL}
+                    className="min-w-0 flex-1 truncate bg-transparent font-mono text-xs text-slate-700 outline-none"
+                  />
+                  <button
+                    type="button"
+                    className="cm-icon-button h-7 w-7 shrink-0"
+                    title="Copy share link"
+                    aria-label="Copy share link"
+                    onClick={() => void copyExternalValue("share-url", externalShareURL)}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+            {externalAccess?.enabled && externalAccess.auth_mode === "password" && externalPassword && (
+              <div className="grid gap-1.5">
+                <label className="text-xs font-semibold uppercase text-slate-500">
+                  Password
+                </label>
+                <div className="flex min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
+                  <input
+                    type={externalPasswordVisible ? "text" : "password"}
+                    readOnly
+                    aria-label="Share link password"
+                    value={externalPassword}
+                    className="min-w-0 flex-1 truncate bg-transparent font-mono text-xs text-slate-700 outline-none"
+                  />
+                  <button
+                    type="button"
+                    className="cm-icon-button h-7 w-7 shrink-0"
+                    title="Copy password"
+                    aria-label="Copy password"
+                    onClick={() => void copyExternalValue("password", externalPassword)}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="cm-icon-button h-7 w-7 shrink-0"
+                    title={externalPasswordVisible ? "Hide password" : "Show password"}
+                    aria-label={externalPasswordVisible ? "Hide password" : "Show password"}
+                    onClick={() => setExternalPasswordVisible((visible) => !visible)}
+                  >
+                    {externalPasswordVisible ? (
+                      <EyeOff className="h-3.5 w-3.5" />
+                    ) : (
+                      <Eye className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+            {!externalAccess?.enabled && !externalShareURL && !externalPassword && !externalError && (
+              <div className="rounded-md border border-dashed border-slate-200 px-3 py-4 text-center text-sm text-slate-500">
+                Create a share link or password to view access details.
+              </div>
+            )}
+            {copyState && <span className="text-xs font-medium text-emerald-700">Copied</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderLiteWorkspace = () => (
+    <div className="flex min-h-0 flex-col gap-4 md:h-[calc(100vh-8rem)]">
+      {renderHeaderSection(shareLinkControl)}
+      <section className="grid min-h-0 flex-1 gap-4 overflow-hidden max-xl:overflow-y-auto xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]">
+        <InstanceServiceFrame
+          instanceId={instance.id}
+          instanceName={instance.name}
+          instanceType={instance.type}
+          availability={availability}
+        />
+        {supportsWorkspace(instance) ? (
+          <WorkspaceFileManager instanceId={instance.id} />
+        ) : (
+          <div className="cm-surface flex h-full min-h-[420px] items-center justify-center text-sm text-slate-500 xl:min-h-0">
+            No workspace
+          </div>
+        )}
+      </section>
+    </div>
+  );
+
   const runtime = runtimeDetails?.runtime;
   const agent = runtimeDetails?.agent;
-  const commands = runtimeDetails?.commands ?? [];
-  const effectiveInstanceStatus = status?.status || instance.status;
-  const systemInfo = asRecord(runtime?.system_info);
-  const runtimeSummary = asRecord(runtime?.summary);
-  const cpuInfo = asRecord(systemInfo?.cpu);
-  const memoryInfo = asRecord(systemInfo?.memory);
-  const diskInfo = asRecord(systemInfo?.disk);
-  const networkInfo = asRecord(systemInfo?.network);
-  const osInfo = asRecord(systemInfo?.os);
-  const openclawStats = asRecord(runtimeSummary?.openclaw_stats);
-  const runtimeStats = asRecord(runtimeSummary?.stats);
-  const skillCount = firstNumber(
-    openclawStats?.skill_count,
-    openclawStats?.skills_count,
-    runtimeStats?.skill_count,
-    runtimeStats?.skills_count,
-    runtimeSummary?.skill_count,
-    runtimeSummary?.skills_count,
-  );
-  const agentCount = firstNumber(
-    openclawStats?.agent_count,
-    openclawStats?.agents_count,
-    runtimeStats?.agent_count,
-    runtimeStats?.agents_count,
-    runtimeSummary?.agent_count,
-    runtimeSummary?.agents_count,
-  );
-  const channelCount = firstNumber(
-    openclawStats?.channel_count,
-    openclawStats?.channels_count,
-    runtimeStats?.channel_count,
-    runtimeStats?.channels_count,
-    runtimeSummary?.channel_count,
-    runtimeSummary?.channels_count,
-  );
-  const currentStatusStyle = statusStyle(effectiveInstanceStatus);
-  const gatewayStatus = runtime?.openclaw_status || "unknown";
-  const metricCurves = buildMetricCurves({
-    cpuInfo,
-    memoryInfo,
-    diskInfo,
-    networkInfo,
-    metricHistory,
-    sessionStartedAt: metricSessionStartedAt,
-    t,
+  const commands = [...(runtimeDetails?.commands ?? [])].sort((left, right) => {
+    const leftTime = new Date(eventTime(left)).getTime();
+    const rightTime = new Date(eventTime(right)).getTime();
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
   });
-  const timelineItems = buildTimelineItems(
-    instance,
-    status,
-    runtime,
-    agent,
-    commands,
-    locale,
-    t,
+  const attachedSkillIds = new Set(instanceSkills.map((item) => item.skill_id));
+  const skillOptions = availableSkills.filter((skill) => !attachedSkillIds.has(skill.id));
+  const overviewResourceRows = resourceRows(runtimeDetails, instance).filter((row) =>
+    ["CPU", "Memory", "Disk"].includes(row.label),
   );
+  const runtimeOverviewRows = [
+    { label: "Infra", value: runtime?.infra_status || instance.status, detail: "Infrastructure", percent: null },
+    { label: "Agent", value: agent?.status || runtime?.agent_status || "-", detail: "Runtime agent", percent: null },
+    { label: "OpenClaw", value: runtime?.openclaw_status || "-", detail: "Process", percent: null },
+    ...overviewResourceRows,
+  ];
 
-  const canControlGateway = effectiveInstanceStatus === "running";
+  const renderProWorkspace = () => (
+    <div className="flex flex-col gap-4">
+      {renderHeaderSection(shareLinkControl)}
+      <section
+        data-layout="pro-desktop-workspace"
+        className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]"
+      >
+        <div className="aspect-video min-h-[420px] min-w-0 overflow-hidden xl:min-h-0">
+          <InstanceServiceFrame
+            instanceId={instance.id}
+            instanceName={instance.name}
+            instanceType={instance.type}
+            availability={availability}
+          />
+        </div>
+
+        {supportsWorkspace(instance) ? (
+          <div className="min-h-[420px] min-w-0 xl:h-full xl:min-h-0">
+            <WorkspaceFileManager instanceId={instance.id} initialPath="/config" />
+          </div>
+        ) : (
+          <div className="cm-surface flex min-h-[420px] items-center justify-center text-sm text-slate-500 xl:min-h-0">
+            No workspace
+          </div>
+        )}
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,22rem)]">
+        <section className="cm-surface px-4 py-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <KeyRound className="h-4 w-4 text-indigo-600" />
+                <h2 className="text-sm font-semibold text-slate-950">Instance Skills</h2>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{instanceSkills.length} attached</div>
+            </div>
+          </div>
+          {skillError && <div className="mb-3 text-xs text-red-600">{skillError}</div>}
+          <div className="mb-3 flex gap-2">
+            <select
+              value={selectedSkillId}
+              onChange={(event) =>
+                setSelectedSkillId(event.target.value ? Number(event.target.value) : "")
+              }
+              className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+              disabled={skillLoading}
+              aria-label="Attach skill"
+            >
+              <option value="">Select a skill</option>
+              {skillOptions.map((skill) => (
+                <option key={skill.id} value={skill.id}>
+                  {skill.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="app-button-secondary"
+              disabled={skillLoading || selectedSkillId === ""}
+              onClick={() => void attachSelectedSkill()}
+              title="Attach skill"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="max-h-[260px] overflow-y-auto pr-1">
+            {instanceSkills.length === 0 ? (
+              <div className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+                No skills attached.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {instanceSkills.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-slate-900">
+                        {item.skill?.name || `Skill #${item.skill_id}`}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {item.status}{item.last_seen_at ? ` - ${formatDateTime(item.last_seen_at, locale)}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="cm-icon-button h-7 w-7 shrink-0"
+                      disabled={skillLoading}
+                      title="Remove skill"
+                      onClick={() => void removeInstanceSkill(item.skill_id)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section data-section="runtime-overview" className="cm-surface px-3 py-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-indigo-600" />
+              <h2 className="text-sm font-semibold text-slate-950">Runtime Overview</h2>
+            </div>
+            <span className="text-xs text-slate-500">
+              {formatDateTime(runtime?.last_reported_at, locale)}
+            </span>
+          </div>
+          {runtimeError && <div className="mb-2 text-xs text-red-600">{runtimeError}</div>}
+          <div className="grid gap-1.5">
+            {runtimeOverviewRows.map((row) => (
+              <Metric key={row.label} label={row.label} value={row.value} detail={row.detail} percent={row.percent} />
+            ))}
+          </div>
+        </section>
+      </section>
+
+      <section className="cm-surface px-4 py-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Clock3 className="h-4 w-4 text-indigo-600" />
+            <h2 className="text-sm font-semibold text-slate-950">Runtime Events</h2>
+          </div>
+          <span className="text-xs text-slate-500">{commands.length} events</span>
+        </div>
+        <div className="max-h-[280px] overflow-y-auto pr-1">
+          {commands.length === 0 ? (
+            <div className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+              No runtime events yet.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {commands.slice(0, 12).map((command) => (
+                <div key={command.id} className="rounded-md border border-slate-200 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-slate-900">{command.command_type}</span>
+                    <span className={`rounded-md border px-2 py-0.5 text-xs font-medium ${eventTone(command.status)}`}>
+                      {command.status}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {formatDateTime(eventTime(command), locale)}
+                  </div>
+                  {command.error_message && (
+                    <div className="mt-1 text-xs text-red-600">{command.error_message}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
 
   return (
-    <UserLayout>
+    <UserLayout title={instance.name}>
       <ConfirmDialog
         open={showDeleteDialog}
         title={t("common.delete")}
@@ -773,1672 +1123,44 @@ const InstanceDetailPage: React.FC = () => {
         destructive
         loading={actionLoading === "delete"}
         onCancel={() => setShowDeleteDialog(false)}
-        onConfirm={() => handleAction("delete")}
+        onConfirm={() => void handleAction("delete")}
       />
 
-      <div className="space-y-6">
-        <section className="app-panel overflow-hidden px-5 py-5">
-          <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-3">
-                <span
-                  className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${currentStatusStyle.shell}`}
-                >
-                  <span
-                    className={`mr-2 h-2 w-2 rounded-full ${currentStatusStyle.dot}`}
-                  />
-                  {t(`status.${effectiveInstanceStatus}`)}
-                </span>
-                <span className="rounded-full border border-[#ead8cf] bg-[#fffaf7] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#8f776b]">
-                  {instance.type}
-                </span>
-                <span className="rounded-full border border-[#dbe4ef] bg-[#f7fbff] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-[#516070]">
-                  {instance.runtime_type || "desktop"}
-                </span>
-                <span className="text-sm text-[#7a6d66]">
-                  {t("instances.instanceIdLabel")}: {instance.id}
-                </span>
-              </div>
-              <h1 className="mt-4 text-[2.2rem] font-semibold leading-none tracking-[-0.05em] text-[#1d1713]">
-                {instance.name}
-              </h1>
-              {instance.description && (
-                <p className="mt-3 max-w-3xl text-sm leading-6 text-[#7a6d66]">
-                  {instance.description}
-                </p>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-                <RefreshState
-                  active={metaRefreshing || runtimeRefreshing}
-                  label={t("instances.live")}
-                />
-              {effectiveInstanceStatus === "running" ? (
-                <button
-                  onClick={() => handleAction("stop")}
-                  disabled={actionLoading === "stop"}
-                  className="rounded-2xl border border-transparent bg-yellow-100 px-4 py-2 text-sm font-medium text-yellow-700 hover:bg-yellow-200 disabled:opacity-50"
-                >
-                  {actionLoading === "stop"
-                    ? `${t("common.stop")}...`
-                    : t("common.stop")}
-                </button>
-              ) : effectiveInstanceStatus === "stopped" ? (
-                <button
-                  onClick={() => handleAction("start")}
-                  disabled={actionLoading === "start"}
-                  className="rounded-2xl border border-transparent bg-green-100 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-200 disabled:opacity-50"
-                >
-                  {actionLoading === "start"
-                    ? `${t("common.start")}...`
-                    : t("common.start")}
-                </button>
-              ) : null}
-              <button
-                onClick={() => handleAction("restart")}
-                disabled={actionLoading === "restart"}
-                className="app-button-secondary disabled:opacity-50"
-              >
-                {actionLoading === "restart"
-                  ? `${t("common.restart")}...`
-                  : t("common.restart")}
-              </button>
-              <button
-                onClick={() => setShowDeleteDialog(true)}
-                disabled={actionLoading === "delete"}
-                className="rounded-2xl border border-transparent bg-red-100 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-200 disabled:opacity-50"
-              >
-                {actionLoading === "delete"
-                  ? `${t("common.delete")}...`
-                  : t("common.delete")}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.48fr)_470px] 2xl:grid-cols-[minmax(0,1.55fr)_520px]">
-          <div className="space-y-6">
-            <section className="overflow-hidden rounded-[34px] border border-[#ead8cf] bg-[linear-gradient(180deg,#fbf5ef_0%,#f6ece4_100%)] p-3 shadow-[0_34px_90px_-62px_rgba(72,44,24,0.5)]">
-              <div className="relative">
-                <InstanceAccess
-                  instanceId={instance.id}
-                  instanceName={instance.name}
-                  isRunning={effectiveInstanceStatus === "running"}
-                  runtimeType={instance.runtime_type || "desktop"}
-                  overlay={
-                    instance.runtime_type !== "shell" && instance.type === "openclaw"
-                      ? {
-                          gatewayStatus,
-                          canControl: canControlGateway,
-                          actionLoading,
-                          onCommand: handleRuntimeCommand,
-                        }
-                      : undefined
-                  }
-                />
-              </div>
-            </section>
-
-            {supportsRuntimeWorkspace(instance.type) && (
-              <section className="app-panel px-5 py-5">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="max-w-xl">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b09d93]">
-                      {t("instances.workspaceSection")}
-                    </p>
-                    <h2 className="mt-2 text-[1.35rem] font-semibold tracking-[-0.03em] text-[#1d1713]">
-                      {t("instances.runtimeWorkspace", {
-                        runtime: runtimeProductName(instance.type),
-                      })}
-                    </h2>
-                    <p className="mt-2 text-sm leading-6 text-[#7a6d66]">
-                      {t("instances.runtimeWorkspaceDesc", {
-                        directory: runtimeWorkspaceDirectory(instance.type),
-                      })}
-                    </p>
-                  </div>
-
-                  <div className="grid w-full gap-3 lg:max-w-[320px]">
-                    <button
-                      type="button"
-                      onClick={handleExportWorkspace}
-                      disabled={
-                        effectiveInstanceStatus !== "running" ||
-                        actionLoading === "export-workspace" ||
-                        actionLoading === "import-workspace"
-                      }
-                      className="app-button-primary disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {actionLoading === "export-workspace"
-                        ? t("instances.exportingRuntimeWorkspace")
-                        : t("instances.exportRuntimeWorkspace", {
-                            directory: runtimeWorkspaceDirectory(instance.type),
-                          })}
-                    </button>
-                    <input
-                      ref={importInputRef}
-                      type="file"
-                      accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/octet-stream"
-                      className="hidden"
-                      onChange={(e) =>
-                        handleImportWorkspace(e.target.files?.[0] || null)
-                      }
-                    />
-                    <button
-                      type="button"
-                      onClick={() => importInputRef.current?.click()}
-                      disabled={
-                        effectiveInstanceStatus !== "running" ||
-                        actionLoading === "export-workspace" ||
-                        actionLoading === "import-workspace"
-                      }
-                      className="app-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {actionLoading === "import-workspace"
-                        ? t("instances.importingRuntimeWorkspace")
-                        : t("instances.importRuntimeWorkspace", {
-                            directory: runtimeWorkspaceDirectory(instance.type),
-                          })}
-                    </button>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            <section className="app-panel px-6 py-6">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b09d93]">
-                    {t("instances.kubernetesSection")}
-                  </p>
-                  <h2 className="mt-2 text-[1.5rem] font-semibold tracking-[-0.03em] text-[#1d1713]">
-                    {t("instances.kubernetesStatusTitle")}
-                  </h2>
-                </div>
-                <RefreshState active={metaRefreshing} label={t("instances.infrastructureReady")} />
-              </div>
-
-              <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <DetailCard
-                  label={t("instances.podName")}
-                  value={status?.pod_name || instance.pod_name || t("instances.notAvailable")}
-                />
-                <DetailCard
-                  label={t("instances.namespace")}
-                  value={status?.pod_namespace || instance.pod_namespace || t("instances.notAvailable")}
-                />
-                <DetailCard
-                  label={t("instances.podStatus")}
-                  value={status?.pod_status || status?.status || t("instances.notAvailable")}
-                />
-                <DetailCard
-                  label={t("instances.podIp")}
-                  value={status?.pod_ip || instance.pod_ip || t("instances.notAvailable")}
-                />
-                <DetailCard label={t("common.type")} value={instance.type} />
-                <DetailCard
-                  label={t("instances.instanceImage")}
-                  value={
-                    instance.image_registry
-                      ? `${instance.image_registry}${instance.image_tag ? `:${instance.image_tag}` : ""}`
-                      : `${instance.os_type} ${instance.os_version}`
-                  }
-                />
-                <DetailCard
-                  label={t("instances.storageClass")}
-                  value={
-                    instance.storage_class || t("instances.defaultStorageClass")
-                  }
-                />
-                <DetailCard
-                  label={t("instances.mountPath")}
-                  value={instance.mount_path}
-                  mono
-                />
-              </div>
-            </section>
-
-            {supportsRuntimeSkillManagement(instance.type) && (
-              <section className="app-panel px-6 py-6">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                  <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b09d93]">
-                      {t("instances.skillsSection")}
-                    </p>
-                    <h2 className="mt-2 text-[1.5rem] font-semibold tracking-[-0.03em] text-[#1d1713]">
-                      {t("instances.skillManagement")}
-                    </h2>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={selectedSkillId}
-                      onChange={(event) => setSelectedSkillId(event.target.value ? Number(event.target.value) : "")}
-                      className="app-input min-w-[220px]"
-                    >
-                      <option value="">{t("instances.selectSkill")}</option>
-                      {availableSkills.map((skill) => (
-                        <option key={skill.id} value={skill.id}>
-                          {skill.name} ({skill.skill_key})
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={handleAttachSkill}
-                      disabled={selectedSkillId === "" || actionLoading === "attach-skill"}
-                      className="app-button-primary disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {actionLoading === "attach-skill" ? t("instances.installingSkill") : t("instances.installSkill")}
-                    </button>
-                  </div>
-                </div>
-                <div className="mt-5 space-y-3">
-                  {instanceSkills.length === 0 ? (
-                    <div className="rounded-[22px] border border-dashed border-[#e7d9d1] bg-[#fffaf7] px-5 py-6 text-sm text-[#7a6d66]">
-                      {t("instances.noSkillsReported")}
-                    </div>
-                  ) : (
-                    <>
-                      {paginatedInstanceSkills.map((item) => (
-                        <div
-                          key={`${item.skill_id}-${item.id}`}
-                          className="rounded-[22px] border border-[#efe2d8] bg-[#fffaf7] px-5 py-4 shadow-[0_20px_40px_-36px_rgba(72,44,24,0.42)]"
-                        >
-                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                            <div>
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-base font-semibold text-[#1d1713]">
-                                  {item.skill?.name || t("instances.skillFallback", { id: item.skill_id })}
-                                </span>
-                                <span className="rounded-full border border-[#ead8cf] bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8f776b]">
-                                  {skillSourceLabel(t, item.source_type)}
-                                </span>
-                                <span className="rounded-full border border-[#ead8cf] bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8f776b]">
-                                  {skillRiskLabel(t, item.skill?.risk_level)}
-                                </span>
-                              </div>
-                              <p className="mt-2 text-sm text-[#6f6158]">
-                                {item.skill?.skill_key || item.skill_id}
-                                {item.install_path ? ` · ${item.install_path}` : ""}
-                                {item.last_seen_at ? ` · ${t("instances.lastSeenAt", { value: formatDateTime(item.last_seen_at, locale, t) })}` : ""}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveSkill(item.skill_id)}
-                              disabled={actionLoading === `remove-skill-${item.skill_id}`}
-                              className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              {actionLoading === `remove-skill-${item.skill_id}` ? t("instances.removingSkill") : t("instances.removeSkill")}
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                      {instanceSkillTotalPages > 1 ? (
-                        <div className="flex flex-col gap-3 border-t border-[#f0e4dc] pt-4 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="text-sm text-[#8a7b72]">
-                            {t("instances.skillPagination", {
-                              from: (currentInstanceSkillPage - 1) * INSTANCE_SKILL_PAGE_SIZE + 1,
-                              to: Math.min(
-                                currentInstanceSkillPage * INSTANCE_SKILL_PAGE_SIZE,
-                                instanceSkills.length,
-                              ),
-                              total: instanceSkills.length,
-                            })}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setInstanceSkillPage((current) =>
-                                  Math.max(1, current - 1),
-                                )
-                              }
-                              disabled={currentInstanceSkillPage <= 1}
-                              className="app-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              {t("instances.previous")}
-                            </button>
-                            <div className="min-w-[76px] text-center text-sm font-medium text-[#5f5957]">
-                              {currentInstanceSkillPage} / {instanceSkillTotalPages}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setInstanceSkillPage((current) =>
-                                  Math.min(instanceSkillTotalPages, current + 1),
-                                )
-                              }
-                              disabled={currentInstanceSkillPage >= instanceSkillTotalPages}
-                              className="app-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              {t("instances.nextPage")}
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </>
-                  )}
-                </div>
-              </section>
-            )}
-
-            <section className="app-panel px-6 py-6">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b09d93]">
-                    {t("instances.timeline")}
-                  </p>
-                  <h2 className="mt-2 text-[1.5rem] font-semibold tracking-[-0.03em] text-[#1d1713]">
-                    {t("instances.timelineSubtitle")}
-                  </h2>
-                </div>
-                <RefreshState
-                  active={runtimeRefreshing}
-                  label={t("instances.timelineEvents", { count: timelineItems.length })}
-                />
-              </div>
-
-              <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_86px]">
-                <div
-                  ref={timelineScrollRef}
-                  className="max-h-[560px] overflow-y-auto pr-2"
-                >
-                  <div className="space-y-4">
-                    {timelineItems.length === 0 ? (
-                      <div className="rounded-[24px] border border-dashed border-[#e7d9d1] bg-[#fffaf7] px-5 py-8 text-sm text-[#7a6d66]">
-                        {t("instances.noRuntimeActivity")}
-                      </div>
-                    ) : (
-                      timelineItems.map((item) => (
-                        <div
-                          key={item.id}
-                          ref={(node) => {
-                            timelineItemRefs.current[item.id] = node;
-                          }}
-                          className="rounded-[26px] border border-[#efe2d8] bg-[#fffaf7] px-5 py-5 shadow-[0_20px_40px_-36px_rgba(72,44,24,0.42)]"
-                        >
-                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span
-                                  className={`h-2.5 w-2.5 rounded-full ${item.tone}`}
-                                />
-                                <p className="text-base font-semibold text-[#1d1713]">
-                                  {item.title}
-                                </p>
-                                <span className="rounded-full border border-[#ead8cf] bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8f776b]">
-                                  {item.section}
-                                </span>
-                              </div>
-                              <p className="mt-2 text-sm leading-6 text-[#6f6158]">
-                                {item.detail}
-                              </p>
-                            </div>
-                            <p className="shrink-0 text-xs font-medium uppercase tracking-[0.14em] text-[#9d8a80]">
-                              {item.stampLabel}
-                            </p>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-[24px] border border-[#efe2d8] bg-[#fffaf7] px-3 py-4">
-                  <p className="text-center text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b09d93]">
-                    {t("instances.minimap")}
-                  </p>
-                  <div className="mt-4 flex max-h-[500px] flex-col items-center gap-3 overflow-y-auto">
-                    {timelineItems.map((item, index) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        title={`${item.title} · ${item.stampLabel}`}
-                        onClick={() =>
-                          timelineItemRefs.current[item.id]?.scrollIntoView({
-                            behavior: "smooth",
-                            block: "center",
-                          })
-                        }
-                        className="group flex w-full flex-col items-center gap-1 rounded-[18px] px-2 py-2 hover:bg-white"
-                      >
-                        <span
-                          className={`h-3 w-3 rounded-full ${item.tone} transition-transform group-hover:scale-110`}
-                        />
-                        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#9d8a80]">
-                          {index + 1}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <aside className="space-y-5 xl:sticky xl:top-6 xl:self-start">
-            <section className="app-panel-warm px-5 py-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#b46c50]">
-                    {t("instances.runtimeSummary")}
-                  </p>
-                  <h2 className="mt-2 text-[1.55rem] font-semibold tracking-[-0.04em] text-[#1d1713]">
-                    {t("instances.agentReportedStatus")}
-                  </h2>
-                </div>
-                <RefreshState active={runtimeRefreshing} label={t("instances.fresh")} />
-              </div>
-
-              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                {metricCurves.map((metric) => (
-                  <CurveMetricCard key={metric.label} metric={metric} />
-                ))}
-              </div>
-
-              <div className="mt-4 grid grid-cols-2 gap-3">
-                <SummaryMetricCard
-                  label={t("instances.operatingSystemShort")}
-                  value={formatMetricValue(
-                    firstValue(
-                      osInfo?.os_release,
-                      osInfo?.kernel,
-                      systemInfo?.hostname,
-                      agent?.host_info?.hostname,
-                    ),
-                    t,
-                  )}
-                />
-                <SummaryMetricCard
-                  label={t("instances.openClawShort")}
-                  value={formatMetricValue(runtime?.openclaw_version, t)}
-                />
-                <SummaryMetricCard
-                  label={t("instances.skillsSection")}
-                  value={formatCountValue(skillCount, t)}
-                />
-                <SummaryMetricCard
-                  label={t("instances.agents")}
-                  value={formatCountValue(agentCount, t)}
-                />
-                <SummaryMetricCard
-                  label={t("instances.channels")}
-                  value={formatCountValue(channelCount, t)}
-                />
-              </div>
-
-              <div className="mt-5 rounded-[24px] border border-[#ead8cf] bg-white/82 p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge
-                    label={t("instances.agentStatusLabel", { status: agent?.status || runtime?.agent_status || "offline" })}
-                    status={agent?.status || runtime?.agent_status || "offline"}
-                  />
-                  <StatusBadge
-                    label={t("instances.gatewayStatusLabel", { status: gatewayStatus })}
-                    status={gatewayStatus}
-                  />
-                </div>
-                <dl className="mt-4 grid gap-3 text-sm text-[#4d4039]">
-                  <MetaRow label={t("instances.agentId")} value={agent?.agent_id || t("instances.notAvailable")} />
-                  <MetaRow
-                    label={t("instances.agentVersion")}
-                    value={agent?.agent_version || t("instances.notAvailable")}
-                  />
-                  <MetaRow
-                    label={t("instances.protocol")}
-                    value={agent?.protocol_version || t("instances.notAvailable")}
-                  />
-                  <MetaRow
-                    label={t("instances.lastHeartbeat")}
-                    value={formatDateTime(agent?.last_heartbeat_at, locale, t)}
-                  />
-                  <MetaRow
-                    label={t("instances.lastReport")}
-                    value={formatDateTime(runtime?.last_reported_at, locale, t)}
-                  />
-                  <MetaRow
-                    label={t("instances.podIp")}
-                    value={status?.pod_ip || instance.pod_ip || t("instances.notAvailable")}
-                  />
-                </dl>
-              </div>
-            </section>
-          </aside>
-        </div>
-      </div>
+      {isDedicatedInstance ? renderProWorkspace() : renderLiteWorkspace()}
     </UserLayout>
   );
 };
 
-function SummaryMetricCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-[20px] border border-[#ead8cf] bg-white/82 px-4 py-3.5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#b09d93]">
-        {label}
-      </p>
-      <p className="mt-2.5 text-sm font-semibold leading-6 text-[#1d1713]">
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function CurveMetricCard({ metric }: { metric: MetricCurve }) {
-  return (
-    <div className="overflow-hidden rounded-[22px] border border-[#ead8cf] bg-white/84 shadow-[0_16px_34px_-28px_rgba(72,44,24,0.3)]">
-      <div className="flex items-start justify-between gap-4 px-4 pb-2.5 pt-3.5">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#b09d93]">
-            {metric.label}
-          </p>
-          <p className="mt-1.5 text-[15px] font-semibold text-[#1d1713]">
-            {metric.value}
-          </p>
-        </div>
-        <span
-          className="mt-1 h-2.5 w-2.5 rounded-full"
-          style={{ backgroundColor: metric.accent }}
-        />
-      </div>
-      <div className="px-3">
-        <Sparkline
-          points={metric.points}
-          accent={metric.accent}
-          secondaryPoints={metric.secondaryPoints}
-          secondaryAccent={metric.secondaryAccent}
-          preNormalized={metric.preNormalized}
-        />
-      </div>
-      {metric.legend && metric.legend.length > 0 ? (
-        <div className="flex items-center gap-3 px-4 pt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9b877c]">
-          {metric.legend.map((item) => (
-            <span key={item.label} className="inline-flex items-center gap-1.5">
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: item.accent }}
-              />
-              {item.label}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <p className="px-4 pb-3.5 pt-1.5 text-[11px] leading-5 text-[#7a6d66]">
-        {metric.detail}
-      </p>
-    </div>
-  );
-}
-
-function buildSparklinePath(
-  points: MetricSample[],
-  chartLeft: number,
-  chartBottom: number,
-  chartWidth: number,
-  chartHeight: number,
-  options?: {
-    preNormalized?: boolean;
-  },
-) {
-  const normalized = options?.preNormalized
-    ? points.map((point) => Math.max(0.04, Math.min(point.value / 100, 1)))
-    : normalizePoints(points.map((point) => point.value));
-  if (!points.length) {
-    return {
-      normalized: [],
-      path: "",
-      areaPath: "",
-    };
-  }
-  const path = normalized
-    .map((point, index) => {
-      const x =
-        chartLeft +
-        ((points[index]?.ts ?? 0) / Math.max(METRIC_WINDOW_MS, 1)) * chartWidth;
-      const y = chartBottom - point * chartHeight;
-      return `${index === 0 ? "M" : "L"} ${x} ${y}`;
-    })
-    .join(" ");
-
-  return {
-    normalized,
-    path,
-    areaPath: `${path} L ${chartLeft + chartWidth} ${chartBottom} L ${chartLeft} ${chartBottom} Z`,
-  };
-}
-
-function Sparkline({
-  points,
-  accent,
-  secondaryPoints,
-  secondaryAccent,
-  preNormalized = false,
-}: {
-  points: MetricSample[];
-  accent: string;
-  secondaryPoints?: MetricSample[];
-  secondaryAccent?: string;
-  preNormalized?: boolean;
-}) {
-  const width = 300;
-  const height = 96;
-  const chartLeft = 24;
-  const chartRight = width - 6;
-  const chartTop = 10;
-  const chartBottom = height - 18;
-  const chartWidth = chartRight - chartLeft;
-  const chartHeight = chartBottom - chartTop;
-  const primaryLine = buildSparklinePath(
-    points,
-    chartLeft,
-    chartBottom,
-    chartWidth,
-    chartHeight,
-    { preNormalized },
-  );
-  const secondaryLine =
-    secondaryPoints && secondaryPoints.length > 0
-      ? buildSparklinePath(
-          secondaryPoints,
-          chartLeft,
-          chartBottom,
-          chartWidth,
-          chartHeight,
-          { preNormalized },
-        )
-      : null;
-  const gradientId = `spark-${accent.replace("#", "")}`;
-  const secondaryGradientId = secondaryAccent
-    ? `spark-${secondaryAccent.replace("#", "")}`
-    : null;
-  const xLabels = buildXAxisLabels();
-  const yTicks = [
-    { label: "100", value: 1 },
-    { label: "50", value: 0.5 },
-    { label: "0", value: 0 },
-  ];
-
-  return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      className="h-[92px] w-full"
-      preserveAspectRatio="none"
-    >
-      <defs>
-        <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor={accent} stopOpacity="0.34" />
-          <stop offset="100%" stopColor={accent} stopOpacity="0.02" />
-        </linearGradient>
-        {secondaryAccent && secondaryGradientId ? (
-          <linearGradient id={secondaryGradientId} x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor={secondaryAccent} stopOpacity="0.18" />
-            <stop offset="100%" stopColor={secondaryAccent} stopOpacity="0.01" />
-          </linearGradient>
-        ) : null}
-      </defs>
-      {yTicks.map((tick) => {
-        const y = chartBottom - tick.value * chartHeight;
-        return (
-          <g key={tick.label}>
-            <line
-              x1={chartLeft}
-              x2={chartRight}
-              y1={y}
-              y2={y}
-              stroke="rgba(143,122,112,0.12)"
-              strokeWidth="1"
-            />
-            <text
-              x={chartLeft - 6}
-              y={y + 3}
-              textAnchor="end"
-              fontSize="8"
-              fill="#b09d93"
-            >
-              {tick.label}
-            </text>
-          </g>
-        );
-      })}
-      <line
-        x1={chartLeft}
-        x2={chartRight}
-        y1={chartBottom}
-        y2={chartBottom}
-        stroke="rgba(143,122,112,0.18)"
-        strokeWidth="1.1"
-      />
-      <line
-        x1={chartLeft}
-        x2={chartLeft}
-        y1={chartTop}
-        y2={chartBottom}
-        stroke="rgba(143,122,112,0.18)"
-        strokeWidth="1.1"
-      />
-      <path d={primaryLine.areaPath} fill={`url(#${gradientId})`} stroke="none" />
-      {secondaryLine && secondaryAccent && secondaryGradientId ? (
-        <path
-          d={secondaryLine.areaPath}
-          fill={`url(#${secondaryGradientId})`}
-          stroke="none"
-        />
-      ) : null}
-      <path
-        d={primaryLine.path}
-        fill="none"
-        stroke={accent}
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      {secondaryLine && secondaryAccent ? (
-        <path
-          d={secondaryLine.path}
-          fill="none"
-          stroke={secondaryAccent}
-          strokeWidth="2.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeDasharray="5 4"
-          opacity="1"
-        />
-      ) : null}
-      {xLabels.map((label) => {
-        const x =
-          chartLeft + (label.offsetMs / Math.max(METRIC_WINDOW_MS, 1)) * chartWidth;
-        return (
-          <g key={label.label}>
-            <line
-              x1={x}
-              x2={x}
-              y1={chartBottom}
-              y2={chartBottom + 3}
-              stroke="rgba(143,122,112,0.18)"
-              strokeWidth="1"
-            />
-            <text
-              x={x}
-              y={height - 5}
-              textAnchor="middle"
-              fontSize="8"
-              fill="#b09d93"
-            >
-              {label.label}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
-function buildXAxisLabels() {
-  return [
-    { label: "0", offsetMs: 0 },
-    { label: "1m", offsetMs: 1 * 60 * 1000 },
-    { label: "2m", offsetMs: 2 * 60 * 1000 },
-    { label: "3m", offsetMs: 3 * 60 * 1000 },
-    { label: "4m", offsetMs: 4 * 60 * 1000 },
-    { label: "5m", offsetMs: 5 * 60 * 1000 },
-  ];
-}
-
-function DetailCard({
+function Metric({
   label,
   value,
-  mono = false,
+  detail,
+  percent,
 }: {
   label: string;
   value: string;
-  mono?: boolean;
+  detail: string;
+  percent: number | null;
 }) {
   return (
-    <div className="rounded-[22px] border border-[#efe2d8] bg-[#fffaf7] px-4 py-4">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#b09d93]">
-        {label}
-      </p>
-      <p
-        className={`mt-3 text-sm font-medium leading-6 text-[#1d1713] ${mono ? "break-all font-mono text-[13px]" : ""}`}
-      >
-        {value}
-      </p>
+    <div className="rounded-md border border-slate-200 px-2.5 py-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs text-slate-500">{label}</div>
+          <div className="truncate text-sm font-semibold text-slate-950">{value}</div>
+        </div>
+        <div className="shrink-0 text-right text-[11px] text-slate-400">{detail}</div>
+      </div>
+      {percent !== null && (
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100">
+          <div
+            className="h-full rounded-full bg-indigo-500"
+            style={{ width: formatPercent(percent) }}
+          />
+        </div>
+      )}
     </div>
   );
-}
-
-function MetaRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-4 border-b border-[#f1e5dd] pb-3 last:border-b-0 last:pb-0">
-      <dt className="text-[#8f7a70]">{label}</dt>
-      <dd className="text-right font-medium text-[#1d1713]">{value}</dd>
-    </div>
-  );
-}
-
-function StatusBadge({ label, status }: { label: string; status: string }) {
-  const style = statusStyle(status);
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${style.shell}`}
-    >
-      <span className={`mr-2 h-2 w-2 rounded-full ${style.dot}`} />
-      {label}
-    </span>
-  );
-}
-
-function RefreshState({ active, label }: { active: boolean; label: string }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] transition-colors duration-300 ${
-        active
-          ? "border-[#d9e8f9] bg-[#f5f9ff] text-[#6581a4]"
-          : "border-[#ead8cf] bg-white/82 text-[#7a6d66]"
-      }`}
-    >
-      <span
-        className={`h-2.5 w-2.5 rounded-full transition-colors duration-300 ${
-          active ? "bg-[#93c5fd]" : "bg-[#22c55e]"
-        }`}
-      />
-      {label}
-    </span>
-  );
-}
-
-function buildTimelineItems(
-  instance: Instance,
-  status: InstanceStatus | null,
-  runtime: RuntimeStatus | undefined,
-  agent: AgentInfo | undefined,
-  commands: InstanceRuntimeCommand[],
-  locale: string,
-  t: TranslateFn,
-): TimelineItem[] {
-  const items: TimelineItem[] = [];
-
-  items.push({
-    id: `instance-created-${instance.id}`,
-    title: t("instances.timelineInstanceCreated"),
-    detail: t("instances.timelineInstanceCreatedDetail", {
-      name: instance.name,
-      type: instance.type,
-    }),
-    timestamp: new Date(instance.created_at).getTime(),
-    stampLabel: formatDateTime(instance.created_at, locale, t),
-    tone: "bg-[#6366f1]",
-    section: t("instances.timelineSectionInstance"),
-  });
-
-  if (instance.started_at) {
-    items.push({
-      id: `instance-started-${instance.id}`,
-      title: t("instances.timelineInstanceStarted"),
-      detail: t("instances.timelineInstanceStartedDetail"),
-      timestamp: new Date(instance.started_at).getTime(),
-      stampLabel: formatDateTime(instance.started_at, locale, t),
-      tone: "bg-[#22c55e]",
-      section: t("instances.timelineSectionInfra"),
-    });
-  }
-
-  if (instance.stopped_at) {
-    items.push({
-      id: `instance-stopped-${instance.id}`,
-      title: t("instances.timelineInstanceStopped"),
-      detail: t("instances.timelineInstanceStoppedDetail"),
-      timestamp: new Date(instance.stopped_at).getTime(),
-      stampLabel: formatDateTime(instance.stopped_at, locale, t),
-      tone: "bg-[#94a3b8]",
-      section: t("instances.timelineSectionInfra"),
-    });
-  }
-
-  if (agent?.registered_at) {
-    items.push({
-      id: `agent-registered-${instance.id}`,
-      title: t("instances.timelineAgentRegistered"),
-      detail: t("instances.timelineAgentRegisteredDetail", {
-        agentId: agent.agent_id,
-        protocol: agent.protocol_version,
-      }),
-      timestamp: new Date(agent.registered_at).getTime(),
-      stampLabel: formatDateTime(agent.registered_at, locale, t),
-      tone: "bg-[#3b82f6]",
-      section: t("instances.timelineSectionAgent"),
-    });
-  }
-
-  if (runtime?.last_reported_at) {
-    items.push({
-      id: `runtime-report-${instance.id}`,
-      title: t("instances.timelineRuntimeReported"),
-      detail: t("instances.timelineRuntimeReportedDetail", {
-        gatewayStatus: runtime.openclaw_status,
-        infraStatus: runtime.infra_status,
-      }),
-      timestamp: new Date(runtime.last_reported_at).getTime(),
-      stampLabel: formatDateTime(runtime.last_reported_at, locale, t),
-      tone: "bg-[#f59e0b]",
-      section: t("instances.timelineSectionRuntime"),
-    });
-  }
-
-  if (status?.pod_status && status.created_at) {
-    items.push({
-      id: `pod-status-${instance.id}`,
-      title: t("instances.timelinePodStatusObserved"),
-      detail: t("instances.timelinePodStatusObservedDetail", {
-        status: status.pod_status,
-      }),
-      timestamp: new Date(status.created_at).getTime(),
-      stampLabel: formatDateTime(status.created_at, locale, t),
-      tone: "bg-[#a855f7]",
-      section: t("instances.timelineSectionKubernetes"),
-    });
-  }
-
-  commands.forEach((command) => {
-    const commandTime =
-      command.finished_at ||
-      command.started_at ||
-      command.dispatched_at ||
-      command.issued_at;
-    items.push({
-      id: `command-${command.id}`,
-      title: formatCommandTitle(command.command_type, locale),
-      detail: command.error_message
-        ? t("instances.timelineCommandWithError", {
-            status: command.status,
-            error: command.error_message,
-          })
-        : t("instances.timelineCommandWithIdempotency", {
-            status: command.status,
-            key: command.idempotency_key,
-          }),
-      timestamp: new Date(commandTime).getTime(),
-      stampLabel: formatDateTime(commandTime, locale, t),
-      tone: commandTone(command.status),
-      section: t("instances.timelineSectionCommand"),
-    });
-  });
-
-  return items
-    .filter((item) => Number.isFinite(item.timestamp))
-    .sort((left, right) => right.timestamp - left.timestamp);
-}
-
-function formatDateTime(
-  value: string | undefined,
-  locale: string,
-  t: TranslateFn,
-) {
-  if (!value) {
-    return t("instances.notAvailable");
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString(locale);
-}
-
-function formatCommandTitle(commandType: string, locale: string) {
-  return commandType
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (char) => char.toLocaleUpperCase(locale));
-}
-
-function commandTone(status: string) {
-  switch (status) {
-    case "succeeded":
-      return "bg-[#22c55e]";
-    case "failed":
-    case "timed_out":
-      return "bg-[#ef4444]";
-    case "running":
-    case "dispatched":
-      return "bg-[#3b82f6]";
-    default:
-      return "bg-[#f59e0b]";
-  }
-}
-
-function firstValue(...values: unknown[]) {
-  return values.find((value) => {
-    if (value === null || value === undefined) {
-      return false;
-    }
-    if (typeof value === "string") {
-      return value.trim() !== "";
-    }
-    return true;
-  });
-}
-
-function firstNumber(...values: unknown[]): number | null {
-  for (const value of values) {
-    const parsed = getNumber(value);
-    if (parsed !== null) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function formatCountValue(value: unknown, t: TranslateFn): string {
-  if (Array.isArray(value)) {
-    return `${value.length}`;
-  }
-  if (typeof value === "number") {
-    return `${value}`;
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    return value;
-  }
-  if (value && typeof value === "object") {
-    const count = (value as Record<string, unknown>).count;
-    if (typeof count === "number") {
-      return `${count}`;
-    }
-  }
-  return t("instances.notAvailable");
-}
-
-function asRecord(value: unknown): Record<string, any> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, any>;
-}
-
-function getNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function getArray(value: unknown): any[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function bytesToGB(value: number | null, t: TranslateFn): string {
-  if (value === null) {
-    return t("instances.notAvailable");
-  }
-  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
-}
-
-function percentLabel(value: number | null, t: TranslateFn): string {
-  if (value === null) {
-    return t("instances.notAvailable");
-  }
-  return `${Math.round(value)}%`;
-}
-
-function clampPercent(value: number) {
-  return Math.max(0, Math.min(100, value));
-}
-
-function getCpuUsagePercent(cpu?: CpuInfo): number | null {
-  if (!cpu) {
-    return null;
-  }
-
-  if (
-    cpu.usage_ready !== false &&
-    typeof cpu.usage_percent === "number" &&
-    Number.isFinite(cpu.usage_percent)
-  ) {
-    return clampPercent(cpu.usage_percent);
-  }
-
-  return null;
-}
-
-function asCpuInfo(value: unknown): CpuInfo | undefined {
-  const record = asRecord(value);
-  return record as CpuInfo | undefined;
-}
-
-function formatLoadValue(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value.toFixed(2)
-    : "-";
-}
-
-function buildCpuDetail(cpu: CpuInfo | undefined, t: TranslateFn): string {
-  if (!cpu) {
-    return t("instances.notAvailable");
-  }
-
-  const details = [
-    typeof cpu.used_cores === "number" &&
-    Number.isFinite(cpu.used_cores) &&
-    typeof cpu.available_cores === "number" &&
-    Number.isFinite(cpu.available_cores)
-      ? t("instances.metricCpuUsedCoresDetail", {
-          used: cpu.used_cores.toFixed(2),
-          available: `${cpu.available_cores}`,
-        })
-      : typeof cpu.cores === "number" && Number.isFinite(cpu.cores)
-        ? t("instances.metricCpuCoresDetail", { cores: cpu.cores })
-        : null,
-    cpu.load
-      ? t("instances.metricCpuLoadDetail", {
-          load1: formatLoadValue(cpu.load["1m"]),
-          load5: formatLoadValue(cpu.load["5m"]),
-          load15: formatLoadValue(cpu.load["15m"]),
-        })
-      : null,
-  ].filter(Boolean);
-
-  return details.length > 0 ? details.join(" · ") : t("instances.notAvailable");
-}
-
-function buildMetricCurves({
-  cpuInfo,
-  memoryInfo,
-  diskInfo,
-  networkInfo,
-  metricHistory,
-  sessionStartedAt,
-  t,
-}: {
-  cpuInfo?: Record<string, any>;
-  memoryInfo?: Record<string, any>;
-  diskInfo?: Record<string, any>;
-  networkInfo?: Record<string, any>;
-  metricHistory: MetricHistory;
-  sessionStartedAt: number;
-  t: TranslateFn;
-}): MetricCurve[] {
-  const cpu = asCpuInfo(cpuInfo);
-  const cpuCurrent = getCpuUsagePercent(cpu);
-
-  const memTotal = getNumber(memoryInfo?.mem_total_bytes);
-  const memAvailable = getNumber(memoryInfo?.mem_available_bytes);
-  const memUsedPercent =
-    memTotal && memAvailable !== null
-      ? ((memTotal - memAvailable) / memTotal) * 100
-      : null;
-
-  const diskTotal = getNumber(diskInfo?.root_total_bytes);
-  const diskFree = getNumber(diskInfo?.root_free_bytes);
-  const diskUsedPercent =
-    diskTotal && diskFree !== null
-      ? ((diskTotal - diskFree) / diskTotal) * 100
-      : null;
-
-  const interfaces = [
-    ...getArray(networkInfo?.interfaces),
-    ...getArray(networkInfo?.devices),
-    ...getArray(networkInfo?.links),
-  ];
-  const activeInterfaces = interfaces.filter((item) => {
-    const record = asRecord(item);
-    return Boolean(
-      record?.up ??
-      record?.is_up ??
-      (typeof record?.status === "string" &&
-        record.status.toLowerCase() === "up"),
-    );
-  }).length;
-  const addressCounts = interfaces.map((item) => {
-    const record = asRecord(item);
-    return (
-      getArray(record?.addresses).length ||
-      getArray(record?.addr).length ||
-      getArray(record?.ips).length ||
-      0
-    );
-  });
-  const inlineAddresses =
-    getArray(networkInfo?.addresses).length ||
-    getArray(networkInfo?.ip_addresses).length ||
-    (networkInfo?.primary_ip || networkInfo?.primary_ipv4 ? 1 : 0);
-  const totalAddresses =
-    addressCounts.reduce((sum, count) => sum + count, 0) + inlineAddresses;
-  const interfaceCount =
-    interfaces.length ||
-    getNumber(networkInfo?.interface_count) ||
-    getNumber(networkInfo?.interfaces_count) ||
-    0;
-  const networkTraffic = aggregateNetworkTraffic(networkInfo, interfaces);
-  const cpuSeries = toVisibleSeries(metricHistory.cpu, sessionStartedAt);
-  const memorySeries = toVisibleSeries(metricHistory.memory, sessionStartedAt);
-  const diskSeries = toVisibleSeries(metricHistory.disk, sessionStartedAt);
-  const networkDownSeriesRaw = toVisibleSeries(
-    metricHistory.networkDown,
-    sessionStartedAt,
-  );
-  const networkUpSeriesRaw = toVisibleSeries(metricHistory.networkUp, sessionStartedAt);
-  const networkPeak = Math.max(
-    ...networkDownSeriesRaw.map((sample) => sample.value),
-    ...networkUpSeriesRaw.map((sample) => sample.value),
-    1,
-  );
-  const networkDownSeries = networkDownSeriesRaw.map((sample) => ({
-    ...sample,
-    value: (sample.value / networkPeak) * 100,
-  }));
-  const networkUpSeries = networkUpSeriesRaw.map((sample) => ({
-    ...sample,
-    value: (sample.value / networkPeak) * 100,
-  }));
-  const networkBase =
-    interfaceCount > 0
-      ? Math.min((activeInterfaces / interfaceCount) * 100, 100)
-      : 0;
-  const addressBase = Math.min(totalAddresses * 16, 100);
-
-  return [
-    {
-      label: t("instances.metricCpu"),
-      value:
-        cpuCurrent === null
-          ? t("instances.metricCpuSampling")
-          : `${cpuCurrent.toFixed(0)}%`,
-      detail: buildCpuDetail(cpu, t),
-      accent: "#f97316",
-      points: cpuSeries,
-    },
-    {
-      label: t("instances.metricMemory"),
-      value: percentLabel(memUsedPercent, t),
-      detail: t("instances.metricMemoryDetail", {
-        used: bytesToGB(
-          memTotal !== null && memAvailable !== null ? memTotal - memAvailable : null,
-          t,
-        ),
-        total: bytesToGB(memTotal, t),
-      }),
-      accent: "#3b82f6",
-      points: memorySeries,
-    },
-    {
-      label: t("instances.metricDisk"),
-      value: percentLabel(diskUsedPercent, t),
-      detail: t("instances.metricDiskDetail", {
-        free: bytesToGB(diskFree, t),
-        total: bytesToGB(diskTotal, t),
-      }),
-      accent: "#d97706",
-      points: diskSeries,
-    },
-    {
-      label: t("instances.metricNetwork"),
-      value:
-        formatTrafficPair(networkTraffic, t) ||
-        `${activeInterfaces}/${interfaceCount || 0}`,
-      detail:
-        formatTrafficDetail(networkTraffic, t) ||
-        t("instances.metricNetworkDetail", {
-          addresses: totalAddresses,
-          interfaces: interfaceCount,
-        }),
-      accent: "#14b8a6",
-      secondaryAccent:
-        networkTraffic.down !== null || networkTraffic.up !== null
-          ? "#3b82f6"
-          : undefined,
-      secondaryPoints:
-        networkTraffic.down !== null || networkTraffic.up !== null
-          ? networkUpSeries
-          : undefined,
-      legend:
-        networkTraffic.down !== null || networkTraffic.up !== null
-          ? [
-              { label: t("instances.metricLegendDown"), accent: "#14b8a6" },
-              { label: t("instances.metricLegendUp"), accent: "#3b82f6" },
-            ]
-          : undefined,
-      preNormalized:
-        networkTraffic.down !== null || networkTraffic.up !== null,
-      points:
-        networkTraffic.down !== null || networkTraffic.up !== null
-          ? networkDownSeries
-          : [
-              ...toVisibleSeries(metricHistory.networkDown, sessionStartedAt),
-              {
-                ts: Math.min(METRIC_WINDOW_MS, Date.now() - sessionStartedAt),
-                value: Math.max(networkBase, addressBase, 6),
-              },
-            ],
-    },
-  ];
-}
-
-function aggregateNetworkTraffic(
-  networkInfo: Record<string, any> | undefined,
-  interfaces: any[],
-) {
-  const nonLoopbackInterfaces = interfaces.filter((item) => {
-    const record = asRecord(item);
-    return `${record?.name || ""}`.toLowerCase() !== "lo";
-  });
-  const preferredInterfaces =
-    nonLoopbackInterfaces.length > 0 ? nonLoopbackInterfaces : interfaces;
-
-  const interfaceTotalsDown = preferredInterfaces
-    .map((item) =>
-      firstNumber(
-        asRecord(item)?.rx_bytes,
-        asRecord(item)?.bytes_recv,
-        asRecord(item)?.receive_bytes,
-        asRecord(item)?.ingress_bytes,
-      ),
-    )
-    .filter((value): value is number => value !== null);
-  const interfaceTotalsUp = preferredInterfaces
-    .map((item) =>
-      firstNumber(
-        asRecord(item)?.tx_bytes,
-        asRecord(item)?.bytes_sent,
-        asRecord(item)?.transmit_bytes,
-        asRecord(item)?.egress_bytes,
-      ),
-    )
-    .filter((value): value is number => value !== null);
-
-  if (interfaceTotalsDown.length > 0 || interfaceTotalsUp.length > 0) {
-    return {
-      down: interfaceTotalsDown.length
-        ? interfaceTotalsDown.reduce((sum, value) => sum + value, 0)
-        : null,
-      up: interfaceTotalsUp.length
-        ? interfaceTotalsUp.reduce((sum, value) => sum + value, 0)
-        : null,
-    };
-  }
-
-  const directDown = firstNumber(
-    networkInfo?.rx_rate_bps,
-    networkInfo?.rx_bps,
-    networkInfo?.rx_bytes_per_sec,
-    networkInfo?.rx_rate,
-    networkInfo?.download_bps,
-    networkInfo?.download_rate_bps,
-    networkInfo?.download_rate,
-    networkInfo?.inbound_bps,
-    networkInfo?.inbound_rate_bps,
-    networkInfo?.inbound_rate,
-    networkInfo?.ingress_bps,
-    networkInfo?.ingress_rate_bps,
-    networkInfo?.ingress_rate,
-    networkInfo?.receive_bps,
-    networkInfo?.receive_rate_bps,
-    networkInfo?.receive_rate,
-    networkInfo?.rx_bytes,
-    networkInfo?.download_bytes,
-    networkInfo?.inbound_bytes,
-    networkInfo?.ingress_bytes,
-    networkInfo?.receive_bytes,
-    networkInfo?.bytes_recv,
-  );
-  const directUp = firstNumber(
-    networkInfo?.tx_rate_bps,
-    networkInfo?.tx_bps,
-    networkInfo?.tx_bytes_per_sec,
-    networkInfo?.tx_rate,
-    networkInfo?.upload_bps,
-    networkInfo?.upload_rate_bps,
-    networkInfo?.upload_rate,
-    networkInfo?.outbound_bps,
-    networkInfo?.outbound_rate_bps,
-    networkInfo?.outbound_rate,
-    networkInfo?.egress_bps,
-    networkInfo?.egress_rate_bps,
-    networkInfo?.egress_rate,
-    networkInfo?.transmit_bps,
-    networkInfo?.transmit_rate_bps,
-    networkInfo?.transmit_rate,
-    networkInfo?.tx_bytes,
-    networkInfo?.upload_bytes,
-    networkInfo?.outbound_bytes,
-    networkInfo?.egress_bytes,
-    networkInfo?.transmit_bytes,
-    networkInfo?.bytes_sent,
-  );
-
-  if (directDown !== null || directUp !== null) {
-    return { down: directDown, up: directUp };
-  }
-
-  const perInterfaceDown = preferredInterfaces
-    .map((item) =>
-      firstNumber(
-        asRecord(item)?.rx_rate_bps,
-        asRecord(item)?.rx_bps,
-        asRecord(item)?.rx_bytes_per_sec,
-        asRecord(item)?.rx_rate,
-        asRecord(item)?.download_bps,
-        asRecord(item)?.download_rate_bps,
-        asRecord(item)?.download_rate,
-        asRecord(item)?.ingress_bps,
-        asRecord(item)?.ingress_rate_bps,
-        asRecord(item)?.ingress_rate,
-        asRecord(item)?.receive_bps,
-        asRecord(item)?.receive_rate_bps,
-        asRecord(item)?.receive_rate,
-        asRecord(item)?.rx_bytes,
-        asRecord(item)?.ingress_bytes,
-        asRecord(item)?.receive_bytes,
-        asRecord(item)?.bytes_recv,
-      ),
-    )
-    .filter((value): value is number => value !== null);
-  const perInterfaceUp = preferredInterfaces
-    .map((item) =>
-      firstNumber(
-        asRecord(item)?.tx_rate_bps,
-        asRecord(item)?.tx_bps,
-        asRecord(item)?.tx_bytes_per_sec,
-        asRecord(item)?.tx_rate,
-        asRecord(item)?.upload_bps,
-        asRecord(item)?.upload_rate_bps,
-        asRecord(item)?.upload_rate,
-        asRecord(item)?.egress_bps,
-        asRecord(item)?.egress_rate_bps,
-        asRecord(item)?.egress_rate,
-        asRecord(item)?.transmit_bps,
-        asRecord(item)?.transmit_rate_bps,
-        asRecord(item)?.transmit_rate,
-        asRecord(item)?.tx_bytes,
-        asRecord(item)?.egress_bytes,
-        asRecord(item)?.transmit_bytes,
-        asRecord(item)?.bytes_sent,
-      ),
-    )
-    .filter((value): value is number => value !== null);
-
-  return {
-    down: perInterfaceDown.length
-      ? perInterfaceDown.reduce((sum, value) => sum + value, 0)
-      : null,
-    up: perInterfaceUp.length
-      ? perInterfaceUp.reduce((sum, value) => sum + value, 0)
-      : null,
-  };
-}
-
-function normalizePoints(points: number[]): number[] {
-  const safe = points.map((point) => Math.max(0.04, Math.min(point / 100, 1)));
-  const max = Math.max(...safe, 0.04);
-  return safe.map((point) => Math.max(point / max, 0.08));
-}
-
-function formatBytesCompact(value: number | null, t: TranslateFn): string {
-  if (value === null) {
-    return t("instances.notAvailable");
-  }
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-function formatTrafficPair(traffic: {
-  down: number | null;
-  up: number | null;
-}, t: TranslateFn) {
-  if (traffic.down === null && traffic.up === null) {
-    return "";
-  }
-  return `↓ ${formatBytesCompact(traffic.down, t)} ↑ ${formatBytesCompact(traffic.up, t)}`;
-}
-
-function formatTrafficDetail(traffic: {
-  down: number | null;
-  up: number | null;
-}, t: TranslateFn) {
-  if (traffic.down === null && traffic.up === null) {
-    return "";
-  }
-  return t("instances.metricTrafficDetail", {
-    inbound: formatBytesCompact(traffic.down, t),
-    outbound: formatBytesCompact(traffic.up, t),
-  });
-}
-
-function appendMetricSample(
-  samples: MetricSample[],
-  value: number | null,
-  ts: number,
-): MetricSample[] {
-  if (value === null || !Number.isFinite(value)) {
-    return trimMetricSamples(samples, ts);
-  }
-  return trimMetricSamples(
-    [
-      ...samples,
-      {
-        ts,
-        value: Math.max(0, value),
-      },
-    ],
-    ts,
-  );
-}
-
-function trimMetricSamples(samples: MetricSample[], ts: number): MetricSample[] {
-  const cutoff = ts - METRIC_WINDOW_MS;
-  return samples.filter((sample) => sample.ts >= cutoff);
-}
-
-function toVisibleSeries(
-  samples: MetricSample[],
-  sessionStartedAt: number,
-): MetricSample[] {
-  const now = Date.now();
-  const windowStart = Math.max(sessionStartedAt, now - METRIC_WINDOW_MS);
-  return samples
-    .filter((sample) => sample.ts >= windowStart)
-    .map((sample) => ({
-      ts: Math.max(0, Math.min(sample.ts - windowStart, METRIC_WINDOW_MS)),
-      value: Math.max(0, Math.min(sample.value, 100)),
-    }));
-}
-
-function extractMetricSnapshot(systemInfoValue: unknown) {
-  const systemInfo = asRecord(systemInfoValue);
-  if (!systemInfo) {
-    return null;
-  }
-
-  const cpuInfo = asCpuInfo(systemInfo.cpu);
-  const cpuPercent = getCpuUsagePercent(cpuInfo);
-
-  const memoryInfo = asRecord(systemInfo.memory);
-  const memTotal = getNumber(memoryInfo?.mem_total_bytes);
-  const memAvailable = getNumber(memoryInfo?.mem_available_bytes);
-  const memoryPercent =
-    memTotal && memAvailable !== null
-      ? ((memTotal - memAvailable) / memTotal) * 100
-      : null;
-
-  const diskInfo = asRecord(systemInfo.disk);
-  const diskTotal = getNumber(diskInfo?.root_total_bytes);
-  const diskFree = getNumber(diskInfo?.root_free_bytes);
-  const diskPercent =
-    diskTotal && diskFree !== null
-      ? ((diskTotal - diskFree) / diskTotal) * 100
-      : null;
-
-  const networkInfo = asRecord(systemInfo.network);
-  const interfaces = [
-    ...getArray(networkInfo?.interfaces),
-    ...getArray(networkInfo?.devices),
-    ...getArray(networkInfo?.links),
-  ];
-  const networkTraffic = aggregateNetworkTraffic(networkInfo, interfaces);
-
-  return {
-    cpuPercent,
-    memoryPercent,
-    diskPercent,
-    networkDownTotal: networkTraffic.down,
-    networkUpTotal: networkTraffic.up,
-  };
-}
-
-function formatMetricValue(value: unknown, t: TranslateFn): string {
-  if (value === null || value === undefined) {
-    return t("instances.notAvailable");
-  }
-  if (typeof value === "string") {
-    return value.trim() || t("instances.notAvailable");
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return `${value}`;
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return t("instances.notAvailable");
-    }
-    return value
-      .map((item) => formatMetricValue(item, t))
-      .filter((item) => item !== t("instances.notAvailable"))
-      .join(", ");
-  }
-
-  const record = value as Record<string, unknown>;
-  const label = firstValue(
-    record.label,
-    record.value,
-    record.total,
-    record.total_gb,
-    record.model,
-    record.name,
-    record.version,
-    record.hostname,
-    record.primary_ip,
-  );
-
-  if (label !== undefined) {
-    return formatMetricValue(label, t);
-  }
-
-  try {
-    return JSON.stringify(record);
-  } catch {
-    return t("instances.notAvailable");
-  }
 }
 
 export default InstanceDetailPage;

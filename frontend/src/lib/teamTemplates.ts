@@ -1,4 +1,5 @@
 import type { AgencyAgentProfileKey } from "./agencyAgentProfiles";
+import type { InstanceMode } from "../types/instance";
 
 export type RuntimeType = "openclaw" | "hermes";
 export type ResourcePresetKey = "small" | "medium" | "large" | "custom";
@@ -8,6 +9,7 @@ export type TeamMemberTemplateMember = {
   name: string;
   role: string;
   runtimeType: RuntimeType;
+  instanceMode?: InstanceMode;
   description: string;
   resourcePreset: ResourcePresetKey;
   isLeader: boolean;

@@ -10,6 +10,10 @@ type RiskHit struct {
 	RequestID    *string   `db:"request_id" json:"request_id,omitempty"`
 	UserID       *int      `db:"user_id" json:"user_id,omitempty"`
 	InstanceID   *int      `db:"instance_id" json:"instance_id,omitempty"`
+	InstanceMode *string   `db:"instance_mode" json:"instance_mode,omitempty"`
+	RuntimeType  *string   `db:"runtime_type" json:"runtime_type,omitempty"`
+	GatewayID    *string   `db:"gateway_id" json:"gateway_id,omitempty"`
+	RuntimePodID *int64    `db:"runtime_pod_id" json:"runtime_pod_id,omitempty"`
 	InvocationID *int      `db:"invocation_id" json:"invocation_id,omitempty"`
 	RuleID       string    `db:"rule_id" json:"rule_id"`
 	RuleName     string    `db:"rule_name" json:"rule_name"`

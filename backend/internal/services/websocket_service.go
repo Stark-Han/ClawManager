@@ -1,9 +1,11 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,10 +26,19 @@ var upgrader = websocket.Upgrader{
 type Client struct {
 	ID     int
 	UserID int
+	Role   string
+	Topic  WebSocketTopic
 	Conn   *websocket.Conn
 	Send   chan []byte
 	hub    *Hub
 }
+
+type WebSocketTopic string
+
+const (
+	WebSocketTopicUser         WebSocketTopic = "user"
+	WebSocketTopicRuntimeAdmin WebSocketTopic = "runtime_admin"
+)
 
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
@@ -181,16 +192,59 @@ func (h *Hub) BroadcastToAll(msgType string, data interface{}) {
 	h.broadcast <- msg
 }
 
+func (h *Hub) BroadcastRuntimeAdmin(msgType string, data interface{}) {
+	msg := &Message{
+		Type:      msgType,
+		Data:      data,
+		Timestamp: time.Now(),
+	}
+	h.broadcastRuntimeAdminMessage(msg)
+}
+
+func (h *Hub) broadcastRuntimeAdminMessage(msg *Message) {
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for client := range h.clients {
+		if client.Role == "admin" && client.Topic == WebSocketTopicRuntimeAdmin {
+			clients = append(clients, client)
+		}
+	}
+	h.mu.RUnlock()
+
+	encoded := mustEncode(msg)
+	for _, client := range clients {
+		select {
+		case client.Send <- encoded:
+		default:
+			h.mu.Lock()
+			if _, ok := h.clients[client]; ok {
+				close(client.Send)
+				delete(h.clients, client)
+			}
+			h.mu.Unlock()
+		}
+	}
+}
+
 // ServeWS handles WebSocket connections
 func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID int) {
+	ServeWSWithOptions(hub, w, r, userID, "", WebSocketTopicUser)
+}
+
+func ServeWSWithOptions(hub *Hub, w http.ResponseWriter, r *http.Request, userID int, role string, topic WebSocketTopic) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade WebSocket: %v", err)
 		return
 	}
+	if topic == "" {
+		topic = WebSocketTopicUser
+	}
 
 	client := &Client{
 		UserID: userID,
+		Role:   strings.TrimSpace(role),
+		Topic:  topic,
 		Conn:   conn,
 		Send:   make(chan []byte, 256),
 		hub:    hub,
@@ -201,6 +255,92 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request, userID int) {
 	// Start goroutines for reading and writing
 	go client.writePump()
 	go client.readPump()
+}
+
+func StartRuntimeAdminEventBridge(ctx context.Context, events RuntimeEventService, hub *Hub) {
+	if events == nil || hub == nil {
+		return
+	}
+	go func() {
+		lastID := "$"
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			messages, err := events.Read(ctx, lastID, 5*time.Second)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("runtime admin event bridge read failed: %v", err)
+				sleepOrDone(ctx, time.Second)
+				continue
+			}
+			if len(messages) == 0 {
+				sleepOrDone(ctx, 200*time.Millisecond)
+				continue
+			}
+			for _, message := range messages {
+				if strings.TrimSpace(message.ID) != "" {
+					lastID = message.ID
+				}
+				if msg, ok := runtimeEventWebSocketMessage(message); ok {
+					hub.broadcastRuntimeAdminMessage(msg)
+				}
+			}
+		}
+	}()
+}
+
+func runtimeEventWebSocketMessage(message redisStreamMessage) (*Message, bool) {
+	eventType := strings.TrimSpace(message.Fields["type"])
+	if eventType == "" {
+		var event RuntimeEvent
+		if raw := strings.TrimSpace(message.Fields["event"]); raw != "" && json.Unmarshal([]byte(raw), &event) == nil {
+			eventType = strings.TrimSpace(event.Type)
+			if eventType == "" {
+				return nil, false
+			}
+			return &Message{
+				Type:      eventType,
+				Data:      json.RawMessage(event.Payload),
+				Timestamp: event.CreatedAt,
+			}, true
+		}
+		return nil, false
+	}
+
+	createdAt := time.Now().UTC()
+	if rawCreatedAt := strings.TrimSpace(message.Fields["created_at"]); rawCreatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, rawCreatedAt); err == nil {
+			createdAt = parsed
+		}
+	}
+	var data interface{} = map[string]any{}
+	if rawPayload := strings.TrimSpace(message.Fields["payload"]); rawPayload != "" {
+		if json.Valid([]byte(rawPayload)) {
+			data = json.RawMessage(rawPayload)
+		} else {
+			data = rawPayload
+		}
+	}
+	return &Message{
+		Type:      eventType,
+		Data:      data,
+		Timestamp: createdAt,
+	}, true
+}
+
+func sleepOrDone(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 // readPump pumps messages from the websocket connection to the hub
@@ -277,7 +417,6 @@ func (h *Hub) GetClientCount() int {
 	defer h.mu.RUnlock()
 	return len(h.clients)
 }
-
 
 // Stop gracefully shuts down the hub, closing all client connections.
 func (h *Hub) Stop() {

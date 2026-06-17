@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS risk_hits (
   request_id VARCHAR(100) NULL,
   user_id INT NULL,
   instance_id INT NULL,
+  instance_mode VARCHAR(16) NULL,
+  runtime_type VARCHAR(32) NULL,
+  gateway_id VARCHAR(128) NULL,
+  runtime_pod_id BIGINT NULL,
   invocation_id INT NULL,
   rule_id VARCHAR(100) NOT NULL,
   rule_name VARCHAR(255) NOT NULL,
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS risk_hits (
   INDEX idx_risk_hits_trace_id (trace_id),
   INDEX idx_risk_hits_request_id (request_id),
   INDEX idx_risk_hits_user_id (user_id),
+  INDEX idx_risk_hits_gateway_id (gateway_id),
   INDEX idx_risk_hits_invocation_id (invocation_id),
   INDEX idx_risk_hits_severity (severity),
   INDEX idx_risk_hits_created_at (created_at)

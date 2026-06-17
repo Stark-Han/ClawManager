@@ -61,8 +61,8 @@ INSERT INTO system_image_settings (instance_type, runtime_type, display_name, im
 SELECT
   'openclaw',
   'shell',
-  'OpenClaw Shell',
-  'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-shell:latest',
+  'OpenClaw Lite',
+  'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest',
   TRUE
 WHERE NOT EXISTS (
   SELECT 1

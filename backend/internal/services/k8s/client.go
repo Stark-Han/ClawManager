@@ -29,12 +29,15 @@ const (
 
 // Client wraps the Kubernetes client
 type Client struct {
-	Clientset      kubernetes.Interface
-	Config         *rest.Config
-	Namespace      string
-	StorageClass   string
-	HostPathPrefix string
-	Mode           ConnectionMode
+	Clientset          kubernetes.Interface
+	Config             *rest.Config
+	Namespace          string
+	StorageClass       string
+	HostPathPrefix     string
+	WorkspaceRoot      string
+	WorkspaceNFSServer string
+	WorkspaceNFSPath   string
+	Mode               ConnectionMode
 }
 
 var (
@@ -97,12 +100,15 @@ func Initialize(cfg *config.Config) error {
 	}
 
 	globalClient = &Client{
-		Clientset:      clientset,
-		Config:         restConfig,
-		Namespace:      cfg.GetNamespace(),
-		StorageClass:   cfg.GetStorageClass(),
-		HostPathPrefix: cfg.GetHostPathPrefix(),
-		Mode:           detectedMode,
+		Clientset:          clientset,
+		Config:             restConfig,
+		Namespace:          cfg.GetNamespace(),
+		StorageClass:       cfg.GetStorageClass(),
+		HostPathPrefix:     cfg.GetHostPathPrefix(),
+		WorkspaceRoot:      cfg.Runtime.WorkspaceRoot,
+		WorkspaceNFSServer: cfg.Runtime.WorkspaceNFSServer,
+		WorkspaceNFSPath:   cfg.Runtime.WorkspaceNFSPath,
+		Mode:               detectedMode,
 	}
 
 	return nil

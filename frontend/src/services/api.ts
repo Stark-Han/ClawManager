@@ -11,6 +11,17 @@ const api: AxiosInstance = axios.create({
   },
 });
 
+const AUTH_FLOW_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/refresh'];
+
+function isAuthFlowRequest(url?: string): boolean {
+  if (!url) {
+    return false;
+  }
+
+  const path = url.split('?')[0];
+  return AUTH_FLOW_ENDPOINTS.some((endpoint) => path.endsWith(endpoint));
+}
+
 // Token refresh state
 let isRefreshing = false;
 let refreshSubscribers: ((token: string) => void)[] = [];
@@ -47,7 +58,12 @@ api.interceptors.response.use(
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
     
     // If error is not 401 or request is already retried, reject
-    if (error.response?.status !== 401 || !originalRequest || originalRequest._retry) {
+    if (
+      error.response?.status !== 401 ||
+      !originalRequest ||
+      originalRequest._retry ||
+      isAuthFlowRequest(originalRequest.url)
+    ) {
       return Promise.reject(error);
     }
     

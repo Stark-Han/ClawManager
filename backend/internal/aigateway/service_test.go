@@ -47,7 +47,7 @@ func (s *stubChatSessionService) EnsureSession(sessionID string, userID, instanc
 func TestBuildProviderRequestPreservesToolConfiguration(t *testing.T) {
 	req := ChatCompletionRequest{
 		Model:   "gateway-model",
-		RawBody: []byte(`{"model":"gateway-model","messages":[{"role":"user","content":[{"type":"text","text":"weather in shanghai"}]}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"tool_choice":{"type":"function","function":{"name":"get_weather"}},"stream":true,"stream_options":{"include_usage":false,"custom":"value"},"custom_field":{"nested":[1,2,3]},"session_id":"sess_123","request_id":"req_123","trace_id":"trc_123","instance_id":99}`),
+		RawBody: []byte(`{"model":"gateway-model","messages":[{"role":"user","content":[{"type":"text","text":"weather in shanghai"}]}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"tool_choice":{"type":"function","function":{"name":"get_weather"}},"stream":true,"stream_options":{"include_usage":false,"custom":"value"},"custom_field":{"nested":[1,2,3]},"session_id":"sess_123","request_id":"req_123","trace_id":"trc_123","instance_id":99,"instance_mode":"lite","runtime_type":"gateway","gateway_id":"gw_123","runtime_pod_id":5}`),
 	}
 
 	model := &models.LLMModel{
@@ -95,6 +95,18 @@ func TestBuildProviderRequestPreservesToolConfiguration(t *testing.T) {
 	if _, ok := payload["instance_id"]; ok {
 		t.Fatalf("expected internal instance_id to be stripped")
 	}
+	if _, ok := payload["instance_mode"]; ok {
+		t.Fatalf("expected internal instance_mode to be stripped")
+	}
+	if _, ok := payload["runtime_type"]; ok {
+		t.Fatalf("expected internal runtime_type to be stripped")
+	}
+	if _, ok := payload["gateway_id"]; ok {
+		t.Fatalf("expected internal gateway_id to be stripped")
+	}
+	if _, ok := payload["runtime_pod_id"]; ok {
+		t.Fatalf("expected internal runtime_pod_id to be stripped")
+	}
 	if string(payload["stream_options"]) != `{"include_usage":false,"custom":"value"}` {
 		t.Fatalf("expected stream_options to pass through unchanged, got %s", string(payload["stream_options"]))
 	}
@@ -132,6 +144,48 @@ func TestBuildProviderRequestUsesAnthropicProtocolForLocalModel(t *testing.T) {
 	}
 	if len(payload.Messages) != 1 || payload.Messages[0].Role != "user" {
 		t.Fatalf("expected anthropic user message, got %#v", payload.Messages)
+	}
+}
+
+func TestRuntimeAttributionHelpersPopulateRecords(t *testing.T) {
+	mode := "lite"
+	runtimeType := "gateway"
+	gatewayID := "gw_instance_1"
+	runtimePodID := int64(17)
+	req := ChatCompletionRequest{
+		InstanceMode: &mode,
+		RuntimeType:  &runtimeType,
+		GatewayID:    &gatewayID,
+		RuntimePodID: &runtimePodID,
+	}
+
+	invocation := &models.ModelInvocation{}
+	applyInvocationRuntimeAttribution(invocation, req)
+	if invocation.InstanceMode == nil || *invocation.InstanceMode != mode {
+		t.Fatalf("invocation instance mode not populated")
+	}
+	if invocation.GatewayID == nil || *invocation.GatewayID != gatewayID {
+		t.Fatalf("invocation gateway ID not populated")
+	}
+
+	audit := &models.AuditEvent{}
+	applyAuditRuntimeAttribution(audit, req)
+	if audit.RuntimeType == nil || *audit.RuntimeType != runtimeType {
+		t.Fatalf("audit runtime type not populated")
+	}
+	if audit.RuntimePodID == nil || *audit.RuntimePodID != runtimePodID {
+		t.Fatalf("audit runtime pod ID not populated")
+	}
+
+	cost := &models.CostRecord{}
+	applyCostRuntimeAttribution(cost, req)
+	if cost.GatewayID == nil || *cost.GatewayID != gatewayID {
+		t.Fatalf("cost gateway ID not populated")
+	}
+
+	risk := riskHitAttribution(req)
+	if risk == nil || risk.GatewayID == nil || *risk.GatewayID != gatewayID {
+		t.Fatalf("risk attribution gateway ID not populated")
 	}
 }
 

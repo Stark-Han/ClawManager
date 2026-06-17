@@ -41,6 +41,8 @@ const (
 	teamTaskStaleSweepInterval  = 30 * time.Second
 
 	initialLeaderTaskIntent = "team_bootstrap_introduction"
+	teamTaskCompletionTool  = "team_complete_task"
+	teamTaskReplyTarget     = "clawmanager"
 )
 
 var (
@@ -83,6 +85,8 @@ type CreateTeamMemberRequest struct {
 	MemberID             string              `json:"member_id,omitempty"`
 	Name                 string              `json:"name,omitempty"`
 	Role                 string              `json:"role"`
+	Mode                 string              `json:"mode,omitempty"`
+	InstanceMode         string              `json:"instance_mode,omitempty"`
 	RuntimeType          string              `json:"runtime_type,omitempty"`
 	Description          *string             `json:"description,omitempty"`
 	CPUCores             float64             `json:"cpu_cores,omitempty"`
@@ -186,35 +190,59 @@ type teamService struct {
 	configMapService *k8s.ConfigMapService
 	podService       *k8s.PodService
 
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	mu                  sync.Mutex
-	consumers           map[int]struct{}
-	staleMonitorStarted bool
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	mu                   sync.Mutex
+	consumers            map[int]struct{}
+	staleMonitorStarted  bool
+	runtimeWorkspaceRoot string
 }
 
 type plannedTeamMember struct {
-	Request     CreateTeamMemberRequest
-	MemberKey   string
-	DisplayName string
-	Role        string
-	RuntimeType string
-	IsLeader    bool
+	Request      CreateTeamMemberRequest
+	MemberKey    string
+	DisplayName  string
+	Role         string
+	RuntimeType  string
+	InstanceMode string
+	IsLeader     bool
 }
 
-func NewTeamService(repo repository.TeamRepository, instanceService InstanceService) TeamService {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &teamService{
-		repo:             repo,
-		instanceService:  instanceService,
-		pvcService:       k8s.NewPVCService(),
-		secretService:    k8s.NewSecretService(),
-		configMapService: k8s.NewConfigMapService(),
-		podService:       k8s.NewPodService(),
-		ctx:              ctx,
-		cancel:           cancel,
-		consumers:        map[int]struct{}{},
+type teamRuntimeSecrets struct {
+	RedisURL string
+	Token    string
+}
+
+type TeamServiceOption func(*teamService)
+
+func WithTeamRuntimeWorkspaceRoot(root string) TeamServiceOption {
+	return func(s *teamService) {
+		if strings.TrimSpace(root) != "" {
+			s.runtimeWorkspaceRoot = strings.TrimSpace(root)
+		}
 	}
+}
+
+func NewTeamService(repo repository.TeamRepository, instanceService InstanceService, opts ...TeamServiceOption) TeamService {
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &teamService{
+		repo:                 repo,
+		instanceService:      instanceService,
+		pvcService:           k8s.NewPVCService(),
+		secretService:        k8s.NewSecretService(),
+		configMapService:     k8s.NewConfigMapService(),
+		podService:           k8s.NewPodService(),
+		ctx:                  ctx,
+		cancel:               cancel,
+		consumers:            map[int]struct{}{},
+		runtimeWorkspaceRoot: "/workspaces",
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+	return service
 }
 
 func (s *teamService) Start() {
@@ -309,15 +337,17 @@ func (s *teamService) CreateTeam(userID int, req CreateTeamRequest) (*TeamDetail
 		return nil, s.rollbackTeamCreation(userID, team, err)
 	}
 
-	if err := s.provisionTeamK8s(userID, team, redisURL, sharedStorageGB, strings.TrimSpace(req.StorageClass)); err != nil {
+	runtimeSecrets, err := s.provisionTeamK8s(userID, team, redisURL, sharedStorageGB, strings.TrimSpace(req.StorageClass))
+	if err != nil {
 		return nil, s.rollbackTeamCreation(userID, team, err)
 	}
-	if err := s.upsertTeamRosterConfig(userID, team, memberPlans); err != nil {
+	rosterJSON, err := s.upsertTeamRosterConfig(userID, team, memberPlans)
+	if err != nil {
 		return nil, s.rollbackTeamCreation(userID, team, err)
 	}
 
 	for _, memberPlan := range memberPlans {
-		member, err := s.createTeamMemberInstance(userID, team, memberPlan)
+		member, err := s.createTeamMemberInstance(userID, team, memberPlan, runtimeSecrets, rosterJSON)
 		if err != nil {
 			return nil, s.rollbackTeamCreation(userID, team, err)
 		}
@@ -396,16 +426,89 @@ func (s *teamService) recordInitialLeaderTaskDispatchFailure(teamID int, cause e
 	})
 }
 
-func (s *teamService) provisionTeamK8s(userID int, team *models.Team, redisURL string, sharedStorageGB int, storageClass string) error {
+func buildTeamTaskEnvelope(teamID int, memberKey string, task *models.TeamTask, messageID string, taskPayload map[string]interface{}, memberContext map[string]string, now time.Time) map[string]interface{} {
+	if taskPayload == nil {
+		taskPayload = map[string]interface{}{}
+	}
+	taskID := 0
+	if task != nil {
+		taskID = task.ID
+	}
+	taskRef := fmt.Sprintf("team-%d-task-%d", teamID, taskID)
+	prompt := eventString(taskPayload, "prompt", "goal", "instruction", "instructions")
+	if prompt == "" {
+		rawPayload, _ := marshalJSON(taskPayload)
+		prompt = rawPayload
+	}
+	rawPrompt := prompt
+	prompt = buildTeamRuntimePrompt(prompt, memberContext)
+	envelope := map[string]interface{}{
+		"v":                  1,
+		"messageId":          messageID,
+		"teamId":             strconv.Itoa(teamID),
+		"from":               "clawmanager",
+		"to":                 memberKey,
+		"replyTo":            teamTaskReplyTarget,
+		"requiresCompletion": true,
+		"completionTool":     teamTaskCompletionTool,
+		"resultSink": map[string]interface{}{
+			"type":           "redis_stream",
+			"eventsKey":      teamEventsKey(teamID),
+			"successEvent":   "task_completed",
+			"failureEvent":   "task_failed",
+			"replyEvent":     "reply",
+			"resultField":    "resultMarkdown",
+			"summaryField":   "summary",
+			"artifactField":  "artifactRefs",
+			"completionTool": teamTaskCompletionTool,
+		},
+		"intent":      eventString(taskPayload, "intent"),
+		"taskId":      taskRef,
+		"title":       eventString(taskPayload, "title"),
+		"prompt":      appendTeamTaskCompletionInstruction(prompt),
+		"rawPrompt":   rawPrompt,
+		"contextRefs": normalizeContextRefs(taskPayload["contextRefs"]),
+		"memberContext": memberContext,
+		"systemPrompt":  memberContext["systemPrompt"],
+		"metadata":    taskPayload,
+		"createdAt":   now.Format(time.RFC3339Nano),
+	}
+	if envelope["intent"] == "" {
+		envelope["intent"] = "run_task"
+	}
+	if envelope["title"] == "" {
+		envelope["title"] = fmt.Sprintf("Team task %d", taskID)
+	}
+	return envelope
+}
+
+func appendTeamTaskCompletionInstruction(prompt string) string {
+	base := strings.TrimSpace(prompt)
+	if strings.Contains(base, teamTaskCompletionTool) && strings.Contains(base, "task_completed") {
+		return base
+	}
+	instruction := strings.Join([]string{
+		"Completion contract:",
+		"- When the final result is ready, call team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
+		"- If the task fails, call team_complete_task with status=\"failed\" and an error message.",
+		"- Do not send the final answer as a normal message to clawmanager; ClawManager consumes task_completed/task_failed events from the Team Redis event stream.",
+	}, "\n")
+	if base == "" {
+		return instruction
+	}
+	return base + "\n\n" + instruction
+}
+
+func (s *teamService) provisionTeamK8s(userID int, team *models.Team, redisURL string, sharedStorageGB int, storageClass string) (*teamRuntimeSecrets, error) {
 	ctx := context.Background()
 	pvc, err := s.pvcService.CreateTeamSharedPVC(ctx, userID, team.ID, sharedStorageGB, storageClass)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	secretName := s.pvcService.GetClient().GetTeamSecretName(team.ID)
 	teamToken, err := generatePrefixedToken("team")
 	if err != nil {
-		return fmt.Errorf("failed to generate Team token: %w", err)
+		return nil, fmt.Errorf("failed to generate Team token: %w", err)
 	}
 	if err := s.secretService.UpsertSecret(ctx, userID, secretName, map[string]string{
 		teamRedisURLSecretKey: redisURL,
@@ -415,7 +518,7 @@ func (s *teamService) provisionTeamK8s(userID int, team *models.Team, redisURL s
 		"managed-by": "clawreef",
 		"team-id":    strconv.Itoa(team.ID),
 	}); err != nil {
-		return err
+		return nil, err
 	}
 
 	team.RedisURLSecretName = &secretName
@@ -425,14 +528,29 @@ func (s *teamService) provisionTeamK8s(userID int, team *models.Team, redisURL s
 	team.SharedPVCName = &pvc.Name
 	team.SharedPVCNamespace = &pvc.Namespace
 	team.UpdatedAt = time.Now().UTC()
-	return s.repo.UpdateTeam(team)
+	if err := s.repo.UpdateTeam(team); err != nil {
+		return nil, err
+	}
+	return &teamRuntimeSecrets{RedisURL: redisURL, Token: teamToken}, nil
 }
 
-func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, members []plannedTeamMember) error {
+func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, members []plannedTeamMember) (string, error) {
 	rosterJSON, err := buildTeamRosterConfig(team, members)
 	if err != nil {
-		return err
+		return "", err
 	}
+	data := buildTeamRosterConfigData(rosterJSON, members)
+	if err := s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), data, map[string]string{
+		"app":        "clawreef",
+		"managed-by": "clawreef",
+		"team-id":    strconv.Itoa(team.ID),
+	}); err != nil {
+		return "", err
+	}
+	return rosterJSON, nil
+}
+
+func buildTeamRosterConfigData(rosterJSON string, members []plannedTeamMember) map[string]string {
 	data := map[string]string{
 		teamConfigFileName: rosterJSON,
 	}
@@ -442,11 +560,7 @@ func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, memb
 		}
 		data[teamMemberSoulConfigKey(member.MemberKey)] = buildTeamMemberSoulMarkdown(member)
 	}
-	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), data, map[string]string{
-		"app":        "clawreef",
-		"managed-by": "clawreef",
-		"team-id":    strconv.Itoa(team.ID),
-	})
+	return data
 }
 
 func (s *teamService) teamConfigMapName(teamID int) string {
@@ -457,7 +571,7 @@ func (s *teamService) teamConfigMapName(teamID int) string {
 	return client.GetTeamConfigMapName(teamID)
 }
 
-func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, memberPlan plannedTeamMember) (*models.TeamMember, error) {
+func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, memberPlan plannedTeamMember, runtimeSecrets *teamRuntimeSecrets, rosterJSON string) (*models.TeamMember, error) {
 	now := time.Now().UTC()
 	member := &models.TeamMember{
 		TeamID:       team.ID,
@@ -466,6 +580,7 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 		DisplayName:  memberPlan.DisplayName,
 		Role:         memberPlan.Role,
 		RuntimeType:  memberPlan.RuntimeType,
+		InstanceMode: memberPlan.InstanceMode,
 		Description:  optionalString(strings.TrimSpace(derefTeamString(memberPlan.Request.Description))),
 		Status:       models.TeamMemberStatusCreating,
 		Availability: models.TeamMemberAvailabilityUnknown,
@@ -476,7 +591,7 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 		return nil, err
 	}
 
-	createReq := s.buildTeamMemberInstanceRequest(team, memberPlan)
+	createReq := s.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, runtimeSecrets, rosterJSON)
 	instance, err := s.instanceService.Create(userID, createReq)
 	if err != nil {
 		member.Status = models.TeamMemberStatusFailed
@@ -501,10 +616,36 @@ func (s *teamService) buildTeamMemberInstanceRequests(team *models.Team, memberP
 }
 
 func (s *teamService) buildTeamMemberInstanceRequest(team *models.Team, memberPlan plannedTeamMember) CreateInstanceRequest {
+	return s.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, nil, "")
+}
+
+func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Team, memberPlan plannedTeamMember, runtimeSecrets *teamRuntimeSecrets, rosterJSON string) CreateInstanceRequest {
 	req := memberPlan.Request
+	instanceMode := memberPlan.InstanceMode
+	if instanceMode == "" {
+		instanceMode = InstanceModeLite
+	}
+	runtimeBackendType, _ := RuntimeTypeForInstanceMode(instanceMode)
+	memberEnv := s.teamMemberEnv(team, memberPlan)
+	if instanceMode == InstanceModeLite {
+		memberEnv["CLAWMANAGER_TEAM_SHARED_DIR"] = s.teamRuntimeSharedPath(team)
+	}
+	environmentOverrides := mergeEnvMaps(req.EnvironmentOverrides, memberEnv)
+	if instanceMode == InstanceModeLite && runtimeSecrets != nil {
+		environmentOverrides = mergeEnvMaps(environmentOverrides, map[string]string{
+			teamRedisURLSecretKey: runtimeSecrets.RedisURL,
+			teamTokenSecretKey:    runtimeSecrets.Token,
+		})
+		if strings.TrimSpace(rosterJSON) != "" {
+			environmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] = rosterJSONWithSharedDir(rosterJSON, s.teamRuntimeSharedPath(team))
+		}
+	}
 	return CreateInstanceRequest{
 		Name:                 teamMemberInstanceName(team.Name, team.ID, memberPlan.MemberKey),
 		Type:                 memberPlan.RuntimeType,
+		Mode:                 instanceMode,
+		InstanceMode:         instanceMode,
+		RuntimeType:          runtimeBackendType,
 		CPUCores:             defaultFloat(req.CPUCores, 2),
 		MemoryGB:             defaultInt(req.MemoryGB, 4),
 		DiskGB:               defaultInt(req.DiskGB, 20),
@@ -514,11 +655,11 @@ func (s *teamService) buildTeamMemberInstanceRequest(team *models.Team, memberPl
 		OSVersion:            "latest",
 		ImageRegistry:        req.ImageRegistry,
 		ImageTag:             req.ImageTag,
-		EnvironmentOverrides: req.EnvironmentOverrides,
+		EnvironmentOverrides: environmentOverrides,
 		StorageClass:         derefTeamString(team.StorageClass),
 		OpenClawConfigPlan:   req.OpenClawConfigPlan,
 		Team: &TeamInstanceConfig{
-			Environment:      s.teamMemberEnv(team, memberPlan),
+			Environment:      memberEnv,
 			SecretName:       derefTeamString(team.TeamTokenSecretName),
 			SharedPVCName:    derefTeamString(team.SharedPVCName),
 			SharedMountPath:  team.SharedMountPath,
@@ -530,6 +671,13 @@ func (s *teamService) buildTeamMemberInstanceRequest(team *models.Team, memberPl
 			SharedUmask:      teamSharedUmask,
 		},
 	}
+}
+
+func (s *teamService) teamRuntimeSharedPath(team *models.Team) string {
+	if team == nil {
+		return k8s.TeamSharedWorkspacePath(s.runtimeWorkspaceRoot, 0, 0)
+	}
+	return k8s.TeamSharedWorkspacePath(s.runtimeWorkspaceRoot, team.UserID, team.ID)
 }
 
 func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember) map[string]string {
@@ -1026,38 +1174,9 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		}
 	}
 	now := time.Now().UTC()
-	rawPrompt := eventString(taskPayload, "prompt", "goal", "instruction", "instructions")
 	memberInstance, _ := s.teamMemberInstance(member)
 	memberContext := buildTeamMemberTaskContext(member, memberInstance)
-	runtimePrompt := buildTeamRuntimePrompt(rawPrompt, memberContext)
-	envelope := map[string]interface{}{
-		"v":             1,
-		"messageId":     messageID,
-		"teamId":        strconv.Itoa(teamID),
-		"from":          "clawmanager",
-		"to":            member.MemberKey,
-		"intent":        eventString(taskPayload, "intent"),
-		"taskId":        fmt.Sprintf("team-%d-task-%d", teamID, task.ID),
-		"title":         eventString(taskPayload, "title"),
-		"prompt":        runtimePrompt,
-		"rawPrompt":     rawPrompt,
-		"contextRefs":   normalizeContextRefs(taskPayload["contextRefs"]),
-		"memberContext": memberContext,
-		"systemPrompt":  memberContext["systemPrompt"],
-		"metadata":      taskPayload,
-		"createdAt":     now.Format(time.RFC3339Nano),
-	}
-	if envelope["intent"] == "" {
-		envelope["intent"] = "run_task"
-	}
-	if envelope["title"] == "" {
-		envelope["title"] = fmt.Sprintf("Team task %d", task.ID)
-	}
-	if envelope["prompt"] == "" {
-		rawPayload, _ := marshalJSON(taskPayload)
-		envelope["prompt"] = buildTeamRuntimePrompt(rawPayload, memberContext)
-		envelope["rawPrompt"] = rawPayload
-	}
+	envelope := buildTeamTaskEnvelope(teamID, member.MemberKey, task, messageID, taskPayload, memberContext, now)
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode task envelope: %w", err)
@@ -1443,9 +1562,26 @@ func (s *teamService) refreshTeamRosterConfig(userID int, team *models.Team) err
 	if err != nil {
 		return err
 	}
-	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), map[string]string{
+	configData := map[string]string{
 		teamConfigFileName: rosterJSON,
-	}, map[string]string{
+	}
+	for _, member := range activeTeamMembers(members) {
+		if member.RuntimeType != "hermes" {
+			continue
+		}
+		configData[teamMemberSoulConfigKey(member.MemberKey)] = buildTeamMemberSoulMarkdown(plannedTeamMember{
+			Request: CreateTeamMemberRequest{
+				Description: member.Description,
+			},
+			MemberKey:    member.MemberKey,
+			DisplayName:  member.DisplayName,
+			Role:         member.Role,
+			RuntimeType:  member.RuntimeType,
+			InstanceMode: member.InstanceMode,
+			IsLeader:     isTeamLeaderRole(member.Role),
+		})
+	}
+	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), configData, map[string]string{
 		"app":        "clawreef",
 		"managed-by": "clawreef",
 		"team-id":    strconv.Itoa(team.ID),
@@ -1844,6 +1980,7 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 		task = found
 	}
+	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task)
 
 	payloadJSON, err := marshalOptionalJSON(payload)
 	if err != nil {
@@ -1929,6 +2066,35 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 	}
 	return nil
+}
+
+func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface{}, task *models.TeamTask) string {
+	if task == nil || !strings.EqualFold(strings.TrimSpace(eventType), "reply") {
+		return eventType
+	}
+	if !eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") {
+		return eventType
+	}
+	if !teamEventHasBody(payload) {
+		return eventType
+	}
+	payload["originalEvent"] = eventType
+	payload["event"] = "task_completed"
+	payload["type"] = "task_completed"
+	payload["status"] = "succeeded"
+	payload["availability"] = models.TeamMemberAvailabilityIdle
+	payload["runtimeStatus"] = "succeeded"
+	if eventString(payload, "resultMarkdown") == "" {
+		if text := eventString(payload, "text", "result", "summary"); text != "" {
+			payload["resultMarkdown"] = text
+		}
+	}
+	if eventString(payload, "summary") == "" {
+		if text := eventString(payload, "text", "resultMarkdown", "result"); text != "" {
+			payload["summary"] = text
+		}
+	}
+	return "task_completed"
 }
 
 func (s *teamService) enrichOutboundEventFromInbox(teamID int, bus *redisBus, payload map[string]interface{}, messageID string) (map[string]interface{}, error) {
@@ -2174,6 +2340,36 @@ func eventString(payload map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func eventBool(payload map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case bool:
+			return typed
+		case string:
+			switch strings.ToLower(strings.TrimSpace(typed)) {
+			case "1", "true", "yes", "y", "on":
+				return true
+			case "0", "false", "no", "n", "off":
+				return false
+			}
+		case float64:
+			return typed != 0
+		case int:
+			return typed != 0
+		default:
+			text := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", typed)))
+			if text == "true" || text == "yes" || text == "1" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[string]interface{}, eventType string) {
@@ -2458,6 +2654,10 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 		if err != nil {
 			return nil, err
 		}
+		instanceMode, err := normalizeTeamMemberInstanceMode(memberReq.Mode, memberReq.InstanceMode)
+		if err != nil {
+			return nil, err
+		}
 
 		isLeader := memberReq.IsLeader || isTeamLeaderRole(role)
 		if isLeader {
@@ -2469,12 +2669,13 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 			displayName = fmt.Sprintf("%s-%s", teamName, memberKey)
 		}
 		plans = append(plans, plannedTeamMember{
-			Request:     memberReq,
-			MemberKey:   memberKey,
-			DisplayName: displayName,
-			Role:        role,
-			RuntimeType: runtimeType,
-			IsLeader:    isLeader,
+			Request:      memberReq,
+			MemberKey:    memberKey,
+			DisplayName:  displayName,
+			Role:         role,
+			RuntimeType:  runtimeType,
+			InstanceMode: instanceMode,
+			IsLeader:     isLeader,
 		})
 	}
 	if leaderCount != 1 {
@@ -2537,6 +2738,22 @@ func normalizeTeamMemberRuntimeType(raw string) (string, error) {
 	}
 }
 
+func normalizeTeamMemberInstanceMode(rawMode, rawInstanceMode string) (string, error) {
+	if mode, ok := NormalizeInstanceMode(rawMode); ok {
+		return mode, nil
+	}
+	if strings.TrimSpace(rawMode) != "" {
+		return "", fmt.Errorf("unsupported team member instance mode: %s", rawMode)
+	}
+	if mode, ok := NormalizeInstanceMode(rawInstanceMode); ok {
+		return mode, nil
+	}
+	if strings.TrimSpace(rawInstanceMode) != "" {
+		return "", fmt.Errorf("unsupported team member instance mode: %s", rawInstanceMode)
+	}
+	return InstanceModeLite, nil
+}
+
 func normalizeTeamMemberRole(raw string, isLeader bool) string {
 	role := strings.TrimSpace(raw)
 	if isLeader || isTeamLeaderRole(role) {
@@ -2583,12 +2800,13 @@ type teamRosterConfig struct {
 }
 
 type teamRosterMember struct {
-	MemberID    string `json:"memberId"`
-	Role        string `json:"role"`
-	RuntimeType string `json:"runtimeType"`
-	DisplayName string `json:"displayName"`
-	Description string `json:"description,omitempty"`
-	IsLeader    bool   `json:"isLeader"`
+	MemberID     string `json:"memberId"`
+	Role         string `json:"role"`
+	RuntimeType  string `json:"runtimeType"`
+	InstanceMode string `json:"instanceMode"`
+	DisplayName  string `json:"displayName"`
+	Description  string `json:"description,omitempty"`
+	IsLeader     bool   `json:"isLeader"`
 }
 
 type teamRosterRedis struct {
@@ -2615,18 +2833,36 @@ func buildTeamRosterConfig(team *models.Team, members []plannedTeamMember) (stri
 			config.LeaderMemberID = member.MemberKey
 		}
 		config.Members = append(config.Members, teamRosterMember{
-			MemberID:    member.MemberKey,
-			Role:        member.Role,
-			RuntimeType: member.RuntimeType,
-			DisplayName: member.DisplayName,
-			Description: derefTeamString(member.Request.Description),
-			IsLeader:    member.IsLeader,
+			MemberID:     member.MemberKey,
+			Role:         member.Role,
+			RuntimeType:  member.RuntimeType,
+			InstanceMode: member.InstanceMode,
+			DisplayName:  member.DisplayName,
+			Description:  derefTeamString(member.Request.Description),
+			IsLeader:     member.IsLeader,
 		})
 	}
 	if config.LeaderMemberID == "" {
 		return "", fmt.Errorf("team must include exactly one leader")
 	}
 	return marshalJSON(config)
+}
+
+func rosterJSONWithSharedDir(rosterJSON, sharedDir string) string {
+	sharedDir = strings.TrimSpace(sharedDir)
+	if sharedDir == "" {
+		return rosterJSON
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(rosterJSON), &payload); err != nil {
+		return rosterJSON
+	}
+	payload["sharedDir"] = sharedDir
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return rosterJSON
+	}
+	return string(raw)
 }
 
 func buildTeamRosterConfigFromMembers(team *models.Team, members []models.TeamMember) (string, error) {
@@ -2648,16 +2884,21 @@ func buildTeamRosterConfigFromMembers(team *models.Team, members []models.TeamMe
 		if runtimeType == "" {
 			runtimeType = "openclaw"
 		}
+		instanceMode := strings.TrimSpace(member.InstanceMode)
+		if instanceMode == "" {
+			instanceMode = InstanceModeLite
+		}
 		if isLeader {
 			config.LeaderMemberID = member.MemberKey
 		}
 		config.Members = append(config.Members, teamRosterMember{
-			MemberID:    member.MemberKey,
-			Role:        member.Role,
-			RuntimeType: runtimeType,
-			DisplayName: member.DisplayName,
-			Description: derefTeamString(member.Description),
-			IsLeader:    isLeader,
+			MemberID:     member.MemberKey,
+			Role:         member.Role,
+			RuntimeType:  runtimeType,
+			InstanceMode: instanceMode,
+			DisplayName:  member.DisplayName,
+			Description:  derefTeamString(member.Description),
+			IsLeader:     isLeader,
 		})
 	}
 	if config.LeaderMemberID == "" {

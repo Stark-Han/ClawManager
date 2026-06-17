@@ -27,9 +27,19 @@ func (h *WebSocketHandler) HandleWebSocket(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
+	roleRaw, _ := c.Get("userRole")
+	role, _ := roleRaw.(string)
+	topic := services.WebSocketTopicUser
+	if c.Query("topic") == string(services.WebSocketTopicRuntimeAdmin) {
+		if role != "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+			return
+		}
+		topic = services.WebSocketTopicRuntimeAdmin
+	}
 
 	// Upgrade HTTP connection to WebSocket
-	services.ServeWS(h.hub, c.Writer, c.Request, userID.(int))
+	services.ServeWSWithOptions(h.hub, c.Writer, c.Request, userID.(int), role, topic)
 }
 
 // GetConnectionCount returns the number of active WebSocket connections

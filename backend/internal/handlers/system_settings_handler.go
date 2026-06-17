@@ -19,7 +19,7 @@ type SystemSettingsHandler struct {
 type UpsertSystemImageSettingRequest struct {
 	ID           int    `json:"id,omitempty"`
 	InstanceType string `json:"instance_type" binding:"required"`
-	RuntimeType  string `json:"runtime_type" binding:"omitempty,oneof=desktop shell"`
+	RuntimeType  string `json:"runtime_type" binding:"omitempty,oneof=desktop gateway shell"`
 	DisplayName  string `json:"display_name"`
 	Image        string `json:"image" binding:"required"`
 }

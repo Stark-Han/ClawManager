@@ -9,6 +9,7 @@ import (
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -17,6 +18,7 @@ type SyncService struct {
 	instanceRepo         repository.InstanceRepository
 	runtimeStatusService InstanceRuntimeStatusService
 	podService           *k8s.PodService
+	deploymentService    *k8s.InstanceDeploymentService
 	interval             time.Duration
 	stopChan             chan struct{}
 }
@@ -27,6 +29,7 @@ func NewSyncService(instanceRepo repository.InstanceRepository, runtimeStatusSer
 		instanceRepo:         instanceRepo,
 		runtimeStatusService: runtimeStatusService,
 		podService:           k8s.NewPodService(),
+		deploymentService:    k8s.NewInstanceDeploymentService(),
 		interval:             5 * time.Second, // Sync every 5 seconds for more responsive status updates
 		stopChan:             make(chan struct{}),
 	}
@@ -96,6 +99,15 @@ func (s *SyncService) syncAllInstances() {
 
 // syncInstance synchronizes a single instance's state
 func (s *SyncService) syncInstance(ctx context.Context, instance *models.Instance) {
+	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		s.updateInfraStatus(instance.ID, instance.Status)
+		return
+	}
+	if instanceUsesDesktopRuntime(instance) {
+		s.syncDeploymentInstance(ctx, instance)
+		return
+	}
+
 	// Check if pod exists in K8s
 	pod, err := s.podService.GetPod(ctx, instance.UserID, instance.ID)
 	if err != nil {
@@ -196,6 +208,73 @@ func (s *SyncService) syncInstance(ctx context.Context, instance *models.Instanc
 	}
 }
 
+func (s *SyncService) syncDeploymentInstance(ctx context.Context, instance *models.Instance) {
+	deployment, err := s.deploymentService.GetDeployment(ctx, instance.UserID, instance.ID)
+	if err != nil {
+		if instance.Status == "running" || instance.Status == "creating" {
+			nextStatus := "stopped"
+			if instance.Status == "creating" {
+				nextStatus = "error"
+			}
+			fmt.Printf("Instance %d marked as %s but deployment not found in K8s, updating status to %s\n",
+				instance.ID, instance.Status, nextStatus)
+			instance.Status = nextStatus
+			instance.PodName = nil
+			instance.PodNamespace = nil
+			instance.PodIP = nil
+			instance.UpdatedAt = time.Now()
+			if err := s.instanceRepo.Update(instance); err != nil {
+				fmt.Printf("Error updating instance %d status: %v\n", instance.ID, err)
+			} else {
+				s.updateInfraStatus(instance.ID, nextStatus)
+				GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+			}
+		}
+		return
+	}
+
+	desiredStatus := mapDeploymentToInstanceStatus(deployment)
+	needsUpdate := false
+	if instance.Status != desiredStatus {
+		fmt.Printf("Instance %d: Deployment replicas=%d available=%d but instance status is %s, updating to %s\n",
+			instance.ID, desiredReplicas(deployment), deployment.Status.AvailableReplicas, instance.Status, desiredStatus)
+		instance.Status = desiredStatus
+		needsUpdate = true
+	}
+	s.updateInfraStatus(instance.ID, desiredStatus)
+
+	if pod, podErr := s.deploymentService.GetActivePod(ctx, instance.UserID, instance.ID); podErr == nil && pod != nil {
+		if pod.Status.PodIP != "" && (instance.PodIP == nil || *instance.PodIP != pod.Status.PodIP) {
+			instance.PodIP = &pod.Status.PodIP
+			needsUpdate = true
+		}
+		if instance.PodName == nil || *instance.PodName != pod.Name {
+			instance.PodName = &pod.Name
+			needsUpdate = true
+		}
+		if instance.PodNamespace == nil || *instance.PodNamespace != pod.Namespace {
+			instance.PodNamespace = &pod.Namespace
+			needsUpdate = true
+		}
+	} else if desiredStatus == "stopped" {
+		if instance.PodName != nil || instance.PodNamespace != nil || instance.PodIP != nil {
+			instance.PodName = nil
+			instance.PodNamespace = nil
+			instance.PodIP = nil
+			needsUpdate = true
+		}
+	}
+
+	if needsUpdate {
+		instance.UpdatedAt = time.Now()
+		if err := s.instanceRepo.Update(instance); err != nil {
+			fmt.Printf("Error updating instance %d: %v\n", instance.ID, err)
+		} else {
+			GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+		}
+	}
+}
+
 func (s *SyncService) updateInfraStatus(instanceID int, instanceStatus string) {
 	if s.runtimeStatusService == nil {
 		return
@@ -241,6 +320,26 @@ func mapPodToInstanceStatus(pod *corev1.Pod) string {
 	default:
 		return "creating"
 	}
+}
+
+func mapDeploymentToInstanceStatus(deployment *appsv1.Deployment) string {
+	if deployment == nil {
+		return "error"
+	}
+	if desiredReplicas(deployment) == 0 {
+		return "stopped"
+	}
+	if deployment.Status.AvailableReplicas > 0 {
+		return "running"
+	}
+	return "creating"
+}
+
+func desiredReplicas(deployment *appsv1.Deployment) int32 {
+	if deployment == nil || deployment.Spec.Replicas == nil {
+		return 1
+	}
+	return *deployment.Spec.Replicas
 }
 
 func isPodReady(pod *corev1.Pod) bool {
