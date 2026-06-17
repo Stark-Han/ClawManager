@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Edit these values before deploying, or override them with environment vars:
 #   TENANT_SUFFIX=-hxc NODE_PORT=32443 APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-profiles-pvfix-20260609 ./clawmanager-apply.sh
+#   OPENCLAW_RUNTIME_IMAGE=10.130.14.23:5000/openclaw-lite:latest HERMES_RUNTIME_IMAGE=10.130.14.23:5000/hermes-lite:latest ./clawmanager-apply.sh
 #
 # TENANT_SUFFIX examples:
 #   empty = clawmanager-system
@@ -10,6 +11,8 @@ set -euo pipefail
 TENANT_SUFFIX="${TENANT_SUFFIX--hxc}"
 NODE_PORT="${NODE_PORT:-32443}"
 APP_IMAGE="${APP_IMAGE:-10.130.14.23:5000/clawmanager-hxc-app:team-profiles-pvfix-20260609}"
+OPENCLAW_RUNTIME_IMAGE="${OPENCLAW_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest}"
+HERMES_RUNTIME_IMAGE="${HERMES_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="${1:-${ROOT}/clawmanager-tenant.yaml}"
@@ -27,5 +30,5 @@ if [[ ! -f "${MANIFEST}" ]]; then
   exit 1
 fi
 
-sed "s|{TENANT_SUFFIX}|${TENANT_SUFFIX}|g;s|{NODE_PORT}|${NODE_PORT}|g;s|{APP_IMAGE}|${APP_IMAGE}|g" \
+sed "s|{TENANT_SUFFIX}|${TENANT_SUFFIX}|g;s|{NODE_PORT}|${NODE_PORT}|g;s|{APP_IMAGE}|${APP_IMAGE}|g;s|{OPENCLAW_RUNTIME_IMAGE}|${OPENCLAW_RUNTIME_IMAGE}|g;s|{HERMES_RUNTIME_IMAGE}|${HERMES_RUNTIME_IMAGE}|g" \
   "${MANIFEST}" | kubectl apply -f -
