@@ -1283,7 +1283,7 @@ spec:
         - name: workspaces
           nfs:
             server: workspace-store.clawmanager{TENANT_SUFFIX}-system.svc.cluster.local
-            path: /exports/workspaces
+            path: /
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1371,7 +1371,7 @@ spec:
         - name: workspaces
           nfs:
             server: workspace-store.clawmanager{TENANT_SUFFIX}-system.svc.cluster.local
-            path: /exports/workspaces
+            path: /
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1470,7 +1470,7 @@ spec:
         - name: workspaces
           nfs:
             server: workspace-store.clawmanager{TENANT_SUFFIX}-system.svc.cluster.local
-            path: /exports/workspaces
+            path: /
 ---
 apiVersion: v1
 kind: Service

@@ -48,12 +48,12 @@ if kubectl -n "${SYSTEM_NAMESPACE}" get svc workspace-store >/dev/null 2>&1; the
     echo "Patching workspace NFS server to workspace-store ClusterIP: ${WORKSPACE_STORE_IP}"
 
     kubectl -n "${SYSTEM_NAMESPACE}" patch deployment clawmanager-app --type=strategic -p \
-      "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"clawmanager-app\",\"env\":[{\"name\":\"RUNTIME_WORKSPACE_NFS_SERVER\",\"value\":\"${WORKSPACE_STORE_IP}\"}]}],\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/exports/workspaces\"}}]}}}}"
+      "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"clawmanager-app\",\"env\":[{\"name\":\"RUNTIME_WORKSPACE_NFS_SERVER\",\"value\":\"${WORKSPACE_STORE_IP}\"}]}],\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/\"}}]}}}}"
 
     for deployment in openclaw-runtime hermes-runtime; do
       if kubectl -n "${SYSTEM_NAMESPACE}" get deployment "${deployment}" >/dev/null 2>&1; then
         kubectl -n "${SYSTEM_NAMESPACE}" patch deployment "${deployment}" --type=strategic -p \
-          "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/exports/workspaces\"}}]}}}}"
+          "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/\"}}]}}}}"
       fi
     done
   fi
