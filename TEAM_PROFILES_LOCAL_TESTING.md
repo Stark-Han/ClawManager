@@ -1,228 +1,204 @@
-# Team Profiles 本地测试与重启流程
+# Team Profiles 本地测试与启动说明
 
-本文档用于记录本地测试 Team 角色模板、Team 执行过程面板时的操作步骤。
+本文记录本地 `kind + localhost:30443` 测试 Team 角色模板、Team 群聊、Execution Kanban、共享文件浏览器等功能时的正确启动方式。
 
-kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
+## 当前结论
 
-## 当前测试方式
+本地测试使用的是：
 
-保留原始部署文件不动：
+- 完整基础部署：[deployments/k8s/clawmanager.yaml](D:\test\ClawManager-2\deployments\k8s\clawmanager.yaml)
+- 本地 app 镜像覆盖：[deployments/k8s/clawmanager-team-profiles-test.yaml](D:\test\ClawManager-2\deployments\k8s\clawmanager-team-profiles-test.yaml)
 
-```powershell
-deployments/k8s/clawmanager.yaml
-```
+`clawmanager-team-profiles-test.yaml` 只用于把 `clawmanager-app` 镜像切换成本地构建的 `clawmanager:team-profiles-test`。它不会替代完整基础部署。
 
-使用测试覆盖文件只替换 ClawManager app 镜像：
+合并 upstream 后，Team 默认走新的 `Lite` runtime pool 逻辑。也就是说，基础部署里必须存在以下资源：
 
-```powershell
-deployments/k8s/clawmanager-team-profiles-test.yaml
-```
+- `workspace-store`
+- `openclaw-runtime`
+- `hermes-runtime`
+- `clawmanager-team-redis`
+- `clawmanager-app` 中的 `RUNTIME_*` 环境变量
+- `clawmanager-app` 的 `/workspaces` NFS 挂载
 
-这只会更新 ClawManager 前端/后端容器，不会更改 OpenClaw/Hermes 成员运行镜像。
+如果只 apply 旧的 test override，或者 test override 把这些字段覆盖掉，Team 实例会一直停在 `Starting`。
 
-## 第一次部署
+## 这次修复了什么
 
-如果集群里还没有安装 ClawManager，先应用原始完整 YAML：
+已更新 [deployments/k8s/clawmanager-team-profiles-test.yaml](D:\test\ClawManager-2\deployments\k8s\clawmanager-team-profiles-test.yaml)，补齐 upstream 新 runtime pool 需要的 app 配置：
 
-```powershell
-cd D:\test\ClawManager-2
-kubectl apply -f deployments/k8s/clawmanager.yaml
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-```
+- `PLATFORM_REDIS_URL`
+- `TEAM_REDIS_URL`
+- `RUNTIME_NAMESPACE`
+- `RUNTIME_WORKSPACE_ROOT`
+- `RUNTIME_WORKSPACE_NFS_SERVER`
+- `RUNTIME_WORKSPACE_NFS_PATH`
+- `RUNTIME_MAX_GATEWAYS_PER_POD`
+- `RUNTIME_GATEWAY_PORT_START`
+- `RUNTIME_GATEWAY_PORT_END`
+- `RUNTIME_SCHEDULER_ENABLED`
+- `RUNTIME_HEARTBEAT_TIMEOUT`
+- `RUNTIME_AGENT_CONTROL_TOKEN`
+- `RUNTIME_AGENT_REPORT_TOKEN`
+- `OPENCLAW_GATEWAY_TOKEN`
+- `/workspaces` NFS volume mount
 
-如果 ClawManager 已经在运行，不需要重复执行这一步。
+也就是说，现在 test YAML 仍然只覆盖 app 镜像，但不会再把 runtime pool 必需配置删掉。
 
-## 构建本地 ClawManager 测试镜像
+## 正确启动流程
 
 必须在项目根目录执行，因为 Dockerfile 在根目录：
 
 ```powershell
 cd D:\test\ClawManager-2
+```
+
+构建本地 ClawManager 镜像：
+
+```powershell
 docker build -t clawmanager:team-profiles-test .
 ```
 
-如果在 `deployments/k8s` 目录执行 `docker build ... .` 会失败，因为那里没有 Dockerfile。
-
-## kind 集群加载镜像
-
-当前集群节点名类似 `my-cluster-control-plane`，通常是 kind 集群。
-
-kind 看不到本机 Docker 镜像，需要手动加载：
+把镜像加载进 kind 集群：
 
 ```powershell
 kind load docker-image clawmanager:team-profiles-test --name my-cluster
 ```
 
-如果集群名不是 `my-cluster`，查看：
+先 apply 完整基础部署。合并 upstream 后，这一步会创建 runtime pool 相关资源：
 
 ```powershell
-kind get clusters
+kubectl apply -f deployments/k8s/clawmanager.yaml
 ```
 
-然后把 `--name my-cluster` 换成实际名称。
-
-## 应用测试 YAML
+再 apply 本地测试覆盖文件：
 
 ```powershell
 kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
+```
+
+等待 app 重启完成：
+
+```powershell
 kubectl -n clawmanager-system rollout status deployment/clawmanager-app
 ```
 
-如果卡在：
+如果你已经 apply 过 test YAML，但想强制重启：
+
+```powershell
+kubectl -n clawmanager-system rollout restart deployment/clawmanager-app
+kubectl -n clawmanager-system rollout status deployment/clawmanager-app
+```
+
+启动端口转发：
+
+```powershell
+kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
+```
+
+浏览器打开：
 
 ```text
-old replicas are pending termination
+https://localhost:30443
 ```
 
-先看 Pod：
-
-```powershell
-kubectl -n clawmanager-system get pods -l app=clawmanager-app -o wide
-```
-
-如果新 Pod 是 `ImagePullBackOff`，说明镜像没有加载进 kind：
-
-```powershell
-kind load docker-image clawmanager:team-profiles-test --name my-cluster
-kubectl -n clawmanager-system delete pod -l app=clawmanager-app
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-```
-
-## 修改前端代码后怎么重启
-
-前端代码会被打包进 ClawManager 镜像，所以修改前端后需要重新构建并重启 ClawManager app：
+## 推荐的一键顺序
 
 ```powershell
 cd D:\test\ClawManager-2
+
 docker build -t clawmanager:team-profiles-test .
 kind load docker-image clawmanager:team-profiles-test --name my-cluster
+
+kubectl apply -f deployments/k8s/clawmanager.yaml
+kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
+
+kubectl -n clawmanager-system rollout status deployment/clawmanager-app
+kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
+```
+
+## 修改前端/后端后怎么重启
+
+前端和后端都会被打进 `clawmanager-app` 镜像，所以改完代码后使用同一套流程：
+
+```powershell
+cd D:\test\ClawManager-2
+
+docker build -t clawmanager:team-profiles-test .
+kind load docker-image clawmanager:team-profiles-test --name my-cluster
+
 kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
 kubectl -n clawmanager-system rollout restart deployment/clawmanager-app
 kubectl -n clawmanager-system rollout status deployment/clawmanager-app
 ```
 
-浏览器强刷：
+通常不需要重新 apply `clawmanager.yaml`。只有以下情况需要重新 apply 基础部署：
 
-```text
-Ctrl + F5
-```
+- upstream 更新了 Kubernetes 资源。
+- runtime pool 相关 YAML 变了。
+- `workspace-store`、`openclaw-runtime`、`hermes-runtime` 不存在。
+- 本地 kind 集群被重建或资源丢失。
 
-## 修改后端代码后怎么重启
-
-后端代码同样在 ClawManager 镜像里。修改后端后也使用同一套流程：
-
-```powershell
-cd D:\test\ClawManager-2
-docker build -t clawmanager:team-profiles-test .
-kind load docker-image clawmanager:team-profiles-test --name my-cluster
-kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
-kubectl -n clawmanager-system rollout restart deployment/clawmanager-app
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-```
-
-不需要重启 OpenClaw/Hermes 镜像，除非修改的是它们自己的 runtime 镜像代码。
-
-## 重启电脑后怎么恢复
-
-1. 打开 Docker Desktop，等待 Kubernetes/kind 节点恢复。
-2. 进入项目根目录：
-
-```powershell
-cd D:\test\ClawManager-2
-```
-
-3. 检查 ClawManager 是否还在：
+## 验证 runtime pool 是否正常
 
 ```powershell
 kubectl -n clawmanager-system get pods
 ```
 
-4. 如果 ClawManager app 还在运行，但不是测试镜像，重新应用测试 YAML：
-
-```powershell
-docker build -t clawmanager:team-profiles-test .
-kind load docker-image clawmanager:team-profiles-test --name my-cluster
-kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
-kubectl -n clawmanager-system rollout restart deployment/clawmanager-app
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-
-kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
-```
-
-5. 如果整个系统资源都没了，先重新安装原始 YAML，再应用测试 YAML：
-
-```powershell
-kubectl apply -f deployments/k8s/clawmanager.yaml
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-
-docker build -t clawmanager:team-profiles-test .
-kind load docker-image clawmanager:team-profiles-test --name my-cluster
-kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
-kubectl -n clawmanager-system rollout status deployment/clawmanager-app
-
-
-
-kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
-```
-
-## 验证 Team 角色模板注入
-
-创建 Team 后，查看成员 Pod：
-
-```powershell
-kubectl -n clawmanager get pods --show-labels
-```
-
-进入成员 Pod 检查环境变量：
-
-```powershell
-kubectl -n clawmanager exec -it <member-pod> -- sh -lc 'printenv | grep AGENTS_JSON'
-kubectl -n clawmanager exec -it <member-pod> -- sh -lc 'cat /etc/clawmanager/team/team.json'
-```
-
-能看到下面任意变量，说明 ClawManager 注入成功：
+至少应能看到：
 
 ```text
-CLAWMANAGER_RUNTIME_AGENTS_JSON
-CLAWMANAGER_OPENCLAW_AGENTS_JSON
-CLAWMANAGER_HERMES_AGENTS_JSON
+clawmanager-app
+clawmanager-team-redis
+workspace-store
+openclaw-runtime
+hermes-runtime
+mysql
+minio
+skill-scanner
 ```
 
-## 验证 Team 执行过程事件
-
-查看 Redis events stream：
+查看 app 是否带有 runtime 环境变量：
 
 ```powershell
-kubectl -n clawmanager-system exec deploy/clawmanager-team-redis -- redis-cli XRANGE claw:team:<team-id>:events - + COUNT 20
+kubectl -n clawmanager-system exec deploy/clawmanager-app -- printenv | findstr RUNTIME
+kubectl -n clawmanager-system exec deploy/clawmanager-app -- printenv | findstr REDIS
 ```
 
-查看成员 inbox：
+查看 runtime pod 是否向后端注册：
 
 ```powershell
-kubectl -n clawmanager-system exec deploy/clawmanager-team-redis -- redis-cli XRANGE claw:team:<team-id>:inbox:leader - + COUNT 20
-kubectl -n clawmanager-system exec deploy/clawmanager-team-redis -- redis-cli XRANGE claw:team:<team-id>:inbox:worker - + COUNT 20
+kubectl -n clawmanager-system logs deploy/openclaw-runtime --tail=120
+kubectl -n clawmanager-system logs deploy/hermes-runtime --tail=120
+kubectl -n clawmanager-system logs deploy/clawmanager-app --tail=160
 ```
 
-如果 Redis 里只有最终结果，没有 `task_started`、`progress`、`reply`、`outbound` 等事件，前端执行过程面板也只能显示有限过程。
+## Team 一直 Starting 时怎么查
 
-## 常用排查命令
-
-查看 ClawManager app：
+先看 runtime pool 是否存在：
 
 ```powershell
-kubectl -n clawmanager-system get deploy clawmanager-app -o wide
-kubectl -n clawmanager-system get pods -l app=clawmanager-app -o wide
-kubectl -n clawmanager-system describe pod -l app=clawmanager-app
-kubectl -n clawmanager-system logs deploy/clawmanager-app --tail=120
+kubectl -n clawmanager-system get deploy workspace-store openclaw-runtime hermes-runtime
+kubectl -n clawmanager-system get pods -l clawmanager.io/runtime-type=openclaw
+kubectl -n clawmanager-system get pods -l clawmanager.io/runtime-type=hermes
 ```
 
-查看最近事件：
+再看 app 日志里的 scheduler：
 
 ```powershell
-kubectl -n clawmanager-system get events --sort-by=.lastTimestamp
+kubectl -n clawmanager-system logs deploy/clawmanager-app --tail=200 | findstr /i "runtime scheduler gateway binding creating"
 ```
 
-查看当前镜像：
+再看实例数据库状态和页面状态是否一致。页面里如果实例显示 `Lite` 且 `Starting`，一般表示 gateway runtime 还没有成功分配。
+
+常见原因：
+
+- 没有重新 apply `deployments/k8s/clawmanager.yaml`，导致 `openclaw-runtime/hermes-runtime/workspace-store` 不存在。
+- apply 了旧版 `clawmanager-team-profiles-test.yaml`，把 app 的 `RUNTIME_*` 环境变量覆盖没了。
+- runtime 镜像拉取失败。
+- `workspace-store` NFS 未启动，导致 runtime pod 挂载失败。
+- app 没有重启，仍在跑旧环境变量。
+
+## 验证当前 app 镜像
 
 ```powershell
 kubectl -n clawmanager-system get deploy clawmanager-app -o jsonpath="{.spec.template.spec.containers[0].image}"
@@ -233,3 +209,44 @@ kubectl -n clawmanager-system get deploy clawmanager-app -o jsonpath="{.spec.tem
 ```text
 clawmanager:team-profiles-test
 ```
+
+如果不是，重新 apply test YAML：
+
+```powershell
+kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
+kubectl -n clawmanager-system rollout restart deployment/clawmanager-app
+kubectl -n clawmanager-system rollout status deployment/clawmanager-app
+```
+
+## 验证 Team 角色模板注入
+
+创建 Team 后，查看 Team 成员实例：
+
+```powershell
+kubectl -n clawmanager-system logs deploy/clawmanager-app --tail=200
+kubectl -n clawmanager-system exec deploy/clawmanager-team-redis -- redis-cli XRANGE claw:team:<team-id>:events - + COUNT 30
+```
+
+如果是 Lite 模式，成员不会再是传统独立桌面 Pod，而是通过 runtime gateway 调度。重点看 Redis event stream、Team 群聊、Execution Kanban 和实例状态。
+
+## 与服务器 tenant 部署的区别
+
+本地 localhost 测试使用：
+
+```text
+deployments/k8s/clawmanager.yaml
+deployments/k8s/clawmanager-team-profiles-test.yaml
+namespace: clawmanager-system
+port-forward: 30443:443
+```
+
+服务器多租户部署使用：
+
+```text
+deployments/k8s/clawmanager-tenant.yaml
+deployments/k8s/clawmanager-apply.sh
+namespace: clawmanager-hxc-system 或其他租户 namespace
+NodePort: 32443 等
+```
+
+两套部署文件不同。localhost 的 `Starting` 问题应优先检查 `clawmanager-team-profiles-test.yaml` 是否覆盖掉 upstream 新增 runtime 配置。
