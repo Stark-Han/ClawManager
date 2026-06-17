@@ -154,8 +154,6 @@ spec:
             - name: tls-cert
               mountPath: /var/run/clawreef-tls
               readOnly: true
-            - name: workspaces
-              mountPath: /workspaces
           readinessProbe:
             httpGet:
               scheme: HTTPS
@@ -175,7 +173,3 @@ spec:
           secret:
             secretName: clawmanager-tls
             optional: true
-        - name: workspaces
-          nfs:
-            server: workspace-store.clawmanager-system.svc.cluster.local
-            path: /exports/workspaces
