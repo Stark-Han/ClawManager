@@ -2900,6 +2900,9 @@ function isSubstantiveFinalAnswerText(value: string) {
 }
 
 function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []) {
+  if (group.task && group.task.status !== "succeeded") {
+    return "";
+  }
   const latestOutcome = latestOutcomeEvidence(steps);
   const finalStep = latestOutcome?.status === "succeeded"
     ? latestOutcome.step
@@ -2926,20 +2929,10 @@ function processVisualStatus(
   if (group.task?.status === "succeeded") {
     return "succeeded";
   }
-  const latestOutcome = latestOutcomeEvidence(steps);
-  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
-    return "succeeded";
-  }
   if (group.task?.status === "failed") {
     return "failed";
   }
   if (group.task?.status === "stale") {
-    return "stale";
-  }
-  if (latestOutcome?.status === "failed") {
-    return "failed";
-  }
-  if (latestOutcome?.status === "stale" || group.status === "stale") {
     return "stale";
   }
   if (group.task?.status === "running") {
@@ -2947,6 +2940,16 @@ function processVisualStatus(
   }
   if (group.task?.status === "dispatched") {
     return "dispatched";
+  }
+  const latestOutcome = latestOutcomeEvidence(steps);
+  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
+    return "succeeded";
+  }
+  if (latestOutcome?.status === "failed") {
+    return "failed";
+  }
+  if (latestOutcome?.status === "stale" || group.status === "stale") {
+    return "stale";
   }
   if (hasWorkerContentEvidence(steps) || hasRuntimeActivityEvidence(steps)) {
     return "running";

@@ -1809,8 +1809,8 @@ func projectTeamTaskRuntimeState(task *models.TeamTask, payload map[string]inter
 		return teamTaskProjectionResult{}
 	}
 	status := normalizedTeamTaskEventStatus(payload)
-	completed := isTeamTaskCompletionSignal(eventType, status)
-	failed := isTeamTaskFailureSignal(eventType, status)
+	completed := isTeamTaskCompletionSignal(eventType, status, payload)
+	failed := isTeamTaskFailureSignal(eventType, status, payload)
 	running := isTeamTaskRunningSignal(eventType, status, payload)
 
 	result := teamTaskProjectionResult{}
@@ -1889,10 +1889,13 @@ func normalizedTeamTaskEventStatus(payload map[string]interface{}) string {
 	return raw
 }
 
-func isTeamTaskCompletionSignal(eventType, status string) bool {
+func isTeamTaskCompletionSignal(eventType, status string, payload map[string]interface{}) bool {
 	switch eventType {
 	case "task_completed", "completion":
 		return true
+	}
+	if !hasTeamTaskCompletionToolCall(payload) {
+		return false
 	}
 	switch status {
 	case "succeeded", "success", "completed", "complete", "done", "finished", "ok":
@@ -1902,10 +1905,13 @@ func isTeamTaskCompletionSignal(eventType, status string) bool {
 	}
 }
 
-func isTeamTaskFailureSignal(eventType, status string) bool {
+func isTeamTaskFailureSignal(eventType, status string, payload map[string]interface{}) bool {
 	switch eventType {
 	case "task_failed", "message_failed":
 		return true
+	}
+	if !hasTeamTaskCompletionToolCall(payload) {
+		return false
 	}
 	switch status {
 	case "failed", "failure", "error", "errored", "blocked":
@@ -2072,6 +2078,9 @@ func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface
 	if task == nil || !strings.EqualFold(strings.TrimSpace(eventType), "reply") {
 		return eventType
 	}
+	if !hasTeamTaskCompletionToolCall(payload) {
+		return eventType
+	}
 	if !eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") {
 		return eventType
 	}
@@ -2095,6 +2104,38 @@ func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface
 		}
 	}
 	return "task_completed"
+}
+
+func hasTeamTaskCompletionToolCall(payload map[string]interface{}) bool {
+	if payload == nil {
+		return false
+	}
+	if eventString(payload, "toolCallName", "tool_call_name", "calledTool", "called_tool") == teamTaskCompletionTool {
+		return true
+	}
+	for _, key := range []string{"toolCall", "tool_call", "function_call"} {
+		record, ok := payload[key].(map[string]interface{})
+		if !ok || record == nil {
+			continue
+		}
+		if eventString(record, "name", "function", "functionName", "function_name", "tool", "toolName", "tool_name") == teamTaskCompletionTool {
+			return true
+		}
+	}
+	return false
+}
+
+func eventRecordCandidates(payload map[string]interface{}) []map[string]interface{} {
+	if payload == nil {
+		return nil
+	}
+	records := []map[string]interface{}{payload}
+	for _, key := range []string{"sent", "metadata", "data", "envelope", "task", "toolCall", "tool_call", "function_call"} {
+		if record, ok := payload[key].(map[string]interface{}); ok && record != nil {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func (s *teamService) enrichOutboundEventFromInbox(teamID int, bus *redisBus, payload map[string]interface{}, messageID string) (map[string]interface{}, error) {
@@ -2174,9 +2215,8 @@ func teamEventHasBody(payload map[string]interface{}) bool {
 	if eventString(payload, "text", "title", "prompt", "instruction", "instructions", "summary", "resultMarkdown") != "" {
 		return true
 	}
-	for _, key := range []string{"sent", "metadata", "data", "envelope", "task"} {
-		record, ok := payload[key].(map[string]interface{})
-		if !ok {
+	for _, record := range eventRecordCandidates(payload) {
+		if record == payload {
 			continue
 		}
 		if eventString(record, "text", "title", "prompt", "instruction", "instructions", "summary", "resultMarkdown") != "" {

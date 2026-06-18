@@ -509,7 +509,7 @@ func TestBuildTeamTaskEnvelopeIncludesCompletionContract(t *testing.T) {
 	}
 }
 
-func TestProjectTeamEventTreatsFinalReplyAsTaskCompleted(t *testing.T) {
+func TestProjectTeamEventDoesNotTreatPlainFinalReplyAsTaskCompleted(t *testing.T) {
 	taskID := 67
 	messageID := "team-31-bootstrap-introduction"
 	task := &models.TeamTask{
@@ -556,8 +556,69 @@ func TestProjectTeamEventTreatsFinalReplyAsTaskCompleted(t *testing.T) {
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
 
+	if repo.updatedTask != nil {
+		t.Fatalf("plain final reply must not mark task succeeded, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status == models.TeamMemberStatusIdle && repo.updatedMember.Progress == 100 {
+		t.Fatalf("plain final reply must not mark member completed, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("expected stored event type reply, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventTreatsExplicitCompletionToolReplyAsTaskCompleted(t *testing.T) {
+	taskID := 67
+	messageID := "team-31-bootstrap-introduction"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":          "reply",
+		"messageId":      messageID,
+		"memberId":       "leader",
+		"taskId":         "team-31-task-67",
+		"final":          true,
+		"summary":        "Team report ready",
+		"resultMarkdown": "Full report",
+		"text":           "Full report",
+		"toolCall": map[string]interface{}{
+			"name": teamTaskCompletionTool,
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178655-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
 	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
-		t.Fatalf("expected final reply to mark task succeeded, got %#v", repo.updatedTask)
+		t.Fatalf("expected explicit completion tool reply to mark task succeeded, got %#v", repo.updatedTask)
 	}
 	if repo.updatedTask.ResultJSON == nil || !strings.Contains(*repo.updatedTask.ResultJSON, "Full report") {
 		t.Fatalf("expected reply payload to become task result, got %#v", repo.updatedTask.ResultJSON)
