@@ -60,6 +60,9 @@ func (h *InstanceHandler) desktopAccessUpstream(c *gin.Context, instance *models
 	if !directProxyEnabled {
 		return "", false
 	}
+	if usesRuntimeGateway(instance) {
+		return "", false
+	}
 	if !h.proxyService.IsWebtopInstanceType(instance.Type) {
 		fmt.Printf("Desktop direct proxy fallback: unsupported desktop instance type instance=%d user=%d type=%s target_port=%d\n",
 			instance.ID, instance.UserID, instance.Type, targetPort)
@@ -86,6 +89,19 @@ func (h *InstanceHandler) desktopAccessUpstream(c *gin.Context, instance *models
 	fmt.Printf("Desktop direct proxy resolved: instance=%d user=%d type=%s target_port=%d upstream=%s\n",
 		instance.ID, instance.UserID, instance.Type, targetPort, resolved)
 	return resolved, true
+}
+
+func usesRuntimeGateway(instance *models.Instance) bool {
+	if instance == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendGateway) {
+		return true
+	}
+	if mode, ok := services.NormalizeInstanceMode(instance.InstanceMode); ok && mode == services.InstanceModeLite {
+		return true
+	}
+	return false
 }
 
 func workspaceArchiveMaxMiB() int64 {
