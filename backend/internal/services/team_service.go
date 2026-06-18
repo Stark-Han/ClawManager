@@ -2215,8 +2215,8 @@ func teamEventHasBody(payload map[string]interface{}) bool {
 	if eventString(payload, "text", "title", "prompt", "instruction", "instructions", "summary", "resultMarkdown") != "" {
 		return true
 	}
-	for _, record := range eventRecordCandidates(payload) {
-		if record == payload {
+	for idx, record := range eventRecordCandidates(payload) {
+		if idx == 0 {
 			continue
 		}
 		if eventString(record, "text", "title", "prompt", "instruction", "instructions", "summary", "resultMarkdown") != "" {
