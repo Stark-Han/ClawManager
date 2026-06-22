@@ -56,6 +56,11 @@ cd D:\test\ClawManager-2
 
 ```powershell
 docker build -t clawmanager:team-profiles-test .
+kind load docker-image clawmanager:team-profiles-test --name my-cluster
+kubectl apply -f deployments/k8s/clawmanager.yaml
+kubectl apply -f deployments/k8s/clawmanager-team-profiles-test.yaml
+kubectl -n clawmanager-system rollout status deployment/clawmanager-app
+kubectl port-forward -n clawmanager-system svc/clawmanager-frontend 30443:443
 ```
 
 把镜像加载进 kind 集群：
@@ -186,3 +191,4 @@ NodePort: 32443 等
 ```
 
 服务器部署应保留 upstream 的 runtime pool、NFS workspace、runtime scheduler 逻辑。本地测试 overlay 只服务于本地开发，不代表服务器部署方式。
+docker build -t clawmanager:team-profiles-test .

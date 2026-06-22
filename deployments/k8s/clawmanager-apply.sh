@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Edit these values before deploying, or override them with environment vars:
-#   TENANT_SUFFIX=-hxc NODE_PORT=32443 APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-profiles-pvfix-20260609 ./clawmanager-apply.sh
+#   TENANT_SUFFIX=-hxc NODE_PORT=32443 APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-update-20260618 ./clawmanager-apply.sh
 #   OPENCLAW_RUNTIME_IMAGE=10.130.14.23:5000/openclaw-lite:latest HERMES_RUNTIME_IMAGE=10.130.14.23:5000/hermes-lite:latest ./clawmanager-apply.sh
 #
 # TENANT_SUFFIX examples:
@@ -10,7 +10,7 @@ set -euo pipefail
 #   -abc  = clawmanager-abc-system
 TENANT_SUFFIX="${TENANT_SUFFIX--hxc}"
 NODE_PORT="${NODE_PORT:-32443}"
-APP_IMAGE="${APP_IMAGE:-10.130.14.23:5000/clawmanager-hxc-app:team-profiles-pvfix-20260609}"
+APP_IMAGE="${APP_IMAGE:-10.130.14.23:5000/clawmanager-hxc-app:team-update-20260618}"
 OPENCLAW_RUNTIME_IMAGE="${OPENCLAW_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest}"
 HERMES_RUNTIME_IMAGE="${HERMES_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest}"
 
@@ -47,13 +47,39 @@ if kubectl -n "${SYSTEM_NAMESPACE}" get svc workspace-store >/dev/null 2>&1; the
   if [[ -n "${WORKSPACE_STORE_IP}" && "${WORKSPACE_STORE_IP}" != "None" ]]; then
     echo "Patching workspace NFS server to workspace-store ClusterIP: ${WORKSPACE_STORE_IP}"
 
-    kubectl -n "${SYSTEM_NAMESPACE}" patch deployment clawmanager-app --type=strategic -p \
-      "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"clawmanager-app\",\"env\":[{\"name\":\"RUNTIME_WORKSPACE_NFS_SERVER\",\"value\":\"${WORKSPACE_STORE_IP}\"}]}],\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/\"}}]}}}}"
+    kubectl -n "${SYSTEM_NAMESPACE}" set env deployment/clawmanager-app \
+      "RUNTIME_WORKSPACE_NFS_SERVER=${WORKSPACE_STORE_IP}" \
+      "RUNTIME_WORKSPACE_NFS_PATH=/"
+
+    patch_workspace_volume() {
+      local deployment="$1"
+      local volume_index=""
+      local current_index
+      local volume_name
+
+      current_index=0
+      while IFS= read -r volume_name; do
+        if [[ "${volume_name}" == "workspaces" ]]; then
+          volume_index="${current_index}"
+          break
+        fi
+        current_index=$((current_index + 1))
+      done < <(kubectl -n "${SYSTEM_NAMESPACE}" get deployment "${deployment}" -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}{"\n"}{end}')
+
+      if [[ -z "${volume_index}" ]]; then
+        echo "WARNING: deployment/${deployment} has no workspaces volume; skipping NFS patch" >&2
+        return 0
+      fi
+
+      kubectl -n "${SYSTEM_NAMESPACE}" patch deployment "${deployment}" --type=json -p \
+        "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/${volume_index}/nfs/server\",\"value\":\"${WORKSPACE_STORE_IP}\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/volumes/${volume_index}/nfs/path\",\"value\":\"/\"}]"
+    }
+
+    patch_workspace_volume clawmanager-app
 
     for deployment in openclaw-runtime hermes-runtime; do
       if kubectl -n "${SYSTEM_NAMESPACE}" get deployment "${deployment}" >/dev/null 2>&1; then
-        kubectl -n "${SYSTEM_NAMESPACE}" patch deployment "${deployment}" --type=strategic -p \
-          "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"workspaces\",\"nfs\":{\"server\":\"${WORKSPACE_STORE_IP}\",\"path\":\"/\"}}]}}}}"
+        patch_workspace_volume "${deployment}"
       fi
     done
   fi

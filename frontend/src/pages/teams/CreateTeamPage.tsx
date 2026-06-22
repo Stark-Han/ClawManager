@@ -92,6 +92,16 @@ const imageOptionKey = (item: SystemImageSetting) =>
     ? `image-${item.id}`
     : `${item.instance_type}:${item.image}`;
 
+const imageRuntimeTypeForMode = (
+  mode: InstanceMode,
+): NonNullable<SystemImageSetting["runtime_type"]> =>
+  mode === "lite" ? "gateway" : "desktop";
+
+const normalizedImageRuntimeType = (
+  item: SystemImageSetting,
+): NonNullable<SystemImageSetting["runtime_type"]> =>
+  item.runtime_type === "gateway" ? "gateway" : "desktop";
+
 const normalizeMemberId = (value: string) =>
   value
     .trim()
@@ -219,9 +229,6 @@ const CreateTeamPage: React.FC = () => {
       ),
     [images],
   );
-  const selectedImage =
-    openClawImages.find((item) => imageOptionKey(item) === selectedImageKey) ||
-    openClawImages[0];
   const memberTemplates = useMemo(
     () => [...BUILTIN_MEMBER_TEMPLATES, ...customMemberTemplates],
     [customMemberTemplates],
@@ -237,6 +244,23 @@ const CreateTeamPage: React.FC = () => {
       runtimeType === "hermes" ? hermesImages : openClawImages,
     [hermesImages, openClawImages],
   );
+  const imageOptionsForMember = useCallback(
+    (runtimeType: RuntimeType, instanceMode: InstanceMode) =>
+      imageOptionsForRuntime(runtimeType).filter(
+        (item) =>
+          normalizedImageRuntimeType(item) ===
+          imageRuntimeTypeForMode(instanceMode),
+      ),
+    [imageOptionsForRuntime],
+  );
+  const defaultOpenClawMemberImages = useMemo(
+    () => imageOptionsForMember("openclaw", "lite"),
+    [imageOptionsForMember],
+  );
+  const selectedImage =
+    defaultOpenClawMemberImages.find(
+      (item) => imageOptionKey(item) === selectedImageKey,
+    ) || defaultOpenClawMemberImages[0];
 
   useEffect(() => {
     const loadImages = async () => {
@@ -254,16 +278,16 @@ const CreateTeamPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (openClawImages.length === 0) {
+    if (defaultOpenClawMemberImages.length === 0) {
       setSelectedImageKey("");
       return;
     }
     setSelectedImageKey((current) =>
-      openClawImages.some((item) => imageOptionKey(item) === current)
+      defaultOpenClawMemberImages.some((item) => imageOptionKey(item) === current)
         ? current
-        : imageOptionKey(openClawImages[0]),
+        : imageOptionKey(defaultOpenClawMemberImages[0]),
     );
-  }, [openClawImages]);
+  }, [defaultOpenClawMemberImages]);
 
   useEffect(() => {
     saveCustomMemberTemplates(customMemberTemplates);
@@ -281,18 +305,21 @@ const CreateTeamPage: React.FC = () => {
   useEffect(() => {
     setMembers((current) =>
       current.map((member) => {
-        const options = imageOptionsForRuntime(member.runtimeType);
+        const options = imageOptionsForMember(
+          member.runtimeType,
+          member.instanceMode,
+        );
         const fallbackImage = options[0]?.image || "";
-        const imageMatchesRuntime = options.some(
+        const imageMatchesRuntimeAndMode = options.some(
           (item) => item.image === member.image,
         );
-        if ((!member.image || !imageMatchesRuntime) && fallbackImage) {
+        if ((!member.image || !imageMatchesRuntimeAndMode) && fallbackImage) {
           return { ...member, image: fallbackImage };
         }
         return member;
       }),
     );
-  }, [imageOptionsForRuntime]);
+  }, [imageOptionsForMember]);
 
   const updateMember = (
     id: string,
@@ -312,8 +339,19 @@ const CreateTeamPage: React.FC = () => {
   };
 
   const setMemberRuntimeType = (id: string, runtimeType: RuntimeType) => {
-    const fallbackImage = imageOptionsForRuntime(runtimeType)[0]?.image || "";
-    updateMember(id, { runtimeType, image: fallbackImage });
+    updateMember(id, (current) => ({
+      runtimeType,
+      image:
+        imageOptionsForMember(runtimeType, current.instanceMode)[0]?.image || "",
+    }));
+  };
+
+  const setMemberInstanceMode = (id: string, instanceMode: InstanceMode) => {
+    updateMember(id, (current) => ({
+      instanceMode,
+      image:
+        imageOptionsForMember(current.runtimeType, instanceMode)[0]?.image || "",
+    }));
   };
 
   const applyResourcePreset = (id: string, preset: ResourcePresetKey) => {
@@ -373,7 +411,7 @@ const CreateTeamPage: React.FC = () => {
   ): TeamMemberDraft => {
     const runtimeType = templateMember.runtimeType || "openclaw";
     const instanceMode = templateMember.instanceMode || "lite";
-    const runtimeImages = imageOptionsForRuntime(runtimeType);
+    const runtimeImages = imageOptionsForMember(runtimeType, instanceMode);
     const templateImageAvailable = runtimeImages.some(
       (item) => item.image === templateMember.image,
     );
@@ -1240,9 +1278,10 @@ const CreateTeamPage: React.FC = () => {
                         <select
                           value={member.instanceMode}
                           onChange={(event) =>
-                            updateMember(member.id, {
-                              instanceMode: event.target.value as InstanceMode,
-                            })
+                            setMemberInstanceMode(
+                              member.id,
+                              event.target.value as InstanceMode,
+                            )
                           }
                           className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                         >
@@ -1266,10 +1305,16 @@ const CreateTeamPage: React.FC = () => {
                         >
                           {loadingImages ? (
                             <option value="">加载中...</option>
-                          ) : imageOptionsForRuntime(member.runtimeType).length === 0 ? (
+                          ) : imageOptionsForMember(
+                              member.runtimeType,
+                              member.instanceMode,
+                            ).length === 0 ? (
                             <option value="">暂无 {member.runtimeType} 镜像</option>
                           ) : (
-                            imageOptionsForRuntime(member.runtimeType).map((item) => (
+                            imageOptionsForMember(
+                              member.runtimeType,
+                              member.instanceMode,
+                            ).map((item) => (
                               <option key={imageOptionKey(item)} value={item.image}>
                                 {item.display_name || item.image}
                               </option>

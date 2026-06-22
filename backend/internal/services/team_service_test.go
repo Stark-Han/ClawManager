@@ -567,6 +567,284 @@ func TestProjectTeamEventDoesNotTreatPlainFinalReplyAsTaskCompleted(t *testing.T
 	}
 }
 
+func TestProjectTeamEventTreatsSubstantialDirectTargetReplyAsTaskCompleted(t *testing.T) {
+	taskID := 68
+	messageID := "team-31-bootstrap-introduction"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusDispatched,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "reply",
+		"messageId": messageID,
+		"memberId":  "leader",
+		"taskId":    "team-31-task-68",
+		"summary":   "Team introduction ready",
+		"text": strings.Join([]string{
+			"# Team report",
+			"The team has two members. Leader coordinates planning, handoff, verification, and final synthesis.",
+			"Worker handles scoped implementation tasks, reports concrete outputs, and keeps changes practical.",
+		}, "\n"),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178656-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected substantial direct target reply to mark task succeeded, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
+		t.Fatalf("expected member to become completed, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" {
+		t.Fatalf("expected stored event type task_completed, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventDoesNotTreatDelegationReplyAsTaskCompleted(t *testing.T) {
+	taskID := 69
+	messageID := "team-31-task-69"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusDispatched,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "reply",
+		"messageId": messageID,
+		"memberId":  "leader",
+		"taskId":    "team-31-task-69",
+		"final":     true,
+		"text":      "Assigned to worker and waiting for worker to finish the report.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178657-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask != nil {
+		t.Fatalf("delegation reply must not mark task succeeded, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("expected stored event type reply, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventDoesNotTreatNonTargetReplyAsTaskCompleted(t *testing.T) {
+	taskID := 70
+	messageID := "team-31-task-70"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusDispatched,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "reply",
+		"messageId": messageID,
+		"memberId":  "worker",
+		"taskId":    "team-31-task-70",
+		"summary":   "Worker report ready",
+		"text":      "# Worker report\nThis is a detailed result, but it belongs to a member that is not the target of the parent task.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178658-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask != nil {
+		t.Fatalf("non-target reply must not mark task succeeded, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("expected stored event type reply, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventDowngradesLiteDispatchWrapperFailure(t *testing.T) {
+	taskID := 71
+	messageID := "team-31-task-71"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 121,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:    map[int]*models.TeamTask{taskID: task},
+		membersByKey: map[string]*models.TeamMember{"worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":        "message_failed",
+		"memberId":     "worker",
+		"availability": "blocked",
+		"reason":       "dispatch finished without reply/completion",
+		"text":         "Redis Team task failed",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178659-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask != nil {
+		t.Fatalf("lite wrapper dispatch failure must not fail the task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Availability == models.TeamMemberAvailabilityBlocked {
+		t.Fatalf("lite wrapper dispatch failure must not block the member, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "message_warning" {
+		t.Fatalf("expected warning event, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventAssociatesCurrentTaskReplyWithoutMessageID(t *testing.T) {
+	taskID := 72
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 121,
+		MessageID:      "team-31-task-72",
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:    map[int]*models.TeamTask{taskID: task},
+		membersByKey: map[string]*models.TeamMember{"worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":    "reply",
+		"memberId": "worker",
+		"summary":  "Weather report ready",
+		"text": strings.Join([]string{
+			"# Melbourne weather",
+			"Current conditions: partly cloudy, 16C, south wind 27 km/h, humidity 82%.",
+			"Forecast: showers today, cooler tomorrow, rain on Saturday.",
+		}, "\n"),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178660-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected current task reply to complete worker task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Availability != models.TeamMemberAvailabilityIdle || repo.updatedMember.Progress != 100 {
+		t.Fatalf("expected worker to become idle after current task reply, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" || repo.createdEvents[0].TaskID == nil || *repo.createdEvents[0].TaskID != taskID {
+		t.Fatalf("expected task_completed event linked to current task, got %#v", repo.createdEvents)
+	}
+}
+
 func TestProjectTeamEventTreatsExplicitCompletionToolReplyAsTaskCompleted(t *testing.T) {
 	taskID := 67
 	messageID := "team-31-bootstrap-introduction"

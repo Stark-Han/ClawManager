@@ -134,12 +134,12 @@ type TeamEventsHistoryPayload struct {
 }
 
 type TeamWorkspaceFileEntry struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Type       string `json:"type"`
-	Size       int64  `json:"size"`
-	ModifiedAt string `json:"modified_at,omitempty"`
-	Previewable bool `json:"previewable"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	ModifiedAt  string `json:"modified_at,omitempty"`
+	Previewable bool   `json:"previewable"`
 }
 
 type TeamWorkspaceListPayload struct {
@@ -462,16 +462,16 @@ func buildTeamTaskEnvelope(teamID int, memberKey string, task *models.TeamTask, 
 			"artifactField":  "artifactRefs",
 			"completionTool": teamTaskCompletionTool,
 		},
-		"intent":      eventString(taskPayload, "intent"),
-		"taskId":      taskRef,
-		"title":       eventString(taskPayload, "title"),
-		"prompt":      appendTeamTaskCompletionInstruction(prompt),
-		"rawPrompt":   rawPrompt,
-		"contextRefs": normalizeContextRefs(taskPayload["contextRefs"]),
+		"intent":        eventString(taskPayload, "intent"),
+		"taskId":        taskRef,
+		"title":         eventString(taskPayload, "title"),
+		"prompt":        appendTeamTaskCompletionInstruction(prompt),
+		"rawPrompt":     rawPrompt,
+		"contextRefs":   normalizeContextRefs(taskPayload["contextRefs"]),
 		"memberContext": memberContext,
 		"systemPrompt":  memberContext["systemPrompt"],
-		"metadata":    taskPayload,
-		"createdAt":   now.Format(time.RFC3339Nano),
+		"metadata":      taskPayload,
+		"createdAt":     now.Format(time.RFC3339Nano),
 	}
 	if envelope["intent"] == "" {
 		envelope["intent"] = "run_task"
@@ -1940,6 +1940,32 @@ func isTerminalTeamTaskStatus(status string) bool {
 		status == models.TeamTaskStatusStale
 }
 
+func shouldAssociateEventWithCurrentMemberTask(eventType string, payload map[string]interface{}) bool {
+	switch eventType {
+	case "reply", "completion", "task_completed", "task_failed", "message_failed", "message_warning", "task_started", "task_progress", "progress":
+		return true
+	}
+	if eventString(payload, "taskId", "task_id", "runtimeTaskId", "runtime_task_id", "messageId", "message_id") != "" {
+		return true
+	}
+	return teamEventHasBody(payload)
+}
+
+func isNonAuthoritativeDispatchFailure(eventType string, payload map[string]interface{}) bool {
+	if eventType != "task_failed" && eventType != "message_failed" {
+		return false
+	}
+	text := strings.ToLower(strings.Join(strings.Fields(strings.Join([]string{
+		eventString(payload, "error_message", "error", "reason", "diagnostic", "lastSummary", "last_summary", "summary", "text", "message"),
+	}, " ")), " "))
+	return strings.Contains(text, "dispatch finished without reply/completion") ||
+		strings.Contains(text, "without reply/completion")
+}
+
+func isNonAuthoritativeDispatchWarning(eventType string, payload map[string]interface{}) bool {
+	return eventType == "message_warning" && isNonAuthoritativeDispatchFailure(eventString(payload, "originalEvent"), payload)
+}
+
 func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message redisStreamMessage) error {
 	if exists, err := s.repo.EventExistsByStreamID(team.ID, message.ID); err != nil || exists {
 		return err
@@ -1986,7 +2012,25 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 		task = found
 	}
-	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task)
+	if task == nil && member != nil && member.CurrentTaskID != nil && shouldAssociateEventWithCurrentMemberTask(eventType, payload) {
+		found, err := s.repo.GetTaskByID(*member.CurrentTaskID)
+		if err != nil {
+			return err
+		}
+		if found != nil && found.TeamID == team.ID && found.TargetMemberID == member.ID && !isTerminalTeamTaskStatus(found.Status) {
+			task = found
+		}
+	}
+	if isNonAuthoritativeDispatchFailure(eventType, payload) {
+		if eventString(payload, "originalEvent") == "" {
+			payload["originalEvent"] = eventType
+		}
+		payload["event"] = "message_warning"
+		payload["type"] = "message_warning"
+		payload["status"] = "warning"
+		eventType = "message_warning"
+	}
+	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task, member)
 
 	payloadJSON, err := marshalOptionalJSON(payload)
 	if err != nil {
@@ -2074,14 +2118,16 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	return nil
 }
 
-func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface{}, task *models.TeamTask) string {
+func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface{}, task *models.TeamTask, member *models.TeamMember) string {
 	if task == nil || !strings.EqualFold(strings.TrimSpace(eventType), "reply") {
 		return eventType
 	}
-	if !hasTeamTaskCompletionToolCall(payload) {
+	hasCompletionTool := hasTeamTaskCompletionToolCall(payload)
+	hasImplicitDirectCompletion := isImplicitDirectTaskCompletionReply(task, member, payload)
+	if !hasCompletionTool && !hasImplicitDirectCompletion {
 		return eventType
 	}
-	if !eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") {
+	if hasCompletionTool && !eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") {
 		return eventType
 	}
 	if !teamEventHasBody(payload) {
@@ -2104,6 +2150,95 @@ func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface
 		}
 	}
 	return "task_completed"
+}
+
+func isImplicitDirectTaskCompletionReply(task *models.TeamTask, member *models.TeamMember, payload map[string]interface{}) bool {
+	if task == nil || member == nil || payload == nil {
+		return false
+	}
+	if member.ID != task.TargetMemberID {
+		return false
+	}
+	status := normalizedTeamTaskEventStatus(payload)
+	if isTeamTaskFailureSignal("reply", status, payload) || isTeamTaskRunningSignal("reply", status, payload) {
+		return false
+	}
+	resultText := directTaskCompletionReplyText(payload)
+	if resultText == "" || isInterimOrDelegationReplyText(resultText) {
+		return false
+	}
+	if eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") {
+		return true
+	}
+	if eventString(payload, "resultMarkdown", "result_markdown", "result", "answer") != "" {
+		return true
+	}
+	switch status {
+	case "succeeded", "success", "completed", "complete", "done", "finished", "ok":
+		return true
+	}
+	compact := strings.TrimSpace(resultText)
+	compact = strings.Join(strings.Fields(compact), "")
+	return len([]rune(compact)) >= 36 && looksLikeSubstantialFinalReply(resultText)
+}
+
+func directTaskCompletionReplyText(payload map[string]interface{}) string {
+	for _, record := range eventRecordCandidates(payload) {
+		if text := eventString(record, "resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary"); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func isInterimOrDelegationReplyText(text string) bool {
+	normalized := strings.TrimSpace(text)
+	if normalized == "" {
+		return true
+	}
+	lower := strings.ToLower(normalized)
+	compact := strings.ToLower(strings.Join(strings.Fields(normalized), ""))
+	if len([]rune(compact)) <= 12 {
+		return true
+	}
+	for _, prefix := range []string{
+		"收到", "好的", "好，", "好,", "ok", "okay", "处理中", "正在", "准备", "我将", "让我", "先看", "稍等",
+		"let me", "i will", "i'll", "checking", "working on",
+	} {
+		if strings.HasPrefix(lower, prefix) || strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	for _, marker := range []string{
+		"正在整理", "现在整理", "稍后", "等待其", "等待他", "等待她", "等待worker", "等待 worker",
+		"派单", "已派发", "派发给", "下发给", "转派给", "交给worker", "交给 worker",
+		"让worker", "让 worker", "请worker", "请 worker", "worker在线空闲",
+		"sent to worker", "assigned to worker", "waiting for worker", "handoff to worker",
+	} {
+		if strings.Contains(compact, strings.ReplaceAll(strings.ToLower(marker), " ", "")) || strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeSubstantialFinalReply(text string) bool {
+	normalized := strings.TrimSpace(text)
+	if normalized == "" {
+		return false
+	}
+	if strings.ContainsAny(normalized, "#*>|`") {
+		return true
+	}
+	if strings.ContainsAny(normalized, "。；;：:\n") {
+		return true
+	}
+	return strings.Contains(normalized, "完成") ||
+		strings.Contains(normalized, "总结") ||
+		strings.Contains(normalized, "报告") ||
+		strings.Contains(normalized, "结果") ||
+		strings.Contains(strings.ToLower(normalized), "completed") ||
+		strings.Contains(strings.ToLower(normalized), "summary")
 }
 
 func hasTeamTaskCompletionToolCall(payload map[string]interface{}) bool {
@@ -2416,7 +2551,11 @@ func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[str
 	if member == nil {
 		return
 	}
+	nonAuthoritativeDispatchWarning := isNonAuthoritativeDispatchWarning(eventType, payload)
 	availability := normalizeTeamAvailability(eventString(payload, "availability", "memberAvailability"))
+	if nonAuthoritativeDispatchWarning && availability == models.TeamMemberAvailabilityBlocked {
+		availability = ""
+	}
 	explicitlyBlocked := availability == models.TeamMemberAvailabilityBlocked
 	if availability != "" {
 		member.Availability = availability
@@ -2437,7 +2576,9 @@ func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[str
 		member.LastSummary = &summary
 	}
 	if reason := eventString(payload, "blocked_reason", "blockedReason", "error_message", "error", "reason"); reason != "" {
-		member.BlockedReason = &reason
+		if !nonAuthoritativeDispatchWarning {
+			member.BlockedReason = &reason
+		}
 	}
 	switch eventType {
 	case "presence", "member_presence", "status", "member_status":
@@ -2654,11 +2795,11 @@ func parseTeamWorkspaceList(parentPath, raw string) []TeamWorkspaceFileEntry {
 			modifiedAt = time.Unix(mtimeUnix, 0).UTC().Format(time.RFC3339)
 		}
 		entries = append(entries, TeamWorkspaceFileEntry{
-			Name:       name,
-			Path:       entryPath,
-			Type:       parts[0],
-			Size:       size,
-			ModifiedAt: modifiedAt,
+			Name:        name,
+			Path:        entryPath,
+			Type:        parts[0],
+			Size:        size,
+			ModifiedAt:  modifiedAt,
 			Previewable: parts[0] == "file" && isPreviewableWorkspaceFile(name),
 		})
 	}
