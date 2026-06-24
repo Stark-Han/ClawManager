@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -454,6 +455,45 @@ func TestNodeSelectorForPVCFallsBackForNoProvisionerStorageClass(t *testing.T) {
 	if selector["kubernetes.io/hostname"] != "node125" {
 		t.Fatalf("selector = %#v, want hostname node125", selector)
 	}
+}
+
+func TestWaitForPVCBindingLeavesDynamicStorageClassToProvisioner(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "clawreef-114-pvc",
+			Namespace: "clawmanager-user-155",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: stringPtr("local-path"),
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+	service := &PVCService{
+		client: &Client{
+			Clientset: fake.NewSimpleClientset(pvc),
+		},
+	}
+
+	got, err := service.waitForPVCBinding(context.Background(), pvc.Namespace, pvc.Name, 155, 114, 100, "local-path", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("waitForPVCBinding returned error: %v", err)
+	}
+	if got.Name != pvc.Name {
+		t.Fatalf("expected PVC %q, got %q", pvc.Name, got.Name)
+	}
+	pvs, err := service.client.Clientset.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("failed to list PVs: %v", err)
+	}
+	if len(pvs.Items) != 0 {
+		t.Fatalf("expected no manual PVs for dynamic storageClass, got %#v", pvs.Items)
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }
 
 func requireHostnameAffinity(t *testing.T, affinity *corev1.VolumeNodeAffinity, hostname string) {
