@@ -22,7 +22,7 @@ import {
   type TeamMemberTemplate,
   type TeamMemberTemplateMember,
 } from "../../lib/teamTemplates";
-import type { CreateTeamRequest } from "../../types/team";
+import type { CreateTeamRequest, TeamCommunicationMode } from "../../types/team";
 import type { InstanceMode } from "../../types/instance";
 import type {
   OpenClawConfigCompilePreview,
@@ -48,6 +48,23 @@ const RUNTIME_OPTIONS: Array<{ value: RuntimeType; label: string }> = [
 const INSTANCE_MODE_OPTIONS: Array<{ value: InstanceMode; label: string }> = [
   { value: "lite", label: "Lite" },
   { value: "pro", label: "Pro" },
+];
+
+const TEAM_COMMUNICATION_MODE_OPTIONS: Array<{
+  value: TeamCommunicationMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "leader_mediated",
+    label: "Leader 中介协作",
+    description: "Leader 统一拆解、派发、回收与总结，Worker 之间不直接交互。",
+  },
+  {
+    value: "peer_assisted",
+    label: "Worker 直连协作",
+    description: "Leader 保留最终汇总权，Worker 可直接请求协助、评审、交接和共享产物。",
+  },
 ];
 
 const RESOURCE_PRESETS: Record<
@@ -175,6 +192,8 @@ const CreateTeamPage: React.FC = () => {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [communicationMode, setCommunicationMode] =
+    useState<TeamCommunicationMode>("leader_mediated");
   const [sharedStorageGb, setSharedStorageGb] = useState(10);
   const [storageClass, setStorageClass] = useState("");
   const [images, setImages] = useState<SystemImageSetting[]>([]);
@@ -477,6 +496,9 @@ const CreateTeamPage: React.FC = () => {
     if (selectedTemplate.description) {
       setDescription(selectedTemplate.description);
     }
+    if (selectedTemplate.communicationMode) {
+      setCommunicationMode(selectedTemplate.communicationMode);
+    }
     setMembers((current) => {
       const existingMembers = mode === "append" ? current : [];
       const importedMembers = buildTemplateMembers(selectedTemplate, existingMembers);
@@ -519,6 +541,7 @@ const CreateTeamPage: React.FC = () => {
       name: packageName,
       teamName: name.trim() || undefined,
       description: description.trim() || undefined,
+      communicationMode,
       source: "custom",
       members: templateMembers,
     };
@@ -778,7 +801,7 @@ const CreateTeamPage: React.FC = () => {
     const payload: CreateTeamRequest = {
       name: name.trim(),
       description: description.trim() || undefined,
-      communication_mode: "leader_mediated",
+      communication_mode: communicationMode,
       shared_storage_gb: sharedStorageGb,
       storage_class: storageClass.trim() || undefined,
       members: members.map((member) => {
@@ -873,6 +896,31 @@ const CreateTeamPage: React.FC = () => {
                     rows={3}
                     className="mt-1 block w-full rounded-xl border border-[#eadfd8] px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
                   />
+                </label>
+                <label className="block md:col-span-2">
+                  <span className="text-sm font-medium text-gray-700">
+                    协作模式
+                  </span>
+                  <select
+                    value={communicationMode}
+                    onChange={(event) =>
+                      setCommunicationMode(event.target.value as TeamCommunicationMode)
+                    }
+                    className="mt-1 block w-full rounded-xl border border-[#eadfd8] bg-white px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                  >
+                    {TEAM_COMMUNICATION_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {
+                      TEAM_COMMUNICATION_MODE_OPTIONS.find(
+                        (option) => option.value === communicationMode,
+                      )?.description
+                    }
+                  </p>
                 </label>
                 <label className="block md:col-span-2">
                   <span className="text-sm font-medium text-gray-700">

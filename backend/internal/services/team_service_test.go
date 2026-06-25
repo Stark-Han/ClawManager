@@ -182,8 +182,8 @@ func TestBuildTeamMemberInstanceRequestSupportsLiteMode(t *testing.T) {
 		liteReq.EnvironmentOverrides[teamTokenSecretKey] != "team_test_token" {
 		t.Fatalf("expected Lite Team runtime secrets in gateway env overrides, got %#v", liteReq.EnvironmentOverrides)
 	}
-	if !strings.Contains(liteReq.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"], `"sharedDir":"/workspaces/teams/user-1/team-8-shared"`) {
-		t.Fatalf("expected Lite Team roster JSON to include runtime shared dir, got %#v", liteReq.EnvironmentOverrides)
+	if liteReq.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] != rosterJSON {
+		t.Fatalf("Lite Team roster JSON should preserve upstream logical sharedDir contract, got %#v", liteReq.EnvironmentOverrides)
 	}
 }
 
@@ -212,8 +212,8 @@ func TestBuildTeamMemberInstanceRequestPointsLiteSharedDirAtRuntimeWorkspace(t *
 	if req.EnvironmentOverrides["CLAWMANAGER_TEAM_SHARED_DIR"] != wantSharedDir {
 		t.Fatalf("expected Lite shared dir %q, got %#v", wantSharedDir, req.EnvironmentOverrides)
 	}
-	if !strings.Contains(req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"], `"sharedDir":"`+wantSharedDir+`"`) {
-		t.Fatalf("expected Lite roster JSON to use runtime shared dir, got %s", req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"])
+	if req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] != `{"sharedDir":"/team"}` {
+		t.Fatalf("Lite roster JSON should preserve logical /team sharedDir, got %s", req.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"])
 	}
 	if req.Team.SharedMountPath != "/team" {
 		t.Fatalf("Pro Team mount path should remain /team, got %q", req.Team.SharedMountPath)
@@ -412,6 +412,34 @@ func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
 	if !strings.Contains(roster, `"instanceMode":"lite"`) {
 		t.Fatalf("roster missing member instance mode: %s", roster)
 	}
+	if !strings.Contains(roster, `"communicationMode":"leader_mediated"`) || !strings.Contains(roster, `"allowPeerToPeer":false`) {
+		t.Fatalf("roster missing leader-mediated collaboration policy: %s", roster)
+	}
+}
+
+func TestTeamMemberEnvIncludesPeerAssistedPolicy(t *testing.T) {
+	description := "Developer: implements scoped tasks."
+	plan, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "leader", Role: "leader"},
+		{MemberID: "worker", Role: "developer", Description: &description},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	env := (&teamService{}).teamMemberEnv(&models.Team{
+		ID:                12,
+		CommunicationMode: teamCommunicationModePeerAssisted,
+		SharedMountPath:   "/team",
+	}, plan[1])
+	if env["CLAWMANAGER_TEAM_COMMUNICATION_MODE"] != teamCommunicationModePeerAssisted {
+		t.Fatalf("expected peer_assisted env, got %#v", env)
+	}
+	if !strings.Contains(env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"], `"allowPeerToPeer":true`) {
+		t.Fatalf("expected peer-to-peer policy env, got %#v", env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"])
+	}
+	if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], "Collaboration mode: peer_assisted") {
+		t.Fatalf("expected peer-assisted guidance in system prompt: %s", env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
+	}
 }
 
 func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
@@ -426,12 +454,13 @@ func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
 		},
 	}
 
-	soul := buildTeamMemberSoulMarkdown(member)
+	soul := buildTeamMemberSoulMarkdown(member, teamCommunicationModePeerAssisted)
 	for _, expected := range []string{
 		"# team-worker",
 		"Member ID: worker",
 		"Role: senior-developer",
 		description,
+		"Collaboration mode: peer_assisted",
 		"If asked about your role",
 	} {
 		if !strings.Contains(soul, expected) {
@@ -753,8 +782,9 @@ func TestProjectTeamEventDowngradesLiteDispatchWrapperFailure(t *testing.T) {
 		Availability:  models.TeamMemberAvailabilityBusy,
 	}
 	repo := &teamRepositoryStub{
-		tasksByID:    map[int]*models.TeamTask{taskID: task},
-		membersByKey: map[string]*models.TeamMember{"worker": worker},
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"worker": worker},
 	}
 	service := &teamService{repo: repo}
 	payload := map[string]interface{}{
@@ -785,6 +815,147 @@ func TestProjectTeamEventDowngradesLiteDispatchWrapperFailure(t *testing.T) {
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "message_warning" {
 		t.Fatalf("expected warning event, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventTreatsSuccessfulFailedEventAsCompletion(t *testing.T) {
+	taskID := 74
+	messageID := "team-31-task-74"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 121,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":          "task_failed",
+		"memberId":       "worker",
+		"messageId":      messageID,
+		"status":         "succeeded",
+		"resultMarkdown": "Delivered correct result.",
+		"summary":        "Finished successfully despite wrapper event type.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178660-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("successful task_failed wrapper should complete task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Availability == models.TeamMemberAvailabilityBlocked {
+		t.Fatalf("successful task_failed wrapper must not block member, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 {
+		t.Fatalf("expected one stored event, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	step, ok := stored["collaborationStep"].(map[string]interface{})
+	if !ok || step["type"] != "result" || step["status"] != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected result collaboration step, got %#v", stored)
+	}
+}
+
+func TestProjectTeamEventAssociatesLeaderPeerHandoffWithRootTask(t *testing.T) {
+	taskID := 73
+	messageID := "team-31-task-73"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	leader := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Role:          "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	worker := &models.TeamMember{
+		ID:           121,
+		TeamID:       31,
+		MemberKey:    "worker",
+		Role:         "developer",
+		Status:       models.TeamMemberStatusIdle,
+		Availability: models.TeamMemberAvailabilityIdle,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:    map[int]*models.TeamTask{taskID: task},
+		membersByKey: map[string]*models.TeamMember{"leader": leader, "worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "outbound",
+		"from":      "leader",
+		"to":        "worker",
+		"messageId": "worker-task-1",
+		"title":     "Research requirement",
+		"text":      "Please research the user segment and return evidence.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModePeerAssisted}, nil, redisStreamMessage{
+		ID:     "1781171178661-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask != nil && repo.updatedTask.Status == models.TeamTaskStatusSucceeded {
+		t.Fatalf("leader handoff must not complete root task, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].TaskID == nil || *repo.createdEvents[0].TaskID != taskID {
+		t.Fatalf("expected handoff event linked to root task, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	step, ok := stored["collaborationStep"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected collaborationStep in payload: %#v", stored)
+	}
+	if step["type"] != "assignment" || step["status"] != models.TeamTaskStatusDispatched || step["target"] != "worker" {
+		t.Fatalf("unexpected collaboration step: %#v", step)
+	}
+	if step["rootTaskId"] != "team-31-task-73" || step["rootMessageId"] != messageID {
+		t.Fatalf("expected root task context, got %#v", step)
 	}
 }
 

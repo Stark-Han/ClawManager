@@ -164,6 +164,38 @@ const payloadTextDeep = (
   return "";
 };
 
+const payloadBool = (
+  payload: Record<string, unknown> | undefined,
+  keys: string[],
+) => {
+  if (!payload) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "number") {
+      return value !== 0;
+    }
+    if (typeof value === "string" && value.trim()) {
+      const normalized = value.trim().toLowerCase();
+      if (["true", "yes", "1"].includes(normalized)) {
+        return true;
+      }
+      if (["false", "no", "0"].includes(normalized)) {
+        return false;
+      }
+    }
+  }
+  return undefined;
+};
+
+const payloadCollaborationStep = (
+  payload: Record<string, unknown> | undefined,
+) => asRecord(payload?.collaborationStep);
+
 const payloadNumber = (
   payload: Record<string, unknown> | undefined,
   keys: string[],
@@ -208,6 +240,16 @@ const memberKeyFromEvent = (
 
 const eventVerb = (eventType: string) => {
   switch (eventType) {
+    case "assignment":
+      return "任务拆解";
+    case "ack":
+      return "领取";
+    case "result":
+      return "交付结果";
+    case "blocker":
+      return "阻塞";
+    case "warning":
+      return "提示";
     case "outbound":
       return "发送/转派";
     case "reply":
@@ -224,6 +266,14 @@ const eventVerb = (eventType: string) => {
       return "进度更新";
     case "task_assigned":
       return "任务转派";
+    case "peer_request":
+      return "直连协作";
+    case "peer_handoff":
+      return "协作交接";
+    case "peer_review_request":
+      return "请求评审";
+    case "peer_reply":
+      return "协作回复";
     case "task_completed":
       return "完成任务";
     case "task_failed":
@@ -238,14 +288,17 @@ const eventVerb = (eventType: string) => {
 };
 
 const eventTone = (eventType: string) => {
-  if (eventType === "task_completed" || eventType === "completion" || eventType === "reply") {
+  if (eventType === "task_completed" || eventType === "completion" || eventType === "reply" || eventType === "result") {
     return "border-green-200 bg-green-50 text-green-700";
   }
-  if (eventType === "task_failed" || eventType === "message_failed" || eventType === "dlq") {
+  if (eventType === "task_failed" || eventType === "message_failed" || eventType === "dlq" || eventType === "blocker") {
     return "border-red-200 bg-red-50 text-red-700";
   }
   if (eventType === "task_stale") {
     return "border-yellow-200 bg-yellow-50 text-yellow-700";
+  }
+  if (eventType.startsWith("peer_")) {
+    return "border-violet-200 bg-violet-50 text-violet-700";
   }
   return "border-blue-200 bg-blue-50 text-blue-700";
 };
@@ -253,6 +306,7 @@ const eventTone = (eventType: string) => {
 type CollaborationItem = {
   event: TeamEvent;
   payload: Record<string, unknown>;
+  collaborationStep?: Record<string, unknown>;
   eventType: string;
   actor: string;
   from: string;
@@ -314,6 +368,35 @@ const groupQueryText = (group: CollaborationGroup) =>
   group.label ||
   "未命名任务";
 
+const isUserQuestionAnchorGroup = (group: CollaborationGroup) => {
+  if (!group.task) {
+    return false;
+  }
+  if (payloadBool(group.task.payload, ["anchorEligible", "anchor_eligible"]) === false) {
+    return false;
+  }
+  const origin = payloadText(group.task.payload, ["origin", "source"]).toLowerCase();
+  const intent = payloadText(group.task.payload, ["intent"]).toLowerCase();
+  if (intent === "team_bootstrap_introduction" || origin === "system_bootstrap") {
+    return false;
+  }
+  if (group.task.created_by === undefined || group.task.created_by === null) {
+    return false;
+  }
+  if (
+    origin &&
+    !["user", "user_query", "clawmanager_user", "manual_dispatch"].includes(origin)
+  ) {
+    return false;
+  }
+  const query = taskPromptText(group.task) || taskTitleText(group.task) || group.title || "";
+  const normalized = query.trim();
+  if (!normalized) {
+    return false;
+  }
+  return !/^(task[-_][a-z0-9-]+|team-\d+-task-\d+)$/i.test(normalized);
+};
+
 const eventTimeValue = (event: TeamEvent) =>
   event.occurred_at || event.created_at;
 
@@ -336,9 +419,29 @@ const payloadTaskIDs = (payload: Record<string, unknown>) =>
     "task_id",
     "currentTaskId",
     "runtimeTaskId",
+    "rootTaskId",
+    "root_task_id",
+    "parentTaskId",
+    "parent_task_id",
+    "parentMessageId",
+    "parent_message_id",
+    "inReplyTo",
+    "in_reply_to",
     "MessageThreadId",
   ]
     .map((key) => payloadText(payload, [key]))
+    .concat(
+      (() => {
+        const step = payloadCollaborationStep(payload);
+        return step
+          ? [
+              payloadText(step, ["rootTaskId", "root_task_id"]),
+              payloadText(step, ["taskId", "task_id"]),
+              payloadText(step, ["parentTaskId", "parent_task_id"]),
+            ]
+          : [];
+      })(),
+    )
     .filter(Boolean);
 
 const taskCreatorKey = (task?: TeamTask) =>
@@ -403,6 +506,11 @@ const taskLabelFromKey = (key: string, event: TeamEvent) => {
 const collaborationContent = (
   payload: Record<string, unknown>,
 ) => {
+  const step = payloadCollaborationStep(payload);
+  const stepSummary = payloadText(step, ["summary", "detail", "content"]);
+  if (stepSummary) {
+    return stepSummary;
+  }
   const resultMarkdown = payloadTextDeep(payload, ["resultMarkdown"]);
   if (resultMarkdown) {
     return resultMarkdown;
@@ -466,25 +574,20 @@ const inferGroupStatus = (items: CollaborationItem[], task?: TeamTask) => {
   if (task?.status) {
     return task.status;
   }
-  const latest = [...items].sort((a, b) => b.timeMs - a.timeMs)[0];
-  const terminal = items.find((item) => {
+  const sorted = [...items].sort((a, b) => b.timeMs - a.timeMs);
+  const latest = sorted[0];
+  const terminal = sorted.find((item) => {
     const status = payloadText(item.payload, ["status"]).toLowerCase();
     return (
-      item.eventType === "task_failed" ||
-      item.eventType === "message_failed" ||
-      status === "failed" ||
+      isFailedCollaborationItem(item) ||
       item.eventType === "task_completed" ||
       item.eventType === "completion" ||
-      status === "succeeded"
+      ["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes(status)
     );
   });
   if (terminal) {
     const status = payloadText(terminal.payload, ["status"]).toLowerCase();
-    if (
-      terminal.eventType === "task_failed" ||
-      terminal.eventType === "message_failed" ||
-      status === "failed"
-    ) {
+    if (isFailedCollaborationItem(terminal) && !["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes(status)) {
       return "failed";
     }
     return "succeeded";
@@ -492,13 +595,42 @@ const inferGroupStatus = (items: CollaborationItem[], task?: TeamTask) => {
   if (latest?.eventType === "reply") {
     return "replied";
   }
-  if (items.some((item) => item.eventType === "progress" || item.eventType === "task_started")) {
+  if (
+    items.some(
+      (item) =>
+        item.eventType === "progress" ||
+        item.eventType === "task_started" ||
+        item.eventType === "peer_request" ||
+        item.eventType === "peer_handoff" ||
+        item.eventType === "peer_review_request",
+    )
+  ) {
     return "running";
   }
   if (items.some((item) => item.eventType === "outbound" || item.eventType === "task_assigned")) {
     return "dispatched";
   }
   return "observed";
+};
+
+const isFailedCollaborationItem = (item: CollaborationItem) => {
+  const status = payloadText(item.payload, ["status", "task_status", "taskStatus"]).toLowerCase();
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok", "warning"].includes(status)) {
+    return false;
+  }
+  const eventType = item.eventType;
+  if (eventType !== "task_failed" && eventType !== "message_failed") {
+    return status === "failed" || status === "failure" || status === "error" || status === "blocked";
+  }
+  const content = item.content.toLowerCase();
+  if (content.includes("dispatch finished without reply/completion") || content.includes("without reply/completion")) {
+    return false;
+  }
+  return /error|failed|failure|exception|timeout|forbidden|失败|错误|异常|超时|blocked/.test(content) ||
+    status === "failed" ||
+    status === "failure" ||
+    status === "error" ||
+    status === "blocked";
 };
 
 const buildCollaborationGroups = (
@@ -547,9 +679,14 @@ const buildCollaborationGroups = (
 
   for (const event of events) {
     const payload = normalizeEventPayload(event);
+    const step = payloadCollaborationStep(payload);
     const eventType = collaborationEventType(event, payload);
-    const from = payloadText(payload, ["from"]);
-    const to = payloadText(payload, ["to", "recipient", "memberId"]);
+    const from =
+      payloadText(step, ["actor", "from", "sourceMemberId", "source_member_id"]) ||
+      payloadText(payload, ["from", "sourceMemberId", "source_member_id"]);
+    const to =
+      payloadText(step, ["target", "to", "recipient", "targetMemberId", "target_member_id"]) ||
+      payloadText(payload, ["to", "recipient", "targetMemberId", "target_member_id", "memberId"]);
     const taskKey = taskKeyFromEvent(
       event,
       payload,
@@ -563,6 +700,7 @@ const buildCollaborationGroups = (
     const item: CollaborationItem = {
       event,
       payload,
+      collaborationStep: step || undefined,
       eventType,
       actor,
       from,
@@ -1698,7 +1836,7 @@ function workspaceLinkToRelativePath(raw: string) {
 }
 
 function isPreviewableWorkspacePath(path: string) {
-  return /\.(md|txt)$/i.test(path.trim());
+  return /\.(md|txt|json)$/i.test(path.trim());
 }
 
 function isTeamWorkspaceLink(path: string) {
@@ -1834,7 +1972,7 @@ function CollaborationPanel({
   const queryAnchors = useMemo(
     () =>
       groups
-        .filter((group) => group.task || group.items.length > 0)
+        .filter((group) => isUserQuestionAnchorGroup(group))
         .sort((a, b) => groupStartTime(a) - groupStartTime(b)),
     [groups],
   );
@@ -2416,18 +2554,23 @@ function QuestionAnchorRail({
 }
 
 function selectActiveProcessGroup(groups: CollaborationGroup[]) {
+  const userQuestionGroups = groups.filter((group) => isUserQuestionAnchorGroup(group));
+  const candidates = userQuestionGroups.length > 0 ? userQuestionGroups : groups;
   return (
-    groups.find((item) =>
+    candidates.find((item) =>
       ["pending", "dispatched", "running", "observed", "replied"].includes(item.status),
-    ) || groups[0]
+    ) || candidates[0]
   );
 }
 
 type ProcessStep = {
   id: string;
+  workId?: string;
   actor: string;
   to: string;
   eventType: string;
+  status?: string;
+  phase?: string;
   content: string;
   progress?: number;
   time: number;
@@ -2484,15 +2627,25 @@ function buildProcessSteps(
     if (isProtocolNoiseItem(item)) {
       continue;
     }
-    const actor = displayMemberName(item.actor || item.from || "system", memberByKey, leaderMemberId);
-    const to = item.to ? displayMemberName(item.to, memberByKey, leaderMemberId) : "";
+    const stepMeta = item.collaborationStep;
+    const actorKey = payloadText(stepMeta, ["actor"]) || item.actor || item.from || "system";
+    const targetKey = payloadText(stepMeta, ["target"]) || item.to;
+    const actor = displayMemberName(actorKey, memberByKey, leaderMemberId);
+    const to = targetKey ? displayMemberName(targetKey, memberByKey, leaderMemberId) : "";
+    const stepType = payloadText(stepMeta, ["type"]) || item.eventType;
+    const stepStatus = payloadText(stepMeta, ["status"]);
+    const stepTitle = payloadText(stepMeta, ["title"]);
+    const stepSummary = payloadText(stepMeta, ["summary"]);
     steps.push({
       id: `event-step-${item.event.id}`,
+      workId: payloadText(stepMeta, ["workId", "work_id", "id"]),
       actor,
       to,
-      eventType: item.eventType,
-      content: item.content || chatFallbackText(item, payloadNumber(item.payload, ["progress"]), payloadText(item.payload, ["status"])),
-      progress: payloadNumber(item.payload, ["progress"]),
+      eventType: stepType,
+      status: stepStatus,
+      phase: payloadText(stepMeta, ["phase"]),
+      content: stepSummary || item.content || stepTitle || chatFallbackText(item, payloadNumber(item.payload, ["progress"]), payloadText(item.payload, ["status"])),
+      progress: payloadNumber(stepMeta, ["progress"]) || payloadNumber(item.payload, ["progress"]),
       time: item.timeMs,
     });
   }
@@ -2534,6 +2687,8 @@ function buildKanbanColumns(
     const workKey = kanbanWorkKey(step, delegatedTargets, steps);
     const previous = cardByWorkKey.get(workKey);
     const column = terminal ? "done" : kanbanColumnForStep(step, visualStatus, steps);
+    const stepStatus = (step.status || "").toLowerCase();
+    const successfulStep = ["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes(stepStatus);
     const card: KanbanTaskCard = {
       id: previous?.id || `kanban-${workKey}`,
       column,
@@ -2544,7 +2699,9 @@ function buildKanbanColumns(
       eventType: step.eventType,
       time: step.time,
       progress: step.progress,
-      statusLabel: terminal && column === "done" && !isTerminalEventType(step.eventType)
+      statusLabel: successfulStep
+        ? "已完成"
+        : terminal && column === "done" && !isTerminalEventType(step.eventType)
         ? "已完成"
         : eventVerb(step.eventType),
     };
@@ -2581,7 +2738,10 @@ function buildKanbanColumns(
 }
 
 function kanbanWorkKey(step: ProcessStep, delegatedTargets: string[] = [], steps: ProcessStep[] = []) {
-  if (step.eventType === "outbound" || step.eventType === "task_assigned") {
+  if (step.workId) {
+    return sanitizeKanbanKey(step.workId);
+  }
+  if (step.eventType === "assignment" || step.eventType === "outbound" || step.eventType === "task_assigned") {
     return sanitizeKanbanKey(step.to || step.actor || "assignment");
   }
   if ((isCompletionEvidenceStep(step, steps) || isFailureEvidenceStep(step)) && isLeaderLikeName(step.actor)) {
@@ -2601,8 +2761,10 @@ function sanitizeKanbanKey(value: string) {
 
 function isTerminalEventType(eventType: string) {
   return [
+    "result",
     "task_completed",
     "completion",
+    "blocker",
     "task_failed",
     "message_failed",
     "task_stale",
@@ -2610,8 +2772,17 @@ function isTerminalEventType(eventType: string) {
 }
 
 function kanbanColumnForStep(step: ProcessStep, visualStatus: string, steps: ProcessStep[] = []): KanbanColumnKey {
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok", "failed", "failure", "error", "blocked", "stale"].includes((step.status || "").toLowerCase())) {
+    return "done";
+  }
   if (isCompletionEvidenceStep(step, steps) || isFailureEvidenceStep(step)) {
     return "done";
+  }
+  if (step.eventType === "assignment" || step.eventType === "peer_request" || step.eventType === "peer_handoff" || step.eventType === "peer_review_request") {
+    return "todo";
+  }
+  if (step.eventType === "peer_reply" || step.eventType === "ack") {
+    return "doing";
   }
   if (step.eventType === "reply") {
     return "doing";
@@ -2635,6 +2806,22 @@ function kanbanStepTitle(step: ProcessStep, previous?: KanbanTaskCard) {
     return `${previous.target || previous.owner} 反馈结果`;
   }
   switch (step.eventType) {
+    case "assignment":
+      return step.to ? `拆解给 ${step.to}` : "拆解子任务";
+    case "peer_request":
+      return step.to ? `${step.actor} 请求 ${step.to} 协作` : "协作请求";
+    case "peer_handoff":
+      return step.to ? `${step.actor} 交接给 ${step.to}` : "协作交接";
+    case "peer_review_request":
+      return step.to ? `${step.actor} 请求 ${step.to} 评审` : "评审请求";
+    case "peer_reply":
+      return `${step.actor} 协作反馈`;
+    case "ack":
+      return `${step.actor} 接收任务`;
+    case "result":
+      return `${step.actor} 交付结果`;
+    case "blocker":
+      return `${step.actor} 遇到阻塞`;
     case "outbound":
     case "task_assigned":
       return step.to ? `拆解给 ${step.to}` : "拆解子任务";
@@ -2786,6 +2973,9 @@ function isCompletionEvidenceStep(step: ProcessStep, steps: ProcessStep[] = []) 
   if (!step.content || isDispatchOnlyLeaderTerminalStep(step)) {
     return false;
   }
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes((step.status || "").toLowerCase())) {
+    return true;
+  }
   if (isFinalResultText(step.content)) {
     return true;
   }
@@ -2824,6 +3014,9 @@ function hasNonLeaderCompletionBeforeStep(step: ProcessStep, steps: ProcessStep[
 }
 
 function isFailureEvidenceStep(step: ProcessStep) {
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok", "warning"].includes((step.status || "").toLowerCase())) {
+    return false;
+  }
   if (!step.content && step.eventType !== "task_failed" && step.eventType !== "message_failed") {
     return false;
   }
@@ -2900,10 +3093,10 @@ function isSubstantiveFinalAnswerText(value: string) {
 }
 
 function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []) {
-  if (group.task && group.task.status !== "succeeded") {
+  const latestOutcome = latestOutcomeEvidence(steps);
+  if (group.task && group.task.status !== "succeeded" && latestOutcome?.status !== "succeeded") {
     return "";
   }
-  const latestOutcome = latestOutcomeEvidence(steps);
   const finalStep = latestOutcome?.status === "succeeded"
     ? latestOutcome.step
     : latestCompletionEvidenceStep(steps);
@@ -2926,6 +3119,10 @@ function processVisualStatus(
   finalResult: string,
   steps: ProcessStep[] = [],
 ) {
+  const latestOutcome = latestOutcomeEvidence(steps);
+  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
+    return "succeeded";
+  }
   if (group.task?.status === "succeeded") {
     return "succeeded";
   }
@@ -2940,10 +3137,6 @@ function processVisualStatus(
   }
   if (group.task?.status === "dispatched") {
     return "dispatched";
-  }
-  const latestOutcome = latestOutcomeEvidence(steps);
-  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
-    return "succeeded";
   }
   if (latestOutcome?.status === "failed") {
     return "failed";
@@ -3195,7 +3388,10 @@ function kanbanColumnStyle(tone: KanbanColumnKey) {
 }
 
 function kanbanCardStyle(card: KanbanTaskCard) {
-  if (card.eventType === "task_failed" || card.eventType === "message_failed" || card.eventType === "task_stale") {
+  const statusLabel = card.statusLabel.toLowerCase();
+  const failedLabel = /失败|阻塞|failed|failure|error|blocked|stale/.test(statusLabel);
+  const successfulLabel = /已完成|完成任务|最终汇总|completed|succeeded|success/.test(statusLabel);
+  if ((failedLabel && !successfulLabel) || card.eventType === "task_stale") {
     return {
       border: "border-rose-100",
       bar: "bg-rose-500",
@@ -3230,6 +3426,7 @@ type TeamChatMessage = {
   senderKey: string;
   content: string;
   time: number;
+  sequence?: number;
   tone?: "normal" | "leader" | "assignment" | "feedback" | "error";
   dedupeKey?: string;
   threadKey?: string;
@@ -3248,6 +3445,15 @@ function buildTeamChatMessages(
     [...memberById.values()].map((member) => [member.member_key, member]),
   );
   for (const group of groups) {
+    const firstItemSequence = group.items.reduce(
+      (current, item) => Math.min(current, item.event.id),
+      Number.POSITIVE_INFINITY,
+    );
+    const taskSequenceBase = Number.isFinite(firstItemSequence)
+      ? firstItemSequence - 0.1
+      : group.task
+        ? group.task.id * 1000000
+        : group.latestAt;
     if (group.task) {
       const target =
         memberById.get(group.task.target_member_id)?.member_key ||
@@ -3270,6 +3476,7 @@ function buildTeamChatMessages(
         senderKey: assignmentSenderKey,
         content: `@${targetLabel} ${prompt}\n任务：${group.task.message_id || group.label}`,
         time: new Date(group.task.created_at).getTime(),
+        sequence: taskSequenceBase,
         tone: "assignment",
         dedupeKey: `assignment:${group.task.message_id || group.task.id}`,
         threadKey: group.key,
@@ -3286,6 +3493,7 @@ function buildTeamChatMessages(
           senderKey: target,
           content: `任务结果反馈：\n${resultSummary}`,
           time: new Date(group.task.finished_at || group.task.updated_at).getTime(),
+          sequence: taskSequenceBase + 0.2,
           tone: "feedback",
           dedupeKey: `feedback:${group.task.message_id || group.task.id}:${normalizeChatDedupeContent(resultSummary)}`,
           threadKey: group.key,
@@ -3300,6 +3508,7 @@ function buildTeamChatMessages(
           senderKey: target,
           content: `失败：${group.task.error_message}`,
           time: new Date(group.task.updated_at).getTime(),
+          sequence: taskSequenceBase + 0.2,
           tone: "error",
           dedupeKey: `error:${group.task.message_id || group.task.id}:${normalizeChatDedupeContent(group.task.error_message)}`,
           threadKey: group.key,
@@ -3325,11 +3534,10 @@ function buildTeamChatMessages(
 }
 
 function compareTeamChatMessages(a: TeamChatMessage, b: TeamChatMessage) {
-  if (a.threadKey && a.threadKey === b.threadKey) {
-    const phaseDiff = (a.sortPhase ?? 1) - (b.sortPhase ?? 1);
-    if (phaseDiff !== 0) {
-      return phaseDiff;
-    }
+  const aSequence = typeof a.sequence === "number" && Number.isFinite(a.sequence) ? a.sequence : undefined;
+  const bSequence = typeof b.sequence === "number" && Number.isFinite(b.sequence) ? b.sequence : undefined;
+  if (aSequence !== undefined && bSequence !== undefined && aSequence !== bSequence) {
+    return aSequence - bSequence;
   }
   return a.time - b.time || a.id.localeCompare(b.id);
 }
@@ -3386,6 +3594,7 @@ function chatMessageFromItem(
     senderKey,
     content,
     time: item.timeMs,
+    sequence: item.event.id,
     tone:
       isAssignmentEvent && hasContent
         ? isFeedbackEvent

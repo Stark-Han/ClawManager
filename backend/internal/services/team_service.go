@@ -1,6 +1,7 @@
 package services
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"mime/multipart"
 	"os"
 	posixpath "path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -43,6 +45,12 @@ const (
 	initialLeaderTaskIntent = "team_bootstrap_introduction"
 	teamTaskCompletionTool  = "team_complete_task"
 	teamTaskReplyTarget     = "clawmanager"
+)
+
+const (
+	teamCommunicationModeLeaderMediated = "leader_mediated"
+	teamCommunicationModePeerAssisted   = "peer_assisted"
+	teamCommunicationModeFullMesh       = "full_mesh"
 )
 
 var (
@@ -287,9 +295,9 @@ func (s *teamService) CreateTeam(userID int, req CreateTeamRequest) (*TeamDetail
 		}
 	}
 
-	communicationMode := strings.TrimSpace(req.CommunicationMode)
-	if communicationMode == "" {
-		communicationMode = "leader_mediated"
+	communicationMode, err := normalizeTeamCommunicationMode(req.CommunicationMode)
+	if err != nil {
+		return nil, err
 	}
 	redisURL := strings.TrimSpace(req.RedisURL)
 	if redisURL == "" {
@@ -489,6 +497,11 @@ func appendTeamTaskCompletionInstruction(prompt string) string {
 	}
 	instruction := strings.Join([]string{
 		"Completion contract:",
+		"- For multi-member Teams, first write a compact collaboration plan: subtasks, owner member_id, dependency, expected artifact, and verification rule.",
+		"- If CLAWMANAGER_TEAM_COMMUNICATION_MODE is peer_assisted or full_mesh, members may use team_send to ask peers, request reviews, hand off bounded work, and share artifacts without routing every interaction through the Leader.",
+		"- Every peer message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
+		"- The Leader must not mark the root task succeeded after merely dispatching work. Final success requires returned member evidence or a direct self-contained answer.",
+		"- Workers should report peer outcomes and produced artifact paths back to the Team channel before completing their assigned task.",
 		"- When the final result is ready, call team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
 		"- If the task fails, call team_complete_task with status=\"failed\" and an error message.",
 		"- Do not send the final answer as a normal message to clawmanager; ClawManager consumes task_completed/task_failed events from the Team Redis event stream.",
@@ -539,7 +552,7 @@ func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, memb
 	if err != nil {
 		return "", err
 	}
-	data := buildTeamRosterConfigData(rosterJSON, members)
+	data := buildTeamRosterConfigData(rosterJSON, team, members)
 	if err := s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), data, map[string]string{
 		"app":        "clawreef",
 		"managed-by": "clawreef",
@@ -550,7 +563,7 @@ func (s *teamService) upsertTeamRosterConfig(userID int, team *models.Team, memb
 	return rosterJSON, nil
 }
 
-func buildTeamRosterConfigData(rosterJSON string, members []plannedTeamMember) map[string]string {
+func buildTeamRosterConfigData(rosterJSON string, team *models.Team, members []plannedTeamMember) map[string]string {
 	data := map[string]string{
 		teamConfigFileName: rosterJSON,
 	}
@@ -558,7 +571,7 @@ func buildTeamRosterConfigData(rosterJSON string, members []plannedTeamMember) m
 		if member.RuntimeType != "hermes" {
 			continue
 		}
-		data[teamMemberSoulConfigKey(member.MemberKey)] = buildTeamMemberSoulMarkdown(member)
+		data[teamMemberSoulConfigKey(member.MemberKey)] = buildTeamMemberSoulMarkdown(member, normalizedTeamCommunicationMode(team.CommunicationMode))
 	}
 	return data
 }
@@ -637,7 +650,7 @@ func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Tea
 			teamTokenSecretKey:    runtimeSecrets.Token,
 		})
 		if strings.TrimSpace(rosterJSON) != "" {
-			environmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] = rosterJSONWithSharedDir(rosterJSON, s.teamRuntimeSharedPath(team))
+			environmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] = rosterJSON
 		}
 	}
 	return CreateInstanceRequest{
@@ -680,34 +693,46 @@ func (s *teamService) teamRuntimeSharedPath(team *models.Team) string {
 	return k8s.TeamSharedWorkspacePath(s.runtimeWorkspaceRoot, team.UserID, team.ID)
 }
 
+func (s *teamService) teamRuntimeSharedPathFor(userID, teamID int) string {
+	return k8s.TeamSharedWorkspacePath(s.runtimeWorkspaceRoot, userID, teamID)
+}
+
 func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember) map[string]string {
 	managerBaseURL, _ := defaultTeamManagerBaseURL()
 	memberContext := buildPlannedTeamMemberTaskContext(member)
+	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
+	collaborationPolicy := buildTeamCollaborationPolicy(communicationMode)
+	collaborationPolicyJSON, _ := json.Marshal(collaborationPolicy)
 	env := map[string]string{
-		"CLAWMANAGER_TEAM_ENABLED":        "true",
-		"CLAWMANAGER_TEAM_ID":             strconv.Itoa(team.ID),
-		"CLAWMANAGER_TEAM_MEMBER_ID":      member.MemberKey,
-		"CLAWMANAGER_TEAM_ROLE":           member.Role,
-		"CLAWMANAGER_TEAM_SHARED_DIR":     team.SharedMountPath,
-		"CLAWMANAGER_TEAM_SHARED_UID":     strconv.Itoa(teamSharedUID),
-		"CLAWMANAGER_TEAM_SHARED_GID":     strconv.Itoa(teamSharedGID),
-		"CLAWMANAGER_TEAM_UMASK":          teamSharedUmask,
-		"PUID":                            strconv.Itoa(teamSharedUID),
-		"PGID":                            strconv.Itoa(teamSharedGID),
-		"UMASK":                           teamSharedUmask,
-		"CLAWMANAGER_TEAM_CONFIG_PATH":    teamConfigMountPath,
-		"CLAWMANAGER_TEAM_AUTORUN":        "true",
-		"CLAWMANAGER_TEAM_CONSUMER_GROUP": "team-members",
-		"CLAWMANAGER_TEAM_INBOX_KEY":      teamInboxKey(team.ID, member.MemberKey),
-		"CLAWMANAGER_TEAM_EVENTS_KEY":     teamEventsKey(team.ID),
-		"CLAWMANAGER_TEAM_PRESENCE_KEY":   teamPresenceKey(team.ID),
-		"CLAWMANAGER_TEAM_DLQ_KEY":        teamDLQKey(team.ID),
-		"CLAWMANAGER_TEAM_MANAGER_URL":    managerBaseURL,
+		"CLAWMANAGER_TEAM_ENABLED":            "true",
+		"CLAWMANAGER_TEAM_ID":                 strconv.Itoa(team.ID),
+		"CLAWMANAGER_TEAM_MEMBER_ID":          member.MemberKey,
+		"CLAWMANAGER_TEAM_ROLE":               member.Role,
+		"CLAWMANAGER_TEAM_COMMUNICATION_MODE": communicationMode,
+		"CLAWMANAGER_TEAM_SHARED_DIR":         team.SharedMountPath,
+		"CLAWMANAGER_TEAM_SHARED_UID":         strconv.Itoa(teamSharedUID),
+		"CLAWMANAGER_TEAM_SHARED_GID":         strconv.Itoa(teamSharedGID),
+		"CLAWMANAGER_TEAM_UMASK":              teamSharedUmask,
+		"PUID":                                strconv.Itoa(teamSharedUID),
+		"PGID":                                strconv.Itoa(teamSharedGID),
+		"UMASK":                               teamSharedUmask,
+		"CLAWMANAGER_TEAM_CONFIG_PATH":        teamConfigMountPath,
+		"CLAWMANAGER_TEAM_AUTORUN":            "true",
+		"CLAWMANAGER_TEAM_CONSUMER_GROUP":     "team-members",
+		"CLAWMANAGER_TEAM_INBOX_KEY":          teamInboxKey(team.ID, member.MemberKey),
+		"CLAWMANAGER_TEAM_EVENTS_KEY":         teamEventsKey(team.ID),
+		"CLAWMANAGER_TEAM_PRESENCE_KEY":       teamPresenceKey(team.ID),
+		"CLAWMANAGER_TEAM_DLQ_KEY":            teamDLQKey(team.ID),
+		"CLAWMANAGER_TEAM_MANAGER_URL":        managerBaseURL,
+	}
+	if len(collaborationPolicyJSON) > 0 {
+		env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"] = string(collaborationPolicyJSON)
 	}
 	if description := strings.TrimSpace(memberContext["description"]); description != "" {
 		env["CLAWMANAGER_TEAM_MEMBER_DESCRIPTION"] = description
 	}
 	if systemPrompt := strings.TrimSpace(memberContext["systemPrompt"]); systemPrompt != "" {
+		systemPrompt = appendTeamCollaborationGuidance(systemPrompt, communicationMode)
 		env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] = systemPrompt
 		env["HERMES_AGENT_HELP_GUIDANCE"] = systemPrompt
 	}
@@ -814,76 +839,84 @@ func (s *teamService) ListTeamEvents(userID, teamID, beforeID, limit int) (*Team
 }
 
 func (s *teamService) ListWorkspaceFiles(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceListPayload, error) {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return nil, err
-	}
 	cleanPath, err := cleanTeamWorkspacePath(relPath)
 	if err != nil {
 		return nil, err
 	}
-	target := teamWorkspaceFullPath(team, cleanPath)
-	script := fmt.Sprintf(`set -eu
-target=%s
-if [ ! -d "$target" ]; then exit 44; fi
-for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
-  [ -e "$entry" ] || continue
-  name="${entry##*/}"
-  [ "$name" = "." ] && continue
-  [ "$name" = ".." ] && continue
-  if [ -d "$entry" ]; then kind=directory; size=0; else kind=file; size=$(stat -c %%s "$entry" 2>/dev/null || wc -c < "$entry" | tr -d ' '); fi
-  mtime=$(stat -c %%Y "$entry" 2>/dev/null || echo 0)
-  printf '%%s\t%%s\t%%s\t%%s\n' "$kind" "$name" "$size" "$mtime"
-done`, shellQuote(target))
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
-		return nil, formatExecError("list Team workspace", err, stderr.String())
+	team, root, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, cleanPath)
+	if err != nil {
+		return nil, err
 	}
-	entries := parseTeamWorkspaceList(cleanPath, stdout.String())
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("Team workspace path not found")
+		}
+		return nil, fmt.Errorf("failed to inspect Team workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("Team workspace path is not a folder")
+	}
+	dirEntries, err := os.ReadDir(target)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Team workspace: %w", err)
+	}
+	entries := make([]TeamWorkspaceFileEntry, 0, len(dirEntries))
+	for _, dirEntry := range dirEntries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		info, err := dirEntry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect Team workspace entry %q: %w", dirEntry.Name(), err)
+		}
+		entries = append(entries, teamWorkspaceFileEntryFromInfo(cleanPath, info))
+	}
+	sortTeamWorkspaceEntries(entries)
 	return &TeamWorkspaceListPayload{
 		Path:    cleanPath,
-		Root:    team.SharedMountPath,
+		Root:    teamWorkspaceDisplayRoot(team, root),
 		Entries: entries,
 	}, nil
 }
 
 func (s *teamService) PreviewWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspacePreviewPayload, error) {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return nil, err
-	}
 	cleanPath, err := cleanTeamWorkspacePath(relPath)
 	if err != nil {
 		return nil, err
 	}
 	if cleanPath == "" || !isPreviewableWorkspaceFile(cleanPath) {
-		return nil, fmt.Errorf("only md and txt files can be previewed")
+		return nil, fmt.Errorf("only md, txt, and json files can be previewed")
 	}
-	target := teamWorkspaceFullPath(team, cleanPath)
-	script := fmt.Sprintf(`set -eu
-target=%s
-[ -f "$target" ] || exit 44
-size=$(stat -c %%s "$target" 2>/dev/null || wc -c < "$target" | tr -d ' ')
-[ "$size" -le 1048576 ] || exit 45
-cat "$target"`, shellQuote(target))
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
-		return nil, formatExecError("preview Team workspace file", err, stderr.String())
+	_, _, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, cleanPath)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("Team workspace file not found")
+		}
+		return nil, fmt.Errorf("failed to inspect Team workspace file: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("Team workspace entry is a folder")
+	}
+	if info.Size() > 1048576 {
+		return nil, fmt.Errorf("Team workspace file is too large to preview")
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		return nil, fmt.Errorf("failed to preview Team workspace file: %w", err)
 	}
 	return &TeamWorkspacePreviewPayload{
 		Path:    cleanPath,
 		Name:    posixpath.Base(cleanPath),
-		Content: stdout.String(),
+		Content: string(raw),
 	}, nil
 }
 
 func (s *teamService) DownloadWorkspaceFile(ctx context.Context, userID, teamID int, relPath string) (*TeamWorkspaceDownloadPayload, error) {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return nil, err
-	}
 	cleanPath, err := cleanTeamWorkspacePath(relPath)
 	if err != nil {
 		return nil, err
@@ -891,88 +924,42 @@ func (s *teamService) DownloadWorkspaceFile(ctx context.Context, userID, teamID 
 	if cleanPath == "" {
 		return nil, fmt.Errorf("file path is required")
 	}
-	target := teamWorkspaceFullPath(team, cleanPath)
-	checkScript := fmt.Sprintf(`set -eu
-target=%s
-if [ -f "$target" ]; then
-  printf file
-elif [ -d "$target" ]; then
-  printf directory
-else
-  exit 44
-fi`, shellQuote(target))
-	var checkStdout bytes.Buffer
-	var checkStderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", checkScript}, nil, &checkStdout, &checkStderr); err != nil {
-		return nil, formatExecError("inspect Team workspace entry", err, checkStderr.String())
+	_, _, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, cleanPath)
+	if err != nil {
+		return nil, err
 	}
-	entryType := strings.TrimSpace(checkStdout.String())
-	if entryType == "directory" {
-		script := fmt.Sprintf(`set -eu
-target=%s
-parent=$(dirname "$target")
-name=$(basename "$target")
-cd "$parent"
-if command -v zip >/dev/null 2>&1; then
-  zip -rq - "$name"
-elif command -v python3 >/dev/null 2>&1; then
-  python3 - "$name" <<'PY'
-import os
-import sys
-import zipfile
-
-root = sys.argv[1]
-with zipfile.ZipFile(sys.stdout.buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-    for current, dirs, files in os.walk(root):
-        dirs.sort()
-        files.sort()
-        if not files and not dirs:
-            archive.write(current, current)
-        for filename in files:
-            path = os.path.join(current, filename)
-            archive.write(path, path)
-PY
-else
-  echo "zip or python3 is required to download folders" >&2
-  exit 45
-fi`, shellQuote(target))
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
-			return nil, formatExecError("download Team workspace folder", err, stderr.String())
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("Team workspace entry not found")
+		}
+		return nil, fmt.Errorf("failed to inspect Team workspace entry: %w", err)
+	}
+	if info.IsDir() {
+		data, err := zipTeamWorkspaceDirectory(ctx, target)
+		if err != nil {
+			return nil, err
 		}
 		return &TeamWorkspaceDownloadPayload{
 			Path:        cleanPath,
 			Name:        posixpath.Base(cleanPath) + ".zip",
 			ContentType: "application/zip",
-			Data:        stdout.Bytes(),
+			Data:        data,
 		}, nil
 	}
-	if entryType != "file" {
-		return nil, fmt.Errorf("unsupported workspace entry type")
-	}
-	script := fmt.Sprintf(`set -eu
-target=%s
-[ -f "$target" ] || exit 44
-cat "$target"`, shellQuote(target))
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, &stdout, &stderr); err != nil {
-		return nil, formatExecError("download Team workspace file", err, stderr.String())
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download Team workspace file: %w", err)
 	}
 	return &TeamWorkspaceDownloadPayload{
 		Path:        cleanPath,
 		Name:        posixpath.Base(cleanPath),
 		ContentType: "application/octet-stream",
-		Data:        stdout.Bytes(),
+		Data:        data,
 	}, nil
 }
 
 func (s *teamService) CreateWorkspaceFolder(ctx context.Context, userID, teamID int, req TeamWorkspaceFolderRequest) error {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return err
-	}
 	parent, err := cleanTeamWorkspacePath(req.Path)
 	if err != nil {
 		return err
@@ -981,23 +968,18 @@ func (s *teamService) CreateWorkspaceFolder(ctx context.Context, userID, teamID 
 	if err != nil {
 		return err
 	}
-	target := teamWorkspaceFullPath(team, joinTeamWorkspacePath(parent, name))
-	script := fmt.Sprintf(`set -eu
-target=%s
-mkdir -p "$target"
-chown -R 1000:1000 "$target" 2>/dev/null || true`, shellQuote(target))
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
-		return formatExecError("create Team workspace folder", err, stderr.String())
+	_, _, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, joinTeamWorkspacePath(parent, name))
+	if err != nil {
+		return err
 	}
+	if err := os.MkdirAll(target, 0775); err != nil {
+		return fmt.Errorf("failed to create Team workspace folder: %w", err)
+	}
+	chownTeamWorkspacePath(target)
 	return nil
 }
 
 func (s *teamService) RenameWorkspaceEntry(ctx context.Context, userID, teamID int, req TeamWorkspaceRenameRequest) error {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return err
-	}
 	cleanPath, err := cleanTeamWorkspacePath(req.Path)
 	if err != nil {
 		return err
@@ -1013,26 +995,32 @@ func (s *teamService) RenameWorkspaceEntry(ctx context.Context, userID, teamID i
 	if parent == "." {
 		parent = ""
 	}
-	source := teamWorkspaceFullPath(team, cleanPath)
-	target := teamWorkspaceFullPath(team, joinTeamWorkspacePath(parent, newName))
-	script := fmt.Sprintf(`set -eu
-source=%s
-target=%s
-[ -e "$source" ] || exit 44
-[ ! -e "$target" ] || exit 46
-mv "$source" "$target"`, shellQuote(source), shellQuote(target))
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
-		return formatExecError("rename Team workspace entry", err, stderr.String())
+	_, _, source, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, cleanPath)
+	if err != nil {
+		return err
+	}
+	_, _, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, joinTeamWorkspacePath(parent, newName))
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(source); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("Team workspace entry not found")
+		}
+		return fmt.Errorf("failed to inspect Team workspace entry: %w", err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("target Team workspace entry already exists")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to inspect target Team workspace entry: %w", err)
+	}
+	if err := os.Rename(source, target); err != nil {
+		return fmt.Errorf("failed to rename Team workspace entry: %w", err)
 	}
 	return nil
 }
 
 func (s *teamService) DeleteWorkspaceEntry(ctx context.Context, userID, teamID int, relPath string) error {
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return err
-	}
 	cleanPath, err := cleanTeamWorkspacePath(relPath)
 	if err != nil {
 		return err
@@ -1040,14 +1028,18 @@ func (s *teamService) DeleteWorkspaceEntry(ctx context.Context, userID, teamID i
 	if cleanPath == "" {
 		return fmt.Errorf("cannot delete workspace root")
 	}
-	target := teamWorkspaceFullPath(team, cleanPath)
-	script := fmt.Sprintf(`set -eu
-target=%s
-[ -e "$target" ] || exit 44
-rm -rf -- "$target"`, shellQuote(target))
-	var stderr bytes.Buffer
-	if err := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, nil, nil, &stderr); err != nil {
-		return formatExecError("delete Team workspace entry", err, stderr.String())
+	_, _, target, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, cleanPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(target); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("Team workspace entry not found")
+		}
+		return fmt.Errorf("failed to inspect Team workspace entry: %w", err)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("failed to delete Team workspace entry: %w", err)
 	}
 	return nil
 }
@@ -1055,10 +1047,6 @@ rm -rf -- "$target"`, shellQuote(target))
 func (s *teamService) UploadWorkspaceFiles(ctx context.Context, userID, teamID int, targetPath string, files []*multipart.FileHeader, relativePaths []string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("no files uploaded")
-	}
-	team, proxyInstanceID, err := s.workspaceProxyInstance(userID, teamID)
-	if err != nil {
-		return err
 	}
 	basePath, err := cleanTeamWorkspacePath(targetPath)
 	if err != nil {
@@ -1079,22 +1067,33 @@ func (s *teamService) UploadWorkspaceFiles(ctx context.Context, userID, teamID i
 		if uploadPath == "" {
 			return fmt.Errorf("uploaded file name is required")
 		}
-		destination := teamWorkspaceFullPath(team, joinTeamWorkspacePath(basePath, uploadPath))
+		_, _, destination, err := s.resolveTeamWorkspacePath(ctx, userID, teamID, joinTeamWorkspacePath(basePath, uploadPath))
+		if err != nil {
+			return err
+		}
 		file, err := fileHeader.Open()
 		if err != nil {
 			return fmt.Errorf("failed to open uploaded file: %w", err)
 		}
-		script := fmt.Sprintf(`set -eu
-target=%s
-mkdir -p "$(dirname "$target")"
-cat > "$target"
-chown 1000:1000 "$target" 2>/dev/null || true`, shellQuote(destination))
-		var stderr bytes.Buffer
-		execErr := s.execTeamWorkspace(ctx, userID, proxyInstanceID, []string{"sh", "-lc", script}, file, nil, &stderr)
-		_ = file.Close()
-		if execErr != nil {
-			return formatExecError("upload Team workspace file", execErr, stderr.String())
+		if err := os.MkdirAll(filepath.Dir(destination), 0775); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("failed to create Team workspace upload folder: %w", err)
 		}
+		out, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0664)
+		if err != nil {
+			_ = file.Close()
+			return fmt.Errorf("failed to create Team workspace upload file: %w", err)
+		}
+		_, copyErr := io.Copy(out, file)
+		closeErr := out.Close()
+		_ = file.Close()
+		if copyErr != nil {
+			return fmt.Errorf("failed to upload Team workspace file: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("failed to close Team workspace upload file: %w", closeErr)
+		}
+		chownTeamWorkspacePath(destination)
 	}
 	return nil
 }
@@ -1117,6 +1116,12 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	}
 	if req.Payload == nil {
 		return nil, fmt.Errorf("task payload is required")
+	}
+	if _, exists := req.Payload["origin"]; !exists {
+		req.Payload["origin"] = "user_query"
+	}
+	if _, exists := req.Payload["anchorEligible"]; !exists {
+		req.Payload["anchorEligible"] = true
 	}
 	member, err := s.repo.GetMemberByTeamKey(teamID, memberKey)
 	if err != nil {
@@ -1281,7 +1286,7 @@ func buildTeamMemberSystemPrompt(displayName, memberID, role, description, perso
 	return systemPrompt
 }
 
-func buildTeamMemberSoulMarkdown(member plannedTeamMember) string {
+func buildTeamMemberSoulMarkdown(member plannedTeamMember, communicationMode string) string {
 	context := buildPlannedTeamMemberTaskContext(member)
 	lines := []string{
 		fmt.Sprintf("# %s", strings.TrimSpace(context["displayName"])),
@@ -1302,13 +1307,33 @@ func buildTeamMemberSoulMarkdown(member plannedTeamMember) string {
 		strings.TrimSpace(context["systemPrompt"]),
 		"",
 		"## Collaboration Rules",
+		teamCollaborationGuidance(communicationMode),
 		"- Only handle tasks addressed to your Team member inbox.",
-		"- Use /team for shared context, durable notes, and handoff artifacts.",
+		"- Use CLAWMANAGER_TEAM_SHARED_DIR for shared context, durable notes, and handoff artifacts. team.json sharedDir is the logical mount path used by Pro runtimes.",
 		"- Report progress, blockers, verification evidence, and final results through the Team channel.",
 		"- If asked about your role, answer from this Team Identity and Role Instructions section.",
 		"",
 	)
 	return strings.Join(lines, "\n")
+}
+
+func appendTeamCollaborationGuidance(systemPrompt, communicationMode string) string {
+	guidance := teamCollaborationGuidance(communicationMode)
+	if strings.Contains(systemPrompt, guidance) {
+		return systemPrompt
+	}
+	return strings.TrimSpace(systemPrompt) + "\n\n" + guidance
+}
+
+func teamCollaborationGuidance(communicationMode string) string {
+	switch normalizedTeamCommunicationMode(communicationMode) {
+	case teamCommunicationModePeerAssisted:
+		return "Collaboration mode: peer_assisted. The Leader still owns final user-facing synthesis, but workers may contact other Team members directly for bounded questions, handoffs, reviews, artifact requests, and blocker help. Preserve the original root task context in every peer message, write durable artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and report peer outcomes back through the Team channel. When receiving a peer request, respond with explicit evidence, artifact paths, blockers, or review findings so the requester can finish its own task."
+	case teamCommunicationModeFullMesh:
+		return "Collaboration mode: full_mesh. Team members may coordinate directly with each other while preserving root task context, shared artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and a final user-facing synthesis. Use direct member-to-member messages for parallel research, design, implementation, review, and verification; keep each peer exchange bounded and evidence based."
+	default:
+		return "Collaboration mode: leader_mediated. Route cross-member dependencies through the Leader. Workers should not start independent peer-to-peer handoffs unless the Leader explicitly delegates them."
+	}
 }
 
 func teamMemberPersonaFromInstance(instance *models.Instance) (string, string) {
@@ -1579,7 +1604,7 @@ func (s *teamService) refreshTeamRosterConfig(userID int, team *models.Team) err
 			RuntimeType:  member.RuntimeType,
 			InstanceMode: member.InstanceMode,
 			IsLeader:     isTeamLeaderRole(member.Role),
-		})
+		}, normalizedTeamCommunicationMode(team.CommunicationMode))
 	}
 	return s.configMapService.UpsertConfigMap(context.Background(), userID, s.teamConfigMapName(team.ID), configData, map[string]string{
 		"app":        "clawreef",
@@ -1890,6 +1915,16 @@ func normalizedTeamTaskEventStatus(payload map[string]interface{}) string {
 }
 
 func isTeamTaskCompletionSignal(eventType, status string, payload map[string]interface{}) bool {
+	if isFailedTeamTaskEventStatus(status) || isDispatchOnlyCompletionPayload(payload) {
+		return false
+	}
+	if isSuccessfulTeamTaskEventStatus(status) {
+		switch eventType {
+		case "task_completed", "completion", "task_failed", "message_failed":
+			return true
+		}
+		return hasTeamTaskCompletionToolCall(payload)
+	}
 	switch eventType {
 	case "task_completed", "completion":
 		return true
@@ -1906,6 +1941,9 @@ func isTeamTaskCompletionSignal(eventType, status string, payload map[string]int
 }
 
 func isTeamTaskFailureSignal(eventType, status string, payload map[string]interface{}) bool {
+	if isSuccessfulTeamTaskEventStatus(status) || isNonAuthoritativeDispatchFailure(eventType, payload) {
+		return false
+	}
 	switch eventType {
 	case "task_failed", "message_failed":
 		return true
@@ -1921,6 +1959,45 @@ func isTeamTaskFailureSignal(eventType, status string, payload map[string]interf
 	}
 }
 
+func isSuccessfulTeamTaskEventStatus(status string) bool {
+	switch status {
+	case "succeeded", "success", "completed", "complete", "done", "finished", "ok":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFailedTeamTaskEventStatus(status string) bool {
+	switch status {
+	case "failed", "failure", "error", "errored", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDispatchOnlyCompletionPayload(payload map[string]interface{}) bool {
+	text := strings.ToLower(strings.Join(strings.Fields(strings.Join([]string{
+		eventString(payload, "resultMarkdown", "result_markdown", "result", "summary", "lastSummary", "last_summary", "message", "text", "diagnostic"),
+		eventString(payload, "title", "intent"),
+	}, " ")), " "))
+	if text == "" {
+		return false
+	}
+	if strings.Contains(text, "result already delivered") || strings.Contains(text, "\u7ed3\u679c\u5df2\u53cd\u9988") {
+		return true
+	}
+	if strings.Contains(text, "dispatch") && (strings.Contains(text, "worker") || strings.Contains(text, "member")) {
+		return true
+	}
+	compact := strings.ReplaceAll(text, " ", "")
+	return strings.Contains(compact, "\u5728\u7ebf\u7a7a\u95f2") ||
+		strings.Contains(compact, "\u6d3e\u5355") ||
+		strings.Contains(compact, "\u5df2\u6d3e\u53d1") ||
+		strings.Contains(compact, "\u7b49\u5f85\u5176") ||
+		strings.Contains(compact, "\u4efb\u52a1\u5206\u6d3e")
+}
 func isTeamTaskRunningSignal(eventType, status string, payload map[string]interface{}) bool {
 	switch eventType {
 	case "task_started", "task_progress", "progress":
@@ -1943,6 +2020,8 @@ func isTerminalTeamTaskStatus(status string) bool {
 func shouldAssociateEventWithCurrentMemberTask(eventType string, payload map[string]interface{}) bool {
 	switch eventType {
 	case "reply", "completion", "task_completed", "task_failed", "message_failed", "message_warning", "task_started", "task_progress", "progress":
+		return true
+	case "outbound", "task_assigned", "team_send", "peer_request", "peer_handoff", "peer_review_request", "peer_reply":
 		return true
 	}
 	if eventString(payload, "taskId", "task_id", "runtimeTaskId", "runtime_task_id", "messageId", "message_id") != "" {
@@ -1994,6 +2073,11 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 		member = found
 	}
+	var err error
+	eventType, member, err = s.normalizePeerAssistedTeamEvent(team, eventType, payload, member)
+	if err != nil {
+		return err
+	}
 
 	var task *models.TeamTask
 	if taskID := eventInt(payload, "task_id", "taskId"); taskID > 0 {
@@ -2012,14 +2096,26 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 		task = found
 	}
-	if task == nil && member != nil && member.CurrentTaskID != nil && shouldAssociateEventWithCurrentMemberTask(eventType, payload) {
-		found, err := s.repo.GetTaskByID(*member.CurrentTaskID)
+	if task == nil {
+		found, err := s.resolveTeamTaskFromEventReferences(team.ID, payload)
 		if err != nil {
 			return err
 		}
-		if found != nil && found.TeamID == team.ID && found.TargetMemberID == member.ID && !isTerminalTeamTaskStatus(found.Status) {
-			task = found
+		task = found
+	}
+	if task == nil && member != nil && member.CurrentTaskID != nil && shouldAssociateEventWithCurrentMemberTask(eventType, payload) {
+		found, err := s.activeTaskForMember(team.ID, member, true)
+		if err != nil {
+			return err
 		}
+		task = found
+	}
+	if task == nil && shouldAssociateEventWithCurrentMemberTask(eventType, payload) {
+		found, err := s.activeTaskFromPeerContext(team.ID, payload, member)
+		if err != nil {
+			return err
+		}
+		task = found
 	}
 	if isNonAuthoritativeDispatchFailure(eventType, payload) {
 		if eventString(payload, "originalEvent") == "" {
@@ -2028,9 +2124,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		payload["event"] = "message_warning"
 		payload["type"] = "message_warning"
 		payload["status"] = "warning"
+		payload["availability"] = "idle"
+		payload["nonAuthoritative"] = true
 		eventType = "message_warning"
 	}
 	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task, member)
+	enrichTeamCollaborationStep(team, eventType, payload, member, task)
 
 	payloadJSON, err := marshalOptionalJSON(payload)
 	if err != nil {
@@ -2080,18 +2179,21 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.CurrentTaskID = &task.ID
 			member.Progress = eventInt(payload, "progress")
 		}
+		eventStatus := normalizedTeamTaskEventStatus(payload)
+		eventSignalsCompletion := isTeamTaskCompletionSignal(eventType, eventStatus, payload)
+		eventSignalsFailure := isTeamTaskFailureSignal(eventType, eventStatus, payload)
 		taskProjectedTerminal := taskProjection.status == models.TeamTaskStatusSucceeded || taskProjection.status == models.TeamTaskStatusFailed
-		terminalEventWithoutTask := task == nil && (eventType == "task_completed" || eventType == "completion" || eventType == "task_failed" || eventType == "message_failed")
+		terminalEventWithoutTask := task == nil && (eventSignalsCompletion || eventSignalsFailure)
 		if taskProjectedTerminal || terminalEventWithoutTask {
 			member.Status = models.TeamMemberStatusIdle
 			member.CurrentTaskID = nil
-			if taskProjection.status == models.TeamTaskStatusSucceeded || (task == nil && (eventType == "task_completed" || eventType == "completion")) {
+			if taskProjection.status == models.TeamTaskStatusSucceeded || (task == nil && eventSignalsCompletion) {
 				member.Progress = 100
 				if member.Availability != models.TeamMemberAvailabilityBlocked {
 					member.Availability = models.TeamMemberAvailabilityIdle
 					member.BlockedReason = nil
 				}
-			} else {
+			} else if taskProjection.status == models.TeamTaskStatusFailed || (task == nil && eventSignalsFailure) {
 				member.Progress = 0
 				if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown {
 					member.Availability = models.TeamMemberAvailabilityBlocked
@@ -2116,6 +2218,490 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 	}
 	return nil
+}
+
+func (s *teamService) resolveTeamTaskFromEventReferences(teamID int, payload map[string]interface{}) (*models.TeamTask, error) {
+	if payload == nil {
+		return nil, nil
+	}
+	for _, key := range []string{"rootMessageId", "root_message_id", "parentMessageId", "parent_message_id", "inReplyTo", "in_reply_to", "replyTo", "reply_to"} {
+		messageID := eventString(payload, key)
+		if messageID == "" {
+			continue
+		}
+		if found, err := s.repo.GetTaskByMessageID(teamID, messageID); err != nil {
+			return nil, err
+		} else if found != nil && found.TeamID == teamID {
+			return found, nil
+		}
+	}
+	for _, key := range []string{"rootTaskId", "root_task_id", "parentTaskId", "parent_task_id", "currentTaskId", "current_task_id", "runtimeTaskId", "runtime_task_id"} {
+		if taskID := parseClawManagerTeamTaskRef(teamID, eventString(payload, key)); taskID > 0 {
+			found, err := s.repo.GetTaskByID(taskID)
+			if err != nil {
+				return nil, err
+			}
+			if found != nil && found.TeamID == teamID {
+				return found, nil
+			}
+		}
+	}
+	if step, ok := payload["collaborationStep"].(map[string]interface{}); ok {
+		return s.resolveTeamTaskFromEventReferences(teamID, step)
+	}
+	return nil, nil
+}
+
+func parseClawManagerTeamTaskRef(teamID int, raw string) int {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+	if matches := regexp.MustCompile(`^team-(\d+)-task-(\d+)$`).FindStringSubmatch(strings.ToLower(value)); len(matches) == 3 {
+		refTeamID, _ := strconv.Atoi(matches[1])
+		taskID, _ := strconv.Atoi(matches[2])
+		if refTeamID == teamID {
+			return taskID
+		}
+		return 0
+	}
+	if matches := regexp.MustCompile(`^clawmanager-task-(\d+)$`).FindStringSubmatch(strings.ToLower(value)); len(matches) == 2 {
+		taskID, _ := strconv.Atoi(matches[1])
+		return taskID
+	}
+	return 0
+}
+
+func (s *teamService) activeTaskForMember(teamID int, member *models.TeamMember, requireTarget bool) (*models.TeamTask, error) {
+	if member == nil || member.CurrentTaskID == nil {
+		return nil, nil
+	}
+	found, err := s.repo.GetTaskByID(*member.CurrentTaskID)
+	if err != nil {
+		return nil, err
+	}
+	if found == nil || found.TeamID != teamID || isTerminalTeamTaskStatus(found.Status) {
+		return nil, nil
+	}
+	if requireTarget && found.TargetMemberID != member.ID {
+		return nil, nil
+	}
+	return found, nil
+}
+
+func (s *teamService) activeTaskFromPeerContext(teamID int, payload map[string]interface{}, member *models.TeamMember) (*models.TeamTask, error) {
+	candidates := []*models.TeamMember{member}
+	for _, key := range []string{"from", "source", "sourceMemberId", "source_member_id", "sender", "senderMemberId", "sender_member_id", "to", "recipient", "target", "targetMemberId", "target_member_id", "memberId", "member_id"} {
+		memberKey := eventString(payload, key)
+		if memberKey == "" || memberKey == teamTaskReplyTarget {
+			continue
+		}
+		found, err := s.repo.GetMemberByTeamKey(teamID, memberKey)
+		if err != nil {
+			return nil, err
+		}
+		if found != nil {
+			candidates = append(candidates, found)
+		}
+	}
+	seen := map[int]struct{}{}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if _, ok := seen[candidate.ID]; ok {
+			continue
+		}
+		seen[candidate.ID] = struct{}{}
+		if task, err := s.activeTaskForMember(teamID, candidate, false); err != nil {
+			return nil, err
+		} else if task != nil {
+			return task, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *teamService) normalizePeerAssistedTeamEvent(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember) (string, *models.TeamMember, error) {
+	if team == nil || payload == nil || !isPeerCapableTeamEvent(eventType) {
+		return eventType, member, nil
+	}
+	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
+	if communicationMode != teamCommunicationModePeerAssisted && communicationMode != teamCommunicationModeFullMesh {
+		return eventType, member, nil
+	}
+	sourceKey := eventString(payload, "from", "source", "sourceMemberId", "source_member_id", "sender", "senderMemberId", "sender_member_id")
+	if sourceKey == "" && member != nil {
+		sourceKey = member.MemberKey
+	}
+	targetKey := eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id")
+	if sourceKey == "" || targetKey == "" || sourceKey == targetKey || sourceKey == teamTaskReplyTarget || targetKey == teamTaskReplyTarget {
+		return eventType, member, nil
+	}
+
+	sourceMember, err := s.repo.GetMemberByTeamKey(team.ID, sourceKey)
+	if err != nil {
+		return eventType, member, err
+	}
+	targetMember, err := s.repo.GetMemberByTeamKey(team.ID, targetKey)
+	if err != nil {
+		return eventType, member, err
+	}
+	if !isActiveTeamMember(sourceMember) || !isActiveTeamMember(targetMember) {
+		return eventType, member, nil
+	}
+
+	if member == nil || member.MemberKey != sourceMember.MemberKey {
+		member = sourceMember
+	}
+	payload["peer"] = true
+	payload["communicationMode"] = communicationMode
+	payload["sourceMemberId"] = sourceMember.MemberKey
+	payload["targetMemberId"] = targetMember.MemberKey
+	payload["from"] = sourceMember.MemberKey
+	payload["to"] = targetMember.MemberKey
+
+	rawAction := eventString(payload, "peerAction", "peer_action", "action", "intent", "kind")
+	action := normalizeTeamPeerAction(rawAction)
+	if strings.TrimSpace(rawAction) == "" && (eventType == "outbound" || eventType == "task_assigned" || eventType == "team_send") && isTeamLeaderRole(sourceMember.Role) && !isTeamLeaderRole(targetMember.Role) {
+		action = "handoff"
+	}
+	payload["peerAction"] = action
+	if strings.HasPrefix(eventType, "peer_") {
+		return eventType, member, nil
+	}
+	switch action {
+	case "review_request", "peer_review":
+		return "peer_review_request", member, nil
+	case "handoff":
+		return "peer_handoff", member, nil
+	default:
+		return "peer_request", member, nil
+	}
+}
+
+func isPeerCapableTeamEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "outbound", "task_assigned", "team_send", "peer_request", "peer_handoff", "peer_review_request", "peer_reply":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeTeamPeerAction(raw string) string {
+	action := strings.ToLower(strings.TrimSpace(raw))
+	action = strings.ReplaceAll(action, "-", "_")
+	action = strings.ReplaceAll(action, " ", "_")
+	switch action {
+	case "handoff", "assign", "assignment":
+		return "handoff"
+	case "review", "review_request", "peer_review", "code_review":
+		return "review_request"
+	case "artifact", "artifact_request", "file_request":
+		return "artifact_request"
+	case "blocker", "blocker_help", "help":
+		return "blocker_help"
+	default:
+		return "ask"
+	}
+}
+
+func isActiveTeamMember(member *models.TeamMember) bool {
+	return member != nil &&
+		member.Status != models.TeamMemberStatusDeleted &&
+		member.Status != models.TeamMemberStatusDeleting
+}
+
+func enrichTeamCollaborationStep(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) {
+	if payload == nil {
+		return
+	}
+	if existing, ok := payload["collaborationStep"].(map[string]interface{}); ok && len(existing) > 0 {
+		normalizeExistingCollaborationStep(existing, team, eventType, payload, member, task)
+		return
+	}
+
+	stepType := collaborationStepTypeForEvent(eventType, payload)
+	if stepType == "" {
+		return
+	}
+	actor := collaborationActorKey(payload, member)
+	target := eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id", "memberId")
+	if stepType == "assignment" && target == "" {
+		target = eventString(payload, "assignee", "owner", "targetMember")
+	}
+	status := collaborationStepStatusForEvent(eventType, payload)
+	title := collaborationStepTitle(stepType, actor, target, payload)
+	summary := eventString(payload, "summary", "resultMarkdown", "result_markdown", "result", "text", "message", "prompt", "instruction", "instructions", "diagnostic", "error", "reason")
+	messageID := eventString(payload, "messageId", "message_id")
+	rootTaskID := ""
+	rootMessageID := ""
+	if task != nil {
+		rootTaskID = fmt.Sprintf("team-%d-task-%d", task.TeamID, task.ID)
+		rootMessageID = task.MessageID
+		if messageID == "" {
+			messageID = task.MessageID
+		}
+	}
+	if rootTaskID == "" {
+		rootTaskID = eventString(payload, "rootTaskId", "root_task_id", "parentTaskId", "parent_task_id")
+	}
+	if rootMessageID == "" {
+		rootMessageID = eventString(payload, "rootMessageId", "root_message_id", "parentMessageId", "parent_message_id", "inReplyTo", "in_reply_to")
+	}
+	workID := collaborationWorkID(stepType, actor, target, messageID, payload)
+	step := map[string]interface{}{
+		"id":            workID,
+		"workId":        workID,
+		"type":          stepType,
+		"status":        status,
+		"title":         title,
+		"summary":       summary,
+		"actor":         actor,
+		"target":        target,
+		"messageId":     messageID,
+		"rootTaskId":    rootTaskID,
+		"rootMessageId": rootMessageID,
+		"eventType":     eventType,
+		"source":        "clawmanager",
+	}
+	if progress := eventInt(payload, "progress"); progress > 0 {
+		step["progress"] = progress
+	}
+	if action := eventString(payload, "peerAction", "peer_action", "action", "intent", "kind"); action != "" {
+		step["action"] = normalizeTeamPeerAction(action)
+	}
+	if phase := inferCollaborationPhase(stepType, title, summary, payload); phase != "" {
+		step["phase"] = phase
+	}
+	payload["collaborationStep"] = step
+	if rootTaskID != "" && eventString(payload, "rootTaskId", "root_task_id") == "" {
+		payload["rootTaskId"] = rootTaskID
+	}
+	if rootMessageID != "" && eventString(payload, "rootMessageId", "root_message_id") == "" {
+		payload["rootMessageId"] = rootMessageID
+	}
+}
+
+func normalizeExistingCollaborationStep(step map[string]interface{}, team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) {
+	if eventString(step, "type") == "" {
+		step["type"] = collaborationStepTypeForEvent(eventType, payload)
+	}
+	if eventString(step, "status") == "" {
+		step["status"] = collaborationStepStatusForEvent(eventType, payload)
+	}
+	if eventString(step, "actor") == "" {
+		step["actor"] = collaborationActorKey(payload, member)
+	}
+	if eventString(step, "target") == "" {
+		if target := eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id", "memberId"); target != "" {
+			step["target"] = target
+		}
+	}
+	if task != nil {
+		if eventString(step, "rootTaskId") == "" {
+			step["rootTaskId"] = fmt.Sprintf("team-%d-task-%d", task.TeamID, task.ID)
+		}
+		if eventString(step, "rootMessageId") == "" {
+			step["rootMessageId"] = task.MessageID
+		}
+	}
+	if eventString(step, "eventType") == "" {
+		step["eventType"] = eventType
+	}
+	if eventString(step, "source") == "" {
+		step["source"] = "clawmanager"
+	}
+	if eventString(step, "id", "workId") == "" {
+		stepType := eventString(step, "type")
+		actor := eventString(step, "actor")
+		target := eventString(step, "target")
+		messageID := eventString(step, "messageId", "message_id")
+		if messageID == "" {
+			messageID = eventString(payload, "messageId", "message_id")
+		}
+		workID := collaborationWorkID(stepType, actor, target, messageID, payload)
+		step["id"] = workID
+		step["workId"] = workID
+	}
+	if team != nil && eventString(step, "teamId") == "" {
+		step["teamId"] = strconv.Itoa(team.ID)
+	}
+}
+
+func collaborationStepTypeForEvent(eventType string, payload map[string]interface{}) string {
+	status := normalizedTeamTaskEventStatus(payload)
+	if isSuccessfulTeamTaskEventStatus(status) {
+		return "result"
+	}
+	if isNonAuthoritativeDispatchFailure(eventType, payload) {
+		return "warning"
+	}
+	switch eventType {
+	case "outbound", "task_assigned", "team_send":
+		return "assignment"
+	case "peer_handoff":
+		return "assignment"
+	case "peer_request", "peer_review_request":
+		return "peer_request"
+	case "peer_reply":
+		return "peer_reply"
+	case "task_received":
+		return "ack"
+	case "task_started", "task_progress", "progress":
+		return "progress"
+	case "task_completed", "completion":
+		return "result"
+	case "task_failed", "message_failed", "task_stale":
+		if !isTeamTaskFailureSignal(eventType, status, payload) && eventType != "task_stale" {
+			return "warning"
+		}
+		return "blocker"
+	case "message_warning":
+		return "warning"
+	case "reply":
+		if eventBool(payload, "final", "isFinal", "complete", "completed", "taskCompleted") || isFinalCompletionPayload(payload) {
+			return "result"
+		}
+		return "progress"
+	default:
+		if eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id") != "" {
+			return "progress"
+		}
+		return ""
+	}
+}
+
+func collaborationStepStatusForEvent(eventType string, payload map[string]interface{}) string {
+	status := normalizedTeamTaskEventStatus(payload)
+	if isSuccessfulTeamTaskEventStatus(status) || eventType == "task_completed" || eventType == "completion" {
+		return models.TeamTaskStatusSucceeded
+	}
+	if isFailedTeamTaskEventStatus(status) || eventType == "task_failed" || eventType == "message_failed" {
+		if isNonAuthoritativeDispatchFailure(eventType, payload) {
+			return "warning"
+		}
+		return models.TeamTaskStatusFailed
+	}
+	switch eventType {
+	case "task_stale":
+		return models.TeamTaskStatusStale
+	case "outbound", "task_assigned", "team_send", "peer_request", "peer_handoff", "peer_review_request":
+		return models.TeamTaskStatusDispatched
+	case "task_received":
+		return "acknowledged"
+	case "task_started", "task_progress", "progress", "reply", "peer_reply":
+		if progress := eventInt(payload, "progress"); progress >= 100 {
+			return models.TeamTaskStatusSucceeded
+		}
+		return models.TeamTaskStatusRunning
+	case "message_warning":
+		return "warning"
+	default:
+		if status != "" {
+			return status
+		}
+		return "observed"
+	}
+}
+
+func collaborationActorKey(payload map[string]interface{}, member *models.TeamMember) string {
+	if actor := eventString(payload, "from", "sourceMemberId", "source_member_id", "sender", "senderMemberId", "sender_member_id", "memberId", "member_id"); actor != "" {
+		return actor
+	}
+	if member != nil {
+		return member.MemberKey
+	}
+	return "system"
+}
+
+func collaborationStepTitle(stepType, actor, target string, payload map[string]interface{}) string {
+	if title := eventString(payload, "stepTitle", "step_title", "title", "intent"); title != "" && !looksLikeOpaqueRuntimeTaskID(title) {
+		return title
+	}
+	switch stepType {
+	case "assignment":
+		if target != "" {
+			return "Assign to " + target
+		}
+		return "Assign subtask"
+	case "peer_request":
+		if target != "" {
+			return actor + " asks " + target
+		}
+		return "Peer request"
+	case "peer_reply":
+		return actor + " replies"
+	case "ack":
+		return actor + " accepted task"
+	case "progress":
+		return actor + " updates progress"
+	case "result":
+		return actor + " delivers result"
+	case "blocker":
+		return actor + " reports blocker"
+	case "warning":
+		return actor + " reports warning"
+	default:
+		return stepType
+	}
+}
+
+func collaborationWorkID(stepType, actor, target, messageID string, payload map[string]interface{}) string {
+	if id := eventString(payload, "workId", "work_id", "stepId", "step_id", "subtaskId", "subtask_id"); id != "" {
+		return id
+	}
+	parts := []string{stepType, actor, target}
+	if messageID != "" {
+		parts = append(parts, messageID)
+	}
+	if len(parts) == 0 {
+		return "team-step"
+	}
+	return strings.ToLower(strings.Trim(strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		if r == '-' || r == '_' {
+			return '-'
+		}
+		return '-'
+	}, strings.Join(parts, "-")), "-"))
+}
+
+func inferCollaborationPhase(stepType, title, summary string, payload map[string]interface{}) string {
+	if phase := eventString(payload, "phase", "stage"); phase != "" {
+		return phase
+	}
+	text := strings.ToLower(title + " " + summary)
+	switch {
+	case strings.Contains(text, "review") || strings.Contains(text, "verify"):
+		return "verification"
+	case strings.Contains(text, "design") || strings.Contains(text, "ui") || strings.Contains(text, "prototype"):
+		return "design"
+	case strings.Contains(text, "research") || strings.Contains(text, "调研"):
+		return "research"
+	case stepType == "assignment":
+		return "decomposition"
+	case stepType == "result":
+		return "delivery"
+	default:
+		return "execution"
+	}
+}
+
+func isFinalCompletionPayload(payload map[string]interface{}) bool {
+	status := normalizedTeamTaskEventStatus(payload)
+	if isSuccessfulTeamTaskEventStatus(status) {
+		return true
+	}
+	return hasTeamTaskCompletionToolCall(payload)
+}
+
+func looksLikeOpaqueRuntimeTaskID(value string) bool {
+	normalized := strings.TrimSpace(value)
+	return regexp.MustCompile(`^(task[-_][a-z0-9-]+|team-\d+-task-\d+)$`).MatchString(strings.ToLower(normalized))
 }
 
 func normalizeFinalReplyTaskEvent(eventType string, payload map[string]interface{}, task *models.TeamTask, member *models.TeamMember) string {
@@ -2466,9 +3052,11 @@ func buildInitialLeaderTaskPayload(teamName string) map[string]interface{} {
 	}
 	prompt := fmt.Sprintf("请介绍`team %s`当前 Redis Team成员构成，包括各角色的职责分工、运行状态与技术能力边界。同时说明团队内部的协作与通信机制(team_send)，例如任务流转方式、消息同步方式、上下文共享方式以及可调用的方法、工具与操作能力，以便后续能够更高效地开展团队工作", normalizedTeamName)
 	return map[string]interface{}{
-		"intent": initialLeaderTaskIntent,
-		"title":  "介绍当前 Redis Team 成员与协作机制",
-		"prompt": prompt,
+		"intent":         initialLeaderTaskIntent,
+		"title":          "介绍当前 Redis Team 成员与协作机制",
+		"prompt":         prompt,
+		"origin":         "system_bootstrap",
+		"anchorEligible": false,
 	}
 }
 
@@ -2552,6 +3140,7 @@ func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[str
 		return
 	}
 	nonAuthoritativeDispatchWarning := isNonAuthoritativeDispatchWarning(eventType, payload)
+	status := normalizedTeamTaskEventStatus(payload)
 	availability := normalizeTeamAvailability(eventString(payload, "availability", "memberAvailability"))
 	if nonAuthoritativeDispatchWarning && availability == models.TeamMemberAvailabilityBlocked {
 		availability = ""
@@ -2562,6 +3151,13 @@ func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[str
 	}
 	if member.Availability == "" {
 		member.Availability = models.TeamMemberAvailabilityUnknown
+	}
+	if nonAuthoritativeDispatchWarning {
+		if member.Availability == models.TeamMemberAvailabilityBlocked || member.Availability == models.TeamMemberAvailabilityUnknown {
+			member.Availability = models.TeamMemberAvailabilityIdle
+		}
+		member.BlockedReason = nil
+		return
 	}
 	if runtimeStatus := eventString(payload, "runtime_status", "runtimeStatus", "runtime", "liveness"); runtimeStatus != "" {
 		member.RuntimeStatus = &runtimeStatus
@@ -2589,6 +3185,9 @@ func applyTeamMemberRuntimeProjection(member *models.TeamMember, payload map[str
 			member.BlockedReason = nil
 		}
 	case "task_failed", "message_failed":
+		if !isTeamTaskFailureSignal(eventType, status, payload) {
+			return
+		}
 		if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown || member.Availability == models.TeamMemberAvailabilityBusy {
 			member.Availability = models.TeamMemberAvailabilityBlocked
 		}
@@ -2775,6 +3374,141 @@ func teamWorkspaceFullPath(team *models.Team, relPath string) string {
 	return root + "/" + relPath
 }
 
+func (s *teamService) resolveTeamWorkspacePath(ctx context.Context, userID, teamID int, cleanPath string) (*models.Team, string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", "", err
+	}
+	team, err := s.requireOwnedTeam(userID, teamID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	root := filepath.Clean(s.teamRuntimeSharedPathFor(userID, team.ID))
+	if root == "." || root == string(filepath.Separator) || strings.TrimSpace(root) == "" {
+		return nil, "", "", fmt.Errorf("invalid Team workspace root")
+	}
+	if err := os.MkdirAll(root, 0775); err != nil {
+		return nil, "", "", fmt.Errorf("failed to prepare Team workspace: %w", err)
+	}
+	target := root
+	if cleanPath != "" {
+		target = filepath.Join(root, filepath.FromSlash(cleanPath))
+	}
+	target = filepath.Clean(target)
+	if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+		return nil, "", "", fmt.Errorf("invalid Team workspace path")
+	}
+	return team, root, target, nil
+}
+
+func teamWorkspaceDisplayRoot(team *models.Team, runtimeRoot string) string {
+	if team != nil {
+		if value := strings.TrimSpace(team.SharedMountPath); value != "" {
+			return value
+		}
+	}
+	return filepath.ToSlash(runtimeRoot)
+}
+
+func teamWorkspaceFileEntryFromInfo(parentPath string, info os.FileInfo) TeamWorkspaceFileEntry {
+	entryType := "file"
+	size := info.Size()
+	if info.IsDir() {
+		entryType = "directory"
+		size = 0
+	}
+	name := info.Name()
+	entryPath := joinTeamWorkspacePath(parentPath, name)
+	modifiedAt := ""
+	if !info.ModTime().IsZero() {
+		modifiedAt = info.ModTime().UTC().Format(time.RFC3339)
+	}
+	return TeamWorkspaceFileEntry{
+		Name:        name,
+		Path:        entryPath,
+		Type:        entryType,
+		Size:        size,
+		ModifiedAt:  modifiedAt,
+		Previewable: entryType == "file" && isPreviewableWorkspaceFile(name),
+	}
+}
+
+func sortTeamWorkspaceEntries(entries []TeamWorkspaceFileEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Type != entries[j].Type {
+			return entries[i].Type == "directory"
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+}
+
+func chownTeamWorkspacePath(path string) {
+	_ = os.Chown(path, teamSharedUID, teamSharedGID)
+}
+
+func zipTeamWorkspaceDirectory(ctx context.Context, root string) ([]byte, error) {
+	var buf bytes.Buffer
+	archive := zip.NewWriter(&buf)
+	base := filepath.Base(root)
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(filepath.Dir(root), path)
+		if err != nil {
+			return err
+		}
+		zipName := filepath.ToSlash(rel)
+		if entry.IsDir() {
+			if path == root {
+				return nil
+			}
+			_, err := archive.CreateHeader(&zip.FileHeader{
+				Name:     strings.TrimSuffix(zipName, "/") + "/",
+				Method:   zip.Store,
+				Modified: info.ModTime(),
+			})
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		if zipName == "." {
+			zipName = base
+		}
+		header.Name = zipName
+		header.Method = zip.Deflate
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(writer, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	}); err != nil {
+		_ = archive.Close()
+		return nil, fmt.Errorf("failed to download Team workspace folder: %w", err)
+	}
+	if err := archive.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finalize Team workspace folder download: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 func parseTeamWorkspaceList(parentPath, raw string) []TeamWorkspaceFileEntry {
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	entries := make([]TeamWorkspaceFileEntry, 0, len(lines))
@@ -2803,18 +3537,13 @@ func parseTeamWorkspaceList(parentPath, raw string) []TeamWorkspaceFileEntry {
 			Previewable: parts[0] == "file" && isPreviewableWorkspaceFile(name),
 		})
 	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].Type != entries[j].Type {
-			return entries[i].Type == "directory"
-		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
-	})
+	sortTeamWorkspaceEntries(entries)
 	return entries
 }
 
 func isPreviewableWorkspaceFile(path string) bool {
 	name := strings.ToLower(strings.TrimSpace(path))
-	return strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt")
+	return strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".json")
 }
 
 func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plannedTeamMember, error) {
@@ -2935,6 +3664,30 @@ func normalizeTeamMemberInstanceMode(rawMode, rawInstanceMode string) (string, e
 	return InstanceModeLite, nil
 }
 
+func normalizeTeamCommunicationMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	mode = strings.ReplaceAll(mode, "-", "_")
+	mode = strings.ReplaceAll(mode, " ", "_")
+	switch mode {
+	case "", teamCommunicationModeLeaderMediated, "leader", "leader_only":
+		return teamCommunicationModeLeaderMediated, nil
+	case teamCommunicationModePeerAssisted, "peer", "peer_to_peer", "peer_assist":
+		return teamCommunicationModePeerAssisted, nil
+	case teamCommunicationModeFullMesh, "mesh":
+		return teamCommunicationModeFullMesh, nil
+	default:
+		return "", fmt.Errorf("unsupported team communication mode: %s", raw)
+	}
+}
+
+func normalizedTeamCommunicationMode(raw string) string {
+	mode, err := normalizeTeamCommunicationMode(raw)
+	if err != nil {
+		return teamCommunicationModeLeaderMediated
+	}
+	return mode
+}
+
 func normalizeTeamMemberRole(raw string, isLeader bool) string {
 	role := strings.TrimSpace(raw)
 	if isLeader || isTeamLeaderRole(role) {
@@ -2971,13 +3724,14 @@ func leaderMemberKey(member *models.TeamMember) string {
 }
 
 type teamRosterConfig struct {
-	Version           int                `json:"version"`
-	TeamID            string             `json:"teamId"`
-	LeaderMemberID    string             `json:"leaderMemberId"`
-	CommunicationMode string             `json:"communicationMode"`
-	SharedDir         string             `json:"sharedDir"`
-	Members           []teamRosterMember `json:"members"`
-	Redis             teamRosterRedis    `json:"redis"`
+	Version             int                           `json:"version"`
+	TeamID              string                        `json:"teamId"`
+	LeaderMemberID      string                        `json:"leaderMemberId"`
+	CommunicationMode   string                        `json:"communicationMode"`
+	CollaborationPolicy teamRosterCollaborationPolicy `json:"collaborationPolicy"`
+	SharedDir           string                        `json:"sharedDir"`
+	Members             []teamRosterMember            `json:"members"`
+	Redis               teamRosterRedis               `json:"redis"`
 }
 
 type teamRosterMember struct {
@@ -2996,13 +3750,50 @@ type teamRosterRedis struct {
 	DLQKey      string `json:"dlqKey"`
 }
 
+type teamRosterCollaborationPolicy struct {
+	Mode               string   `json:"mode"`
+	AllowPeerToPeer    bool     `json:"allowPeerToPeer"`
+	LeaderFinalizes    bool     `json:"leaderFinalizes"`
+	PeerReplyRequired  bool     `json:"peerReplyRequired"`
+	AllowedPeerActions []string `json:"allowedPeerActions,omitempty"`
+}
+
+func buildTeamCollaborationPolicy(communicationMode string) teamRosterCollaborationPolicy {
+	mode := normalizedTeamCommunicationMode(communicationMode)
+	policy := teamRosterCollaborationPolicy{
+		Mode:            mode,
+		LeaderFinalizes: true,
+	}
+	switch mode {
+	case teamCommunicationModePeerAssisted:
+		policy.AllowPeerToPeer = true
+		policy.PeerReplyRequired = true
+		policy.AllowedPeerActions = []string{"ask", "handoff", "review_request", "artifact_request", "blocker_help", "peer_review"}
+	case teamCommunicationModeFullMesh:
+		policy.AllowPeerToPeer = true
+		policy.PeerReplyRequired = true
+		policy.AllowedPeerActions = []string{"ask", "handoff", "review_request", "artifact_request", "blocker_help", "peer_review", "delegate"}
+	}
+	return policy
+}
+
 func buildTeamRosterConfig(team *models.Team, members []plannedTeamMember) (string, error) {
+	return buildTeamRosterConfigWithSharedDir(team, members, team.SharedMountPath)
+}
+
+func buildTeamRosterConfigWithSharedDir(team *models.Team, members []plannedTeamMember, sharedDir string) (string, error) {
+	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
+	sharedDir = strings.TrimSpace(sharedDir)
+	if sharedDir == "" {
+		sharedDir = team.SharedMountPath
+	}
 	config := teamRosterConfig{
-		Version:           1,
-		TeamID:            strconv.Itoa(team.ID),
-		CommunicationMode: team.CommunicationMode,
-		SharedDir:         team.SharedMountPath,
-		Members:           make([]teamRosterMember, 0, len(members)),
+		Version:             1,
+		TeamID:              strconv.Itoa(team.ID),
+		CommunicationMode:   communicationMode,
+		CollaborationPolicy: buildTeamCollaborationPolicy(communicationMode),
+		SharedDir:           sharedDir,
+		Members:             make([]teamRosterMember, 0, len(members)),
 		Redis: teamRosterRedis{
 			EventsKey:   teamEventsKey(team.ID),
 			PresenceKey: teamPresenceKey(team.ID),
@@ -3029,30 +3820,23 @@ func buildTeamRosterConfig(team *models.Team, members []plannedTeamMember) (stri
 	return marshalJSON(config)
 }
 
-func rosterJSONWithSharedDir(rosterJSON, sharedDir string) string {
-	sharedDir = strings.TrimSpace(sharedDir)
-	if sharedDir == "" {
-		return rosterJSON
-	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(rosterJSON), &payload); err != nil {
-		return rosterJSON
-	}
-	payload["sharedDir"] = sharedDir
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return rosterJSON
-	}
-	return string(raw)
+func buildTeamRosterConfigFromMembers(team *models.Team, members []models.TeamMember) (string, error) {
+	return buildTeamRosterConfigFromMembersWithSharedDir(team, members, team.SharedMountPath)
 }
 
-func buildTeamRosterConfigFromMembers(team *models.Team, members []models.TeamMember) (string, error) {
+func buildTeamRosterConfigFromMembersWithSharedDir(team *models.Team, members []models.TeamMember, sharedDir string) (string, error) {
+	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
+	sharedDir = strings.TrimSpace(sharedDir)
+	if sharedDir == "" {
+		sharedDir = team.SharedMountPath
+	}
 	config := teamRosterConfig{
-		Version:           1,
-		TeamID:            strconv.Itoa(team.ID),
-		CommunicationMode: team.CommunicationMode,
-		SharedDir:         team.SharedMountPath,
-		Members:           make([]teamRosterMember, 0, len(members)),
+		Version:             1,
+		TeamID:              strconv.Itoa(team.ID),
+		CommunicationMode:   communicationMode,
+		CollaborationPolicy: buildTeamCollaborationPolicy(communicationMode),
+		SharedDir:           sharedDir,
+		Members:             make([]teamRosterMember, 0, len(members)),
 		Redis: teamRosterRedis{
 			EventsKey:   teamEventsKey(team.ID),
 			PresenceKey: teamPresenceKey(team.ID),

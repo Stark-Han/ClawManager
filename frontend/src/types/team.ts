@@ -1,12 +1,17 @@
 import type { OpenClawConfigPlan } from "./openclawConfig";
 
+export type TeamCommunicationMode =
+  | "leader_mediated"
+  | "peer_assisted"
+  | "full_mesh";
+
 export interface Team {
   id: number;
   user_id: number;
   name: string;
   description?: string;
   status: "creating" | "running" | "failed" | "deleting" | "deleted";
-  communication_mode: string;
+  communication_mode: TeamCommunicationMode | string;
   redis_events_last_id: string;
   shared_pvc_name?: string;
   shared_pvc_namespace?: string;
@@ -108,7 +113,7 @@ export interface CreateTeamMemberRequest {
 export interface CreateTeamRequest {
   name: string;
   description?: string;
-  communication_mode?: string;
+  communication_mode?: TeamCommunicationMode;
   shared_storage_gb?: number;
   storage_class?: string;
   members: CreateTeamMemberRequest[];
