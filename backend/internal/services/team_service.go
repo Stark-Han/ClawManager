@@ -450,6 +450,7 @@ func buildTeamTaskEnvelope(teamID int, memberKey string, task *models.TeamTask, 
 	}
 	rawPrompt := prompt
 	prompt = buildTeamRuntimePrompt(prompt, memberContext)
+	intent := eventString(taskPayload, "intent")
 	envelope := map[string]interface{}{
 		"v":                  1,
 		"messageId":          messageID,
@@ -470,10 +471,10 @@ func buildTeamTaskEnvelope(teamID int, memberKey string, task *models.TeamTask, 
 			"artifactField":  "artifactRefs",
 			"completionTool": teamTaskCompletionTool,
 		},
-		"intent":        eventString(taskPayload, "intent"),
+		"intent":        intent,
 		"taskId":        taskRef,
 		"title":         eventString(taskPayload, "title"),
-		"prompt":        appendTeamTaskCompletionInstruction(prompt),
+		"prompt":        appendTeamTaskCompletionInstruction(prompt, memberContext["communicationMode"], intent),
 		"rawPrompt":     rawPrompt,
 		"contextRefs":   normalizeContextRefs(taskPayload["contextRefs"]),
 		"memberContext": memberContext,
@@ -490,18 +491,57 @@ func buildTeamTaskEnvelope(teamID int, memberKey string, task *models.TeamTask, 
 	return envelope
 }
 
-func appendTeamTaskCompletionInstruction(prompt string) string {
+func appendTeamTaskCompletionInstruction(prompt string, communicationMode, intent string) string {
 	base := strings.TrimSpace(prompt)
+	if strings.TrimSpace(intent) == initialLeaderTaskIntent {
+		instruction := strings.Join([]string{
+			"Bootstrap completion contract:",
+			"- This is a control-plane Team snapshot assigned only to the Leader. Do not delegate it, create worker assignments, or wait for member replies.",
+			"- Read the Team roster/configuration and current status directly. If a runtime status source is unavailable, report that field as unavailable instead of blocking.",
+			"- Summarize every member's identity, role, runtime, responsibilities, capability boundaries, and the configured collaboration mode.",
+			"- Explain task routing, Team Redis event synchronization, shared workspace usage, and the available Team methods without asking other members to restate their own roles.",
+			"- Complete this bootstrap in the current turn by calling team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
+			"- Do not finish with tool calls only and do not wait for QA/review evidence for this bootstrap snapshot.",
+		}, "\n")
+		if base == "" {
+			return instruction
+		}
+		return base + "\n\n" + instruction
+	}
 	if strings.Contains(base, teamTaskCompletionTool) && strings.Contains(base, "task_completed") {
 		return base
+	}
+	mode := normalizedTeamCommunicationMode(communicationMode)
+	modeInstructions := []string{
+		"- Leader-mediated mode is a strict hub-and-spoke workflow: user root task -> Leader -> assigned workers -> Leader -> final user-facing result.",
+		"- If you are the Leader, answer self-contained control-plane or simple tasks directly. For multi-member work, create explicit assignments with team_send, wait for the assigned workers' actual results, verify them, and only then complete the root task.",
+		"- If you are a Worker, execute only the assignment addressed to you and report the result, evidence, artifact paths, or blocker back to the Leader. Do not hand off directly to another Worker.",
+		"- Worker completion never closes the user root task. Only the Leader may finalize the root task after reconciling all required member outputs.",
+	}
+	switch mode {
+	case teamCommunicationModePeerAssisted:
+		modeInstructions = []string{
+			"- Worker-direct mode: if the root task or collaboration plan names a downstream member, you MUST hand off to that exact member with team_send before completing your own step. This handoff is required, not optional.",
+			"- In worker-direct mode, do not send a completed step only to the Leader when a downstream owner is specified. The Leader is the fallback only when no downstream owner is specified, when you are blocked, or when final synthesis is explicitly requested.",
+			"- A worker-to-worker handoff must include rootTaskId/rootMessageId when available, artifact paths, the requested next action, acceptance criteria, and whether a reply is required.",
+		}
+	case teamCommunicationModeFullMesh:
+		modeInstructions = []string{
+			"- Full-mesh mode: coordinate directly with the named downstream owners. If a member is specified as the next owner, hand off to that exact member before completing your own step.",
+			"- Preserve rootTaskId/rootMessageId, artifact paths, requested next action, acceptance criteria, and reply requirements in every peer handoff.",
+		}
 	}
 	instruction := strings.Join([]string{
 		"Completion contract:",
 		"- For multi-member Teams, first write a compact collaboration plan: subtasks, owner member_id, dependency, expected artifact, and verification rule.",
-		"- If CLAWMANAGER_TEAM_COMMUNICATION_MODE is peer_assisted or full_mesh, members may use team_send to ask peers, request reviews, hand off bounded work, and share artifacts without routing every interaction through the Leader.",
-		"- Every peer message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
+	}, "\n")
+	instruction += "\n" + strings.Join(modeInstructions, "\n")
+	instruction += "\n" + strings.Join([]string{
+		"- Every Team message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
 		"- The Leader must not mark the root task succeeded after merely dispatching work. Final success requires returned member evidence or a direct self-contained answer.",
-		"- Workers should report peer outcomes and produced artifact paths back to the Team channel before completing their assigned task.",
+		"- Write shared artifacts under the exact directory in CLAWMANAGER_TEAM_SHARED_DIR. Never write to a relative team/... folder.",
+		"- Report shared artifact links using the canonical UI path /team/<relative-path>, even when a Lite runtime uses a different physical shared directory.",
+		"- Members must report produced artifact paths and concrete outcomes through the Team channel before completing their assigned task.",
 		"- When the final result is ready, call team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
 		"- If the task fails, call team_complete_task with status=\"failed\" and an error message.",
 		"- Do not send the final answer as a normal message to clawmanager; ClawManager consumes task_completed/task_failed events from the Team Redis event stream.",
@@ -724,6 +764,7 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 		"CLAWMANAGER_TEAM_PRESENCE_KEY":       teamPresenceKey(team.ID),
 		"CLAWMANAGER_TEAM_DLQ_KEY":            teamDLQKey(team.ID),
 		"CLAWMANAGER_TEAM_MANAGER_URL":        managerBaseURL,
+		"GATEWAY_ALLOW_ALL_USERS":             "true",
 	}
 	if len(collaborationPolicyJSON) > 0 {
 		env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"] = string(collaborationPolicyJSON)
@@ -733,6 +774,7 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 	}
 	if systemPrompt := strings.TrimSpace(memberContext["systemPrompt"]); systemPrompt != "" {
 		systemPrompt = appendTeamCollaborationGuidance(systemPrompt, communicationMode)
+		systemPrompt = appendTeamWorkspaceGuidance(systemPrompt)
 		env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] = systemPrompt
 		env["HERMES_AGENT_HELP_GUIDANCE"] = systemPrompt
 	}
@@ -1181,6 +1223,10 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	now := time.Now().UTC()
 	memberInstance, _ := s.teamMemberInstance(member)
 	memberContext := buildTeamMemberTaskContext(member, memberInstance)
+	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
+	memberContext["communicationMode"] = communicationMode
+	memberContext["systemPrompt"] = appendTeamCollaborationGuidance(memberContext["systemPrompt"], communicationMode)
+	memberContext["systemPrompt"] = appendTeamWorkspaceGuidance(memberContext["systemPrompt"])
 	envelope := buildTeamTaskEnvelope(teamID, member.MemberKey, task, messageID, taskPayload, memberContext, now)
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
@@ -1309,7 +1355,8 @@ func buildTeamMemberSoulMarkdown(member plannedTeamMember, communicationMode str
 		"## Collaboration Rules",
 		teamCollaborationGuidance(communicationMode),
 		"- Only handle tasks addressed to your Team member inbox.",
-		"- Use CLAWMANAGER_TEAM_SHARED_DIR for shared context, durable notes, and handoff artifacts. team.json sharedDir is the logical mount path used by Pro runtimes.",
+		"- Use the exact CLAWMANAGER_TEAM_SHARED_DIR value for shared context, durable notes, and handoff artifacts. Never create or write to a relative team/... folder.",
+		"- Report shared artifact links as /team/<relative-path>. /team is the canonical ClawManager UI path even when a Lite runtime uses a different physical directory.",
 		"- Report progress, blockers, verification evidence, and final results through the Team channel.",
 		"- If asked about your role, answer from this Team Identity and Role Instructions section.",
 		"",
@@ -1325,14 +1372,22 @@ func appendTeamCollaborationGuidance(systemPrompt, communicationMode string) str
 	return strings.TrimSpace(systemPrompt) + "\n\n" + guidance
 }
 
+func appendTeamWorkspaceGuidance(systemPrompt string) string {
+	guidance := "Shared workspace contract: write every shared artifact under the exact CLAWMANAGER_TEAM_SHARED_DIR value; never use a relative team/... directory. When reporting an artifact to ClawManager or another member, use the canonical link /team/<relative-path>. The /team prefix is a UI/logical alias and may map to a different physical directory in Lite runtimes."
+	if strings.Contains(systemPrompt, guidance) {
+		return systemPrompt
+	}
+	return strings.TrimSpace(systemPrompt) + "\n\n" + guidance
+}
+
 func teamCollaborationGuidance(communicationMode string) string {
 	switch normalizedTeamCommunicationMode(communicationMode) {
 	case teamCommunicationModePeerAssisted:
-		return "Collaboration mode: peer_assisted. The Leader still owns final user-facing synthesis, but workers may contact other Team members directly for bounded questions, handoffs, reviews, artifact requests, and blocker help. Preserve the original root task context in every peer message, write durable artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and report peer outcomes back through the Team channel. When receiving a peer request, respond with explicit evidence, artifact paths, blockers, or review findings so the requester can finish its own task."
+		return "Collaboration mode: peer_assisted / worker-direct. This mode is isolated from leader_mediated flow: the Leader still owns final user-facing synthesis, but members must hand off directly to the named downstream owner when the root task, collaboration plan, or current instruction specifies one. Direct handoff is mandatory, not optional; sending only to the Leader is allowed only when there is no named downstream owner, when blocked, or when final synthesis is explicitly required. Preserve rootTaskId/rootMessageId, artifact paths, requested next action, acceptance criteria, and reply-required status in every peer message. Ask peer questions through the Team channel, then wait for the addressed member's real reply before continuing dependent work; never simulate, invent, or reinterpret another member's answer as if the user said it. Write durable artifacts under CLAWMANAGER_TEAM_SHARED_DIR, report peer outcomes through the Team channel, and let the Leader close the root task only after final synthesis. When receiving a peer request, respond with explicit evidence, artifact paths, blockers, or review findings so the requester can finish its own task."
 	case teamCommunicationModeFullMesh:
-		return "Collaboration mode: full_mesh. Team members may coordinate directly with each other while preserving root task context, shared artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and a final user-facing synthesis. Use direct member-to-member messages for parallel research, design, implementation, review, and verification; keep each peer exchange bounded and evidence based."
+		return "Collaboration mode: full_mesh. Team members coordinate directly with each other while preserving rootTaskId/rootMessageId context, shared artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and final user-facing synthesis. If a downstream owner is named, hand off to that exact member before completing your own step. Use direct member-to-member messages for parallel research, design, implementation, review, and verification. Wait for real addressed-member replies before continuing dependent work; do not simulate peer answers or label peer messages as user replies. Keep each peer exchange bounded, evidence based, and visible in the Team channel."
 	default:
-		return "Collaboration mode: leader_mediated. Route cross-member dependencies through the Leader. Workers should not start independent peer-to-peer handoffs unless the Leader explicitly delegates them."
+		return "Collaboration mode: leader_mediated. This is a strict hub-and-spoke workflow isolated from worker-direct flow. User root tasks enter through the Leader. The Leader may answer self-contained control-plane or simple tasks directly; for multi-member work the Leader creates explicit assignments with team_send, waits for the addressed workers' real results, verifies them, and produces the final synthesis. Workers execute only assignments addressed to them, preserve rootTaskId/rootMessageId and artifact paths, and report results or blockers back to the Leader. Workers must not hand off directly to other workers. A worker completion never closes the user root task; only the Leader may finalize it after all required outputs are reconciled."
 	}
 }
 
@@ -1985,6 +2040,9 @@ func isDispatchOnlyCompletionPayload(payload map[string]interface{}) bool {
 	if text == "" {
 		return false
 	}
+	if text == "redis team task completed" || text == "redis team task processing completed" {
+		return true
+	}
 	if strings.Contains(text, "result already delivered") || strings.Contains(text, "\u7ed3\u679c\u5df2\u53cd\u9988") {
 		return true
 	}
@@ -2037,6 +2095,9 @@ func isNonAuthoritativeDispatchFailure(eventType string, payload map[string]inte
 	text := strings.ToLower(strings.Join(strings.Fields(strings.Join([]string{
 		eventString(payload, "error_message", "error", "reason", "diagnostic", "lastSummary", "last_summary", "summary", "text", "message"),
 	}, " ")), " "))
+	if text == "redis team task failed" {
+		return true
+	}
 	return strings.Contains(text, "dispatch finished without reply/completion") ||
 		strings.Contains(text, "without reply/completion")
 }
@@ -2129,6 +2190,17 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		eventType = "message_warning"
 	}
 	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task, member)
+	eventStatus := normalizedTeamTaskEventStatus(payload)
+	eventSignalsCompletion := isTeamTaskCompletionSignal(eventType, eventStatus, payload)
+	eventSignalsFailure := isTeamTaskFailureSignal(eventType, eventStatus, payload)
+	memberTerminalOnly := task != nil &&
+		member != nil &&
+		member.ID != task.TargetMemberID &&
+		(eventSignalsCompletion || eventSignalsFailure)
+	if memberTerminalOnly {
+		payload["memberTerminalOnly"] = true
+		payload["rootTaskTerminal"] = false
+	}
 	enrichTeamCollaborationStep(team, eventType, payload, member, task)
 
 	payloadJSON, err := marshalOptionalJSON(payload)
@@ -2158,7 +2230,7 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 
 	now := time.Now().UTC()
 	taskProjection := teamTaskProjectionResult{}
-	if task != nil {
+	if task != nil && !memberTerminalOnly {
 		taskProjection = projectTeamTaskRuntimeState(task, payload, eventType, payloadJSON, now)
 		if taskProjection.changed {
 			task.UpdatedAt = now
@@ -2179,21 +2251,18 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.CurrentTaskID = &task.ID
 			member.Progress = eventInt(payload, "progress")
 		}
-		eventStatus := normalizedTeamTaskEventStatus(payload)
-		eventSignalsCompletion := isTeamTaskCompletionSignal(eventType, eventStatus, payload)
-		eventSignalsFailure := isTeamTaskFailureSignal(eventType, eventStatus, payload)
 		taskProjectedTerminal := taskProjection.status == models.TeamTaskStatusSucceeded || taskProjection.status == models.TeamTaskStatusFailed
-		terminalEventWithoutTask := task == nil && (eventSignalsCompletion || eventSignalsFailure)
+		terminalEventWithoutTask := (task == nil || memberTerminalOnly) && (eventSignalsCompletion || eventSignalsFailure)
 		if taskProjectedTerminal || terminalEventWithoutTask {
 			member.Status = models.TeamMemberStatusIdle
 			member.CurrentTaskID = nil
-			if taskProjection.status == models.TeamTaskStatusSucceeded || (task == nil && eventSignalsCompletion) {
+			if taskProjection.status == models.TeamTaskStatusSucceeded || (terminalEventWithoutTask && eventSignalsCompletion) {
 				member.Progress = 100
 				if member.Availability != models.TeamMemberAvailabilityBlocked {
 					member.Availability = models.TeamMemberAvailabilityIdle
 					member.BlockedReason = nil
 				}
-			} else if taskProjection.status == models.TeamTaskStatusFailed || (task == nil && eventSignalsFailure) {
+			} else if taskProjection.status == models.TeamTaskStatusFailed || (terminalEventWithoutTask && eventSignalsFailure) {
 				member.Progress = 0
 				if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown {
 					member.Availability = models.TeamMemberAvailabilityBlocked
@@ -3052,11 +3121,13 @@ func buildInitialLeaderTaskPayload(teamName string) map[string]interface{} {
 	}
 	prompt := fmt.Sprintf("请介绍`team %s`当前 Redis Team成员构成，包括各角色的职责分工、运行状态与技术能力边界。同时说明团队内部的协作与通信机制(team_send)，例如任务流转方式、消息同步方式、上下文共享方式以及可调用的方法、工具与操作能力，以便后续能够更高效地开展团队工作", normalizedTeamName)
 	return map[string]interface{}{
-		"intent":         initialLeaderTaskIntent,
-		"title":          "介绍当前 Redis Team 成员与协作机制",
-		"prompt":         prompt,
-		"origin":         "system_bootstrap",
-		"anchorEligible": false,
+		"intent":             initialLeaderTaskIntent,
+		"title":              "介绍当前 Redis Team 成员与协作机制",
+		"prompt":             prompt,
+		"origin":             "system_bootstrap",
+		"executionMode":      "leader_control_plane_snapshot",
+		"requiresDelegation": false,
+		"anchorEligible":     false,
 	}
 }
 

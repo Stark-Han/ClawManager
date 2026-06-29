@@ -87,6 +87,11 @@ func TestTeamMemberEnvInjectsRoleGuidance(t *testing.T) {
 	if env["HERMES_AGENT_HELP_GUIDANCE"] != env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] {
 		t.Fatalf("expected Hermes guidance alias to match Team system prompt")
 	}
+	for _, expected := range []string{"exact CLAWMANAGER_TEAM_SHARED_DIR", "never use a relative team/... directory", "/team/<relative-path>"} {
+		if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], expected) {
+			t.Fatalf("expected shared workspace guidance %q, got %q", expected, env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
+		}
+	}
 }
 
 func TestBuildTeamMemberInstanceRequestUsesSharedPermissionDefaults(t *testing.T) {
@@ -440,6 +445,102 @@ func TestTeamMemberEnvIncludesPeerAssistedPolicy(t *testing.T) {
 	if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], "Collaboration mode: peer_assisted") {
 		t.Fatalf("expected peer-assisted guidance in system prompt: %s", env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
 	}
+	if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], "Direct handoff is mandatory") {
+		t.Fatalf("expected mandatory direct handoff guidance in system prompt: %s", env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
+	}
+	if env["GATEWAY_ALLOW_ALL_USERS"] != "true" {
+		t.Fatalf("expected Hermes teammate messages to be allowed, got %#v", env["GATEWAY_ALLOW_ALL_USERS"])
+	}
+}
+
+func TestAppendTeamTaskCompletionInstructionSeparatesCollaborationModes(t *testing.T) {
+	leaderMediated := appendTeamTaskCompletionInstruction("Do the work.", teamCommunicationModeLeaderMediated, "")
+	if !strings.Contains(leaderMediated, "Leader-mediated mode") || strings.Contains(leaderMediated, "Worker-direct mode") {
+		t.Fatalf("leader-mediated completion contract mixed modes: %s", leaderMediated)
+	}
+	for _, expected := range []string{
+		"strict hub-and-spoke workflow",
+		"answer self-contained control-plane or simple tasks directly",
+		"wait for the assigned workers' actual results",
+		"Do not hand off directly to another Worker",
+		"Only the Leader may finalize the root task",
+	} {
+		if !strings.Contains(leaderMediated, expected) {
+			t.Fatalf("leader-mediated completion contract missing %q: %s", expected, leaderMediated)
+		}
+	}
+
+	peerAssisted := appendTeamTaskCompletionInstruction("Do the work.", teamCommunicationModePeerAssisted, "")
+	for _, expected := range []string{
+		"Worker-direct mode",
+		"MUST hand off to that exact member",
+		"required, not optional",
+		"fallback only",
+	} {
+		if !strings.Contains(peerAssisted, expected) {
+			t.Fatalf("peer-assisted completion contract missing %q: %s", expected, peerAssisted)
+		}
+	}
+	if strings.Contains(peerAssisted, "Leader-mediated mode") {
+		t.Fatalf("peer-assisted completion contract should not include leader-mediated flow: %s", peerAssisted)
+	}
+}
+
+func TestTeamMemberEnvKeepsLeaderMediatedFlowIsolated(t *testing.T) {
+	description := "Developer: implements assigned work and reports to the Leader."
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "leader", Role: "leader"},
+		{MemberID: "worker", Role: "developer", Description: &description},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	team := &models.Team{
+		ID:                14,
+		CommunicationMode: teamCommunicationModeLeaderMediated,
+		SharedMountPath:   "/team",
+	}
+	for _, plan := range plans {
+		env := (&teamService{}).teamMemberEnv(team, plan)
+		if env["CLAWMANAGER_TEAM_COMMUNICATION_MODE"] != teamCommunicationModeLeaderMediated {
+			t.Fatalf("expected leader-mediated env for %s: %#v", plan.MemberKey, env)
+		}
+		if !strings.Contains(env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"], `"allowPeerToPeer":false`) {
+			t.Fatalf("leader-mediated policy allowed peer-to-peer for %s: %s", plan.MemberKey, env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"])
+		}
+		guidance := env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"]
+		for _, expected := range []string{"strict hub-and-spoke workflow", "Workers must not hand off directly to other workers", "only the Leader may finalize"} {
+			if !strings.Contains(guidance, expected) {
+				t.Fatalf("leader-mediated guidance for %s missing %q: %s", plan.MemberKey, expected, guidance)
+			}
+		}
+		if strings.Contains(guidance, "Direct handoff is mandatory") {
+			t.Fatalf("leader-mediated guidance leaked worker-direct rules for %s: %s", plan.MemberKey, guidance)
+		}
+	}
+}
+
+func TestAppendTeamTaskCompletionInstructionUsesLeaderOnlyBootstrapContract(t *testing.T) {
+	bootstrap := appendTeamTaskCompletionInstruction(
+		"Introduce the current Team.",
+		teamCommunicationModeLeaderMediated,
+		initialLeaderTaskIntent,
+	)
+	for _, expected := range []string{
+		"Bootstrap completion contract",
+		"assigned only to the Leader",
+		"Do not delegate it",
+		"Complete this bootstrap in the current turn",
+	} {
+		if !strings.Contains(bootstrap, expected) {
+			t.Fatalf("bootstrap contract missing %q: %s", expected, bootstrap)
+		}
+	}
+	for _, forbidden := range []string{"For multi-member Teams", "workers report deliverables back to the Leader"} {
+		if strings.Contains(bootstrap, forbidden) {
+			t.Fatalf("bootstrap contract must not include normal collaboration rule %q: %s", forbidden, bootstrap)
+		}
+	}
 }
 
 func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
@@ -462,6 +563,8 @@ func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
 		description,
 		"Collaboration mode: peer_assisted",
 		"If asked about your role",
+		"Never create or write to a relative team/... folder",
+		"Report shared artifact links as /team/<relative-path>",
 	} {
 		if !strings.Contains(soul, expected) {
 			t.Fatalf("SOUL.md missing %q: %s", expected, soul)
@@ -477,6 +580,12 @@ func TestBuildInitialLeaderTaskPayloadDescribesRosterAndTeamSend(t *testing.T) {
 	}
 	if payload["title"] == "" {
 		t.Fatalf("expected bootstrap task title: %#v", payload)
+	}
+	if payload["executionMode"] != "leader_control_plane_snapshot" || payload["requiresDelegation"] != false {
+		t.Fatalf("expected leader-only bootstrap execution metadata: %#v", payload)
+	}
+	if payload["anchorEligible"] != false {
+		t.Fatalf("bootstrap task must not become a user question anchor: %#v", payload)
 	}
 	prompt, ok := payload["prompt"].(string)
 	if !ok {
@@ -956,6 +1065,137 @@ func TestProjectTeamEventAssociatesLeaderPeerHandoffWithRootTask(t *testing.T) {
 	}
 	if step["rootTaskId"] != "team-31-task-73" || step["rootMessageId"] != messageID {
 		t.Fatalf("expected root task context, got %#v", step)
+	}
+}
+
+func TestProjectTeamEventDoesNotCompleteRootTaskFromPeerMemberTerminal(t *testing.T) {
+	taskID := 75
+	messageID := "team-31-task-75"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	leader := &models.TeamMember{
+		ID:           120,
+		TeamID:       31,
+		MemberKey:    "leader",
+		Role:         "leader",
+		Status:       models.TeamMemberStatusBusy,
+		Availability: models.TeamMemberAvailabilityBusy,
+	}
+	workerTaskID := taskID
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Role:          "developer",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &workerTaskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader, "worker": worker},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "worker",
+		"messageId":      messageID,
+		"taskId":         messageID,
+		"status":         "succeeded",
+		"summary":        "Worker delivery ready",
+		"resultMarkdown": "Worker completed the assigned research and produced a report for leader synthesis.",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModePeerAssisted}, nil, redisStreamMessage{
+		ID:     "1781171178662-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask != nil {
+		t.Fatalf("peer member terminal event must not complete root task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.MemberKey != "worker" || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
+		t.Fatalf("expected peer member to be marked idle and complete, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].TaskID == nil || *repo.createdEvents[0].TaskID != taskID {
+		t.Fatalf("expected member terminal event linked to root task for visibility, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if stored["memberTerminalOnly"] != true || stored["rootTaskTerminal"] != false {
+		t.Fatalf("expected member terminal marker without root completion, got %#v", stored)
+	}
+}
+
+func TestProjectTeamEventLeaderMediatedWorkerCompletionDoesNotCloseRootTask(t *testing.T) {
+	taskID := 76
+	messageID := "team-31-task-76"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	leader := &models.TeamMember{ID: 120, TeamID: 31, MemberKey: "leader", Role: "leader"}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "worker",
+		Role:          "developer",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader, "worker": worker},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "worker",
+		"messageId":      messageID,
+		"taskId":         messageID,
+		"status":         "succeeded",
+		"summary":        "Worker delivery ready for Leader verification",
+		"resultMarkdown": "The assigned work is complete with evidence and artifact paths.",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178663-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask != nil {
+		t.Fatalf("leader-mediated worker completion must not close root task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.MemberKey != "worker" || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
+		t.Fatalf("worker delivery should complete only the worker lane, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].TaskID == nil || *repo.createdEvents[0].TaskID != taskID {
+		t.Fatalf("worker delivery must remain linked to the Leader root task, got %#v", repo.createdEvents)
 	}
 }
 

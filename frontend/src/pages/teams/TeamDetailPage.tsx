@@ -337,17 +337,24 @@ type WorkspacePreviewState = {
   content: string;
 };
 
-const teamWorkspaceHeight = (view: TeamSidePanelView, detailSize: KanbanDetailSize) => {
+const teamWorkspaceHeight = (
+  view: TeamSidePanelView,
+  detailSize: KanbanDetailSize,
+  communicationMode?: string,
+) => {
   if (view === "files") {
     return 760;
   }
+  if (isPeerCommunicationMode(communicationMode)) {
+    return 900;
+  }
   switch (detailSize) {
     case "long":
-      return 1040;
+      return 1220;
     case "medium":
-      return 900;
+      return 1040;
     default:
-      return 780;
+      return 820;
   }
 };
 
@@ -394,7 +401,13 @@ const isUserQuestionAnchorGroup = (group: CollaborationGroup) => {
   if (!normalized) {
     return false;
   }
-  return !/^(task[-_][a-z0-9-]+|team-\d+-task-\d+)$/i.test(normalized);
+  if (/^(task[-_][a-z0-9-]+|team-\d+-task-\d+)$/i.test(normalized)) {
+    return false;
+  }
+  if (/^team\s+message$/i.test(normalized)) {
+    return false;
+  }
+  return true;
 };
 
 const eventTimeValue = (event: TeamEvent) =>
@@ -873,7 +886,11 @@ const TeamDetailPage: React.FC = () => {
       selectActiveProcessGroup(collaborationGroups),
     [collaborationGroups, selectedGroupKey],
   );
-  const mainWorkspaceHeight = teamWorkspaceHeight(sidePanelView, kanbanDetailSize);
+  const mainWorkspaceHeight = teamWorkspaceHeight(
+    sidePanelView,
+    kanbanDetailSize,
+    details?.team.communication_mode,
+  );
 
   const handleDeleteTeam = async () => {
     if (!teamId || !window.confirm(`删除 Team「${details?.team.name || teamId}」？`)) {
@@ -1110,6 +1127,7 @@ const TeamDetailPage: React.FC = () => {
                 group={activeProcessGroup}
                 memberById={memberById}
                 leaderMemberId={details.leader_member_id}
+                communicationMode={details.team.communication_mode}
                 compact
                 expanded
                 heightClass="h-full"
@@ -1823,14 +1841,15 @@ function downloadBlob(blob: Blob, filename: string) {
 
 function workspaceLinkToRelativePath(raw: string) {
   const normalized = raw.trim().replace(/\\/g, "/").replace(/[，。；;,.、)）\]}]+$/g, "");
-  if (normalized === "/team" || normalized === "team") {
+  if (normalized === "/team") {
     return "";
   }
   if (normalized.startsWith("/team/")) {
     return normalized.slice("/team/".length);
   }
-  if (normalized.startsWith("team/")) {
-    return normalized.slice("team/".length);
+  const liteSharedMatch = normalized.match(/^\/workspaces\/teams\/user-\d+\/team-\d+-shared\/(.+)$/i);
+  if (liteSharedMatch) {
+    return liteSharedMatch[1];
   }
   return normalized.replace(/^\/+/, "");
 }
@@ -1841,7 +1860,10 @@ function isPreviewableWorkspacePath(path: string) {
 
 function isTeamWorkspaceLink(path: string) {
   const normalized = path.trim().replace(/\\/g, "/");
-  return normalized.startsWith("/team/") || normalized.startsWith("team/");
+  return (
+    normalized.startsWith("/team/") ||
+    /^\/workspaces\/teams\/user-\d+\/team-\d+-shared\//i.test(normalized)
+  );
 }
 
 function formatWorkspaceSize(size: number) {
@@ -2152,10 +2174,12 @@ function InteractionProcessPanel({
   showToggle = true,
   onDetailSizeChange,
   onWorkspaceFileOpen,
+  communicationMode,
 }: {
   group?: CollaborationGroup;
   memberById: Map<number, TeamMember>;
   leaderMemberId?: string;
+  communicationMode?: string;
   compact?: boolean;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
@@ -2170,9 +2194,11 @@ function InteractionProcessPanel({
   const steps = group
     ? buildProcessSteps(group, memberById, memberByKey, leaderMemberId)
     : [];
-  const finalResult = group ? processFinalResult(group, steps) : "";
-  const visualStatus = group ? processVisualStatus(group, finalResult, steps) : "idle";
-  const progress = group ? processProgress(group, steps, visualStatus) : 0;
+  const peerMode = isPeerCommunicationMode(communicationMode);
+  const peerRoot = peerMode && isRootTaskTargetLeader(group, memberById, leaderMemberId);
+  const finalResult = group ? processFinalResult(group, steps, peerRoot) : "";
+  const visualStatus = group ? processVisualStatus(group, finalResult, steps, peerRoot) : "idle";
+  const progress = group ? processProgress(group, steps, visualStatus, peerRoot) : 0;
   const isTerminal = ["succeeded", "failed", "stale"].includes(visualStatus);
   const statusText = processStatusText(visualStatus);
   const title = group?.task ? taskTitleText(group.task) : group?.title || "等待任务";
@@ -2180,23 +2206,36 @@ function InteractionProcessPanel({
     ? taskPromptText(group.task) || group.title
     : group?.items.find((item) => item.content)?.content || "";
   const columns = buildKanbanColumns(group, steps, finalResult, visualStatus);
-  const decompositionItems = buildDecompositionItems(columns);
+  const peerModel = peerRoot
+    ? buildPeerCollaborationModel(group, steps, memberById, leaderMemberId)
+    : undefined;
+  const peerLanes = peerModel?.lanes || [];
+  const decompositionItems = peerRoot
+    ? buildPeerDecompositionItems(peerLanes)
+    : buildDecompositionItems(columns);
   const kanbanCounts = {
-    todo: columns.todo.length,
-    doing: columns.doing.length,
-    done: columns.done.length,
+    todo: peerRoot ? peerLanes.filter((lane) => lane.status === "idle" || lane.status === "waiting").length : columns.todo.length,
+    doing: peerRoot ? peerLanes.filter((lane) => lane.status === "working").length : columns.doing.length,
+    done: peerRoot ? peerLanes.filter((lane) => lane.status === "done" || lane.status === "blocked").length : columns.done.length,
   };
+  const peerCards = peerLanes.map((lane) => lane.card).filter(Boolean) as KanbanTaskCard[];
+  const allCards = peerRoot ? peerCards : [...columns.todo, ...columns.doing, ...columns.done];
   const defaultCardId =
-    columns.doing[0]?.id || columns.done[0]?.id || columns.todo[0]?.id || "";
+    allCards.find((card) => card.column === "doing")?.id ||
+    allCards.find((card) => card.column === "done")?.id ||
+    allCards.find((card) => card.column === "todo")?.id ||
+    "";
   const [selectedCardId, setSelectedCardId] = useState(defaultCardId);
   const [internalExpanded, setInternalExpanded] = useState(false);
   const expanded = controlledExpanded ?? internalExpanded;
   const setExpanded = onExpandedChange ?? setInternalExpanded;
-  const allCards = [...columns.todo, ...columns.doing, ...columns.done];
   const selectedCard =
     allCards.find((card) => card.id === selectedCardId) ||
     allCards.find((card) => card.id === defaultCardId);
   const selectedDetailSize = kanbanDetailSizeForText(selectedCard?.summary || finalResult || "");
+  const leaderWorkspaceSize = peerMode
+    ? "short"
+    : leaderKanbanWorkspaceSize(selectedDetailSize, decompositionItems.length, columns);
 
   useEffect(() => {
     setSelectedCardId(defaultCardId);
@@ -2206,9 +2245,11 @@ function InteractionProcessPanel({
     if (!onDetailSizeChange) {
       return;
     }
-    const detailText = selectedCard?.summary || finalResult || "";
-    onDetailSizeChange(kanbanDetailSizeForText(detailText));
-  }, [finalResult, onDetailSizeChange, selectedCard?.id, selectedCard?.summary]);
+    if (peerMode) {
+      return;
+    }
+    onDetailSizeChange(leaderWorkspaceSize);
+  }, [leaderWorkspaceSize, onDetailSizeChange, peerMode]);
   const progressStyle =
     visualStatus === "failed" || visualStatus === "stale"
       ? "from-rose-500 via-orange-400 to-amber-400"
@@ -2238,7 +2279,7 @@ function InteractionProcessPanel({
                 />
               </span>
               <span className="truncate text-xs font-semibold uppercase tracking-[0.16em] text-cyan-100">
-                Execution Kanban
+                {peerRoot ? "Peer Collaboration" : "Execution Kanban"}
               </span>
               <span className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-200 ring-1 ring-white/15">
                 {statusText}
@@ -2334,6 +2375,55 @@ function InteractionProcessPanel({
               </div>
             </div>
           </div>
+        ) : peerRoot ? (
+          <>
+        <PeerCollaborationMatrix
+          model={peerModel}
+          queryText={queryText}
+          statusText={statusText}
+          visualStatus={visualStatus}
+          progress={progress}
+          selectedCardId={selectedCard?.id}
+          onSelect={setSelectedCardId}
+        />
+
+        <div className={`flex min-h-[112px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-2.5 shadow-sm ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
+          <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-slate-800">
+                {selectedCard ? "卡片详情" : "汇总结果"}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-400">
+                点击 Kanban 卡片可切换查看细节
+              </div>
+            </div>
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
+              {statusText}
+            </span>
+          </div>
+          <div className="min-h-0">
+            {selectedCard ? (
+              <KanbanCardDetail
+                card={selectedCard}
+                size={selectedDetailSize}
+                onWorkspaceFileOpen={onWorkspaceFileOpen}
+              />
+            ) : finalResult ? (
+              <div className={`overflow-auto pb-4 pr-1 text-xs leading-5 text-slate-700 ${kanbanDetailBodyMaxHeight(selectedDetailSize)}`}>
+                <MarkdownContent
+                  text={finalResult}
+                  compact
+                  onWorkspaceFileOpen={onWorkspaceFileOpen}
+                />
+              </div>
+            ) : (
+              <div className="text-xs leading-5 text-slate-500">
+                当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
+              </div>
+            )}
+          </div>
+        </div>
+          </>
         ) : (
           <>
         <div className="shrink-0 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
@@ -2422,7 +2512,7 @@ function InteractionProcessPanel({
           </div>
         </div>
 
-        <div className={`flex min-h-[112px] min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-2.5 shadow-sm ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
+        <div className={`flex min-h-[112px] min-w-0 shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-2.5 shadow-sm ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
           <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
             <div>
               <div className="text-xs font-semibold text-slate-800">
@@ -2563,17 +2653,44 @@ function selectActiveProcessGroup(groups: CollaborationGroup[]) {
   );
 }
 
+function isPeerCommunicationMode(mode?: string) {
+  const normalized = (mode || "").trim().toLowerCase();
+  return normalized === "peer_assisted" || normalized === "full_mesh";
+}
+
+function isRootTaskTargetLeader(
+  group: CollaborationGroup | undefined,
+  memberById: Map<number, TeamMember>,
+  leaderMemberId?: string,
+) {
+  if (!group?.task) {
+    return false;
+  }
+  const target = memberById.get(group.task.target_member_id);
+  if (!target) {
+    return false;
+  }
+  return (
+    target.member_key === leaderMemberId ||
+    target.member_key === "leader" ||
+    target.role.toLowerCase().includes("leader")
+  );
+}
+
 type ProcessStep = {
   id: string;
   workId?: string;
   actor: string;
+  actorKey?: string;
   to: string;
+  toKey?: string;
   eventType: string;
   status?: string;
   phase?: string;
   content: string;
   progress?: number;
   time: number;
+  memberTerminalOnly?: boolean;
 };
 
 type KanbanColumnKey = "todo" | "doing" | "done";
@@ -2592,6 +2709,51 @@ type KanbanTaskCard = {
 };
 
 type KanbanColumns = Record<KanbanColumnKey, KanbanTaskCard[]>;
+
+type PeerLaneStatus = "idle" | "waiting" | "working" | "done" | "blocked";
+
+type PeerCollaborationLane = {
+  id: string;
+  label: string;
+  role: string;
+  status: PeerLaneStatus;
+  statusLabel: string;
+  summary: string;
+  currentTask?: string;
+  deliverable?: string;
+  waitingOn?: string;
+  dependencies: string[];
+  card?: KanbanTaskCard;
+};
+
+type PeerDependencyEdge = {
+  id: string;
+  from: string;
+  to: string;
+  label: string;
+  status: PeerLaneStatus;
+};
+
+type PeerFlowEdge = {
+  id: string;
+  from: string;
+  to: string;
+  status: PeerLaneStatus;
+};
+
+type PeerCollaborationModel = {
+  lanes: PeerCollaborationLane[];
+  dependencies: PeerDependencyEdge[];
+  flow: PeerFlowEdge[];
+  phaseLabel: string;
+  completionRule: string;
+  stats: {
+    waiting: number;
+    working: number;
+    completed: number;
+    blocked: number;
+  };
+};
 
 type DecompositionItem = {
   id: string;
@@ -2616,7 +2778,9 @@ function buildProcessSteps(
     steps.push({
       id: `task-dispatch-${group.task.id}`,
       actor: "ClawManager",
+      actorKey: "ClawManager",
       to: displayMemberName(target, memberByKey, leaderMemberId),
+      toKey: target,
       eventType: "task_assigned",
       content: taskPromptText(group.task) || taskTitleText(group.task),
       time: new Date(group.task.created_at).getTime(),
@@ -2640,13 +2804,16 @@ function buildProcessSteps(
       id: `event-step-${item.event.id}`,
       workId: payloadText(stepMeta, ["workId", "work_id", "id"]),
       actor,
+      actorKey,
       to,
+      toKey: targetKey,
       eventType: stepType,
       status: stepStatus,
       phase: payloadText(stepMeta, ["phase"]),
       content: stepSummary || item.content || stepTitle || chatFallbackText(item, payloadNumber(item.payload, ["progress"]), payloadText(item.payload, ["status"])),
       progress: payloadNumber(stepMeta, ["progress"]) || payloadNumber(item.payload, ["progress"]),
       time: item.timeMs,
+      memberTerminalOnly: payloadBool(item.payload, ["memberTerminalOnly", "member_terminal_only"]) === true,
     });
   }
 
@@ -2657,7 +2824,16 @@ function buildProcessSteps(
 
 function isProtocolNoiseItem(item: CollaborationItem) {
   const normalizedContent = item.content.trim().toLowerCase();
-  return item.eventType === "inbound" || normalizedContent === "inbound";
+  const compact = normalizedContent.replace(/\s+/g, "");
+  return (
+    item.eventType === "inbound" ||
+    normalizedContent === "inbound" ||
+    compact === "teammessage" ||
+    compact === "任务下发teammessage" ||
+    normalizedContent === "redis team task completed" ||
+    normalizedContent === "redis team task processing completed" ||
+    normalizedContent === "redis team task failed"
+  );
 }
 
 function buildKanbanColumns(
@@ -2801,6 +2977,215 @@ function kanbanColumnForStep(step: ProcessStep, visualStatus: string, steps: Pro
   return "todo";
 }
 
+function buildPeerCollaborationModel(
+  group: CollaborationGroup | undefined,
+  steps: ProcessStep[],
+  memberById: Map<number, TeamMember>,
+  leaderMemberId?: string,
+): PeerCollaborationModel {
+  const memberByKey = new Map(
+    [...memberById.values()].map((member) => [member.member_key, member]),
+  );
+  const lanes = new Map<string, PeerCollaborationLane>();
+  const dependencies: PeerDependencyEdge[] = [];
+  const addDependency = (
+    fromKey: string,
+    toKey: string,
+    step: ProcessStep,
+    status: PeerLaneStatus,
+  ) => {
+    if (!fromKey || !toKey || fromKey === toKey || fromKey === "ClawManager") {
+      return;
+    }
+    const id = `${fromKey}->${toKey}-${step.id}`;
+    dependencies.push({
+      id,
+      from: displayMemberName(fromKey, memberByKey, leaderMemberId),
+      to: displayMemberName(toKey, memberByKey, leaderMemberId),
+      label: step.content || eventVerb(step.eventType),
+      status,
+    });
+  };
+  const ensureLane = (memberKey: string) => {
+    const normalized = memberKey || "system";
+    const member = memberByKey.get(normalized);
+    const existing = lanes.get(normalized);
+    if (existing) {
+      return existing;
+    }
+    const lane: PeerCollaborationLane = {
+      id: normalized,
+      label: displayMemberName(normalized, memberByKey, leaderMemberId),
+      role: member?.role || "",
+      status: member?.status === "busy" ? "working" : "idle",
+      statusLabel: member?.status === "busy" ? "执行中" : "空闲",
+      summary: member?.last_summary || "等待协作任务。",
+      currentTask: member?.last_summary || "",
+      deliverable: "",
+      dependencies: [],
+    };
+    lanes.set(normalized, lane);
+    return lane;
+  };
+
+  [...memberById.values()]
+    .sort((a, b) => Number(b.member_key === leaderMemberId || b.role.toLowerCase().includes("leader")) - Number(a.member_key === leaderMemberId || a.role.toLowerCase().includes("leader")) || a.id - b.id)
+    .forEach((member) => ensureLane(member.member_key));
+
+  const setLaneCard = (
+    lane: PeerCollaborationLane,
+    step: ProcessStep,
+    status: PeerLaneStatus,
+    statusLabel: string,
+    title: string,
+  ) => {
+    if (lane.status === "done" && status !== "blocked") {
+      return;
+    }
+    if (lane.status === "blocked" && status !== "done") {
+      return;
+    }
+    lane.status = status;
+    lane.statusLabel = statusLabel;
+    lane.summary = step.content || title;
+    if (status === "working" || status === "waiting") {
+      lane.currentTask = step.content || title;
+    }
+    if (status === "done") {
+      lane.deliverable = step.content || title;
+    }
+    lane.card = {
+      id: `peer-lane-${lane.id}`,
+      column: status === "done" ? "done" : status === "idle" ? "todo" : "doing",
+      title,
+      summary: lane.summary,
+      owner: lane.label,
+      target: step.to,
+      eventType: step.eventType,
+      time: step.time,
+      progress: status === "done" ? 100 : step.progress,
+      statusLabel,
+    };
+  };
+
+  for (const step of steps) {
+    const actorKey = step.actorKey || step.actor;
+    const targetKey = step.toKey || "";
+    if (targetKey && !isLeaderLikeName(targetKey)) {
+      ensureLane(targetKey);
+    }
+    if (actorKey && actorKey !== "ClawManager" && !isLeaderLikeName(actorKey)) {
+      ensureLane(actorKey);
+    }
+
+    if (["assignment", "task_assigned", "outbound", "peer_handoff", "peer_request", "peer_review_request"].includes(step.eventType)) {
+      if (targetKey) {
+        const targetLane = ensureLane(targetKey);
+        if (actorKey && actorKey !== "ClawManager") {
+          const dependencyLabel = displayMemberName(actorKey, memberByKey, leaderMemberId);
+          if (!targetLane.dependencies.includes(dependencyLabel)) {
+            targetLane.dependencies.push(dependencyLabel);
+          }
+        }
+        setLaneCard(targetLane, step, "waiting", "待响应", `${targetLane.label} 收到协作请求`);
+        addDependency(actorKey, targetKey, step, "waiting");
+      }
+      if (actorKey && !isLeaderLikeName(actorKey) && targetKey) {
+        const actorLane = ensureLane(actorKey);
+        actorLane.waitingOn = displayMemberName(targetKey, memberByKey, leaderMemberId);
+        setLaneCard(actorLane, step, "working", "等待协作", `${actorLane.label} 等待 ${actorLane.waitingOn}`);
+      }
+      continue;
+    }
+
+    if (isFailureEvidenceStep(step)) {
+      const lane = ensureLane(actorKey);
+      setLaneCard(lane, step, "blocked", "阻塞", `${lane.label} 遇到阻塞`);
+      continue;
+    }
+
+    if (isCompletionEvidenceStep(step, steps)) {
+      const lane = ensureLane(actorKey);
+      setLaneCard(lane, step, "done", step.memberTerminalOnly ? "成员交付" : "已交付", `${lane.label} 交付结果`);
+      continue;
+    }
+
+    if (["task_received", "task_started", "progress", "task_progress", "reply", "peer_reply", "ack"].includes(step.eventType)) {
+      const lane = ensureLane(actorKey);
+      setLaneCard(lane, step, "working", "进行中", `${lane.label} 更新进展`);
+    }
+  }
+
+  if (group?.task) {
+    const target = memberById.get(group.task.target_member_id);
+    if (target) {
+      ensureLane(target.member_key);
+    }
+  }
+
+  const laneList = [...lanes.values()];
+  const stats = {
+    waiting: laneList.filter((lane) => lane.status === "waiting").length,
+    working: laneList.filter((lane) => lane.status === "working").length,
+    completed: laneList.filter((lane) => lane.status === "done").length,
+    blocked: laneList.filter((lane) => lane.status === "blocked").length,
+  };
+  const rootCompleted = Boolean(latestRootCompletionEvidenceStep(steps, true));
+  const phaseLabel = rootCompleted
+    ? "Leader 最终汇总完成"
+    : stats.blocked > 0
+      ? "存在阻塞等待处理"
+      : stats.working > 0
+        ? "成员协作执行中"
+        : stats.waiting > 0
+          ? "等待成员响应"
+          : stats.completed > 0
+            ? "等待 Leader 汇总"
+            : "等待任务拆解";
+
+  return {
+    lanes: laneList,
+    dependencies: dependencies.slice(-8),
+    flow: compactPeerFlow(dependencies),
+    phaseLabel,
+    completionRule: "只有 Leader 最终汇总并关闭根任务后，整体进度才进入 100%。成员交付只更新对应泳道。",
+    stats,
+  };
+}
+
+function compactPeerFlow(dependencies: PeerDependencyEdge[]): PeerFlowEdge[] {
+  const deduped = new Map<string, PeerFlowEdge>();
+  for (const edge of dependencies) {
+    const key = `${edge.from}->${edge.to}`;
+    deduped.set(key, {
+      id: key,
+      from: edge.from,
+      to: edge.to,
+      status: edge.status,
+    });
+  }
+  return [...deduped.values()].slice(-6);
+}
+
+function peerProgressStats(steps: ProcessStep[]) {
+  const touched = new Set<string>();
+  const completed = new Set<string>();
+  for (const step of steps) {
+    const actor = step.actorKey || step.actor;
+    const target = step.toKey || "";
+    if (target && !isLeaderLikeName(target)) {
+      touched.add(target);
+    }
+    if (actor && actor !== "ClawManager" && !isLeaderLikeName(actor)) {
+      touched.add(actor);
+      if (isCompletionEvidenceStep(step, steps)) {
+        completed.add(actor);
+      }
+    }
+  }
+  return { total: touched.size, completed: completed.size };
+}
+
 function kanbanStepTitle(step: ProcessStep, previous?: KanbanTaskCard) {
   if (previous && isTerminalEventType(step.eventType)) {
     return `${previous.target || previous.owner} 反馈结果`;
@@ -2861,6 +3246,20 @@ function buildDecompositionItems(columns: KanbanColumns): DecompositionItem[] {
   }));
 }
 
+function buildPeerDecompositionItems(lanes: PeerCollaborationLane[]): DecompositionItem[] {
+  return lanes
+    .filter((lane) => lane.card || lane.status !== "idle")
+    .slice(0, 6)
+    .map((lane) => ({
+      id: lane.id,
+      title: `${lane.label}${lane.role ? ` (${lane.role})` : ""}`,
+      route: lane.waitingOn ? `等待 ${lane.waitingOn}` : "",
+      summary: lane.summary,
+      status: lane.statusLabel,
+      badgeClass: peerLaneStatusClass(lane.status),
+    }));
+}
+
 function kanbanDetailSizeForText(value: string): KanbanDetailSize {
   const normalized = value.trim();
   if (!normalized) {
@@ -2877,10 +3276,25 @@ function kanbanDetailSizeForText(value: string): KanbanDetailSize {
   return "short";
 }
 
+function leaderKanbanWorkspaceSize(
+  detailSize: KanbanDetailSize,
+  decompositionCount: number,
+  columns: Record<KanbanColumnKey, KanbanTaskCard[]>,
+): KanbanDetailSize {
+  const largestColumn = Math.max(columns.todo.length, columns.doing.length, columns.done.length);
+  if (detailSize === "long" || decompositionCount > 4 || largestColumn > 4) {
+    return "long";
+  }
+  if (detailSize === "medium" || decompositionCount > 2 || largestColumn > 2) {
+    return "medium";
+  }
+  return "short";
+}
+
 function kanbanDetailPanelMaxHeight(size: KanbanDetailSize) {
   switch (size) {
     case "long":
-      return "max-h-[500px]";
+      return "max-h-[520px]";
     case "medium":
       return "max-h-[360px]";
     default:
@@ -2891,7 +3305,7 @@ function kanbanDetailPanelMaxHeight(size: KanbanDetailSize) {
 function kanbanDetailBodyMaxHeight(size: KanbanDetailSize) {
   switch (size) {
     case "long":
-      return "max-h-[320px]";
+      return "max-h-[360px]";
     case "medium":
       return "max-h-[220px]";
     default:
@@ -2903,6 +3317,7 @@ function processProgress(
   group: CollaborationGroup,
   steps: ProcessStep[],
   visualStatus = group.status,
+  peerRoot = false,
 ) {
   if (visualStatus === "succeeded") {
     return 100;
@@ -2913,6 +3328,14 @@ function processProgress(
   const explicit = stepsProgress(steps);
   if (explicit > 0) {
     return Math.min(explicit, 88);
+  }
+  if (peerRoot) {
+    const laneStats = peerProgressStats(steps);
+    if (laneStats.total > 0) {
+      const base = laneStats.completed > 0 ? 42 : 28;
+      const weighted = Math.round(base + (laneStats.completed / laneStats.total) * 42);
+      return Math.min(weighted, 88);
+    }
   }
   if (hasWorkerContentEvidence(steps)) {
     return 82;
@@ -2954,6 +3377,12 @@ function latestCompletionEvidenceStep(steps: ProcessStep[]) {
     .find((step) => isCompletionEvidenceStep(step, steps));
 }
 
+function latestRootCompletionEvidenceStep(steps: ProcessStep[], peerRoot = false) {
+  return [...steps]
+    .reverse()
+    .find((step) => isRootCompletionEvidenceStep(step, steps, peerRoot));
+}
+
 function latestOutcomeEvidence(steps: ProcessStep[]) {
   for (const step of [...steps].reverse()) {
     if (isCompletionEvidenceStep(step, steps)) {
@@ -2967,6 +3396,23 @@ function latestOutcomeEvidence(steps: ProcessStep[]) {
     }
   }
   return undefined;
+}
+
+function isRootCompletionEvidenceStep(
+  step: ProcessStep,
+  steps: ProcessStep[] = [],
+  peerRoot = false,
+) {
+  if (!isCompletionEvidenceStep(step, steps)) {
+    return false;
+  }
+  if (!peerRoot) {
+    return true;
+  }
+  if (step.memberTerminalOnly) {
+    return false;
+  }
+  return isLeaderLikeName(step.actor);
 }
 
 function isCompletionEvidenceStep(step: ProcessStep, steps: ProcessStep[] = []) {
@@ -3092,14 +3538,20 @@ function isSubstantiveFinalAnswerText(value: string) {
   return compact.length >= 36 || /[#*>|`]|。|：|:/.test(normalized) && compact.length >= 24;
 }
 
-function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []) {
+function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = [], peerRoot = false) {
+  const rootCompletion = latestRootCompletionEvidenceStep(steps, peerRoot);
   const latestOutcome = latestOutcomeEvidence(steps);
-  if (group.task && group.task.status !== "succeeded" && latestOutcome?.status !== "succeeded") {
+  if (peerRoot && !rootCompletion) {
     return "";
   }
-  const finalStep = latestOutcome?.status === "succeeded"
-    ? latestOutcome.step
-    : latestCompletionEvidenceStep(steps);
+  if (group.task && group.task.status !== "succeeded" && !rootCompletion) {
+    return "";
+  }
+  const finalStep =
+    rootCompletion ||
+    (latestOutcome?.status === "succeeded" && !peerRoot
+      ? latestOutcome.step
+      : latestCompletionEvidenceStep(steps));
   if (finalStep?.content) {
     return finalStep.content;
   }
@@ -3118,12 +3570,14 @@ function processVisualStatus(
   group: CollaborationGroup,
   finalResult: string,
   steps: ProcessStep[] = [],
+  peerRoot = false,
 ) {
+  const rootCompletion = latestRootCompletionEvidenceStep(steps, peerRoot);
   const latestOutcome = latestOutcomeEvidence(steps);
-  if (finalResult || latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)) {
+  if (finalResult || rootCompletion || (!peerRoot && (latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)))) {
     return "succeeded";
   }
-  if (group.task?.status === "succeeded") {
+  if (group.task?.status === "succeeded" && !peerRoot) {
     return "succeeded";
   }
   if (group.task?.status === "failed") {
@@ -3178,6 +3632,9 @@ function isDispatchOnlyResult(value: string) {
   return (
     normalized === "结果已反馈。" ||
     normalized === "结果已反馈" ||
+    normalized.toLowerCase() === "redisteamtaskcompleted" ||
+    normalized.toLowerCase() === "redisteamtaskprocessingcompleted" ||
+    normalized.toLowerCase() === "redisteamtaskfailed" ||
     normalized.includes("在线空闲，派单") ||
     normalized.includes("在线空闲,派单") ||
     normalized.includes("已派发") ||
@@ -3205,6 +3662,171 @@ function processStatusText(status: string) {
       return "超时";
     default:
       return status || "观察中";
+  }
+}
+
+function PeerCollaborationMatrix({
+  model,
+  queryText,
+  statusText,
+  visualStatus,
+  progress,
+  selectedCardId,
+  onSelect,
+}: {
+  model?: PeerCollaborationModel;
+  queryText: string;
+  statusText: string;
+  visualStatus: string;
+  progress: number;
+  selectedCardId?: string;
+  onSelect: (cardId: string) => void;
+}) {
+  const lanes = model?.lanes || [];
+  const visible = lanes.filter((lane) => lane.role || lane.card || lane.status !== "idle");
+  const chain = model?.flow.length ? model.flow : model?.dependencies.map((edge) => ({
+    id: edge.id,
+    from: edge.from,
+    to: edge.to,
+    status: edge.status,
+  })) || [];
+  return (
+    <div className="shrink-0 rounded-2xl border border-slate-200 bg-white p-2.5 shadow-sm">
+      <div className="mb-2 rounded-xl border border-slate-100 bg-slate-50/80 px-2.5 py-2">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                Root Query
+              </span>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusStyle(visualStatus)}`}>
+                {statusText}
+              </span>
+              {model?.phaseLabel && (
+                <span className="rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-medium text-cyan-700">
+                  {model.phaseLabel}
+                </span>
+              )}
+            </div>
+            <div className="mt-1 line-clamp-1 text-xs leading-5 text-slate-700">
+              {queryText || "Idle，等待新的团队任务。"}
+            </div>
+            <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1">
+              {chain.length > 0 ? (
+                chain.slice(0, 6).map((edge, index) => (
+                  <React.Fragment key={edge.id}>
+                    {index > 0 && <span className="text-[10px] text-slate-300">→</span>}
+                    <span className={`max-w-[150px] truncate rounded-full px-2 py-0.5 text-[10px] ${peerLaneStatusClass(edge.status)}`}>
+                      {edge.from} → {edge.to}
+                    </span>
+                  </React.Fragment>
+                ))
+              ) : (
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">
+                  等待 peer handoff
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="shrink-0 rounded-xl border border-white bg-white px-2.5 py-1.5 text-right shadow-sm">
+            <div className="text-xl font-semibold leading-none text-slate-900">{progress}%</div>
+            <div className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-slate-400">overall</div>
+          </div>
+        </div>
+      </div>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <div className="text-xs font-semibold text-slate-800">成员协作板</div>
+          </div>
+          <div className="mt-0.5 text-[11px] leading-4 text-slate-400">
+            {model?.completionRule || "等待成员协作事件。"}
+          </div>
+        </div>
+        <div className="grid shrink-0 grid-cols-4 gap-1 text-center text-[10px]">
+          <span className="rounded-lg bg-amber-50 px-2 py-1 text-amber-700">{model?.stats.waiting || 0} 待</span>
+          <span className="rounded-lg bg-sky-50 px-2 py-1 text-sky-700">{model?.stats.working || 0} 做</span>
+          <span className="rounded-lg bg-emerald-50 px-2 py-1 text-emerald-700">{model?.stats.completed || 0} 交</span>
+          <span className="rounded-lg bg-rose-50 px-2 py-1 text-rose-700">{model?.stats.blocked || 0} 阻</span>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        {visible.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-400">
+            暂无成员协作事件
+          </div>
+        ) : (
+          visible.map((lane) => {
+            const card = lane.card;
+            const selected = card && selectedCardId === card.id;
+            return (
+              <button
+                key={lane.id}
+                type="button"
+                disabled={!card}
+                onClick={() => card && onSelect(card.id)}
+                className={`grid min-w-0 grid-cols-[minmax(92px,0.85fr)_minmax(0,1.45fr)_minmax(0,1.1fr)] gap-2 rounded-xl border px-2 py-1.5 text-left transition ${
+                  selected
+                    ? "border-slate-500 bg-slate-50 shadow-sm"
+                    : "border-slate-200 bg-white hover:border-slate-300"
+                } ${card ? "" : "cursor-default"}`}
+              >
+                <div className="min-w-0">
+                  <div className="min-w-0">
+                    <div className="truncate text-xs font-semibold text-slate-900">{lane.label}</div>
+                    <div className="mt-0.5 truncate text-[10px] text-slate-400">{lane.role || "member"}</div>
+                  </div>
+                  <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${peerLaneStatusClass(lane.status)}`}>
+                    {lane.statusLabel}
+                  </span>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-medium text-slate-400">当前任务</div>
+                  <div className="mt-0.5 line-clamp-1 text-[11px] leading-4 text-slate-600">
+                    {lane.currentTask || lane.summary || "空闲，等待任务。"}
+                  </div>
+                  {(lane.waitingOn || lane.dependencies.length > 0) && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {lane.waitingOn && (
+                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700">
+                          等待 {lane.waitingOn}
+                        </span>
+                      )}
+                      {lane.dependencies.slice(0, 2).map((dependency) => (
+                        <span key={`${lane.id}-${dependency}`} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">
+                          来自 {dependency}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-medium text-slate-400">交付 / 证据</div>
+                  <div className="mt-0.5 line-clamp-1 text-[11px] leading-4 text-slate-600">
+                    {lane.deliverable || (lane.status === "done" ? lane.summary : "尚未正式交付")}
+                  </div>
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function peerLaneStatusClass(status: PeerLaneStatus) {
+  switch (status) {
+    case "done":
+      return "bg-emerald-100 text-emerald-700";
+    case "blocked":
+      return "bg-rose-100 text-rose-700";
+    case "working":
+      return "bg-sky-100 text-sky-700";
+    case "waiting":
+      return "bg-amber-100 text-amber-700";
+    default:
+      return "bg-slate-100 text-slate-500";
   }
 }
 
@@ -3239,7 +3861,7 @@ function KanbanColumn({
         </span>
       </div>
 
-      <div className="space-y-1 overflow-hidden">
+      <div className="max-h-[230px] space-y-1 overflow-y-auto pr-1">
         {cards.length === 0 ? (
           <div className="rounded-lg border border-dashed border-slate-200 bg-white/70 px-2 py-2.5 text-center text-[11px] leading-5 text-slate-400">
             暂无卡片
@@ -3575,7 +4197,11 @@ function chatMessageFromItem(
     ? displayMemberName(item.to, memberByKey, leaderMemberId)
     : "";
   const isAssignmentEvent =
-    item.eventType === "outbound" || item.eventType === "task_assigned";
+    item.eventType === "outbound" ||
+    item.eventType === "task_assigned" ||
+    item.eventType === "peer_request" ||
+    item.eventType === "peer_handoff" ||
+    item.eventType === "peer_review_request";
   const hasContent = Boolean(item.content.trim());
   const isFeedbackEvent =
     isWorkerToLeaderMessage(senderKey, item.to, leaderMemberId) ||
@@ -3604,6 +4230,8 @@ function chatMessageFromItem(
           ? "feedback"
         : item.eventType === "task_failed" || item.eventType === "message_failed"
           ? "error"
+          : item.eventType.startsWith("peer_")
+            ? "assignment"
           : senderKey === leaderMemberId || senderKey === "ClawManager"
             ? "leader"
             : "normal",
@@ -4109,7 +4737,7 @@ function renderInlineMarkdown(
   onWorkspaceFileOpen?: (path: string) => void,
 ) {
   const nodes: React.ReactNode[] = [];
-  const pattern = /(`[^`]+`|\/team\/[^\s`<>"')\]}]+|\bteam\/[^\s`<>"')\]}]+|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const pattern = /(`[^`]+`|\/workspaces\/teams\/user-\d+\/team-\d+-shared\/[^\s`<>"')\]}]+|\/team\/[^\s`<>"')\]}]+|\*\*[^*]+\*\*|\*[^*]+\*)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {

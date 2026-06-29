@@ -58,12 +58,7 @@ const TEAM_COMMUNICATION_MODE_OPTIONS: Array<{
   {
     value: "leader_mediated",
     label: "Leader 中介协作",
-    description: "Leader 统一拆解、派发、回收与总结，Worker 之间不直接交互。",
-  },
-  {
-    value: "peer_assisted",
-    label: "Worker 直连协作",
-    description: "Leader 保留最终汇总权，Worker 可直接请求协助、评审、交接和共享产物。",
+    description: "任务统一进入 Leader，由 Leader 拆解、派发、回收并汇总结果。",
   },
 ];
 
@@ -192,8 +187,7 @@ const CreateTeamPage: React.FC = () => {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [communicationMode, setCommunicationMode] =
-    useState<TeamCommunicationMode>("leader_mediated");
+  const [communicationMode] = useState<TeamCommunicationMode>("leader_mediated");
   const [sharedStorageGb, setSharedStorageGb] = useState(10);
   const [storageClass, setStorageClass] = useState("");
   const [images, setImages] = useState<SystemImageSetting[]>([]);
@@ -496,9 +490,6 @@ const CreateTeamPage: React.FC = () => {
     if (selectedTemplate.description) {
       setDescription(selectedTemplate.description);
     }
-    if (selectedTemplate.communicationMode) {
-      setCommunicationMode(selectedTemplate.communicationMode);
-    }
     setMembers((current) => {
       const existingMembers = mode === "append" ? current : [];
       const importedMembers = buildTemplateMembers(selectedTemplate, existingMembers);
@@ -541,7 +532,7 @@ const CreateTeamPage: React.FC = () => {
       name: packageName,
       teamName: name.trim() || undefined,
       description: description.trim() || undefined,
-      communicationMode,
+      communicationMode: "leader_mediated",
       source: "custom",
       members: templateMembers,
     };
@@ -801,7 +792,7 @@ const CreateTeamPage: React.FC = () => {
     const payload: CreateTeamRequest = {
       name: name.trim(),
       description: description.trim() || undefined,
-      communication_mode: communicationMode,
+      communication_mode: "leader_mediated",
       shared_storage_gb: sharedStorageGb,
       storage_class: storageClass.trim() || undefined,
       members: members.map((member) => {
@@ -903,10 +894,8 @@ const CreateTeamPage: React.FC = () => {
                   </span>
                   <select
                     value={communicationMode}
-                    onChange={(event) =>
-                      setCommunicationMode(event.target.value as TeamCommunicationMode)
-                    }
-                    className="mt-1 block w-full rounded-xl border border-[#eadfd8] bg-white px-3 py-2 text-sm focus:border-[#ef4444] focus:outline-none focus:ring-1 focus:ring-[#f3d2c2]"
+                    disabled
+                    className="mt-1 block w-full cursor-not-allowed rounded-xl border border-[#eadfd8] bg-gray-50 px-3 py-2 text-sm text-gray-700"
                   >
                     {TEAM_COMMUNICATION_MODE_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
