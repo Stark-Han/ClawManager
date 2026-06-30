@@ -88,7 +88,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     teamName: "delivery-team",
     description:
       "Delivery Team: the Leader decomposes and coordinates work, the Developer implements and integrates, and the Reviewer verifies tests, regressions, and delivery quality.",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     source: "builtin",
     members: [
       baseMember({
@@ -132,7 +132,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     teamName: "software-engineering-team",
     description:
       "Software Engineering Team: the Leader owns goals, task breakdown, coordination, risk control, and final integration; PM, UI/UX, Frontend, Backend, Architect, QA, and Code Reviewer cover product, design, client, server, architecture, validation, and review.",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     source: "builtin",
     members: [
       baseMember({
@@ -222,7 +222,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     id: "builtin-product-discovery-team",
     name: "产品探索四成员",
     teamName: "product-discovery-team",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     description:
       "产品探索 Team：Leader 统筹目标与分工，产品经理澄清用户价值与需求，UI 设计师梳理交互方向，架构师评估技术可行性与边界。",
     source: "builtin",
@@ -274,7 +274,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     id: "builtin-fullstack-delivery-team",
     name: "全栈交付五成员",
     teamName: "fullstack-delivery-team",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     description:
       "全栈交付 Team：Leader 统筹交付，前端和后端负责实现，代码评审员检查风险，验收验证员在交付前确认行为证据。",
     source: "builtin",
@@ -338,7 +338,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     id: "builtin-quality-gate-team",
     name: "质量验收四成员",
     teamName: "quality-gate-team",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     description:
       "质量验收 Team：Leader 统筹验收，代码评审员检查实现风险，API 测试员验证接口契约，验收验证员确认端到端证据。",
     source: "builtin",
@@ -386,7 +386,7 @@ export const BUILTIN_MEMBER_TEMPLATES: TeamMemberTemplate[] = [
     id: "builtin-api-integration-team",
     name: "API 集成五成员",
     teamName: "api-integration-team",
-    communicationMode: "peer_assisted",
+    communicationMode: "leader_mediated",
     description:
       "API 集成 Team：Leader 统筹集成范围，后端架构师定义服务契约，前端开发者对接接口，API 测试员验证行为，代码评审员检查集成风险。",
     source: "builtin",

@@ -30,6 +30,8 @@ import (
 const (
 	teamSharedMountPath     = "/team"
 	teamConfigFileName      = "team.json"
+	teamAgentsFileName      = "AGENTS.md"
+	teamSoulFileName        = "SOUL.md"
 	teamConfigMountDirPath  = "/etc/clawmanager/team"
 	teamConfigMountPath     = teamConfigMountDirPath + "/" + teamConfigFileName
 	teamHermesSoulMountPath = "/config/.hermes/SOUL.md"
@@ -207,13 +209,16 @@ type teamService struct {
 }
 
 type plannedTeamMember struct {
-	Request      CreateTeamMemberRequest
-	MemberKey    string
-	DisplayName  string
-	Role         string
-	RuntimeType  string
-	InstanceMode string
-	IsLeader     bool
+	Request       CreateTeamMemberRequest
+	MemberKey     string
+	DisplayName   string
+	Role          string
+	ProfileKey    string
+	ProfileName   string
+	EffectiveRole string
+	RuntimeType   string
+	InstanceMode  string
+	IsLeader      bool
 }
 
 type teamRuntimeSecrets struct {
@@ -501,6 +506,7 @@ func appendTeamTaskCompletionInstruction(prompt string, communicationMode, inten
 			"- Summarize every member's identity, role, runtime, responsibilities, capability boundaries, and the configured collaboration mode.",
 			"- Explain task routing, Team Redis event synchronization, shared workspace usage, and the available Team methods without asking other members to restate their own roles.",
 			"- Complete this bootstrap in the current turn by calling team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
+			"- Successful bootstrap completion is recorded as the task_completed event.",
 			"- Do not finish with tool calls only and do not wait for QA/review evidence for this bootstrap snapshot.",
 		}, "\n")
 		if base == "" {
@@ -514,9 +520,11 @@ func appendTeamTaskCompletionInstruction(prompt string, communicationMode, inten
 	mode := normalizedTeamCommunicationMode(communicationMode)
 	modeInstructions := []string{
 		"- Leader-mediated mode is a strict hub-and-spoke workflow: user root task -> Leader -> assigned workers -> Leader -> final user-facing result.",
-		"- If you are the Leader, answer self-contained control-plane or simple tasks directly. For multi-member work, create explicit assignments with team_send, wait for the assigned workers' actual results, verify them, and only then complete the root task.",
+		"- If you are the Leader and the user names a non-Leader member or role, you MUST delegate the work to that exact member with team_send, wait for the assigned workers' actual results, then provide a final synthesis before completing the root task.",
+		"- If you are the Leader and the user gives a broad task without naming one member, first create a compact plan, decompose the work into owner/member_id assignments, send those assignments, wait for the assigned workers' actual results, verify them, then complete the root task.",
+		"- If you are the Leader, answer self-contained control-plane or simple tasks directly only when the request clearly stays within the Leader/control-plane scope and does not require a named worker or multi-member evidence.",
 		"- If you are a Worker, execute only the assignment addressed to you and report the result, evidence, artifact paths, or blocker back to the Leader. Do not hand off directly to another Worker.",
-		"- Worker completion never closes the user root task. Only the Leader may finalize the root task after reconciling all required member outputs.",
+		"- A Leader dispatch, plan, or handoff is not a final result and must not call team_complete_task. Worker completion never closes the user root task. Only the Leader may finalize the root task after reconciling all required member outputs.",
 	}
 	switch mode {
 	case teamCommunicationModePeerAssisted:
@@ -538,8 +546,9 @@ func appendTeamTaskCompletionInstruction(prompt string, communicationMode, inten
 	instruction += "\n" + strings.Join(modeInstructions, "\n")
 	instruction += "\n" + strings.Join([]string{
 		"- Every Team message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
-		"- The Leader must not mark the root task succeeded after merely dispatching work. Final success requires returned member evidence or a direct self-contained answer.",
-		"- Write shared artifacts under the exact directory in CLAWMANAGER_TEAM_SHARED_DIR. Never write to a relative team/... folder.",
+		"- The Leader must not mark the root task succeeded after merely dispatching work. Final success requires returned member evidence plus Leader synthesis, or a truly direct self-contained answer.",
+		"- Write shared artifacts under the exact directory in CLAWMANAGER_TEAM_SHARED_DIR. When using shell commands, always create files under \"$CLAWMANAGER_TEAM_SHARED_DIR/<relative-path>\".",
+		"- Never create or report a relative team/... folder. The path team/... is invalid because ClawManager file browsing only resolves shared artifacts through the Team shared directory.",
 		"- Report shared artifact links using the canonical UI path /team/<relative-path>, even when a Lite runtime uses a different physical shared directory.",
 		"- Members must report produced artifact paths and concrete outcomes through the Team channel before completing their assigned task.",
 		"- When the final result is ready, call team_complete_task with status=\"succeeded\", summary, and resultMarkdown.",
@@ -634,7 +643,7 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 		Role:         memberPlan.Role,
 		RuntimeType:  memberPlan.RuntimeType,
 		InstanceMode: memberPlan.InstanceMode,
-		Description:  optionalString(strings.TrimSpace(derefTeamString(memberPlan.Request.Description))),
+		Description:  optionalString(plannedTeamMemberDescription(memberPlan)),
 		Status:       models.TeamMemberStatusCreating,
 		Availability: models.TeamMemberAvailabilityUnknown,
 		CreatedAt:    now,
@@ -647,6 +656,12 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 	createReq := s.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, runtimeSecrets, rosterJSON)
 	instance, err := s.instanceService.Create(userID, createReq)
 	if err != nil {
+		member.Status = models.TeamMemberStatusFailed
+		member.UpdatedAt = time.Now().UTC()
+		_ = s.repo.UpdateMember(member)
+		return nil, err
+	}
+	if err := s.writeLiteTeamMemberIdentityFiles(instance, team, memberPlan, rosterJSON); err != nil {
 		member.Status = models.TeamMemberStatusFailed
 		member.UpdatedAt = time.Now().UTC()
 		_ = s.repo.UpdateMember(member)
@@ -747,7 +762,8 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 		"CLAWMANAGER_TEAM_ENABLED":            "true",
 		"CLAWMANAGER_TEAM_ID":                 strconv.Itoa(team.ID),
 		"CLAWMANAGER_TEAM_MEMBER_ID":          member.MemberKey,
-		"CLAWMANAGER_TEAM_ROLE":               member.Role,
+		"CLAWMANAGER_TEAM_ROLE":               effectiveTeamMemberRole(member),
+		"CLAWMANAGER_TEAM_EFFECTIVE_ROLE":     effectiveTeamMemberRole(member),
 		"CLAWMANAGER_TEAM_COMMUNICATION_MODE": communicationMode,
 		"CLAWMANAGER_TEAM_SHARED_DIR":         team.SharedMountPath,
 		"CLAWMANAGER_TEAM_SHARED_UID":         strconv.Itoa(teamSharedUID),
@@ -768,6 +784,12 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 	}
 	if len(collaborationPolicyJSON) > 0 {
 		env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"] = string(collaborationPolicyJSON)
+	}
+	if profileKey := strings.TrimSpace(member.ProfileKey); profileKey != "" {
+		env["CLAWMANAGER_TEAM_PROFILE_KEY"] = profileKey
+	}
+	if profileName := strings.TrimSpace(member.ProfileName); profileName != "" {
+		env["CLAWMANAGER_TEAM_PROFILE_NAME"] = profileName
 	}
 	if description := strings.TrimSpace(memberContext["description"]); description != "" {
 		env["CLAWMANAGER_TEAM_MEMBER_DESCRIPTION"] = description
@@ -1343,6 +1365,13 @@ func buildTeamMemberSoulMarkdown(member plannedTeamMember, communicationMode str
 		fmt.Sprintf("- Member ID: %s", context["memberId"]),
 		fmt.Sprintf("- Display name: %s", context["displayName"]),
 		fmt.Sprintf("- Role: %s", context["role"]),
+		fmt.Sprintf("- Effective role: %s", effectiveTeamMemberRole(member)),
+	}
+	if profileKey := strings.TrimSpace(member.ProfileKey); profileKey != "" {
+		lines = append(lines, fmt.Sprintf("- Profile key: %s", profileKey))
+	}
+	if profileName := strings.TrimSpace(member.ProfileName); profileName != "" {
+		lines = append(lines, fmt.Sprintf("- Profile name: %s", profileName))
 	}
 	if description := strings.TrimSpace(context["description"]); description != "" {
 		lines = append(lines, fmt.Sprintf("- Responsibilities: %s", description))
@@ -1355,13 +1384,127 @@ func buildTeamMemberSoulMarkdown(member plannedTeamMember, communicationMode str
 		"## Collaboration Rules",
 		teamCollaborationGuidance(communicationMode),
 		"- Only handle tasks addressed to your Team member inbox.",
-		"- Use the exact CLAWMANAGER_TEAM_SHARED_DIR value for shared context, durable notes, and handoff artifacts. Never create or write to a relative team/... folder.",
+		"- If team.json contains effectiveRole/profileName, use those fields when describing your role instead of falling back to a generic roster role.",
+		"- Use the exact CLAWMANAGER_TEAM_SHARED_DIR value for shared context, durable notes, and handoff artifacts. When using shell commands, always create files under \"$CLAWMANAGER_TEAM_SHARED_DIR/<relative-path>\".",
+		"- Never create or report a relative team/... folder. The path team/... is invalid because ClawManager file browsing only resolves shared artifacts through the Team shared directory.",
 		"- Report shared artifact links as /team/<relative-path>. /team is the canonical ClawManager UI path even when a Lite runtime uses a different physical directory.",
 		"- Report progress, blockers, verification evidence, and final results through the Team channel.",
 		"- If asked about your role, answer from this Team Identity and Role Instructions section.",
 		"",
 	)
 	return strings.Join(lines, "\n")
+}
+
+func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) string {
+	communicationMode := teamCommunicationModeLeaderMediated
+	teamID := ""
+	if team != nil {
+		communicationMode = normalizedTeamCommunicationMode(team.CommunicationMode)
+		teamID = strconv.Itoa(team.ID)
+	}
+	lines := []string{
+		"# ClawManager Team Runtime",
+		"",
+		"This file defines the stable Team runtime contract. Treat SOUL.md as the member-specific identity and role file.",
+		"",
+		"## Runtime Capabilities",
+		"- You are running inside a ClawManager managed OpenClaw/Hermes runtime.",
+		"- Use the available runtime tools normally, but coordinate Team work through the ClawManager Team channel.",
+		"- Use team_send for assignments, handoffs, clarifying questions, blockers, and final delivery messages.",
+		"- Use team_status / progress updates to report work state when available.",
+		"- Use team_complete_task only when the assigned task is actually complete and evidence has been reported.",
+		"",
+		"## Workspace Contract",
+		"- CLAWMANAGER_TEAM_SHARED_DIR is the only writable shared artifact directory.",
+		"- Create shared artifacts under \"$CLAWMANAGER_TEAM_SHARED_DIR/<relative-path>\".",
+		"- Report shared artifact links as /team/<relative-path>.",
+		"- Do not report bare filenames or relative team/... paths as final artifact links.",
+		"",
+		"## Team Identity Source Order",
+		"- Prefer SOUL.md for your member identity, role, profile, and collaboration rules.",
+		"- Then use CLAWMANAGER_TEAM_CONFIG_JSON / team.json for roster and communication mode.",
+		"- Environment variables are compatibility fallbacks, not a reason to ignore SOUL.md.",
+		"",
+		"## Collaboration Contract",
+		teamCollaborationGuidance(communicationMode),
+		"- Never invent another member's reply or treat your own assumptions as a peer response.",
+		"- Keep role answers consistent with SOUL.md and the effectiveRole/profileName fields in team.json.",
+		"",
+		"## Current Member",
+		fmt.Sprintf("- Team ID: %s", teamID),
+		fmt.Sprintf("- Member ID: %s", member.MemberKey),
+		fmt.Sprintf("- Display name: %s", member.DisplayName),
+		fmt.Sprintf("- Runtime: %s", member.RuntimeType),
+		fmt.Sprintf("- Effective role: %s", effectiveTeamMemberRole(member)),
+	}
+	if member.ProfileKey != "" {
+		lines = append(lines, fmt.Sprintf("- Profile key: %s", member.ProfileKey))
+	}
+	if member.ProfileName != "" {
+		lines = append(lines, fmt.Sprintf("- Profile name: %s", member.ProfileName))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func plannedTeamMemberDescription(member plannedTeamMember) string {
+	if description := strings.TrimSpace(derefTeamString(member.Request.Description)); description != "" {
+		return description
+	}
+	_, description := teamMemberPersonaFromEnv(member.Request.EnvironmentOverrides)
+	return strings.TrimSpace(description)
+}
+
+func effectiveTeamMemberRole(member plannedTeamMember) string {
+	if role := strings.TrimSpace(member.EffectiveRole); role != "" {
+		return role
+	}
+	if role := strings.TrimSpace(member.Role); role != "" {
+		return role
+	}
+	return "member"
+}
+
+func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance, team *models.Team, member plannedTeamMember, rosterJSON string) error {
+	if instance == nil || modeForExistingInstance(instance) != InstanceModeLite {
+		return nil
+	}
+	workspacePath := ""
+	if instance.WorkspacePath != nil {
+		workspacePath = strings.TrimSpace(*instance.WorkspacePath)
+	}
+	if workspacePath == "" {
+		return fmt.Errorf("failed to write Lite Team identity files: workspace path is empty")
+	}
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		return fmt.Errorf("failed to prepare Lite Team identity workspace: %w", err)
+	}
+	files := map[string]string{
+		teamAgentsFileName: buildTeamMemberAgentsMarkdown(team, member),
+		teamSoulFileName:   buildTeamMemberSoulMarkdown(member, normalizedTeamCommunicationMode(team.CommunicationMode)),
+	}
+	if strings.TrimSpace(rosterJSON) != "" {
+		files[teamConfigFileName] = rosterJSON
+	}
+	for name, content := range files {
+		target := filepath.Join(workspacePath, name)
+		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write Lite Team identity file %s: %w", name, err)
+		}
+		chownTeamWorkspacePath(target)
+	}
+	if strings.EqualFold(member.RuntimeType, "hermes") {
+		hermesDir := filepath.Join(workspacePath, ".hermes")
+		if err := os.MkdirAll(hermesDir, 0755); err != nil {
+			return fmt.Errorf("failed to prepare Hermes identity directory: %w", err)
+		}
+		chownTeamWorkspacePath(hermesDir)
+		target := filepath.Join(hermesDir, teamSoulFileName)
+		if err := os.WriteFile(target, []byte(files[teamSoulFileName]), 0644); err != nil {
+			return fmt.Errorf("failed to write Hermes Lite SOUL.md: %w", err)
+		}
+		chownTeamWorkspacePath(target)
+	}
+	return nil
 }
 
 func appendTeamCollaborationGuidance(systemPrompt, communicationMode string) string {
@@ -1373,7 +1516,7 @@ func appendTeamCollaborationGuidance(systemPrompt, communicationMode string) str
 }
 
 func appendTeamWorkspaceGuidance(systemPrompt string) string {
-	guidance := "Shared workspace contract: write every shared artifact under the exact CLAWMANAGER_TEAM_SHARED_DIR value; never use a relative team/... directory. When reporting an artifact to ClawManager or another member, use the canonical link /team/<relative-path>. The /team prefix is a UI/logical alias and may map to a different physical directory in Lite runtimes."
+	guidance := "Shared workspace contract: write every shared artifact under the exact CLAWMANAGER_TEAM_SHARED_DIR value. When using shell commands, always create files under \"$CLAWMANAGER_TEAM_SHARED_DIR/<relative-path>\". Never create or report a relative team/... directory; team/... is invalid and may not be visible in ClawManager. When reporting an artifact to ClawManager or another member, use the canonical link /team/<relative-path>. The /team prefix is a UI/logical alias and may map to a different physical directory in Lite runtimes."
 	if strings.Contains(systemPrompt, guidance) {
 		return systemPrompt
 	}
@@ -1387,7 +1530,7 @@ func teamCollaborationGuidance(communicationMode string) string {
 	case teamCommunicationModeFullMesh:
 		return "Collaboration mode: full_mesh. Team members coordinate directly with each other while preserving rootTaskId/rootMessageId context, shared artifacts under CLAWMANAGER_TEAM_SHARED_DIR, and final user-facing synthesis. If a downstream owner is named, hand off to that exact member before completing your own step. Use direct member-to-member messages for parallel research, design, implementation, review, and verification. Wait for real addressed-member replies before continuing dependent work; do not simulate peer answers or label peer messages as user replies. Keep each peer exchange bounded, evidence based, and visible in the Team channel."
 	default:
-		return "Collaboration mode: leader_mediated. This is a strict hub-and-spoke workflow isolated from worker-direct flow. User root tasks enter through the Leader. The Leader may answer self-contained control-plane or simple tasks directly; for multi-member work the Leader creates explicit assignments with team_send, waits for the addressed workers' real results, verifies them, and produces the final synthesis. Workers execute only assignments addressed to them, preserve rootTaskId/rootMessageId and artifact paths, and report results or blockers back to the Leader. Workers must not hand off directly to other workers. A worker completion never closes the user root task; only the Leader may finalize it after all required outputs are reconciled."
+		return "Collaboration mode: leader_mediated. This is a strict hub-and-spoke workflow isolated from worker-direct flow. User root tasks enter through the Leader. If the user names a non-Leader member or role, the Leader must delegate to that exact member with team_send, wait for that member's real result, then synthesize the final answer. If the user gives a broad task without naming one member, the Leader must create a compact plan, decompose work by owner/member_id, send assignments, wait for required member results, verify them, and produce final synthesis. The Leader may answer directly only for self-contained control-plane or simple tasks that do not require a named worker or multi-member evidence. A dispatch, plan, or handoff is not a final result and must not close the root task. Workers execute only assignments addressed to them, preserve rootTaskId/rootMessageId and artifact paths, and report results or blockers back to the Leader. Workers must not hand off directly to other workers. A worker completion never closes the user root task; only the Leader may finalize it after all required outputs are reconciled."
 	}
 }
 
@@ -1449,8 +1592,64 @@ func teamMemberPersonaFromEnv(overrides map[string]string) (string, string) {
 }
 
 type teamPersonaEnv struct {
+	ProfileKey   string `json:"profileKey"`
+	Name         string `json:"name"`
+	DisplayName  string `json:"displayName"`
+	RoleHint     string `json:"roleHint"`
 	SystemPrompt string `json:"systemPrompt"`
 	Summary      string `json:"summary"`
+}
+
+type teamProfileEnv struct {
+	ProfileKey  string
+	ProfileName string
+	RoleHint    string
+	Summary     string
+}
+
+func teamMemberProfileFromEnv(overrides map[string]string) teamProfileEnv {
+	if len(overrides) == 0 {
+		return teamProfileEnv{}
+	}
+	for _, key := range []string{
+		"CLAWMANAGER_AGENT_PERSONA_JSON",
+		"CLAWMANAGER_HERMES_PERSONA_JSON",
+		"CLAWMANAGER_RUNTIME_PERSONA_JSON",
+	} {
+		persona := parseTeamPersonaEnv(overrides[key])
+		if persona == nil {
+			continue
+		}
+		profile := teamProfileEnv{
+			ProfileKey:  strings.TrimSpace(persona.ProfileKey),
+			ProfileName: strings.TrimSpace(firstNonEmptyString(persona.DisplayName, persona.Name)),
+			RoleHint:    strings.TrimSpace(persona.RoleHint),
+			Summary:     strings.TrimSpace(persona.Summary),
+		}
+		if profile.ProfileKey != "" || profile.ProfileName != "" || profile.RoleHint != "" || profile.Summary != "" {
+			return profile
+		}
+	}
+	for _, key := range []string{
+		"CLAWMANAGER_HERMES_AGENTS_JSON",
+		"CLAWMANAGER_RUNTIME_AGENTS_JSON",
+		"CLAWMANAGER_OPENCLAW_AGENTS_JSON",
+	} {
+		agents := parseTeamAgentsEnv(overrides[key])
+		if agents == nil {
+			continue
+		}
+		profile := teamProfileEnv{
+			ProfileKey:  strings.TrimSpace(agents.ProfileKey),
+			ProfileName: strings.TrimSpace(agents.Name),
+			RoleHint:    strings.TrimSpace(agents.RoleHint),
+			Summary:     strings.TrimSpace(agents.Summary),
+		}
+		if profile.ProfileKey != "" || profile.ProfileName != "" || profile.RoleHint != "" || profile.Summary != "" {
+			return profile
+		}
+	}
+	return teamProfileEnv{}
 }
 
 func parseTeamPersonaEnv(raw string) *teamPersonaEnv {
@@ -1468,6 +1667,10 @@ type teamAgentsEnv struct {
 	Items []struct {
 		Content struct {
 			Config struct {
+				ProfileKey   string `json:"profileKey"`
+				Name         string `json:"name"`
+				DisplayName  string `json:"displayName"`
+				RoleHint     string `json:"roleHint"`
 				SystemPrompt string `json:"systemPrompt"`
 				Summary      string `json:"summary"`
 			} `json:"config"`
@@ -1486,11 +1689,29 @@ func parseTeamAgentsEnv(raw string) *teamPersonaEnv {
 	for _, item := range payload.Items {
 		systemPrompt := strings.TrimSpace(item.Content.Config.SystemPrompt)
 		summary := strings.TrimSpace(item.Content.Config.Summary)
-		if systemPrompt != "" || summary != "" {
-			return &teamPersonaEnv{SystemPrompt: systemPrompt, Summary: summary}
+		profileKey := strings.TrimSpace(item.Content.Config.ProfileKey)
+		name := strings.TrimSpace(firstNonEmptyString(item.Content.Config.DisplayName, item.Content.Config.Name))
+		roleHint := strings.TrimSpace(item.Content.Config.RoleHint)
+		if systemPrompt != "" || summary != "" || profileKey != "" || name != "" || roleHint != "" {
+			return &teamPersonaEnv{
+				ProfileKey:   profileKey,
+				Name:         name,
+				RoleHint:     roleHint,
+				SystemPrompt: systemPrompt,
+				Summary:      summary,
+			}
 		}
 	}
 	return nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func firstNonEmptyEnv(values map[string]string, keys ...string) string {
@@ -1952,6 +2173,11 @@ func projectTeamTaskRuntimeState(task *models.TeamTask, payload map[string]inter
 	case "task_started":
 		setStatus(models.TeamTaskStatusRunning)
 		setStarted()
+	case "outbound", "task_assigned", "team_send", "peer_request", "peer_handoff", "peer_review_request":
+		if task.Status == models.TeamTaskStatusPending {
+			setStatus(models.TeamTaskStatusDispatched)
+		}
+		setStarted()
 	default:
 		if running {
 			setStatus(models.TeamTaskStatusRunning)
@@ -2033,8 +2259,13 @@ func isFailedTeamTaskEventStatus(status string) bool {
 }
 
 func isDispatchOnlyCompletionPayload(payload map[string]interface{}) bool {
+	for _, key := range []string{"resultMarkdown", "result_markdown", "result", "answer"} {
+		if body := eventString(payload, key); looksLikeSubstantiveResultDocument(body) {
+			return false
+		}
+	}
 	text := strings.ToLower(strings.Join(strings.Fields(strings.Join([]string{
-		eventString(payload, "resultMarkdown", "result_markdown", "result", "summary", "lastSummary", "last_summary", "message", "text", "diagnostic"),
+		eventString(payload, "summary", "lastSummary", "last_summary", "message", "text", "diagnostic"),
 		eventString(payload, "title", "intent"),
 	}, " ")), " "))
 	if text == "" {
@@ -2046,15 +2277,37 @@ func isDispatchOnlyCompletionPayload(payload map[string]interface{}) bool {
 	if strings.Contains(text, "result already delivered") || strings.Contains(text, "\u7ed3\u679c\u5df2\u53cd\u9988") {
 		return true
 	}
+	compact := strings.ReplaceAll(text, " ", "")
+	if len([]rune(compact)) > 120 {
+		return false
+	}
 	if strings.Contains(text, "dispatch") && (strings.Contains(text, "worker") || strings.Contains(text, "member")) {
 		return true
 	}
-	compact := strings.ReplaceAll(text, " ", "")
 	return strings.Contains(compact, "\u5728\u7ebf\u7a7a\u95f2") ||
 		strings.Contains(compact, "\u6d3e\u5355") ||
 		strings.Contains(compact, "\u5df2\u6d3e\u53d1") ||
 		strings.Contains(compact, "\u7b49\u5f85\u5176") ||
 		strings.Contains(compact, "\u4efb\u52a1\u5206\u6d3e")
+}
+
+func looksLikeSubstantiveResultDocument(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	compact := strings.ReplaceAll(strings.ToLower(strings.Join(strings.Fields(trimmed), "")), " ", "")
+	if compact == "redisteamtaskcompleted" || compact == "redisteamtaskprocessingcompleted" {
+		return false
+	}
+	if len([]rune(compact)) >= 180 {
+		return true
+	}
+	return strings.Contains(trimmed, "\n## ") ||
+		strings.Contains(trimmed, "\n|") ||
+		strings.Contains(trimmed, "\n- ") ||
+		strings.Contains(trimmed, "\n1.") ||
+		strings.Contains(trimmed, "\n### ")
 }
 func isTeamTaskRunningSignal(eventType, status string, payload map[string]interface{}) bool {
 	switch eventType {
@@ -2104,6 +2357,386 @@ func isNonAuthoritativeDispatchFailure(eventType string, payload map[string]inte
 
 func isNonAuthoritativeDispatchWarning(eventType string, payload map[string]interface{}) bool {
 	return eventType == "message_warning" && isNonAuthoritativeDispatchFailure(eventString(payload, "originalEvent"), payload)
+}
+
+func isLeaderMediatedLeaderDispatchOnlyCompletion(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask, completion bool) bool {
+	return completion && isLeaderMediatedLeaderDispatchOnlyMessage(team, eventType, payload, member, task)
+}
+
+func isLeaderMediatedLeaderDispatchOnlyMessage(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) bool {
+	if team == nil || payload == nil || member == nil || task == nil {
+		return false
+	}
+	if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
+		return false
+	}
+	if member.ID != task.TargetMemberID || !isLeaderTeamMember(member) {
+		return false
+	}
+	if strings.TrimSpace(eventString(payload, "intent")) == initialLeaderTaskIntent {
+		return false
+	}
+	if eventBool(payload, "rootTaskTerminal", "root_task_terminal", "finalSynthesis", "final_synthesis") {
+		return false
+	}
+	return looksLikeLeaderDispatchOnlyText(eventString(payload, "resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary"))
+}
+
+func (s *teamService) leaderMediatedRootCompletionReady(team *models.Team, task *models.TeamTask, member *models.TeamMember) (bool, error) {
+	if !isLeaderMediatedTeam(team) || task == nil || member == nil || member.ID != task.TargetMemberID || !isLeaderTeamMember(member) {
+		return true, nil
+	}
+	events, err := s.repo.ListEventsByTeamID(team.ID, 500)
+	if err != nil {
+		return false, err
+	}
+	required := map[string]struct{}{}
+	delivered := map[string]struct{}{}
+	for idx := range events {
+		event := events[idx]
+		payload := teamEventPayloadMap(event)
+		if !teamEventMatchesRootTask(event, payload, task) {
+			continue
+		}
+		step, _ := payload["collaborationStep"].(map[string]interface{})
+		stepType := eventString(step, "type")
+		actor := normalizeTeamMemberRouteKey(eventString(step, "actor"))
+		target := normalizeTeamMemberRouteKey(eventString(step, "target"))
+		if actor == "" && event.MemberID != nil {
+			// The event table keeps member_id numeric; fall back to payload fields only here.
+			actor = normalizeTeamMemberRouteKey(eventString(payload, "memberId", "member_id", "from", "sourceMemberId", "senderMemberId"))
+		}
+		if target == "" {
+			target = normalizeTeamMemberRouteKey(leaderMediatedRouteTarget(payload))
+		}
+		if stepType == "assignment" && isLeaderRouteTarget(actor) && target != "" && !isLeaderRouteTarget(target) {
+			required[target] = struct{}{}
+			continue
+		}
+		if eventBool(payload, "assignmentResultOnly", "assignment_result_only") && actor != "" && !isLeaderRouteTarget(actor) {
+			delivered[actor] = struct{}{}
+			continue
+		}
+		if stepType == "result" && actor != "" && !isLeaderRouteTarget(actor) && (target == "" || isLeaderRouteTarget(target)) {
+			delivered[actor] = struct{}{}
+		}
+	}
+	if len(required) == 0 {
+		return true, nil
+	}
+	for memberKey := range required {
+		if !leaderMediatedDeliveredForRequiredMember(memberKey, delivered) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func leaderMediatedDeliveredForRequiredMember(required string, delivered map[string]struct{}) bool {
+	if _, ok := delivered[required]; ok {
+		return true
+	}
+	for candidate := range delivered {
+		if teamMemberRouteEquivalent(required, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func teamMemberRouteEquivalent(a, b string) bool {
+	left := normalizeTeamMemberRouteKey(a)
+	right := normalizeTeamMemberRouteKey(b)
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	aliasGroups := [][]string{
+		{"pm", "product-manager", "product"},
+		{"designer", "ui-designer", "ui-ux-designer", "ux-designer"},
+		{"architect", "solution-architect", "software-architect"},
+		{"developer", "worker", "senior-developer", "frontend-developer", "backend-developer"},
+	}
+	for _, group := range aliasGroups {
+		leftMatch := false
+		rightMatch := false
+		for _, alias := range group {
+			if left == alias || strings.Contains(left, "-"+alias) || strings.Contains(left, alias+"-") {
+				leftMatch = true
+			}
+			if right == alias || strings.Contains(right, "-"+alias) || strings.Contains(right, alias+"-") {
+				rightMatch = true
+			}
+		}
+		if leftMatch && rightMatch {
+			return true
+		}
+	}
+	return false
+}
+
+func markLeaderMediatedPrematureCompletion(eventType string, payload map[string]interface{}) string {
+	if eventString(payload, "originalEvent") == "" {
+		payload["originalEvent"] = eventType
+	}
+	payload["event"] = "reply"
+	payload["type"] = "reply"
+	payload["status"] = models.TeamTaskStatusRunning
+	payload["runtimeStatus"] = models.TeamTaskStatusRunning
+	payload["availability"] = models.TeamMemberAvailabilityBusy
+	payload["rootTaskTerminal"] = false
+	payload["leaderPrematureCompletion"] = true
+	if eventString(payload, "summary") == "" {
+		payload["summary"] = "Leader is waiting for assigned member results before final synthesis."
+	}
+	return "reply"
+}
+
+func teamEventPayloadMap(event models.TeamEvent) map[string]interface{} {
+	payload := map[string]interface{}{}
+	if event.PayloadJSON != nil && strings.TrimSpace(*event.PayloadJSON) != "" {
+		_ = json.Unmarshal([]byte(*event.PayloadJSON), &payload)
+	}
+	return payload
+}
+
+func teamEventMatchesRootTask(event models.TeamEvent, payload map[string]interface{}, task *models.TeamTask) bool {
+	if task == nil {
+		return false
+	}
+	if event.TaskID != nil && *event.TaskID == task.ID {
+		return true
+	}
+	for _, key := range []string{"taskId", "task_id", "rootTaskId", "root_task_id", "parentTaskId", "parent_task_id", "currentTaskId", "current_task_id", "runtimeTaskId", "runtime_task_id"} {
+		if parseClawManagerTeamTaskRef(task.TeamID, eventString(payload, key)) == task.ID {
+			return true
+		}
+	}
+	for _, key := range []string{"messageId", "message_id", "rootMessageId", "root_message_id", "parentMessageId", "parent_message_id", "inReplyTo", "in_reply_to", "replyTo", "reply_to"} {
+		if task.MessageID != "" && eventString(payload, key) == task.MessageID {
+			return true
+		}
+	}
+	if step, ok := payload["collaborationStep"].(map[string]interface{}); ok {
+		return teamEventMatchesRootTask(event, step, task)
+	}
+	return false
+}
+
+func normalizeTeamMemberRouteKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isLeaderTeamMember(member *models.TeamMember) bool {
+	if member == nil {
+		return false
+	}
+	normalizedKey := strings.ToLower(strings.TrimSpace(member.MemberKey))
+	normalizedRole := strings.ToLower(strings.TrimSpace(member.Role))
+	return normalizedKey == "leader" || strings.Contains(normalizedKey, "leader") ||
+		normalizedRole == "leader" || strings.Contains(normalizedRole, "leader")
+}
+
+func isLeaderMediatedTeam(team *models.Team) bool {
+	return team != nil && normalizedTeamCommunicationMode(team.CommunicationMode) == teamCommunicationModeLeaderMediated
+}
+
+func leaderMediatedRouteTarget(payload map[string]interface{}) string {
+	target := eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id")
+	if target != "" {
+		return target
+	}
+	return eventString(payload, "assignee", "owner", "targetMember")
+}
+
+func isLeaderRouteTarget(target string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(target))
+	if normalized == "" {
+		return false
+	}
+	return normalized == "leader" ||
+		normalized == teamTaskReplyTarget ||
+		strings.Contains(normalized, "leader") ||
+		strings.Contains(normalized, "clawmanager")
+}
+
+func isLeaderMediatedOutboundLikeEvent(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "outbound", "task_assigned", "team_send", "reply", "task_completed", "completion":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLeaderMediatedInvalidWorkerRoute(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember) bool {
+	if !isLeaderMediatedTeam(team) || payload == nil || member == nil || isLeaderTeamMember(member) {
+		return false
+	}
+	if !isLeaderMediatedOutboundLikeEvent(eventType) {
+		return false
+	}
+	target := leaderMediatedRouteTarget(payload)
+	if target == "" {
+		return false
+	}
+	return !isLeaderRouteTarget(target)
+}
+
+func markLeaderMediatedRouteViolation(eventType string, payload map[string]interface{}, member *models.TeamMember) string {
+	if eventString(payload, "originalEvent") == "" {
+		payload["originalEvent"] = eventType
+	}
+	target := leaderMediatedRouteTarget(payload)
+	payload["event"] = "message_warning"
+	payload["type"] = "message_warning"
+	payload["status"] = "warning"
+	payload["runtimeStatus"] = "warning"
+	payload["availability"] = models.TeamMemberAvailabilityIdle
+	payload["leaderMediatedRouteViolation"] = true
+	payload["nonAuthoritative"] = true
+	payload["rootTaskTerminal"] = false
+	payload["summary"] = "Leader-mediated mode ignores worker-to-worker/self routing; workers must return assignment results to the Leader."
+	if target != "" {
+		payload["target"] = target
+		payload["to"] = target
+	}
+	if member != nil {
+		payload["from"] = member.MemberKey
+	}
+	return "message_warning"
+}
+
+func isLeaderMediatedWorkerToLeaderResult(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) bool {
+	if !isLeaderMediatedTeam(team) || payload == nil || member == nil || task == nil || isLeaderTeamMember(member) {
+		return false
+	}
+	if member.ID == task.TargetMemberID {
+		return false
+	}
+	if !isLeaderMediatedOutboundLikeEvent(eventType) || !teamEventHasBody(payload) {
+		return false
+	}
+	if isNonAuthoritativeDispatchFailure(eventType, payload) || eventBool(payload, "leaderMediatedRouteViolation") {
+		return false
+	}
+	target := leaderMediatedRouteTarget(payload)
+	if target == "" {
+		target = eventString(payload, "replyTarget", "reply_target")
+	}
+	if target != "" && !isLeaderRouteTarget(target) {
+		return false
+	}
+	body := eventString(payload, "resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary")
+	if looksLikeLeaderDispatchOnlyText(body) {
+		return false
+	}
+	return true
+}
+
+func markLeaderMediatedAssignmentResult(eventType string, payload map[string]interface{}, member *models.TeamMember) {
+	payload["assignmentResultOnly"] = true
+	payload["rootTaskTerminal"] = false
+	payload["status"] = models.TeamTaskStatusSucceeded
+	payload["runtimeStatus"] = models.TeamTaskStatusSucceeded
+	payload["availability"] = models.TeamMemberAvailabilityIdle
+	if eventString(payload, "originalEvent") == "" {
+		payload["originalEvent"] = eventType
+	}
+	if member != nil {
+		payload["from"] = member.MemberKey
+		payload["memberId"] = member.MemberKey
+	}
+	if leaderMediatedRouteTarget(payload) == "" {
+		payload["to"] = "leader"
+		payload["target"] = "leader"
+	}
+}
+
+func looksLikeLeaderDispatchOnlyText(text string) bool {
+	normalized := strings.TrimSpace(text)
+	if normalized == "" {
+		return false
+	}
+	compact := strings.ToLower(strings.Join(strings.Fields(normalized), ""))
+	lower := strings.ToLower(normalized)
+	for _, marker := range []string{
+		"任务结果反馈", "任务输出", "最终回答", "最终方案", "最终总结", "汇总如下", "结果如下",
+		"已完成并", "已完成，", "已完成:", "已完成：", "产出摘要",
+		"final answer", "final synthesis", "result summary", "task result", "completed with evidence",
+	} {
+		if strings.Contains(compact, strings.ToLower(strings.Join(strings.Fields(marker), ""))) || strings.Contains(lower, strings.ToLower(marker)) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"任务分派", "任务下发", "分派给", "派发给", "交给", "请你", "请写", "请完成",
+		"assignment", "assigned to", "handoff",
+	} {
+		if strings.Contains(compact, strings.ToLower(strings.Join(strings.Fields(marker), ""))) || strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	if strings.Contains(normalized, "$CLAWMANAGER_TEAM_SHARED_DIR") ||
+		(strings.Contains(compact, "共享目录") && strings.Contains(compact, "规范路径")) ||
+		(strings.Contains(lower, "shared directory") && strings.Contains(lower, "canonical path")) {
+		return true
+	}
+	if strings.Contains(compact, "完成后") &&
+		(strings.Contains(compact, "回传") || strings.Contains(compact, "返回给我") || strings.Contains(compact, "通知我") || strings.Contains(compact, "交付给我")) {
+		return true
+	}
+	if strings.Contains(compact, "用户想让你") && strings.Contains(compact, "请") {
+		return true
+	}
+	for _, target := range []string{"pm", "designer", "ui-designer", "architect", "worker", "product-manager", "solution-architect"} {
+		if strings.Contains(compact, target+"你好") || strings.Contains(compact, "@"+target) {
+			return true
+		}
+	}
+	if strings.Contains(lower, "please ") &&
+		(strings.Contains(lower, "write") || strings.Contains(lower, "complete") || strings.Contains(lower, "return") || strings.Contains(lower, "report back")) &&
+		(strings.Contains(lower, "designer") || strings.Contains(lower, "pm") || strings.Contains(lower, "architect") || strings.Contains(lower, "worker")) {
+		return true
+	}
+	return false
+}
+
+func looksLikeFinalResultText(text string) bool {
+	normalized := strings.TrimSpace(text)
+	if normalized == "" {
+		return false
+	}
+	compact := strings.ToLower(strings.Join(strings.Fields(normalized), ""))
+	lower := strings.ToLower(normalized)
+	for _, marker := range []string{
+		"任务结果反馈", "任务输出", "最终回答", "最终方案", "最终总结", "汇总如下", "结果如下",
+		"已完成并", "已完成，", "已完成:", "已完成：", "产出摘要",
+		"final answer", "final synthesis", "result summary", "task result", "completed with evidence",
+	} {
+		if strings.Contains(compact, strings.ToLower(strings.Join(strings.Fields(marker), ""))) || strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func inferLeaderDispatchTarget(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	if target := eventString(payload, "to", "recipient", "target", "targetMemberId", "target_member_id", "assignee", "owner"); target != "" {
+		return target
+	}
+	text := strings.ToLower(eventString(payload, "resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary"))
+	for _, target := range []string{"ui-designer", "designer", "product-manager", "pm", "solution-architect", "architect", "worker"} {
+		if strings.Contains(text, target) {
+			return target
+		}
+	}
+	return ""
 }
 
 func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message redisStreamMessage) error {
@@ -2189,10 +2822,51 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		payload["nonAuthoritative"] = true
 		eventType = "message_warning"
 	}
+	leaderMediatedRouteViolation := isLeaderMediatedInvalidWorkerRoute(team, eventType, payload, member)
+	if leaderMediatedRouteViolation {
+		eventType = markLeaderMediatedRouteViolation(eventType, payload, member)
+	}
+	assignmentResultOnly := isLeaderMediatedWorkerToLeaderResult(team, eventType, payload, member, task)
+	if assignmentResultOnly {
+		markLeaderMediatedAssignmentResult(eventType, payload, member)
+	}
 	eventType = normalizeFinalReplyTaskEvent(eventType, payload, task, member)
 	eventStatus := normalizedTeamTaskEventStatus(payload)
 	eventSignalsCompletion := isTeamTaskCompletionSignal(eventType, eventStatus, payload)
 	eventSignalsFailure := isTeamTaskFailureSignal(eventType, eventStatus, payload)
+	leaderDispatchOnly := isLeaderMediatedLeaderDispatchOnlyMessage(team, eventType, payload, member, task)
+	if leaderDispatchOnly {
+		if eventString(payload, "originalEvent") == "" {
+			payload["originalEvent"] = eventType
+		}
+		payload["event"] = "reply"
+		payload["type"] = "reply"
+		payload["status"] = models.TeamTaskStatusDispatched
+		payload["runtimeStatus"] = models.TeamTaskStatusRunning
+		payload["availability"] = models.TeamMemberAvailabilityBusy
+		payload["rootTaskTerminal"] = false
+		payload["leaderDispatchOnly"] = true
+		if target := inferLeaderDispatchTarget(payload); target != "" {
+			payload["target"] = target
+			payload["to"] = target
+		}
+		eventType = "reply"
+		eventStatus = normalizedTeamTaskEventStatus(payload)
+		eventSignalsCompletion = false
+		eventSignalsFailure = false
+	}
+	if eventSignalsCompletion && !leaderDispatchOnly && !assignmentResultOnly && !leaderMediatedRouteViolation {
+		ready, err := s.leaderMediatedRootCompletionReady(team, task, member)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			eventType = markLeaderMediatedPrematureCompletion(eventType, payload)
+			eventStatus = normalizedTeamTaskEventStatus(payload)
+			eventSignalsCompletion = false
+			eventSignalsFailure = false
+		}
+	}
 	memberTerminalOnly := task != nil &&
 		member != nil &&
 		member.ID != task.TargetMemberID &&
@@ -2230,7 +2904,7 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 
 	now := time.Now().UTC()
 	taskProjection := teamTaskProjectionResult{}
-	if task != nil && !memberTerminalOnly {
+	if task != nil && !memberTerminalOnly && !assignmentResultOnly && !leaderMediatedRouteViolation {
 		taskProjection = projectTeamTaskRuntimeState(task, payload, eventType, payloadJSON, now)
 		if taskProjection.changed {
 			task.UpdatedAt = now
@@ -2239,11 +2913,17 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			}
 		}
 	}
+	if task != nil && (memberTerminalOnly || leaderDispatchOnly || assignmentResultOnly || leaderMediatedRouteViolation) && !taskProjection.changed && !isTerminalTeamTaskStatus(task.Status) {
+		task.UpdatedAt = now
+		if err := s.repo.UpdateTask(task); err != nil {
+			return err
+		}
+	}
 	if member != nil {
 		member.LastSeenAt = &now
 		applyTeamMemberRuntimeProjection(member, payload, eventType)
 		taskIsActive := task != nil && !isTerminalTeamTaskStatus(task.Status)
-		if taskIsActive && (eventType == "task_received" || eventType == "task_started" || taskProjection.status == models.TeamTaskStatusRunning || taskProjection.status == models.TeamTaskStatusDispatched) {
+		if taskIsActive && (leaderDispatchOnly || eventType == "task_received" || eventType == "task_started" || taskProjection.status == models.TeamTaskStatusRunning || taskProjection.status == models.TeamTaskStatusDispatched) {
 			member.Status = models.TeamMemberStatusBusy
 			if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown {
 				member.Availability = models.TeamMemberAvailabilityBusy
@@ -2252,11 +2932,11 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.Progress = eventInt(payload, "progress")
 		}
 		taskProjectedTerminal := taskProjection.status == models.TeamTaskStatusSucceeded || taskProjection.status == models.TeamTaskStatusFailed
-		terminalEventWithoutTask := (task == nil || memberTerminalOnly) && (eventSignalsCompletion || eventSignalsFailure)
+		terminalEventWithoutTask := (task == nil || memberTerminalOnly || assignmentResultOnly) && (eventSignalsCompletion || eventSignalsFailure || assignmentResultOnly)
 		if taskProjectedTerminal || terminalEventWithoutTask {
 			member.Status = models.TeamMemberStatusIdle
 			member.CurrentTaskID = nil
-			if taskProjection.status == models.TeamTaskStatusSucceeded || (terminalEventWithoutTask && eventSignalsCompletion) {
+			if taskProjection.status == models.TeamTaskStatusSucceeded || assignmentResultOnly || (terminalEventWithoutTask && eventSignalsCompletion) {
 				member.Progress = 100
 				if member.Availability != models.TeamMemberAvailabilityBlocked {
 					member.Availability = models.TeamMemberAvailabilityIdle
@@ -2503,6 +3183,7 @@ func enrichTeamCollaborationStep(team *models.Team, eventType string, payload ma
 	status := collaborationStepStatusForEvent(eventType, payload)
 	title := collaborationStepTitle(stepType, actor, target, payload)
 	summary := eventString(payload, "summary", "resultMarkdown", "result_markdown", "result", "text", "message", "prompt", "instruction", "instructions", "diagnostic", "error", "reason")
+	fullContent := collaborationStepContentForEvent(stepType, payload, summary)
 	messageID := eventString(payload, "messageId", "message_id")
 	rootTaskID := ""
 	rootMessageID := ""
@@ -2527,6 +3208,7 @@ func enrichTeamCollaborationStep(team *models.Team, eventType string, payload ma
 		"status":        status,
 		"title":         title,
 		"summary":       summary,
+		"content":       fullContent,
 		"actor":         actor,
 		"target":        target,
 		"messageId":     messageID,
@@ -2554,6 +3236,14 @@ func enrichTeamCollaborationStep(team *models.Team, eventType string, payload ma
 }
 
 func normalizeExistingCollaborationStep(step map[string]interface{}, team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) {
+	if eventBool(payload, "leaderMediatedRouteViolation", "leader_mediated_route_violation") {
+		step["type"] = "warning"
+		step["status"] = "warning"
+	}
+	if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
+		step["type"] = "result"
+		step["status"] = models.TeamTaskStatusSucceeded
+	}
 	if eventString(step, "type") == "" {
 		step["type"] = collaborationStepTypeForEvent(eventType, payload)
 	}
@@ -2579,6 +3269,13 @@ func normalizeExistingCollaborationStep(step map[string]interface{}, team *model
 	if eventString(step, "eventType") == "" {
 		step["eventType"] = eventType
 	}
+	if eventString(step, "content", "detail") == "" {
+		stepType := eventString(step, "type")
+		summary := eventString(step, "summary")
+		if content := collaborationStepContentForEvent(stepType, payload, summary); content != "" {
+			step["content"] = content
+		}
+	}
 	if eventString(step, "source") == "" {
 		step["source"] = "clawmanager"
 	}
@@ -2599,8 +3296,29 @@ func normalizeExistingCollaborationStep(step map[string]interface{}, team *model
 	}
 }
 
+func collaborationStepContentForEvent(stepType string, payload map[string]interface{}, fallback string) string {
+	if stepType == "result" || stepType == "blocker" {
+		if full := eventString(payload, "resultMarkdown", "result_markdown", "result", "answer", "diagnostic", "error_message", "error", "message", "text"); full != "" {
+			return full
+		}
+	}
+	if content := eventString(payload, "content", "detail", "text", "message", "resultMarkdown", "result_markdown", "result", "answer"); content != "" {
+		return content
+	}
+	return fallback
+}
+
 func collaborationStepTypeForEvent(eventType string, payload map[string]interface{}) string {
 	status := normalizedTeamTaskEventStatus(payload)
+	if eventBool(payload, "leaderMediatedRouteViolation", "leader_mediated_route_violation") {
+		return "warning"
+	}
+	if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
+		return "result"
+	}
+	if eventBool(payload, "leaderDispatchOnly", "leader_dispatch_only") {
+		return "assignment"
+	}
 	if isSuccessfulTeamTaskEventStatus(status) {
 		return "result"
 	}
@@ -2644,6 +3362,15 @@ func collaborationStepTypeForEvent(eventType string, payload map[string]interfac
 
 func collaborationStepStatusForEvent(eventType string, payload map[string]interface{}) string {
 	status := normalizedTeamTaskEventStatus(payload)
+	if eventBool(payload, "leaderMediatedRouteViolation", "leader_mediated_route_violation") {
+		return "warning"
+	}
+	if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
+		return models.TeamTaskStatusSucceeded
+	}
+	if eventBool(payload, "leaderDispatchOnly", "leader_dispatch_only") {
+		return models.TeamTaskStatusDispatched
+	}
 	if isSuccessfulTeamTaskEventStatus(status) || eventType == "task_completed" || eventType == "completion" {
 		return models.TeamTaskStatusSucceeded
 	}
@@ -2850,6 +3577,12 @@ func isInterimOrDelegationReplyText(text string) bool {
 	normalized := strings.TrimSpace(text)
 	if normalized == "" {
 		return true
+	}
+	if looksLikeLeaderDispatchOnlyText(normalized) {
+		return true
+	}
+	if looksLikeFinalResultText(normalized) {
+		return false
 	}
 	lower := strings.ToLower(normalized)
 	compact := strings.ToLower(strings.Join(strings.Fields(normalized), ""))
@@ -3400,7 +4133,13 @@ func (s *teamService) execTeamWorkspace(ctx context.Context, userID, instanceID 
 
 func cleanTeamWorkspacePath(raw string) (string, error) {
 	value := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	value = strings.TrimPrefix(value, "./")
 	value = strings.TrimPrefix(value, "/")
+	if value == "team" {
+		value = ""
+	} else if strings.HasPrefix(value, "team/") {
+		value = strings.TrimPrefix(value, "team/")
+	}
 	if value == "" || value == "." {
 		return "", nil
 	}
@@ -3645,18 +4384,27 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 			leaderCount++
 			role = "leader"
 		}
+		profile := teamMemberProfileFromEnv(memberReq.EnvironmentOverrides)
+		effectiveRole := role
+		if !isLeader && strings.TrimSpace(profile.RoleHint) != "" && !isTeamLeaderRole(profile.RoleHint) {
+			effectiveRole = strings.TrimSpace(profile.RoleHint)
+			role = effectiveRole
+		}
 		displayName := strings.TrimSpace(memberReq.Name)
 		if displayName == "" {
 			displayName = fmt.Sprintf("%s-%s", teamName, memberKey)
 		}
 		plans = append(plans, plannedTeamMember{
-			Request:      memberReq,
-			MemberKey:    memberKey,
-			DisplayName:  displayName,
-			Role:         role,
-			RuntimeType:  runtimeType,
-			InstanceMode: instanceMode,
-			IsLeader:     isLeader,
+			Request:       memberReq,
+			MemberKey:     memberKey,
+			DisplayName:   displayName,
+			Role:          role,
+			ProfileKey:    profile.ProfileKey,
+			ProfileName:   profile.ProfileName,
+			EffectiveRole: effectiveRole,
+			RuntimeType:   runtimeType,
+			InstanceMode:  instanceMode,
+			IsLeader:      isLeader,
 		})
 	}
 	if leaderCount != 1 {
@@ -3806,13 +4554,16 @@ type teamRosterConfig struct {
 }
 
 type teamRosterMember struct {
-	MemberID     string `json:"memberId"`
-	Role         string `json:"role"`
-	RuntimeType  string `json:"runtimeType"`
-	InstanceMode string `json:"instanceMode"`
-	DisplayName  string `json:"displayName"`
-	Description  string `json:"description,omitempty"`
-	IsLeader     bool   `json:"isLeader"`
+	MemberID      string `json:"memberId"`
+	Role          string `json:"role"`
+	EffectiveRole string `json:"effectiveRole,omitempty"`
+	ProfileKey    string `json:"profileKey,omitempty"`
+	ProfileName   string `json:"profileName,omitempty"`
+	RuntimeType   string `json:"runtimeType"`
+	InstanceMode  string `json:"instanceMode"`
+	DisplayName   string `json:"displayName"`
+	Description   string `json:"description,omitempty"`
+	IsLeader      bool   `json:"isLeader"`
 }
 
 type teamRosterRedis struct {
@@ -3876,13 +4627,16 @@ func buildTeamRosterConfigWithSharedDir(team *models.Team, members []plannedTeam
 			config.LeaderMemberID = member.MemberKey
 		}
 		config.Members = append(config.Members, teamRosterMember{
-			MemberID:     member.MemberKey,
-			Role:         member.Role,
-			RuntimeType:  member.RuntimeType,
-			InstanceMode: member.InstanceMode,
-			DisplayName:  member.DisplayName,
-			Description:  derefTeamString(member.Request.Description),
-			IsLeader:     member.IsLeader,
+			MemberID:      member.MemberKey,
+			Role:          member.Role,
+			EffectiveRole: effectiveTeamMemberRole(member),
+			ProfileKey:    member.ProfileKey,
+			ProfileName:   member.ProfileName,
+			RuntimeType:   member.RuntimeType,
+			InstanceMode:  member.InstanceMode,
+			DisplayName:   member.DisplayName,
+			Description:   plannedTeamMemberDescription(member),
+			IsLeader:      member.IsLeader,
 		})
 	}
 	if config.LeaderMemberID == "" {
@@ -3928,13 +4682,14 @@ func buildTeamRosterConfigFromMembersWithSharedDir(team *models.Team, members []
 			config.LeaderMemberID = member.MemberKey
 		}
 		config.Members = append(config.Members, teamRosterMember{
-			MemberID:     member.MemberKey,
-			Role:         member.Role,
-			RuntimeType:  runtimeType,
-			InstanceMode: instanceMode,
-			DisplayName:  member.DisplayName,
-			Description:  derefTeamString(member.Description),
-			IsLeader:     isLeader,
+			MemberID:      member.MemberKey,
+			Role:          member.Role,
+			EffectiveRole: member.Role,
+			RuntimeType:   runtimeType,
+			InstanceMode:  instanceMode,
+			DisplayName:   member.DisplayName,
+			Description:   derefTeamString(member.Description),
+			IsLeader:      isLeader,
 		})
 	}
 	if config.LeaderMemberID == "" {

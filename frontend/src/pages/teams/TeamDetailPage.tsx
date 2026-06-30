@@ -516,11 +516,40 @@ const taskLabelFromKey = (key: string, event: TeamEvent) => {
   return key;
 };
 
+const terminalResultText = (payload: Record<string, unknown> | undefined) =>
+  payloadTextDeep(payload, [
+    "resultMarkdown",
+    "result_markdown",
+    "result",
+    "answer",
+  ]);
+
+const taskResultText = (task?: TeamTask) =>
+  terminalResultText(task?.result) ||
+  payloadText(task?.result, ["summary", "message", "text"]) ||
+  terminalResultText(task?.payload);
+
+function isTerminalResultEventType(eventType: string) {
+  return (
+    eventType === "task_completed" ||
+    eventType === "completion" ||
+    eventType === "task_failed" ||
+    eventType === "message_failed"
+  );
+}
+
 const collaborationContent = (
   payload: Record<string, unknown>,
+  eventType = "",
 ) => {
+  if (isTerminalResultEventType(eventType)) {
+    const fullResult = terminalResultText(payload);
+    if (fullResult) {
+      return fullResult;
+    }
+  }
   const step = payloadCollaborationStep(payload);
-  const stepSummary = payloadText(step, ["summary", "detail", "content"]);
+  const stepSummary = payloadText(step, isTerminalResultEventType(eventType) ? ["content", "detail", "summary"] : ["summary", "detail", "content"]);
   if (stepSummary) {
     return stepSummary;
   }
@@ -585,11 +614,19 @@ const eventActorKey = (
 
 const inferGroupStatus = (items: CollaborationItem[], task?: TeamTask) => {
   if (task?.status) {
+    if (task.status === "succeeded" && isDispatchOnlyResult(taskResultText(task))) {
+      return items.some((item) => item.eventType === "outbound" || item.eventType === "task_assigned" || isDispatchOnlyResult(item.content))
+        ? "dispatched"
+        : "running";
+    }
     return task.status;
   }
   const sorted = [...items].sort((a, b) => b.timeMs - a.timeMs);
   const latest = sorted[0];
   const terminal = sorted.find((item) => {
+    if (payloadBool(item.payload, ["memberTerminalOnly", "member_terminal_only"]) || isDispatchOnlyResult(item.content)) {
+      return false;
+    }
     const status = payloadText(item.payload, ["status"]).toLowerCase();
     return (
       isFailedCollaborationItem(item) ||
@@ -720,7 +757,7 @@ const buildCollaborationGroups = (
       to,
       taskKey,
       taskLabel: taskLabelFromKey(taskKey, event),
-      content: collaborationContent(payload),
+      content: collaborationContent(payload, eventType),
       occurredAt: eventTimeValue(event),
       timeMs: eventTimeMs(event),
     };
@@ -1847,6 +1884,10 @@ function workspaceLinkToRelativePath(raw: string) {
   if (normalized.startsWith("/team/")) {
     return normalized.slice("/team/".length);
   }
+  const relativeTeamMatch = normalized.match(/^\.?\/?team\/(.+)$/i);
+  if (relativeTeamMatch) {
+    return relativeTeamMatch[1];
+  }
   const liteSharedMatch = normalized.match(/^\/workspaces\/teams\/user-\d+\/team-\d+-shared\/(.+)$/i);
   if (liteSharedMatch) {
     return liteSharedMatch[1];
@@ -1862,6 +1903,7 @@ function isTeamWorkspaceLink(path: string) {
   const normalized = path.trim().replace(/\\/g, "/");
   return (
     normalized.startsWith("/team/") ||
+    /^\.?\/?team\/.+/i.test(normalized) ||
     /^\/workspaces\/teams\/user-\d+\/team-\d+-shared\//i.test(normalized)
   );
 }
@@ -2691,6 +2733,8 @@ type ProcessStep = {
   progress?: number;
   time: number;
   memberTerminalOnly?: boolean;
+  assignmentResultOnly?: boolean;
+  leaderMediatedRouteViolation?: boolean;
 };
 
 type KanbanColumnKey = "todo" | "doing" | "done";
@@ -2799,7 +2843,10 @@ function buildProcessSteps(
     const stepType = payloadText(stepMeta, ["type"]) || item.eventType;
     const stepStatus = payloadText(stepMeta, ["status"]);
     const stepTitle = payloadText(stepMeta, ["title"]);
-    const stepSummary = payloadText(stepMeta, ["summary"]);
+    const terminalResult = isTerminalResultEventType(item.eventType) || stepType === "result" || stepType === "blocker";
+    const stepSummary = terminalResult
+      ? payloadText(stepMeta, ["content", "detail", "summary"])
+      : payloadText(stepMeta, ["summary", "content", "detail"]);
     steps.push({
       id: `event-step-${item.event.id}`,
       workId: payloadText(stepMeta, ["workId", "work_id", "id"]),
@@ -2814,6 +2861,8 @@ function buildProcessSteps(
       progress: payloadNumber(stepMeta, ["progress"]) || payloadNumber(item.payload, ["progress"]),
       time: item.timeMs,
       memberTerminalOnly: payloadBool(item.payload, ["memberTerminalOnly", "member_terminal_only"]) === true,
+      assignmentResultOnly: payloadBool(item.payload, ["assignmentResultOnly", "assignment_result_only"]) === true,
+      leaderMediatedRouteViolation: payloadBool(item.payload, ["leaderMediatedRouteViolation", "leader_mediated_route_violation"]) === true,
     });
   }
 
@@ -2857,7 +2906,7 @@ function buildKanbanColumns(
     .map((step) => step.to);
 
   for (const step of steps) {
-    if (isDispatchOnlyLeaderTerminalStep(step)) {
+    if (isDispatchOnlyLeaderTerminalStep(step) || step.leaderMediatedRouteViolation) {
       continue;
     }
     const workKey = kanbanWorkKey(step, delegatedTargets, steps);
@@ -3371,12 +3420,6 @@ function isDispatchOnlyLeaderTerminalStep(step: ProcessStep) {
     isDispatchOnlyResult(step.content);
 }
 
-function latestCompletionEvidenceStep(steps: ProcessStep[]) {
-  return [...steps]
-    .reverse()
-    .find((step) => isCompletionEvidenceStep(step, steps));
-}
-
 function latestRootCompletionEvidenceStep(steps: ProcessStep[], peerRoot = false) {
   return [...steps]
     .reverse()
@@ -3406,17 +3449,20 @@ function isRootCompletionEvidenceStep(
   if (!isCompletionEvidenceStep(step, steps)) {
     return false;
   }
-  if (!peerRoot) {
-    return true;
-  }
-  if (step.memberTerminalOnly) {
+  if (step.memberTerminalOnly || step.assignmentResultOnly || step.leaderMediatedRouteViolation || isDispatchOnlyResult(step.content)) {
     return false;
+  }
+  if (!peerRoot) {
+    return !hasDelegatedWorkBeforeStep(step, steps) || isLeaderLikeName(step.actor);
   }
   return isLeaderLikeName(step.actor);
 }
 
 function isCompletionEvidenceStep(step: ProcessStep, steps: ProcessStep[] = []) {
-  if (!step.content || isDispatchOnlyLeaderTerminalStep(step)) {
+  if (!step.content || step.memberTerminalOnly || step.leaderMediatedRouteViolation || isDispatchOnlyResult(step.content) || isDispatchOnlyLeaderTerminalStep(step)) {
+    return false;
+  }
+  if (step.assignmentResultOnly) {
     return false;
   }
   if (["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes((step.status || "").toLowerCase())) {
@@ -3441,9 +3487,14 @@ function hasDelegatedWorkBeforeStep(step: ProcessStep, steps: ProcessStep[]) {
   return steps.some(
     (candidate) =>
       candidate.time <= step.time &&
-      (candidate.eventType === "task_assigned" || candidate.eventType === "outbound") &&
       candidate.to &&
-      !isLeaderLikeName(candidate.to),
+      !isLeaderLikeName(candidate.to) &&
+      (
+        candidate.eventType === "task_assigned" ||
+        candidate.eventType === "outbound" ||
+        candidate.status === "dispatched" ||
+        isDispatchOnlyResult(candidate.content)
+      ),
   );
 }
 
@@ -3549,17 +3600,17 @@ function processFinalResult(group: CollaborationGroup, steps: ProcessStep[] = []
   }
   const finalStep =
     rootCompletion ||
-    (latestOutcome?.status === "succeeded" && !peerRoot
+    (latestOutcome?.status === "succeeded" &&
+    !peerRoot &&
+    (!hasDelegatedWorkBeforeStep(latestOutcome.step, steps) || isLeaderLikeName(latestOutcome.step.actor))
       ? latestOutcome.step
-      : latestCompletionEvidenceStep(steps));
+      : undefined);
   if (finalStep?.content) {
     return finalStep.content;
   }
   if (group.task) {
-    const taskResult =
-      payloadText(group.task.result, ["resultMarkdown", "result_markdown", "summary", "result", "message", "text", "answer"]) ||
-      payloadText(group.task.payload, ["resultMarkdown", "result_markdown", "result", "answer"]);
-    if (taskResult && (group.task.status === "succeeded" || isFinalResultText(taskResult))) {
+    const taskResult = taskResultText(group.task);
+    if (taskResult && !isDispatchOnlyResult(taskResult) && (group.task.status === "succeeded" || isFinalResultText(taskResult))) {
       return taskResult;
     }
   }
@@ -3574,10 +3625,13 @@ function processVisualStatus(
 ) {
   const rootCompletion = latestRootCompletionEvidenceStep(steps, peerRoot);
   const latestOutcome = latestOutcomeEvidence(steps);
-  if (finalResult || rootCompletion || (!peerRoot && (latestOutcome?.status === "succeeded" || latestCompletionEvidenceStep(steps)))) {
+  if (finalResult || rootCompletion) {
     return "succeeded";
   }
-  if (group.task?.status === "succeeded" && !peerRoot) {
+  if (!peerRoot && latestOutcome?.status === "succeeded" && !hasDelegatedWorkBeforeStep(latestOutcome.step, steps)) {
+    return "succeeded";
+  }
+  if (group.task?.status === "succeeded" && !peerRoot && !isDispatchOnlyResult(taskResultText(group.task))) {
     return "succeeded";
   }
   if (group.task?.status === "failed") {
@@ -3626,8 +3680,28 @@ function isLeaderLikeName(value: string) {
 
 function isDispatchOnlyResult(value: string) {
   const normalized = value.trim().replace(/\s+/g, "");
+  const readable = value.trim().replace(/\s+/g, " ");
+  const lower = readable.toLowerCase();
   if (!normalized) {
     return true;
+  }
+  const finalMarkers = [
+    "任务结果反馈",
+    "任务输出",
+    "最终回答",
+    "最终方案",
+    "最终总结",
+    "汇总如下",
+    "结果如下",
+    "已完成并",
+    "产出摘要",
+    "final answer",
+    "final synthesis",
+    "task result",
+    "result summary",
+  ];
+  if (finalMarkers.some((marker) => normalized.includes(marker.replace(/\s+/g, "")) || lower.includes(marker))) {
+    return false;
   }
   return (
     normalized === "结果已反馈。" ||
@@ -3637,8 +3711,22 @@ function isDispatchOnlyResult(value: string) {
     normalized.toLowerCase() === "redisteamtaskfailed" ||
     normalized.includes("在线空闲，派单") ||
     normalized.includes("在线空闲,派单") ||
+    normalized.includes("任务分派") ||
+    normalized.includes("任务下发") ||
+    normalized.includes("分派给") ||
+    normalized.includes("派发给") ||
+    normalized.includes("交给") ||
+    normalized.includes("用户想让你") ||
+    normalized.includes("$CLAWMANAGER_TEAM_SHARED_DIR") ||
+    (normalized.includes("共享目录") && normalized.includes("规范路径")) ||
+    (normalized.includes("完成后") && (normalized.includes("回传") || normalized.includes("返回给我") || normalized.includes("通知我") || normalized.includes("交付给我"))) ||
     normalized.includes("已派发") ||
-    normalized.includes("等待其查询并交付结果")
+    normalized.includes("等待其查询并交付结果") ||
+    lower.includes("assigned to") ||
+    lower.includes("handoff") ||
+    (lower.includes("please ") &&
+      (lower.includes("write") || lower.includes("complete") || lower.includes("return") || lower.includes("report back")) &&
+      (lower.includes("designer") || lower.includes("pm") || lower.includes("architect") || lower.includes("worker")))
   );
 }
 
@@ -4104,9 +4192,7 @@ function buildTeamChatMessages(
         threadKey: group.key,
         sortPhase: 0,
       });
-      const resultSummary =
-        payloadText(group.task.result, ["summary", "result", "message", "text"]) ||
-        payloadText(group.task.payload, ["result", "answer"]);
+      const resultSummary = taskResultText(group.task);
       if (resultSummary && group.items.length === 0) {
         messages.push({
           id: `task-result-${group.task.id}`,
@@ -4139,6 +4225,7 @@ function buildTeamChatMessages(
       }
     }
 
+    const taskResult = taskResultText(group.task);
     for (const item of group.items) {
       if (isTaskDispatchEcho(item, group.task) || isProtocolProgressEcho(item) || isProtocolNoiseItem(item)) {
         continue;
@@ -4147,6 +4234,29 @@ function buildTeamChatMessages(
       if (message) {
         messages.push(message);
       }
+    }
+    if (
+      group.task?.status === "succeeded" &&
+      taskResult &&
+      group.items.length > 0 &&
+      !group.items.some((item) => normalizeChatDedupeContent(item.content).includes(normalizeChatDedupeContent(taskResult).slice(0, 120)))
+    ) {
+      const target =
+        memberById.get(group.task.target_member_id)?.member_key ||
+        `#${group.task.target_member_id}`;
+      messages.push({
+        id: `task-result-full-${group.task.id}`,
+        kind: "member",
+        sender: displayMemberName(target, memberByKey, leaderMemberId),
+        senderKey: target,
+        content: `任务结果反馈：\n${taskResult}`,
+        time: new Date(group.task.finished_at || group.task.updated_at).getTime(),
+        sequence: taskSequenceBase + 0.3,
+        tone: "feedback",
+        dedupeKey: `feedback-full:${group.task.message_id || group.task.id}:${normalizeChatDedupeContent(taskResult)}`,
+        threadKey: group.key,
+        sortPhase: 2,
+      });
     }
   }
   return messages
@@ -4737,7 +4847,7 @@ function renderInlineMarkdown(
   onWorkspaceFileOpen?: (path: string) => void,
 ) {
   const nodes: React.ReactNode[] = [];
-  const pattern = /(`[^`]+`|\/workspaces\/teams\/user-\d+\/team-\d+-shared\/[^\s`<>"')\]}]+|\/team\/[^\s`<>"')\]}]+|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const pattern = /(`[^`]+`|\/workspaces\/teams\/user-\d+\/team-\d+-shared\/[^\s`<>"')\]}]+|\/team\/[^\s`<>"')\]}]+|\.?\/?team\/[^\s`<>"')\]}]+|\*\*[^*]+\*\*|\*[^*]+\*)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {

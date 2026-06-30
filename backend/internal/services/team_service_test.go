@@ -2,6 +2,8 @@ package services
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -87,9 +89,30 @@ func TestTeamMemberEnvInjectsRoleGuidance(t *testing.T) {
 	if env["HERMES_AGENT_HELP_GUIDANCE"] != env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"] {
 		t.Fatalf("expected Hermes guidance alias to match Team system prompt")
 	}
-	for _, expected := range []string{"exact CLAWMANAGER_TEAM_SHARED_DIR", "never use a relative team/... directory", "/team/<relative-path>"} {
+	for _, expected := range []string{"exact CLAWMANAGER_TEAM_SHARED_DIR", "team/... is invalid", "/team/<relative-path>"} {
 		if !strings.Contains(env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"], expected) {
 			t.Fatalf("expected shared workspace guidance %q, got %q", expected, env["CLAWMANAGER_TEAM_SYSTEM_PROMPT"])
+		}
+	}
+}
+
+func TestCleanTeamWorkspacePathTreatsTeamPrefixAsLogicalAlias(t *testing.T) {
+	cases := map[string]string{
+		"/team/results/report.md":  "results/report.md",
+		"team/results/report.md":   "results/report.md",
+		"./team/results/report.md": "results/report.md",
+		"/team":                    "",
+		"team":                     "",
+		"results/report.md":        "results/report.md",
+	}
+
+	for raw, expected := range cases {
+		cleaned, err := cleanTeamWorkspacePath(raw)
+		if err != nil {
+			t.Fatalf("cleanTeamWorkspacePath(%q) returned error: %v", raw, err)
+		}
+		if cleaned != expected {
+			t.Fatalf("cleanTeamWorkspacePath(%q) = %q, want %q", raw, cleaned, expected)
 		}
 	}
 }
@@ -422,6 +445,45 @@ func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
 	}
 }
 
+func TestPlanTeamMembersUsesProfileEffectiveRole(t *testing.T) {
+	profileEnv := map[string]string{
+		"CLAWMANAGER_AGENT_PERSONA_JSON": `{"profileKey":"agency.senior-developer","name":"Senior Developer","displayName":"Senior Developer","roleHint":"senior-developer","summary":"Implements scoped engineering tasks.","systemPrompt":"You are a senior implementation specialist."}`,
+	}
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "leader", Role: "leader"},
+		{MemberID: "worker", Role: "developer", EnvironmentOverrides: profileEnv},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	worker := plans[1]
+	if worker.Role != "senior-developer" || worker.EffectiveRole != "senior-developer" {
+		t.Fatalf("expected profile effective role to override generic role, got role=%q effective=%q", worker.Role, worker.EffectiveRole)
+	}
+	if worker.ProfileKey != "agency.senior-developer" || worker.ProfileName != "Senior Developer" {
+		t.Fatalf("expected profile metadata, got key=%q name=%q", worker.ProfileKey, worker.ProfileName)
+	}
+
+	roster, err := buildTeamRosterConfig(&models.Team{
+		ID:                19,
+		CommunicationMode: teamCommunicationModeLeaderMediated,
+		SharedMountPath:   "/team",
+	}, plans)
+	if err != nil {
+		t.Fatalf("buildTeamRosterConfig returned error: %v", err)
+	}
+	for _, expected := range []string{
+		`"role":"senior-developer"`,
+		`"effectiveRole":"senior-developer"`,
+		`"profileKey":"agency.senior-developer"`,
+		`"profileName":"Senior Developer"`,
+	} {
+		if !strings.Contains(roster, expected) {
+			t.Fatalf("roster missing %q: %s", expected, roster)
+		}
+	}
+}
+
 func TestTeamMemberEnvIncludesPeerAssistedPolicy(t *testing.T) {
 	description := "Developer: implements scoped tasks."
 	plan, err := planTeamMembers("team", []CreateTeamMemberRequest{
@@ -563,12 +625,81 @@ func TestBuildTeamMemberSoulMarkdownIncludesProfileGuidance(t *testing.T) {
 		description,
 		"Collaboration mode: peer_assisted",
 		"If asked about your role",
-		"Never create or write to a relative team/... folder",
+		"team/... is invalid",
 		"Report shared artifact links as /team/<relative-path>",
 	} {
 		if !strings.Contains(soul, expected) {
 			t.Fatalf("SOUL.md missing %q: %s", expected, soul)
 		}
+	}
+}
+
+func TestWriteLiteTeamMemberIdentityFiles(t *testing.T) {
+	workspace := t.TempDir()
+	profileEnv := map[string]string{
+		"CLAWMANAGER_AGENT_PERSONA_JSON": `{"profileKey":"agency.senior-developer","name":"Senior Developer","roleHint":"senior-developer","summary":"Implements scoped engineering tasks.","systemPrompt":"You are a senior implementation specialist."}`,
+	}
+	plans, err := planTeamMembers("team", []CreateTeamMemberRequest{
+		{MemberID: "leader", Role: "leader"},
+		{MemberID: "worker", Role: "developer", RuntimeType: "hermes", Mode: InstanceModeLite, InstanceMode: InstanceModeLite, EnvironmentOverrides: profileEnv},
+	})
+	if err != nil {
+		t.Fatalf("planTeamMembers returned error: %v", err)
+	}
+	member := plans[1]
+	team := &models.Team{
+		UserID:            1,
+		ID:                31,
+		CommunicationMode: teamCommunicationModeLeaderMediated,
+		SharedMountPath:   "/team",
+	}
+	roster, err := buildTeamRosterConfig(team, plans)
+	if err != nil {
+		t.Fatalf("buildTeamRosterConfig returned error: %v", err)
+	}
+	instance := &models.Instance{
+		Type:          "hermes",
+		RuntimeType:   RuntimeBackendGateway,
+		InstanceMode:  InstanceModeLite,
+		WorkspacePath: &workspace,
+	}
+
+	if err := (&teamService{}).writeLiteTeamMemberIdentityFiles(instance, team, member, roster); err != nil {
+		t.Fatalf("writeLiteTeamMemberIdentityFiles returned error: %v", err)
+	}
+	for _, name := range []string{teamAgentsFileName, teamSoulFileName, teamConfigFileName, filepath.Join(".hermes", teamSoulFileName)} {
+		if _, err := os.Stat(filepath.Join(workspace, name)); err != nil {
+			t.Fatalf("expected Lite identity file %s: %v", name, err)
+		}
+	}
+	soulBytes, err := os.ReadFile(filepath.Join(workspace, teamSoulFileName))
+	if err != nil {
+		t.Fatalf("failed to read SOUL.md: %v", err)
+	}
+	soul := string(soulBytes)
+	for _, expected := range []string{
+		"Effective role: senior-developer",
+		"Profile key: agency.senior-developer",
+		"Profile name: Senior Developer",
+		"If team.json contains effectiveRole/profileName",
+	} {
+		if !strings.Contains(soul, expected) {
+			t.Fatalf("SOUL.md missing %q: %s", expected, soul)
+		}
+	}
+	agentsBytes, err := os.ReadFile(filepath.Join(workspace, teamAgentsFileName))
+	if err != nil {
+		t.Fatalf("failed to read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsBytes), "SOUL.md as the member-specific identity") {
+		t.Fatalf("AGENTS.md missing identity source guidance: %s", string(agentsBytes))
+	}
+	rosterBytes, err := os.ReadFile(filepath.Join(workspace, teamConfigFileName))
+	if err != nil {
+		t.Fatalf("failed to read team.json: %v", err)
+	}
+	if !strings.Contains(string(rosterBytes), `"effectiveRole":"senior-developer"`) {
+		t.Fatalf("team.json missing effective role: %s", string(rosterBytes))
 	}
 }
 
@@ -763,6 +894,20 @@ func TestProjectTeamEventTreatsSubstantialDirectTargetReplyAsTaskCompleted(t *te
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" {
 		t.Fatalf("expected stored event type task_completed, got %#v", repo.createdEvents)
 	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored event payload: %v", err)
+	}
+	step, ok := stored["collaborationStep"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected collaboration step in stored event, got %#v", stored)
+	}
+	if got := step["summary"]; got != "Team introduction ready" {
+		t.Fatalf("expected collaboration step summary to stay compact, got %#v", got)
+	}
+	if got, _ := step["content"].(string); !strings.Contains(got, "# Team report") {
+		t.Fatalf("expected collaboration step content to preserve full reply text, got %#v", got)
+	}
 }
 
 func TestProjectTeamEventDoesNotTreatDelegationReplyAsTaskCompleted(t *testing.T) {
@@ -810,11 +955,95 @@ func TestProjectTeamEventDoesNotTreatDelegationReplyAsTaskCompleted(t *testing.T
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
 
-	if repo.updatedTask != nil {
-		t.Fatalf("delegation reply must not mark task succeeded, got %#v", repo.updatedTask)
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("delegation reply should touch but not complete task, got %#v", repo.updatedTask)
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
 		t.Fatalf("expected stored event type reply, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventLeaderDispatchCompletionDoesNotCloseRootTask(t *testing.T) {
+	taskID := 169
+	messageID := "team-31-task-169"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC().Add(-10 * time.Minute),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Role:          "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "task_completed",
+		"messageId": messageID,
+		"memberId":  "leader",
+		"taskId":    "team-31-task-169",
+		"status":    "succeeded",
+		"summary":   "Dispatched to designer.",
+		"resultMarkdown": strings.Join([]string{
+			"【任务分派 · 自我介绍】",
+			"",
+			"designer 你好，我是 Leader。用户想让你做一段自我介绍。",
+			"",
+			"请写一段自我介绍，内容包括你的角色身份、能力范围和工作风格。",
+			"完成后将内容写入共享目录，并回传结果给我。",
+			"",
+			"共享目录：$CLAWMANAGER_TEAM_SHARED_DIR/results/team-31-task-169/",
+			"规范路径：/team/results/team-31-task-169/intro-designer.md",
+		}, "\n"),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178669-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil {
+		t.Fatalf("expected root task to be touched so stale detection sees active delegation")
+	}
+	if repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil || repo.updatedTask.ResultJSON != nil {
+		t.Fatalf("leader dispatch must not complete root task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusBusy || repo.updatedMember.Progress == 100 {
+		t.Fatalf("leader dispatch must keep leader/root task active, got %#v", repo.updatedMember)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("expected dispatch stored as reply, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if stored["leaderDispatchOnly"] != true || stored["rootTaskTerminal"] != false {
+		t.Fatalf("expected leader dispatch marker without root terminal, got %#v", stored)
+	}
+	step := stored["collaborationStep"].(map[string]interface{})
+	if step["type"] != "assignment" || step["status"] != models.TeamTaskStatusDispatched {
+		t.Fatalf("expected assignment collaboration step, got %#v", step)
+	}
+	if got, _ := step["content"].(string); !strings.Contains(got, "designer 你好") {
+		t.Fatalf("expected assignment content preserved, got %#v", got)
 	}
 }
 
@@ -863,7 +1092,7 @@ func TestProjectTeamEventDoesNotTreatNonTargetReplyAsTaskCompleted(t *testing.T)
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
 
-	if repo.updatedTask != nil {
+	if repo.updatedTask != nil && (repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil) {
 		t.Fatalf("non-target reply must not mark task succeeded, got %#v", repo.updatedTask)
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
@@ -1125,8 +1354,8 @@ func TestProjectTeamEventDoesNotCompleteRootTaskFromPeerMemberTerminal(t *testin
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
 
-	if repo.updatedTask != nil {
-		t.Fatalf("peer member terminal event must not complete root task, got %#v", repo.updatedTask)
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("peer member terminal event should touch but not complete root task, got %#v", repo.updatedTask)
 	}
 	if repo.updatedMember == nil || repo.updatedMember.MemberKey != "worker" || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
 		t.Fatalf("expected peer member to be marked idle and complete, got %#v", repo.updatedMember)
@@ -1188,14 +1417,260 @@ func TestProjectTeamEventLeaderMediatedWorkerCompletionDoesNotCloseRootTask(t *t
 	}); err != nil {
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
-	if repo.updatedTask != nil {
-		t.Fatalf("leader-mediated worker completion must not close root task, got %#v", repo.updatedTask)
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("leader-mediated worker completion should touch but not close root task, got %#v", repo.updatedTask)
 	}
 	if repo.updatedMember == nil || repo.updatedMember.MemberKey != "worker" || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
 		t.Fatalf("worker delivery should complete only the worker lane, got %#v", repo.updatedMember)
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].TaskID == nil || *repo.createdEvents[0].TaskID != taskID {
 		t.Fatalf("worker delivery must remain linked to the Leader root task, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventLeaderMediatedWorkerReplyToLeaderIsAssignmentResult(t *testing.T) {
+	taskID := 176
+	messageID := "team-31-task-176"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID:            121,
+		TeamID:        31,
+		MemberKey:     "designer",
+		Role:          "ui-ux-designer",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"designer": worker},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":      "outbound",
+		"memberId":   "designer",
+		"from":       "designer",
+		"to":         "leader",
+		"rootTaskId": messageID,
+		"messageId":  "reply-designer-1",
+		"text":       "1",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178676-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("worker assignment result must not close Leader root task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.MemberKey != "designer" || repo.updatedMember.Status != models.TeamMemberStatusIdle || repo.updatedMember.Progress != 100 {
+		t.Fatalf("worker reply should complete only the member lane, got %#v", repo.updatedMember)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if stored["assignmentResultOnly"] != true || stored["rootTaskTerminal"] != false {
+		t.Fatalf("expected assignment-result marker, got %#v", stored)
+	}
+	step := stored["collaborationStep"].(map[string]interface{})
+	if step["type"] != "result" || step["status"] != models.TeamTaskStatusSucceeded || step["actor"] != "designer" {
+		t.Fatalf("expected worker result collaboration step, got %#v", step)
+	}
+}
+
+func TestProjectTeamEventLeaderMediatedRejectsWorkerSelfRoute(t *testing.T) {
+	taskID := 177
+	messageID := "team-31-task-177"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	architect := &models.TeamMember{
+		ID:            122,
+		TeamID:        31,
+		MemberKey:     "architect",
+		Role:          "architect",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:    map[int]*models.TeamTask{taskID: task},
+		membersByKey: map[string]*models.TeamMember{"architect": architect},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":      "outbound",
+		"memberId":   "architect",
+		"from":       "architect",
+		"to":         "architect",
+		"rootTaskId": messageID,
+		"messageId":  "self-loop",
+		"text":       "42",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178677-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("invalid worker route must not close root task, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "message_warning" {
+		t.Fatalf("expected protocol warning event, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if stored["leaderMediatedRouteViolation"] != true || stored["nonAuthoritative"] != true {
+		t.Fatalf("expected route violation marker, got %#v", stored)
+	}
+	step := stored["collaborationStep"].(map[string]interface{})
+	if step["type"] != "warning" {
+		t.Fatalf("expected warning collaboration step, got %#v", step)
+	}
+}
+
+func TestProjectTeamEventLeaderMediatedPrematureLeaderCompletionWaitsForAssignments(t *testing.T) {
+	taskID := 178
+	messageID := "team-31-task-178"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	leader := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Role:          "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	assignmentPayload := `{"event":"reply","leaderDispatchOnly":true,"status":"dispatched","rootTaskId":"team-31-task-178","memberId":"leader","collaborationStep":{"type":"assignment","status":"dispatched","actor":"leader","target":"designer","rootTaskId":"team-31-task-178","content":"Please return a number."}}`
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+		createdEvents: []models.TeamEvent{{
+			TeamID:      31,
+			TaskID:      &taskID,
+			EventType:   "reply",
+			PayloadJSON: &assignmentPayload,
+		}},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "leader",
+		"messageId":      messageID,
+		"taskId":         messageID,
+		"status":         "succeeded",
+		"summary":        "Final result ready too early",
+		"resultMarkdown": "Designer result is pending.",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178678-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("premature Leader completion must keep root task open, got %#v", repo.updatedTask)
+	}
+	stored := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[len(repo.createdEvents)-1].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored payload: %v", err)
+	}
+	if stored["leaderPrematureCompletion"] != true || stored["rootTaskTerminal"] != false {
+		t.Fatalf("expected premature completion marker, got %#v", stored)
+	}
+}
+
+func TestProjectTeamEventLeaderMediatedLeaderCompletionAfterAssignmentResultsClosesRoot(t *testing.T) {
+	taskID := 179
+	messageID := "team-31-task-179"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	leader := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Role:          "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	assignmentPayload := `{"event":"reply","leaderDispatchOnly":true,"status":"dispatched","rootTaskId":"team-31-task-179","memberId":"leader","collaborationStep":{"type":"assignment","status":"dispatched","actor":"leader","target":"designer","rootTaskId":"team-31-task-179","content":"Please return a number."}}`
+	resultPayload := `{"event":"outbound","assignmentResultOnly":true,"status":"succeeded","rootTaskId":"team-31-task-179","memberId":"designer","from":"designer","to":"leader","text":"1","collaborationStep":{"type":"result","status":"succeeded","actor":"designer","target":"leader","rootTaskId":"team-31-task-179","content":"1"}}`
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+		createdEvents: []models.TeamEvent{
+			{TeamID: 31, TaskID: &taskID, EventType: "reply", PayloadJSON: &assignmentPayload},
+			{TeamID: 31, TaskID: &taskID, EventType: "outbound", PayloadJSON: &resultPayload},
+		},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "leader",
+		"messageId":      messageID,
+		"taskId":         messageID,
+		"status":         "succeeded",
+		"summary":        "Designer returned 1; final synthesis complete.",
+		"resultMarkdown": "Final result: designer=1.",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID:     "1781171178679-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt == nil {
+		t.Fatalf("Leader final synthesis after member results should close root task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedTask.ResultJSON == nil || !strings.Contains(*repo.updatedTask.ResultJSON, "designer=1") {
+		t.Fatalf("expected final synthesis result stored, got %#v", repo.updatedTask.ResultJSON)
 	}
 }
 
@@ -1317,6 +1792,90 @@ func TestProjectTeamEventTreatsExplicitCompletionToolReplyAsTaskCompleted(t *tes
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" {
 		t.Fatalf("expected stored event type task_completed, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored event payload: %v", err)
+	}
+	step, ok := stored["collaborationStep"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected collaboration step in stored event, got %#v", stored)
+	}
+	if got := step["summary"]; got != "Team report ready" {
+		t.Fatalf("expected collaboration step summary to stay compact, got %#v", got)
+	}
+	if got := step["content"]; got != "Full report" {
+		t.Fatalf("expected collaboration step content to preserve full resultMarkdown, got %#v", got)
+	}
+}
+
+func TestProjectTeamEventCompletionReportMentioningDispatchStillClosesTask(t *testing.T) {
+	taskID := 69
+	messageID := "team-31-bootstrap-introduction"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	report := strings.Join([]string{
+		"# Team 31 introduction",
+		"",
+		"## Collaboration",
+		"Leader uses team_send for task dispatch to each member, then waits for worker evidence before final synthesis.",
+		"PM, Designer, and Architect each receive scoped assignments and return concrete artifacts through the shared workspace.",
+		"Task dispatch is part of this completed report, not a dispatch-only acknowledgement.",
+	}, "\n")
+	payload := map[string]interface{}{
+		"event":          "task_completed",
+		"messageId":      messageID,
+		"memberId":       "leader",
+		"taskId":         "team-31-task-69",
+		"status":         "succeeded",
+		"summary":        "Completed team introduction.",
+		"resultMarkdown": report,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178657-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("expected completion report mentioning dispatch to close task, got %#v", repo.updatedTask)
+	}
+	if repo.updatedTask.ResultJSON == nil || !strings.Contains(*repo.updatedTask.ResultJSON, "Task dispatch is part of this completed report") {
+		t.Fatalf("expected full report to be stored on task result, got %#v", repo.updatedTask.ResultJSON)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored event payload: %v", err)
+	}
+	step := stored["collaborationStep"].(map[string]interface{})
+	if got, _ := step["content"].(string); !strings.Contains(got, "Leader uses team_send") {
+		t.Fatalf("expected collaboration step content to preserve report, got %#v", got)
 	}
 }
 
@@ -1530,7 +2089,16 @@ func (s *teamRepositoryStub) EventExistsByStreamID(teamID int, streamID string) 
 	return false, nil
 }
 func (s *teamRepositoryStub) ListEventsByTeamID(teamID int, limit int) ([]models.TeamEvent, error) {
-	return nil, nil
+	events := make([]models.TeamEvent, 0, len(s.createdEvents))
+	for _, event := range s.createdEvents {
+		if event.TeamID == teamID {
+			events = append(events, event)
+		}
+	}
+	if limit > 0 && len(events) > limit {
+		events = events[:limit]
+	}
+	return events, nil
 }
 func (s *teamRepositoryStub) ListEventsBeforeID(teamID, beforeID, limit int) ([]models.TeamEvent, error) {
 	return nil, nil
