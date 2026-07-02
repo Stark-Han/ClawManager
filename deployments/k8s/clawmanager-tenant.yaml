@@ -1180,7 +1180,21 @@ spec:
             - name: K8S_NAMESPACE
               value: "clawmanager{TENANT_SUFFIX}"
             - name: K8S_STORAGE_CLASS
+              value: "longhorn"
+            - name: CLAWMANAGER_STORAGE_PROFILE
+              value: "cluster"
+            - name: K8S_HOSTPATH_FALLBACK_ENABLED
+              value: "false"
+            - name: K8S_PVC_BIND_TIMEOUT
+              value: "2m"
+            - name: K8S_CONTROL_PLANE_STORAGE_CLASS
               value: "manual"
+            - name: K8S_INSTANCE_STORAGE_CLASS
+              value: "longhorn"
+            - name: K8S_WORKSPACE_STORAGE_CLASS
+              value: "manual"
+            - name: K8S_WORKSPACE_ACCESS_MODE
+              value: "ReadWriteMany"
             - name: K8S_PV_HOST_PATH_PREFIX
               value: "/data/clawmanager{TENANT_SUFFIX}/instances"
             - name: CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB

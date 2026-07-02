@@ -2895,7 +2895,6 @@ function buildKanbanColumns(
   if (!group) {
     return columns;
   }
-  const terminal = ["succeeded", "failed", "stale"].includes(visualStatus);
   const cardByWorkKey = new Map<string, KanbanTaskCard>();
   const delegatedTargets = steps
     .filter((step) =>
@@ -2911,7 +2910,7 @@ function buildKanbanColumns(
     }
     const workKey = kanbanWorkKey(step, delegatedTargets, steps);
     const previous = cardByWorkKey.get(workKey);
-    const column = terminal ? "done" : kanbanColumnForStep(step, visualStatus, steps);
+    const column = kanbanColumnForStep(step, visualStatus, steps);
     const stepStatus = (step.status || "").toLowerCase();
     const successfulStep = ["succeeded", "success", "completed", "complete", "done", "finished", "ok"].includes(stepStatus);
     const card: KanbanTaskCard = {
@@ -2925,8 +2924,6 @@ function buildKanbanColumns(
       time: step.time,
       progress: step.progress,
       statusLabel: successfulStep
-        ? "已完成"
-        : terminal && column === "done" && !isTerminalEventType(step.eventType)
         ? "已完成"
         : eventVerb(step.eventType),
     };
@@ -4155,15 +4152,16 @@ function buildTeamChatMessages(
     [...memberById.values()].map((member) => [member.member_key, member]),
   );
   for (const group of groups) {
-    const firstItemSequence = group.items.reduce(
-      (current, item) => Math.min(current, item.event.id),
+    const firstItemTime = group.items.reduce(
+      (current, item) => Math.min(current, item.timeMs),
       Number.POSITIVE_INFINITY,
     );
-    const taskSequenceBase = Number.isFinite(firstItemSequence)
-      ? firstItemSequence - 0.1
-      : group.task
-        ? group.task.id * 1000000
-        : group.latestAt;
+    const taskCreatedAt = group.task ? new Date(group.task.created_at).getTime() : Number.NaN;
+    const taskSequenceBase = Number.isFinite(taskCreatedAt)
+      ? taskCreatedAt * 1000
+      : Number.isFinite(firstItemTime)
+        ? firstItemTime * 1000 - 100
+        : group.latestAt * 1000;
     if (group.task) {
       const target =
         memberById.get(group.task.target_member_id)?.member_key ||
@@ -4330,7 +4328,7 @@ function chatMessageFromItem(
     senderKey,
     content,
     time: item.timeMs,
-    sequence: item.event.id,
+    sequence: item.timeMs * 1000 + item.event.id / 1000000,
     tone:
       isAssignmentEvent && hasContent
         ? isFeedbackEvent

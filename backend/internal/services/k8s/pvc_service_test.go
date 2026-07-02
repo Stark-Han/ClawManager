@@ -291,6 +291,38 @@ func TestCreateTeamSharedPVCCreatesWorkspaceNFSPVBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestCreateTeamSharedPVCUsesWorkspaceNFSInsteadOfInstanceStorageClass(t *testing.T) {
+	ctx := context.Background()
+	client := &Client{
+		Clientset:            fake.NewSimpleClientset(),
+		Namespace:            "clawmanager",
+		StorageClass:         "longhorn",
+		InstanceStorageClass: "longhorn",
+		WorkspaceRoot:        t.TempDir(),
+		WorkspaceNFSServer:   "workspace-store.clawmanager-system.svc.cluster.local",
+		WorkspaceNFSPath:     "/",
+	}
+	service := &PVCService{
+		client:           client,
+		namespaceService: &NamespaceService{client: client},
+	}
+
+	pvc, err := service.CreateTeamSharedPVC(ctx, 1, 28, 10, "")
+	if err != nil {
+		t.Fatalf("CreateTeamSharedPVC returned error: %v", err)
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "manual" {
+		t.Fatalf("Team shared PVC storage class = %#v, want manual static NFS binding", pvc.Spec.StorageClassName)
+	}
+	pv, err := client.Clientset.CoreV1().PersistentVolumes().Get(ctx, "clawreef-pv-clawmanager-user-1-team-28-shared", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected Team shared NFS PV: %v", err)
+	}
+	if pv.Spec.NFS == nil {
+		t.Fatalf("Team shared PV should use workspace NFS, got %#v", pv.Spec.PersistentVolumeSource)
+	}
+}
+
 func TestCreateTeamSharedPVCRejectsExistingNonWorkspaceNFSPV(t *testing.T) {
 	ctx := context.Background()
 	namespace := "clawmanager-user-1"

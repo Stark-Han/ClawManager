@@ -963,6 +963,73 @@ func TestProjectTeamEventDoesNotTreatDelegationReplyAsTaskCompleted(t *testing.T
 	}
 }
 
+func TestProjectTeamEventDoesNotTreatProcessOnlyTaskCompletedAsRootCompletion(t *testing.T) {
+	taskID := 70
+	messageID := "team-31-bootstrap-introduction"
+	task := &models.TeamTask{
+		ID:             taskID,
+		TeamID:         31,
+		TargetMemberID: 120,
+		MessageID:      messageID,
+		Status:         models.TeamTaskStatusRunning,
+		UpdatedAt:      time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID:            120,
+		TeamID:        31,
+		MemberKey:     "leader",
+		Status:        models.TeamMemberStatusBusy,
+		CurrentTaskID: &taskID,
+		Availability:  models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":     "task_completed",
+		"messageId": messageID,
+		"memberId":  "leader",
+		"taskId":    "team-31-task-70",
+		"status":    "succeeded",
+		"collaborationStep": map[string]interface{}{
+			"type":    "progress",
+			"summary": "Good, I have the team configuration.",
+			"content": "Good, I have the team configuration. Now let me write the comprehensive report to the shared workspace and then finalize.",
+		},
+		"toolCall": map[string]interface{}{
+			"name": teamTaskCompletionTool,
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	err = service.projectTeamEvent(&models.Team{ID: 31}, nil, redisStreamMessage{
+		ID:     "1781171178661-0",
+		Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("process-only completion wrapper must not complete task, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("expected process-only completion wrapper to be stored as reply, got %#v", repo.createdEvents)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode stored event payload: %v", err)
+	}
+	if stored["nonAuthoritativeCompletion"] != true {
+		t.Fatalf("expected nonAuthoritativeCompletion marker, got %#v", stored)
+	}
+}
+
 func TestProjectTeamEventLeaderDispatchCompletionDoesNotCloseRootTask(t *testing.T) {
 	taskID := 169
 	messageID := "team-31-task-169"
@@ -1984,6 +2051,139 @@ func TestMergeMissingEventFieldsEnrichesOutboundPayload(t *testing.T) {
 	}
 	if !teamEventHasBody(merged) {
 		t.Fatalf("expected enriched event to have displayable body: %#v", merged)
+	}
+}
+
+func TestCollectTeamArtifactReferencesStopsAtMarkdownAndJSONDelimiters(t *testing.T) {
+	payload := map[string]interface{}{
+		"resultMarkdown": "Report: `/team/results/team-22-task-40/team-introduction-report.md`.",
+		"raw":            `{"resultMarkdown":"/team/results/team-22-task-40/team-introduction-report.md\\n","artifactRefs":["/team/results/team-22-task-40/result.md"]}`,
+		"artifactRefs": []interface{}{
+			"/team/results/team-22-task-40/team-introduction-report.md",
+			"/team/results/team-22-task-40/result.md",
+		},
+	}
+
+	got := collectTeamArtifactReferences(payload)
+	want := map[string]bool{
+		"/team/results/team-22-task-40/team-introduction-report.md": true,
+		"/team/results/team-22-task-40/result.md":                   true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("artifact refs = %#v, want exactly %#v", got, want)
+	}
+	for _, ref := range got {
+		if !want[ref] {
+			t.Fatalf("unexpected malformed artifact ref %q in %#v", ref, got)
+		}
+	}
+}
+
+func TestProjectTeamEventAcceptsExistingMarkdownArtifactReference(t *testing.T) {
+	teamID := 22
+	taskID := 40
+	messageID := "team-22-bootstrap-introduction"
+	workspaceRoot := t.TempDir()
+	resultDir := filepath.Join(workspaceRoot, "teams", "user-1", "team-22-shared", "results", "team-22-task-40")
+	if err := os.MkdirAll(resultDir, 0o775); err != nil {
+		t.Fatalf("create result dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "team-introduction-report.md"), []byte("full report"), 0o664); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	task := &models.TeamTask{ID: taskID, TeamID: teamID, TargetMemberID: 120, MessageID: messageID, Status: models.TeamTaskStatusRunning, UpdatedAt: time.Now().UTC()}
+	leader := &models.TeamMember{ID: 120, TeamID: teamID, MemberKey: "leader", Role: "leader", Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID, Availability: models.TeamMemberAvailabilityBusy}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+	}
+	service := &teamService{repo: repo, runtimeWorkspaceRoot: workspaceRoot}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "leader",
+		"messageId":      messageID,
+		"status":         "succeeded",
+		"summary":        "Team introduction complete.",
+		"resultMarkdown": "Full report: `/team/results/team-22-task-40/team-introduction-report.md`.",
+		"artifactRefs":   []string{"/team/results/team-22-task-40/team-introduction-report.md"},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	if err := service.projectTeamEvent(&models.Team{ID: teamID, UserID: 1, SharedMountPath: "/team", CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID: "1781171178688-0", Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("existing Markdown artifact should allow completion, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "task_completed" {
+		t.Fatalf("expected task_completed event, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventMissingArtifactKeepsFinalAnswerInWarning(t *testing.T) {
+	teamID := 22
+	taskID := 40
+	messageID := "team-22-bootstrap-introduction"
+	previouslyFinished := time.Now().UTC().Add(-time.Minute)
+	task := &models.TeamTask{ID: taskID, TeamID: teamID, TargetMemberID: 120, MessageID: messageID, Status: models.TeamTaskStatusSucceeded, FinishedAt: &previouslyFinished, UpdatedAt: time.Now().UTC()}
+	leader := &models.TeamMember{ID: 120, TeamID: teamID, MemberKey: "leader", Role: "leader", Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID, Availability: models.TeamMemberAvailabilityBusy}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+	}
+	service := &teamService{repo: repo, runtimeWorkspaceRoot: t.TempDir()}
+	finalBody := "# Delivery Team\n\nDetailed final answer."
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event":          "task_completed",
+		"memberId":       "leader",
+		"messageId":      messageID,
+		"status":         "succeeded",
+		"summary":        "Team introduction complete.",
+		"resultMarkdown": finalBody,
+		"artifactRefs":   []string{"/team/results/team-22-task-40/missing.md"},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	if err := service.projectTeamEvent(&models.Team{ID: teamID, UserID: 1, SharedMountPath: "/team", CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID: "1781171178689-0", Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if repo.updatedTask == nil || repo.updatedTask.Status == models.TeamTaskStatusSucceeded || repo.updatedTask.FinishedAt != nil {
+		t.Fatalf("missing artifact must reopen an incorrectly terminal task, got %#v", repo.updatedTask)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "message_warning" {
+		t.Fatalf("expected artifact warning event, got %#v", repo.createdEvents)
+	}
+	stored := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(*repo.createdEvents[0].PayloadJSON), &stored); err != nil {
+		t.Fatalf("decode warning: %v", err)
+	}
+	if stored["resultMarkdown"] != finalBody || stored["summary"] != "Team introduction complete." {
+		t.Fatalf("artifact warning must preserve final answer, got %#v", stored)
+	}
+	if stored["artifactValidationMessage"] == "" {
+		t.Fatalf("expected separate artifact validation diagnostic, got %#v", stored)
+	}
+}
+
+func TestNormalizeTeamArtifactReferencesDoesNotCorruptSerializedJSON(t *testing.T) {
+	service := &teamService{runtimeWorkspaceRoot: "/workspaces"}
+	payload := map[string]interface{}{
+		"raw": `{"resultMarkdown":"line one\n/team/results/team-22-task-40/result.md","artifactRefs":["/team/results/team-22-task-40/result.md"]}`,
+	}
+	service.normalizeTeamArtifactReferences(&models.Team{ID: 22, UserID: 1, SharedMountPath: "/team"}, payload)
+	got, _ := payload["raw"].(string)
+	if strings.Contains(got, "line one/n") || !strings.Contains(got, `line one\n`) {
+		t.Fatalf("serialized JSON escapes were corrupted: %q", got)
 	}
 }
 

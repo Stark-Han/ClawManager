@@ -150,12 +150,10 @@ func (s *PVCService) CreateTeamSharedPVC(ctx context.Context, userID, teamID, st
 
 	pvcName := s.client.GetTeamSharedPVCName(teamID)
 	namespace := s.client.GetNamespace(userID)
-	if storageClass == "" {
-		storageClass = firstNonEmpty(s.client.WorkspaceStorageClass, s.client.StorageClass)
-	}
 	storageSize := resource.MustParse(fmt.Sprintf("%dGi", storageSizeGB))
-	workspaceAccessMode := workspacePVCAccessMode(s.client.WorkspaceAccessMode)
 	useWorkspaceNFS := strings.TrimSpace(s.client.WorkspaceNFSServer) != ""
+	storageClass = s.teamSharedPVCStorageClass(storageClass, useWorkspaceNFS)
+	workspaceAccessMode := workspacePVCAccessMode(s.client.WorkspaceAccessMode)
 	if useWorkspaceNFS {
 		if err := s.ensureTeamSharedWorkspaceDirectory(userID, teamID); err != nil {
 			return nil, err
@@ -215,6 +213,22 @@ func (s *PVCService) CreateTeamSharedPVC(ctx context.Context, userID, teamID, st
 
 func usesManualHostPathFallback(storageClass string) bool {
 	return strings.EqualFold(strings.TrimSpace(storageClass), "manual")
+}
+
+func (s *PVCService) teamSharedPVCStorageClass(requested string, useWorkspaceNFS bool) string {
+	requested = strings.TrimSpace(requested)
+	if !useWorkspaceNFS {
+		return firstNonEmpty(requested, s.client.WorkspaceStorageClass, s.client.StorageClass)
+	}
+	workspaceClass := strings.TrimSpace(s.client.WorkspaceStorageClass)
+	globalClass := strings.TrimSpace(s.client.StorageClass)
+	instanceClass := strings.TrimSpace(s.client.InstanceStorageClass)
+	if requested == "" ||
+		strings.EqualFold(requested, globalClass) ||
+		strings.EqualFold(requested, instanceClass) {
+		return firstNonEmpty(workspaceClass, "manual")
+	}
+	return requested
 }
 
 func (s *PVCService) shouldUseManualHostPathFallback(storageClass string) bool {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Edit these values before deploying, or override them with environment vars:
-#   TENANT_SUFFIX=-hxc NODE_PORT=32443 APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-update-20260618 ./clawmanager-apply.sh
+#   TENANT_SUFFIX=-hxc NODE_PORT=32443 APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-update-20260701 ./clawmanager-apply.sh
 #   OPENCLAW_RUNTIME_IMAGE=10.130.14.23:5000/openclaw-lite:latest HERMES_RUNTIME_IMAGE=10.130.14.23:5000/hermes-lite:latest ./clawmanager-apply.sh
 #
 # TENANT_SUFFIX examples:
@@ -10,7 +10,7 @@ set -euo pipefail
 #   -abc  = clawmanager-abc-system
 TENANT_SUFFIX="${TENANT_SUFFIX--hxc}"
 NODE_PORT="${NODE_PORT:-32443}"
-APP_IMAGE="${APP_IMAGE:-10.130.14.23:5000/clawmanager-hxc-app:team-update-20260618}"
+APP_IMAGE="${APP_IMAGE:-10.130.14.23:5000/clawmanager-hxc-app:team-update-20260701}"
 OPENCLAW_RUNTIME_IMAGE="${OPENCLAW_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest}"
 HERMES_RUNTIME_IMAGE="${HERMES_RUNTIME_IMAGE:-ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest}"
 
