@@ -1088,11 +1088,12 @@ const TeamDetailPage: React.FC = () => {
         return;
       }
       const relPath = workspaceLinkToRelativePath(workspacePath);
-      if (!relPath) {
+      const action = workspaceFileAction(relPath);
+      if (!relPath || !action) {
         return;
       }
       try {
-        if (isPreviewableWorkspacePath(relPath)) {
+        if (action === "preview") {
           const result = await teamService.previewWorkspaceFile(details.team.id, relPath);
           setWorkspacePreview({
             path: result.path,
@@ -1106,7 +1107,7 @@ const TeamDetailPage: React.FC = () => {
       } catch (err: any) {
         window.alert(
           err.response?.data?.error ||
-            (isPreviewableWorkspacePath(relPath) ? "预览文件失败" : "下载文件失败"),
+            (action === "preview" ? "预览文件失败" : "下载文件失败"),
         );
       }
     },
@@ -2007,6 +2008,86 @@ function isPreviewableWorkspacePath(path: string) {
   return /\.(md|txt|json)$/i.test(path.trim());
 }
 
+type WorkspaceFileAction = "preview" | "download";
+
+const DOWNLOADABLE_WORKSPACE_EXTENSIONS = new Set([
+  "7z",
+  "avi",
+  "bin",
+  "bmp",
+  "csv",
+  "css",
+  "doc",
+  "docx",
+  "gif",
+  "go",
+  "gz",
+  "htm",
+  "html",
+  "ico",
+  "java",
+  "jpeg",
+  "jpg",
+  "js",
+  "jsx",
+  "log",
+  "mov",
+  "mp3",
+  "mp4",
+  "pdf",
+  "png",
+  "ppt",
+  "pptx",
+  "ps1",
+  "py",
+  "rs",
+  "sh",
+  "sql",
+  "svg",
+  "tar",
+  "tgz",
+  "ts",
+  "tsx",
+  "tsv",
+  "wasm",
+  "wav",
+  "webm",
+  "webp",
+  "xls",
+  "xlsx",
+  "xml",
+  "yaml",
+  "yml",
+  "zip",
+]);
+const DOWNLOADABLE_EXTENSIONLESS_WORKSPACE_FILES = new Set([
+  "dockerfile",
+  "license",
+  "makefile",
+]);
+
+function workspaceFileAction(path: string): WorkspaceFileAction | null {
+  const normalized = workspaceLinkToRelativePath(path).trim();
+  if (
+    !normalized ||
+    normalized.endsWith("/") ||
+    /[<>{}*?$]/.test(normalized) ||
+    normalized.includes("[") ||
+    normalized.includes("]")
+  ) {
+    return null;
+  }
+  const filename = normalized.split("/").filter(Boolean).pop() || "";
+  if (isPreviewableWorkspacePath(normalized)) {
+    return "preview";
+  }
+  const extension = filename.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || "";
+  return DOWNLOADABLE_WORKSPACE_EXTENSIONS.has(extension) ||
+    DOWNLOADABLE_EXTENSIONLESS_WORKSPACE_FILES.has(filename.toLowerCase())
+    ? "download"
+    : null;
+}
+
 function isTeamWorkspaceLink(path: string) {
   const normalized = path.trim().replace(/\\/g, "/");
   return (
@@ -2014,6 +2095,26 @@ function isTeamWorkspaceLink(path: string) {
     /^\.?\/?team\/.+/i.test(normalized) ||
     /^\/workspaces\/teams\/user-\d+\/team-\d+-shared\//i.test(normalized)
   );
+}
+
+const TEAM_CHAT_COMPOSER_HEIGHTS = {
+  compact: 34,
+  medium: 64,
+  expanded: 94,
+} as const;
+
+function resizeTeamChatComposer(composer: HTMLTextAreaElement) {
+  composer.style.height = `${TEAM_CHAT_COMPOSER_HEIGHTS.compact}px`;
+  const contentHeight = composer.scrollHeight;
+  const targetHeight =
+    contentHeight <= TEAM_CHAT_COMPOSER_HEIGHTS.compact + 2
+      ? TEAM_CHAT_COMPOSER_HEIGHTS.compact
+      : contentHeight <= TEAM_CHAT_COMPOSER_HEIGHTS.medium
+        ? TEAM_CHAT_COMPOSER_HEIGHTS.medium
+        : TEAM_CHAT_COMPOSER_HEIGHTS.expanded;
+  composer.style.height = `${targetHeight}px`;
+  composer.style.overflowY =
+    contentHeight > TEAM_CHAT_COMPOSER_HEIGHTS.expanded ? "auto" : "hidden";
 }
 
 function teamArtifactRefsFromPayload(payload: Record<string, unknown>, step?: Record<string, unknown>) {
@@ -2158,6 +2259,23 @@ function CollaborationPanel({
     (member) => !["offline", "deleted", "deleting"].includes(member.status),
   ).length;
   const messageAnchorRefs = useRef(new Map<string, HTMLDivElement | null>());
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) {
+      return;
+    }
+    resizeTeamChatComposer(composer);
+  }, [taskPrompt]);
+  useEffect(() => {
+    const handleResize = () => {
+      if (composerRef.current) {
+        resizeTeamChatComposer(composerRef.current);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
   const firstMessageByGroup = useMemo(() => {
     const result = new Map<string, string>();
     for (const message of messages) {
@@ -2306,8 +2424,10 @@ function CollaborationPanel({
         )}
         <form onSubmit={onDispatch} className="flex items-end gap-2">
           <textarea
+            ref={composerRef}
             value={taskPrompt}
             onChange={(event) => onTaskPromptChange(event.target.value)}
+            onInput={(event) => resizeTeamChatComposer(event.currentTarget)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
@@ -2316,7 +2436,7 @@ function CollaborationPanel({
             }}
             rows={1}
             placeholder="发送消息..."
-            className="max-h-20 min-h-[34px] flex-1 resize-none rounded-full border border-[#d9d9d9] bg-white px-4 py-1.5 text-xs leading-5 text-gray-900 outline-none transition focus:border-[#9ca3af] focus:ring-2 focus:ring-gray-100"
+            className="h-[34px] min-h-[34px] flex-1 resize-none overflow-y-hidden rounded-[18px] border border-[#d9d9d9] bg-white px-4 py-1.5 text-xs leading-5 text-gray-900 outline-none transition-[height,border-color,box-shadow] duration-150 focus:border-[#9ca3af] focus:ring-2 focus:ring-gray-100"
           />
           <button
             type="submit"
@@ -5359,7 +5479,19 @@ function TeamChatMessageRow({
             <div className="mt-2 flex flex-wrap gap-1.5 border-t border-slate-100 pt-2">
               {message.artifactRefs.map((artifactRef) => {
                 const relativePath = workspaceLinkToRelativePath(artifactRef);
-                const previewable = isPreviewableWorkspacePath(relativePath);
+                const action = workspaceFileAction(relativePath);
+                if (!action) {
+                  return (
+                    <span
+                      key={artifactRef}
+                      title="共享目录或路径模板"
+                      className="inline-flex max-w-full items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-500"
+                    >
+                      <span className="truncate">{artifactRef}</span>
+                    </span>
+                  );
+                }
+                const previewable = action === "preview";
                 return (
                   <button
                     key={artifactRef}
@@ -5650,8 +5782,9 @@ function renderInlineMarkdown(
     if (token.startsWith("`")) {
       const codeValue = token.slice(1, -1);
       const workspacePath = workspaceLinkToRelativePath(codeValue);
-      if (onWorkspaceFileOpen && isTeamWorkspaceLink(codeValue)) {
-        const previewable = isPreviewableWorkspacePath(workspacePath);
+      const workspaceAction = workspaceFileAction(workspacePath);
+      if (onWorkspaceFileOpen && isTeamWorkspaceLink(codeValue) && workspaceAction) {
+        const previewable = workspaceAction === "preview";
         nodes.push(
           <button
             key={key}
@@ -5679,8 +5812,9 @@ function renderInlineMarkdown(
       const displayToken = token.replace(/[，。；：;,:.、)）\]}】》]+$/g, "");
       const suffix = token.slice(displayToken.length);
       const workspacePath = workspaceLinkToRelativePath(displayToken);
-      if (onWorkspaceFileOpen) {
-        const previewable = isPreviewableWorkspacePath(workspacePath);
+      const workspaceAction = workspaceFileAction(workspacePath);
+      if (onWorkspaceFileOpen && workspaceAction) {
+        const previewable = workspaceAction === "preview";
         nodes.push(
           <button
             key={key}
@@ -5701,7 +5835,14 @@ function renderInlineMarkdown(
           nodes.push(suffix);
         }
       } else {
-        nodes.push(token);
+        nodes.push(
+          <code key={key} className="rounded bg-white px-1 py-0.5 font-mono text-xs text-gray-700">
+            {displayToken}
+          </code>,
+        );
+        if (suffix) {
+          nodes.push(suffix);
+        }
       }
     } else if (token.startsWith("**")) {
       nodes.push(
