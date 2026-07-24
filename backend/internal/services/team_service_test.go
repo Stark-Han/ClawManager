@@ -2778,6 +2778,72 @@ func TestTeamChatPolicyBusinessNarrativeOverridesLegacyHiddenPolicy(t *testing.T
 	}
 }
 
+func TestNormalizeTeamRoleEventPayloadSeparatesLeaderFromWorkerAssignment(t *testing.T) {
+	member := &models.TeamMember{ID: 1, MemberKey: "leader", Role: "leader"}
+	task := &models.TeamTask{ID: 85, TeamID: 12, TargetMemberID: 1}
+	payload := map[string]interface{}{
+		"eventKind":    "leader_synthesis",
+		"assignmentId": "review-01",
+		"workId":       "review-01",
+		"phaseId":      "phase-review",
+	}
+	normalizeTeamRoleEventPayload(payload, member, task, false)
+	if eventString(payload, "assignmentId") != "leader-final-synthesis" ||
+		eventString(payload, "canonicalWorkId") != "leader-final-synthesis" ||
+		eventString(payload, "sourceWorkId") != "review-01" ||
+		eventString(payload, "phaseId") != "phase-final-synthesis" {
+		t.Fatalf("Leader synthesis must keep the Reviewer assignment only as source audit data: %#v", payload)
+	}
+
+	legacyProgress := map[string]interface{}{
+		"eventKind": "worker_progress", "assignmentId": "review-01", "summary": "Leader is assembling the final report.",
+	}
+	normalizeTeamRoleEventPayload(legacyProgress, member, task, false)
+	if eventString(legacyProgress, "eventKind") != "leader_progress" ||
+		eventString(legacyProgress, "reportedEventKind") != "worker_progress" {
+		t.Fatalf("legacy Leader progress must be interpreted by actor role without losing its reported kind: %#v", legacyProgress)
+	}
+}
+
+func TestNormalizeTrustedTeamChatOrderUsesOnlyBoundedNarrativeSourceTime(t *testing.T) {
+	now := time.Date(2026, 7, 24, 10, 5, 0, 0, time.UTC)
+	task := &models.TeamTask{
+		ID: 85, TeamID: 12, MessageID: "team-12-task-85",
+		CreatedAt: now.Add(-10 * time.Minute),
+	}
+	payload := map[string]interface{}{
+		"eventKind":        "agent_narrative",
+		"taskId":           "team-12-task-85",
+		"sourceOccurredAt": now.Add(-7 * time.Minute).Format(time.RFC3339Nano),
+	}
+	normalizeTrustedTeamChatOrder(payload, task, now)
+	if payload["chatOrderTrusted"] != true || eventString(payload, "chatOrderAt") == "" {
+		t.Fatalf("bounded narrative source time should be trusted for chat ordering: %#v", payload)
+	}
+	payload["lateProjection"] = true
+	payload["nonAuthoritative"] = true
+	payload["stateEffect"] = "none"
+	if !isTrustedLateTeamNarrative(payload) {
+		t.Fatalf("a trusted chat-only narrative may be projected after root completion without changing state: %#v", payload)
+	}
+
+	wrongTask := map[string]interface{}{
+		"eventKind":        "agent_narrative",
+		"taskId":           "team-12-task-999",
+		"sourceOccurredAt": now.Add(-7 * time.Minute).Format(time.RFC3339Nano),
+	}
+	normalizeTrustedTeamChatOrder(wrongTask, task, now)
+	if _, exists := wrongTask["chatOrderTrusted"]; exists {
+		t.Fatalf("a source timestamp from another root task must not affect chat ordering: %#v", wrongTask)
+	}
+
+	oldRuntime := map[string]interface{}{"eventKind": "agent_narrative"}
+	normalizeTrustedTeamChatOrder(oldRuntime, task, now)
+	if _, exists := oldRuntime["chatOrderTrusted"]; exists {
+		t.Fatalf("old Runtime events without source metadata must keep server ingestion order: %#v", oldRuntime)
+	}
+}
+
 func TestTeamChatPolicyKeepsTransportAcknowledgementHidden(t *testing.T) {
 	payload := map[string]interface{}{
 		"eventKind": "assignment_heartbeat", "summary": "still running", "visibleToChat": true,
@@ -5187,6 +5253,49 @@ func TestAgentNarrativeNeverBecomesMemberResult(t *testing.T) {
 	}
 	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusBusy {
 		t.Fatalf("agent narrative must not make the member terminal: %#v", repo.updatedMember)
+	}
+}
+
+func TestTrustedLateAgentNarrativeRemainsVisibleAfterRootCompletion(t *testing.T) {
+	now := time.Now().UTC()
+	taskID := 155
+	leaderID := 272
+	messageID := "team-78-task-155"
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 78, TargetMemberID: leaderID, MessageID: messageID,
+		Status: models.TeamTaskStatusSucceeded, WorkflowState: teamWorkflowStateCompleted,
+		CreatedAt: now.Add(-10 * time.Minute), FinishedAt: &now,
+	}
+	leader := &models.TeamMember{
+		ID: leaderID, TeamID: 78, MemberKey: "leader", Role: "leader",
+		Status: models.TeamMemberStatusIdle, Availability: models.TeamMemberAvailabilityIdle,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+	}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event": "reply", "eventKind": "agent_narrative",
+		"memberId": "leader", "rootTaskId": "team-78-task-155", "rootMessageId": messageID,
+		"nonAuthoritative": true, "stateEffect": "none", "lateProjection": true,
+		"sourceOccurredAt": now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+		"text":             "Leader reviewed the member results before publishing the final delivery.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamEvent(&models.Team{ID: 78, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID: "1784251779999-0", Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
+		t.Fatalf("trusted late narrative must be retained as chat-only history: %#v", repo.createdEvents)
+	}
+	if task.Status != models.TeamTaskStatusSucceeded || task.WorkflowState != teamWorkflowStateCompleted {
+		t.Fatalf("chat-only history must not reopen the completed root task: %#v", task)
 	}
 }
 

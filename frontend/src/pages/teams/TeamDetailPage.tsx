@@ -514,6 +514,30 @@ const eventTimeMs = (event: TeamEvent) => {
   return Number.isFinite(ms) ? ms : 0;
 };
 
+const chatEventTimeValue = (
+  event: TeamEvent,
+  payload: Record<string, unknown>,
+) => {
+  if (payloadBool(payload, ["chatOrderTrusted", "chat_order_trusted"]) !== true) {
+    return eventTimeValue(event);
+  }
+  const trustedValue = payloadText(payload, ["chatOrderAt", "chat_order_at"]);
+  return trustedValue && Number.isFinite(new Date(trustedValue).getTime())
+    ? trustedValue
+    : eventTimeValue(event);
+};
+
+const chatEventKind = (payload: Record<string, unknown>) =>
+  payloadText(payload, [
+    "chatBusinessKind",
+    "chat_business_kind",
+    "semanticEventKind",
+    "semantic_event_kind",
+    "eventKind",
+    "event_kind",
+    "kind",
+  ]).toLowerCase();
+
 const collaborationEventType = (
   event: TeamEvent,
   payload: Record<string, unknown>,
@@ -859,6 +883,8 @@ const buildCollaborationGroups = (
       taskByKey.get(taskKey) ||
       (event.task_id ? taskByID.get(event.task_id) : undefined);
     const actor = eventActorKey(event, payload, eventType, from, memberById, existingTask);
+    const chatOccurredAt = chatEventTimeValue(event, payload);
+    const chatTimeMs = chatOccurredAt ? new Date(chatOccurredAt).getTime() : 0;
     const item: CollaborationItem = {
       event,
       payload,
@@ -870,8 +896,8 @@ const buildCollaborationGroups = (
       taskKey,
       taskLabel: taskLabelFromKey(taskKey, event),
       content: collaborationContent(payload, eventType),
-      occurredAt: eventTimeValue(event),
-      timeMs: eventTimeMs(event),
+      occurredAt: chatOccurredAt,
+      timeMs: Number.isFinite(chatTimeMs) ? chatTimeMs : eventTimeMs(event),
     };
     const current = groups.get(taskKey);
     if (current) {
@@ -3082,9 +3108,9 @@ function hasMeaningfulChatBody(item: CollaborationItem) {
 }
 
 function isBusinessChatItem(item: CollaborationItem) {
-  const eventKind = payloadText(item.payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  const eventKind = chatEventKind(item.payload);
   const businessKinds = new Set([
-    "leader_plan", "worker_plan", "worker_progress", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder",
+    "leader_plan", "leader_progress", "worker_plan", "worker_progress", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder",
     "agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis",
     "completion_deferred", "completion_candidate", "completion_validation_warning", "assignment_recovery_started", "assignment_reissued", "assignment_recovery_exhausted",
   ]);
@@ -4915,7 +4941,7 @@ function uniqueRecentHeartbeatActors(
 }
 
 function isUserVisibleProcessItem(item: CollaborationItem) {
-  const eventKind = payloadText(item.payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  const eventKind = chatEventKind(item.payload);
   const visibleRaw = payloadText(item.payload, ["visibleToChat", "visible_to_chat"]).toLowerCase();
   const explicitlyHidden = ["false", "0", "no", "off"].includes(visibleRaw);
   const explicitlyVisible = payloadBool(item.payload, ["visibleToChat", "visible_to_chat"]) === true;
@@ -4934,6 +4960,7 @@ function isUserVisibleProcessItem(item: CollaborationItem) {
   }
   const processKinds = new Set([
     "leader_plan",
+    "leader_progress",
     "worker_plan",
     "worker_progress",
     "leader_synthesis",
@@ -4953,7 +4980,7 @@ function isUserVisibleProcessItem(item: CollaborationItem) {
 }
 
 function isAssignmentMonitorDigestItem(item: CollaborationItem) {
-  const eventKind = payloadText(item.payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  const eventKind = chatEventKind(item.payload);
   const chatPolicy = payloadText(item.payload, ["chatPolicy", "chat_policy"]).toLowerCase();
   if (["visible", "replaceable", "warning"].includes(chatPolicy)) {
     return false;
@@ -5000,7 +5027,7 @@ function chatMessageFromItem(
   const isFeedbackEvent =
     isWorkerToLeaderMessage(senderKey, item.to, leaderMemberId) ||
     isWorkerFeedbackEvent(item, senderKey, leaderMemberId, hasContent);
-  const eventKind = payloadText(item.payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  const eventKind = chatEventKind(item.payload);
   const isSystemProcess =
     senderKey === "clawmanager-monitor" ||
     eventKind === "assignment_check_requested" ||
@@ -5113,7 +5140,7 @@ function chatItemDedupeKey(
   isAssignmentEvent: boolean,
   isFeedbackEvent: boolean,
 ) {
-  const eventKind = payloadText(item.payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  const eventKind = chatEventKind(item.payload);
   const messageId =
     payloadTextDeep(item.payload, ["messageId", "message_id", "inReplyTo", "in_reply_to"]) ||
     item.event.message_id ||

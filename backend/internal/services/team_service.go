@@ -4502,7 +4502,7 @@ func isPostTerminalMutableTeamEvent(eventType string, payload map[string]interfa
 		return true
 	}
 	switch eventKind {
-	case "leader_plan", "worker_plan", "worker_progress", "leader_synthesis",
+	case "leader_plan", "leader_progress", "worker_plan", "worker_progress", "leader_synthesis",
 		"agent_narrative", "agent_plan", "agent_progress", "agent_synthesis",
 		"assignment_heartbeat", "assignment_check_requested", "assignment_check_result",
 		"leader_decision_reminder", "leader_synthesis_reminder", "completion_deferred":
@@ -5459,6 +5459,90 @@ func completionDecisionMessage(evaluation teamCompletionEvaluation) string {
 	return "最终交付暂未接受，ClawManager 正在等待可验证的工作流状态。"
 }
 
+func normalizeTeamRoleEventPayload(payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask, rootCompletion bool) {
+	if payload == nil || !isLeaderTeamMember(member) {
+		return
+	}
+	reportedKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
+	semanticKind := strings.ToLower(strings.TrimSpace(eventString(payload, "semanticEventKind", "semantic_event_kind")))
+	if semanticKind == "" {
+		semanticKind = reportedKind
+	}
+	switch semanticKind {
+	case "worker_plan":
+		semanticKind = "leader_plan"
+	case "worker_progress":
+		semanticKind = "leader_progress"
+	}
+	if semanticKind != reportedKind {
+		payload["reportedEventKind"] = reportedKind
+		payload["semanticEventKind"] = semanticKind
+		payload["eventKind"] = semanticKind
+	}
+	if semanticKind == "leader_synthesis" || rootCompletion {
+		const finalWorkID = "leader-final-synthesis"
+		inheritedWorkID := eventString(payload, "assignmentId", "assignment_id", "canonicalWorkId", "canonical_work_id", "workId", "work_id")
+		if inheritedWorkID != "" && inheritedWorkID != finalWorkID && eventString(payload, "sourceWorkId", "source_work_id") == "" {
+			payload["sourceWorkId"] = inheritedWorkID
+		}
+		payload["assignmentId"] = finalWorkID
+		payload["canonicalWorkId"] = finalWorkID
+		payload["workId"] = finalWorkID
+		if eventString(payload, "phaseId", "phase_id") == "" || inheritedWorkID != "" && inheritedWorkID != finalWorkID {
+			payload["phaseId"] = "phase-final-synthesis"
+		}
+	}
+	if task != nil {
+		payload["actorRole"] = "leader"
+	}
+}
+
+func normalizeTrustedTeamChatOrder(payload map[string]interface{}, task *models.TeamTask, now time.Time) {
+	if payload == nil || task == nil {
+		return
+	}
+	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
+	if eventKind != "agent_narrative" {
+		return
+	}
+	raw := eventString(payload, "sourceOccurredAt", "source_occurred_at")
+	if raw == "" {
+		return
+	}
+	sourceTime, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return
+	}
+	sourceTime = sourceTime.UTC()
+	lowerBound := task.CreatedAt.UTC().Add(-5 * time.Minute)
+	if task.CreatedAt.IsZero() {
+		lowerBound = now.UTC().Add(-24 * time.Hour)
+	}
+	upperBound := now.UTC().Add(2 * time.Minute)
+	if sourceTime.Before(lowerBound) || sourceTime.After(upperBound) {
+		return
+	}
+	for _, key := range []string{"rootTaskId", "root_task_id", "taskId", "task_id"} {
+		ref := eventString(payload, key)
+		if ref == "" {
+			continue
+		}
+		if parsed := parseClawManagerTeamTaskRef(task.TeamID, ref); parsed != 0 && parsed != task.ID {
+			return
+		}
+	}
+	payload["chatOrderAt"] = sourceTime.Format(time.RFC3339Nano)
+	payload["chatOrderTrusted"] = true
+}
+
+func isTrustedLateTeamNarrative(payload map[string]interface{}) bool {
+	return strings.EqualFold(eventString(payload, "eventKind", "event_kind", "kind"), "agent_narrative") &&
+		eventBool(payload, "lateProjection", "late_projection") &&
+		eventBool(payload, "chatOrderTrusted", "chat_order_trusted") &&
+		eventBool(payload, "nonAuthoritative", "non_authoritative") &&
+		strings.EqualFold(eventString(payload, "stateEffect", "state_effect"), "none")
+}
+
 func applyTeamChatPolicy(eventType string, payload map[string]interface{}, task *models.TeamTask, member *models.TeamMember) {
 	if payload == nil {
 		return
@@ -5580,7 +5664,7 @@ func teamChatEventIsBusinessContent(eventType, eventKind string, payload map[str
 		return false
 	}
 	switch eventKind {
-	case "leader_plan", "worker_plan", "worker_progress", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder",
+	case "leader_plan", "leader_progress", "worker_plan", "worker_progress", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder",
 		"agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis",
 		"member_result_updated", "completion_deferred", "completion_candidate", "completion_validation_warning",
 		"assignment_recovery_started", "assignment_reissued", "assignment_recovery_exhausted":
@@ -6394,12 +6478,16 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	// This deliberately runs after task/member resolution and before any
 	// terminal decision, so it cannot make an unrelated reply terminal.
 	hydrateExplicitCompletionEnvelope(payload, team, task, member, message.ID)
+	normalizeTrustedTeamChatOrder(payload, task, time.Now().UTC())
 	// Root terminal state is an immutable business boundary. Runtime retries can
 	// arrive after the accepted event (Team75 emitted a late leader_synthesis and
 	// stale completion), but they may not create a new warning, reopen a member,
 	// or replace the accepted summary. A completion proposal still receives an
 	// ACK so a compatible Runtime can stop retrying.
-	if task != nil && isTerminalTeamTaskStatus(task.Status) && isPostTerminalMutableTeamEvent(eventType, payload) {
+	if task != nil &&
+		isTerminalTeamTaskStatus(task.Status) &&
+		isPostTerminalMutableTeamEvent(eventType, payload) &&
+		!isTrustedLateTeamNarrative(payload) {
 		if isCompletionProposal {
 			decision := teamCompletionDecisionAccepted
 			reason := "root_already_completed"
@@ -6722,6 +6810,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		payload["memberTerminalOnly"] = true
 		payload["rootTaskTerminal"] = false
 	}
+	rootCompletion := eventSignalsCompletion &&
+		task != nil &&
+		member != nil &&
+		member.ID == task.TargetMemberID &&
+		isLeaderTeamMember(member)
+	normalizeTeamRoleEventPayload(payload, member, task, rootCompletion)
 	applyTeamChatPolicy(eventType, payload, task, member)
 	if stateNeutralAssignmentEvent &&
 		(strings.EqualFold(eventString(payload, "originalEvent"), "task_failed") ||
@@ -8462,7 +8556,7 @@ func collaborationStepTypeForEvent(eventType string, payload map[string]interfac
 	status := normalizedTeamTaskEventStatus(payload)
 	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
 	switch eventKind {
-	case "leader_plan", "worker_plan", "worker_progress", "artifact_changed", "assignment_check_requested", "assignment_check_result", "assignment_heartbeat", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder", "completion_deferred", "assignment_recovery_started", "assignment_reissued", "agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis":
+	case "leader_plan", "leader_progress", "worker_plan", "worker_progress", "artifact_changed", "assignment_check_requested", "assignment_check_result", "assignment_heartbeat", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder", "completion_deferred", "assignment_recovery_started", "assignment_reissued", "agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis":
 		return "progress"
 	case "completion_candidate":
 		return "progress"
@@ -8485,7 +8579,7 @@ func collaborationStepTypeForEvent(eventType string, payload map[string]interfac
 		return "warning"
 	}
 	switch eventType {
-	case "leader_plan", "worker_plan", "worker_progress", "artifact_changed", "assignment_check_requested", "assignment_check_result", "assignment_heartbeat", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder", "completion_candidate", "completion_deferred", "assignment_recovery_started", "assignment_reissued", "agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis":
+	case "leader_plan", "leader_progress", "worker_plan", "worker_progress", "artifact_changed", "assignment_check_requested", "assignment_check_result", "assignment_heartbeat", "leader_synthesis", "leader_synthesis_reminder", "leader_decision_reminder", "completion_candidate", "completion_deferred", "assignment_recovery_started", "assignment_reissued", "agent_narrative", "agent_plan", "agent_assignment", "agent_handoff", "agent_progress", "agent_delivery", "agent_review", "agent_synthesis":
 		return "progress"
 	case "completion_validation_warning", "completion_needs_confirmation", "completion_rejected", "assignment_recovery_exhausted":
 		return "warning"
@@ -8602,6 +8696,8 @@ func collaborationStepTitle(stepType, actor, target string, payload map[string]i
 	switch strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind"))) {
 	case "leader_plan":
 		return "Leader execution plan"
+	case "leader_progress":
+		return "Leader updates progress"
 	case "worker_plan":
 		return actor + " execution plan"
 	case "worker_progress":
