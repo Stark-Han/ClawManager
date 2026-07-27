@@ -2558,7 +2558,12 @@ function InteractionProcessPanel({
       : processProgress(group, steps, visualStatus, peerRoot)
     : 0;
   const isTerminal = ["succeeded", "failed", "stale"].includes(visualStatus);
-  const statusText = workflowStatusText(group?.task?.workflow_state) || processStatusText(visualStatus);
+  const latestRuntimeStatus = group ? latestGroupRuntimeStatus(group) : "";
+  const statusText = isTerminal
+    ? processStatusText(visualStatus)
+    : latestRuntimeStatus === "waiting_completion"
+      ? "等待显式完成确认"
+      : workflowStatusText(group?.task?.workflow_state) || processStatusText(visualStatus);
   const title = group?.task ? taskTitleText(group.task) : group?.title || "等待任务";
   const queryText = group?.task
     ? taskPromptText(group.task) || group.title
@@ -4592,6 +4597,19 @@ function workflowStatusText(state?: string) {
     default:
       return "";
   }
+}
+
+function latestGroupRuntimeStatus(group: CollaborationGroup) {
+  const latest = [...group.items].sort((left, right) => right.timeMs - left.timeMs)[0];
+  if (!latest) {
+    return "";
+  }
+  return payloadText(latest.payload, [
+    "runtimeStatus",
+    "runtime_status",
+    "availability",
+    "status",
+  ]).toLowerCase();
 }
 
 function peerLaneStatusClass(status: PeerLaneStatus) {

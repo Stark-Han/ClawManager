@@ -62,6 +62,24 @@ func TestWriteLiteOpenClawTeamIdentityFilesUseInjectedWorkspace(t *testing.T) {
 			t.Fatalf("injected SOUL.md missing member identity: %s", string(data))
 		}
 	}
+	agents, err := os.ReadFile(actualAgents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"## Leader Team Context Preflight",
+		"./team.json",
+		"./team-introduction.md",
+		"$CLAWMANAGER_TEAM_SHARED_DIR/team.json",
+	} {
+		if !strings.Contains(string(agents), expected) {
+			t.Fatalf("Leader AGENTS.md missing %q: %s", expected, string(agents))
+		}
+	}
+	roster, err := os.ReadFile(filepath.Join(workspace, "home", ".openclaw", "workspace", teamConfigFileName))
+	if err != nil || !strings.Contains(string(roster), `"memberId":"leader"`) {
+		t.Fatalf("injected team.json invalid: data=%q err=%v", string(roster), err)
+	}
 	if _, err := os.Stat(filepath.Join(workspace, teamAgentsFileName)); !os.IsNotExist(err) {
 		t.Fatalf("OpenClaw Team AGENTS.md must not be written to the unused workspace root: %v", err)
 	}

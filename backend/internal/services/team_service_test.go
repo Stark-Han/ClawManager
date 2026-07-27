@@ -487,6 +487,30 @@ func TestBuildTeamRosterConfigOmitsSecrets(t *testing.T) {
 	if !strings.Contains(roster, `"communicationMode":"leader_mediated"`) || !strings.Contains(roster, `"allowPeerToPeer":false`) {
 		t.Fatalf("roster missing leader-mediated collaboration policy: %s", roster)
 	}
+	var rosterConfig teamRosterConfig
+	if err := json.Unmarshal([]byte(roster), &rosterConfig); err != nil {
+		t.Fatalf("decode roster: %v", err)
+	}
+	if !strings.HasPrefix(rosterConfig.RosterHash, "sha256:") || len(rosterConfig.RosterHash) != len("sha256:")+64 {
+		t.Fatalf("roster missing stable content hash: %#v", rosterConfig)
+	}
+	changedPlans := append([]plannedTeamMember(nil), plans...)
+	changedPlans[1].DisplayName = "Changed Worker"
+	changedRoster, err := buildTeamRosterConfig(&models.Team{
+		ID:                9,
+		CommunicationMode: "leader_mediated",
+		SharedMountPath:   "/team",
+	}, changedPlans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changedRosterConfig teamRosterConfig
+	if err := json.Unmarshal([]byte(changedRoster), &changedRosterConfig); err != nil {
+		t.Fatal(err)
+	}
+	if changedRosterConfig.RosterHash == rosterConfig.RosterHash {
+		t.Fatalf("roster hash must change with roster content: %s", rosterConfig.RosterHash)
+	}
 }
 
 func TestPlanTeamMembersUsesProfileEffectiveRole(t *testing.T) {
@@ -972,6 +996,18 @@ func TestCompleteInitialLeaderTaskFromSnapshotWritesReportAndCompletion(t *testi
 	if !strings.Contains(report, "Developer") || !strings.Contains(report, "Redis Streams") {
 		t.Fatalf("bootstrap report missing member or mechanism detail: %s", report)
 	}
+	stableReportPath := filepath.Join(workspaceRoot, "teams", "user-1", "team-49-shared", teamIntroductionFileName)
+	stableReport, err := os.ReadFile(stableReportPath)
+	if err != nil {
+		t.Fatalf("expected stable Team introduction to be written: %v", err)
+	}
+	if string(stableReport) != report {
+		t.Fatalf("stable Team introduction must match the verified bootstrap report")
+	}
+	stableRosterPath := filepath.Join(workspaceRoot, "teams", "user-1", "team-49-shared", teamConfigFileName)
+	if _, err := os.Stat(stableRosterPath); err != nil {
+		t.Fatalf("expected stable shared roster to be written: %v", err)
+	}
 	if repo.updatedTask == nil || repo.updatedTask.Status != models.TeamTaskStatusSucceeded || repo.updatedTask.ResultJSON == nil {
 		t.Fatalf("expected task result to be persisted, got %#v", repo.updatedTask)
 	}
@@ -1042,6 +1078,49 @@ func TestProjectTeamEventDoesNotTreatPlainFinalReplyAsTaskCompleted(t *testing.T
 	}
 	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "reply" {
 		t.Fatalf("expected stored event type reply, got %#v", repo.createdEvents)
+	}
+}
+
+func TestProjectTeamEventQueuesBoundedRecoveryAfterLeaderTurnEnds(t *testing.T) {
+	taskID := 69
+	messageID := "team-31-user-root"
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 31, TargetMemberID: 120, MessageID: messageID,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStatePlanning,
+		PayloadJSON: `{"prompt":"Describe the current Team members."}`, UpdatedAt: time.Now().UTC(),
+	}
+	member := &models.TeamMember{
+		ID: 120, TeamID: 31, MemberKey: "leader", Role: "leader",
+		Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID, Availability: models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": member},
+	}
+	service := &teamService{repo: repo}
+	payloadJSON, err := json.Marshal(map[string]interface{}{
+		"event": "task_progress", "eventKind": "turn_finished_without_completion",
+		"messageId": messageID, "memberId": "leader", "taskId": "team-31-task-69",
+		"status": "waiting_completion", "runtimeStatus": "waiting_completion",
+		"activeTurnFinished": true, "hadAssistantNarrative": true,
+		"hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
+		"summary": "Agent turn ended and is waiting for an explicit completion receipt.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.projectTeamEvent(
+		&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated},
+		nil,
+		redisStreamMessage{ID: "1781171178655-1", Fields: map[string]string{"payload": string(payloadJSON)}},
+	); err != nil {
+		t.Fatalf("projectTeamEvent returned error: %v", err)
+	}
+	if len(repo.outboxRows) != 1 || repo.outboxRows[0].MessageID != "leader-completion-recovery:31:69:1" {
+		t.Fatalf("expected one bounded completion recovery outbox row, got %#v", repo.outboxRows)
+	}
+	if task.Status == models.TeamTaskStatusSucceeded || task.FinishedAt != nil || task.AcceptedCompletionID != nil {
+		t.Fatalf("turn-end recovery must not infer task success: %#v", task)
 	}
 }
 
@@ -5692,6 +5771,122 @@ func TestReconcileDeferredCompletionNeverReusesReportFromOlderPlan(t *testing.T)
 	}
 	if reconciled || task.Status == models.TeamTaskStatusSucceeded || len(repo.createdEvents) != 1 {
 		t.Fatalf("an older plan report must not be auto-accepted after plan advancement: reconciled=%v task=%#v events=%#v", reconciled, task, repo.createdEvents)
+	}
+}
+
+func TestRequestLeaderCompletionRecoveryQueuesOneExplicitContinuation(t *testing.T) {
+	taskID := 245
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 92, TargetMemberID: 920,
+		MessageID: "team-92-task-root-message", Status: models.TeamTaskStatusRunning,
+		WorkflowState: teamWorkflowStatePlanning,
+		PayloadJSON:   `{"prompt":"Describe the current Team members.","responseLocale":"zh-CN"}`,
+	}
+	leader := &models.TeamMember{ID: 920, TeamID: 92, MemberKey: "leader", Role: "leader"}
+	repo := &teamRepositoryStub{}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"eventKind": "turn_finished_without_completion", "activeTurnFinished": true,
+		"hadAssistantNarrative": true, "hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
+	}
+	sourceEvent := &models.TeamEvent{ID: 501, TeamID: 92, TaskID: &taskID, EventType: "task_progress"}
+	team := &models.Team{ID: 92, CommunicationMode: teamCommunicationModeLeaderMediated}
+
+	if err := service.requestLeaderCompletionRecovery(team, nil, task, leader, payload, sourceEvent); err != nil {
+		t.Fatalf("requestLeaderCompletionRecovery returned error: %v", err)
+	}
+	if len(repo.outboxRows) != 1 {
+		t.Fatalf("expected one durable completion recovery envelope, got %#v", repo.outboxRows)
+	}
+	var envelope map[string]interface{}
+	if err := json.Unmarshal([]byte(repo.outboxRows[0].PayloadJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["requiresCompletion"] != true || eventString(envelope, "intent") != "leader_completion_recovery" {
+		t.Fatalf("unexpected completion recovery contract: %#v", envelope)
+	}
+	metadata, _ := envelope["metadata"].(map[string]interface{})
+	if eventInt(metadata, "completionRecoveryAttempt") != 1 {
+		t.Fatalf("expected exactly one recovery attempt marker: %#v", metadata)
+	}
+	prompt := eventString(envelope, "prompt")
+	for _, expected := range []string{"not permission to assume success", "team_complete_task", "team_update_progress", "no text from the previous turn will be converted into success"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("completion recovery prompt missing %q: %s", expected, prompt)
+		}
+	}
+	if task.Status != models.TeamTaskStatusRunning || task.AcceptedCompletionID != nil {
+		t.Fatalf("recovery must not terminalize the task: %#v", task)
+	}
+	if err := service.requestLeaderCompletionRecovery(team, nil, task, leader, payload, sourceEvent); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.outboxRows) != 1 {
+		t.Fatalf("recovery must be idempotent, got %#v", repo.outboxRows)
+	}
+}
+
+func TestRequestLeaderCompletionRecoveryRejectsUnsafeCases(t *testing.T) {
+	basePayload := func() map[string]interface{} {
+		return map[string]interface{}{
+			"eventKind": "turn_finished_without_completion", "activeTurnFinished": true,
+			"hadAssistantNarrative": true, "hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
+		}
+	}
+	cases := []struct {
+		name       string
+		mutateTask func(*models.TeamTask)
+		mutate     func(map[string]interface{}, *teamRepositoryStub)
+	}{
+		{name: "turn still active", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["activeTurnFinished"] = false }},
+		{name: "no assistant narrative", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["hadAssistantNarrative"] = false }},
+		{name: "outbound assignment", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["hadOutboundAssignment"] = true }},
+		{name: "already recovery turn", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["completionRecoveryAttempt"] = 1 }},
+		{name: "existing work item", mutate: func(_ map[string]interface{}, repo *teamRepositoryStub) {
+			repo.workItems = []models.TeamWorkItem{{TeamID: 93, RootTaskID: 246, WorkID: "worker-1", Status: models.TeamTaskStatusRunning}}
+		}},
+		{name: "planned workflow", mutateTask: func(task *models.TeamTask) { task.PlanVersion = 1 }},
+		{name: "active phase", mutateTask: func(task *models.TeamTask) {
+			phase := "phase-1"
+			task.CurrentPhaseID = &phase
+		}},
+		{name: "long running turn heartbeat", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) {
+			payload["eventKind"] = "assignment_heartbeat"
+		}},
+		{name: "bootstrap control plane", mutateTask: func(task *models.TeamTask) {
+			task.MessageID = "team-93-bootstrap-introduction"
+			task.PayloadJSON = `{"intent":"team_bootstrap_introduction"}`
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			taskID := 246
+			task := &models.TeamTask{
+				ID: taskID, TeamID: 93, TargetMemberID: 930, MessageID: "root-message",
+				Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStatePlanning,
+				PayloadJSON: `{"prompt":"A direct Leader task"}`,
+			}
+			repo := &teamRepositoryStub{}
+			payload := basePayload()
+			if tc.mutateTask != nil {
+				tc.mutateTask(task)
+			}
+			if tc.mutate != nil {
+				tc.mutate(payload, repo)
+			}
+			service := &teamService{repo: repo}
+			leader := &models.TeamMember{ID: 930, TeamID: 93, MemberKey: "leader", Role: "leader"}
+			if err := service.requestLeaderCompletionRecovery(
+				&models.Team{ID: 93, CommunicationMode: teamCommunicationModeLeaderMediated},
+				nil, task, leader, payload,
+				&models.TeamEvent{ID: 601, TeamID: 93, TaskID: &taskID, EventType: "task_progress"},
+			); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(repo.outboxRows) != 0 {
+				t.Fatalf("unsafe recovery case must not queue a continuation: %#v", repo.outboxRows)
+			}
+		})
 	}
 }
 

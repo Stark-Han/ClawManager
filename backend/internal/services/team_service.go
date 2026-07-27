@@ -30,20 +30,21 @@ import (
 )
 
 const (
-	teamSharedMountPath     = "/team"
-	teamConfigFileName      = "team.json"
-	teamAgentsFileName      = "AGENTS.md"
-	teamSoulFileName        = "SOUL.md"
-	teamManagedOverlayStart = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
-	teamManagedOverlayEnd   = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
-	teamConfigMountDirPath  = "/etc/clawmanager/team"
-	teamConfigMountPath     = teamConfigMountDirPath + "/" + teamConfigFileName
-	teamHermesSoulMountPath = "/config/.hermes/SOUL.md"
-	teamSharedUID           = 1000
-	teamSharedGID           = 1000
-	teamSharedUmask         = "0002"
-	teamRedisURLSecretKey   = "CLAWMANAGER_TEAM_REDIS_URL"
-	teamTokenSecretKey      = "CLAWMANAGER_TEAM_TOKEN"
+	teamSharedMountPath      = "/team"
+	teamConfigFileName       = "team.json"
+	teamIntroductionFileName = "team-introduction.md"
+	teamAgentsFileName       = "AGENTS.md"
+	teamSoulFileName         = "SOUL.md"
+	teamManagedOverlayStart  = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
+	teamManagedOverlayEnd    = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
+	teamConfigMountDirPath   = "/etc/clawmanager/team"
+	teamConfigMountPath      = teamConfigMountDirPath + "/" + teamConfigFileName
+	teamHermesSoulMountPath  = "/config/.hermes/SOUL.md"
+	teamSharedUID            = 1000
+	teamSharedGID            = 1000
+	teamSharedUmask          = "0002"
+	teamRedisURLSecretKey    = "CLAWMANAGER_TEAM_REDIS_URL"
+	teamTokenSecretKey       = "CLAWMANAGER_TEAM_TOKEN"
 
 	defaultTeamTaskStaleTimeout    = 30 * time.Minute
 	teamTaskStaleSweepInterval     = 30 * time.Second
@@ -933,10 +934,54 @@ func (s *teamService) writeSharedTeamRosterConfig(userID int, team *models.Team,
 		_ = os.Chmod(target, 0o2775)
 	}
 	path := filepath.Join(root, teamConfigFileName)
-	if err := os.WriteFile(path, []byte(rosterJSON), 0o664); err != nil {
+	if err := writeManagedTeamContextFile(path, []byte(rosterJSON), 0o664); err != nil {
 		return fmt.Errorf("failed to write shared Team roster %s: %w", path, err)
 	}
-	_ = os.Chmod(path, 0o664)
+	return nil
+}
+
+func writeManagedTeamContextFile(target string, content []byte, mode os.FileMode) error {
+	target = filepath.Clean(target)
+	parent := filepath.Dir(target)
+	if target == "." || target == string(filepath.Separator) || parent == "." || parent == string(filepath.Separator) {
+		return fmt.Errorf("invalid managed Team context path %q", target)
+	}
+	if err := os.MkdirAll(parent, 0o2775); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(parent, "."+filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(mode); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(content); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	chownTeamWorkspacePath(tempPath)
+	if err := os.Rename(tempPath, target); err != nil {
+		return err
+	}
+	cleanup = false
+	_ = os.Chmod(target, mode)
+	chownTeamWorkspacePath(target)
 	return nil
 }
 
@@ -1754,12 +1799,32 @@ func (s *teamService) completeInitialLeaderTaskFromSnapshot(userID int, team *mo
 	if err := ensureTeamWorkspaceDirectory(filepath.Dir(reportPath)); err != nil {
 		return nil, err
 	}
-	resultMarkdown := buildBackendBootstrapReport(team, activeMembers, taskRef, taskPayload)
-	if err := os.WriteFile(reportPath, []byte(resultMarkdown), 0o664); err != nil {
+	reportMembers := append([]models.TeamMember(nil), activeMembers...)
+	for idx := range reportMembers {
+		if reportMembers[idx].ID != leader.ID {
+			continue
+		}
+		reportMembers[idx].Status = models.TeamMemberStatusIdle
+		reportMembers[idx].Availability = models.TeamMemberAvailabilityIdle
+		reportMembers[idx].Progress = 100
+		reportMembers[idx].CurrentTaskID = nil
+	}
+	resultMarkdown := buildBackendBootstrapReport(team, reportMembers, taskRef, taskPayload)
+	if err := writeManagedTeamContextFile(reportPath, []byte(resultMarkdown), 0o664); err != nil {
 		return nil, fmt.Errorf("failed to write bootstrap report: %w", err)
 	}
-	_ = os.Chmod(reportPath, 0o664)
-	chownTeamWorkspacePath(reportPath)
+	rosterPath := filepath.Join(filepath.Clean(s.teamRuntimeSharedPathFor(userID, team.ID)), teamConfigFileName)
+	rosterBytes, rosterReadErr := os.ReadFile(rosterPath)
+	if rosterReadErr != nil || strings.TrimSpace(string(rosterBytes)) == "" {
+		rosterJSON, rosterBuildErr := buildTeamRosterConfigFromMembers(team, activeMembers)
+		if rosterBuildErr != nil {
+			return nil, fmt.Errorf("failed to rebuild bootstrap Team roster: %w", rosterBuildErr)
+		}
+		rosterBytes = []byte(rosterJSON)
+	}
+	if err := s.syncLeaderTeamContextFiles(userID, team, activeMembers, string(rosterBytes), resultMarkdown); err != nil {
+		return nil, err
+	}
 	artifactRef := "/team/" + reportRel
 	summary := fmt.Sprintf("Team %s 启动快照完成，已生成成员与协作机制介绍。", team.Name)
 	completionID := fmt.Sprintf("clawmanager-bootstrap:%s", taskRef)
@@ -2210,7 +2275,7 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 		"",
 		"## Team Identity Source Order",
 		"- Prefer SOUL.md for your member identity, role, profile, and collaboration rules.",
-		"- Then use CLAWMANAGER_TEAM_CONFIG_JSON / team.json for roster and communication mode.",
+		"- Then use team.json for the authoritative roster and communication mode.",
 		"- Environment variables are compatibility fallbacks, not a reason to ignore SOUL.md.",
 		"",
 		"## Collaboration Contract",
@@ -2224,6 +2289,16 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 		fmt.Sprintf("- Display name: %s", member.DisplayName),
 		fmt.Sprintf("- Runtime: %s", member.RuntimeType),
 		fmt.Sprintf("- Effective role: %s", effectiveTeamMemberRole(member)),
+	}
+	if member.IsLeader {
+		lines = append(lines,
+			"",
+			"## Leader Team Context Preflight",
+			"- Before handling the first user root task and whenever team.json changes, read ./team.json and ./team-introduction.md from this prompt workspace after SOUL.md.",
+			"- The same managed files are available at $CLAWMANAGER_TEAM_SHARED_DIR/team.json and $CLAWMANAGER_TEAM_SHARED_DIR/team-introduction.md.",
+			"- Treat team.json as the authoritative current roster. Treat team-introduction.md as the operating overview; if the two differ, team.json wins for current membership.",
+			"- Do not claim that no roster is available before checking these exact files.",
+		)
 	}
 	if member.ProfileKey != "" {
 		lines = append(lines, fmt.Sprintf("- Profile key: %s", member.ProfileKey))
@@ -2285,6 +2360,12 @@ func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance
 			}
 			chownTeamWorkspacePath(filepath.Join(openClawWorkspace, name))
 		}
+		if strings.TrimSpace(rosterJSON) != "" {
+			target := filepath.Join(openClawWorkspace, teamConfigFileName)
+			if err := writeManagedTeamContextFile(target, []byte(rosterJSON), 0o644); err != nil {
+				return fmt.Errorf("failed to write Lite Team OpenClaw roster file: %w", err)
+			}
+		}
 	}
 	files := map[string]string{}
 	if !strings.EqualFold(instance.Type, "openclaw") {
@@ -2297,10 +2378,9 @@ func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance
 	}
 	for name, content := range files {
 		target := filepath.Join(workspacePath, name)
-		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+		if err := writeManagedTeamContextFile(target, []byte(content), 0o644); err != nil {
 			return fmt.Errorf("failed to write Lite Team identity file %s: %w", name, err)
 		}
-		chownTeamWorkspacePath(target)
 	}
 	if strings.EqualFold(member.RuntimeType, "hermes") {
 		hermesDir := filepath.Join(workspacePath, ".hermes")
@@ -2313,6 +2393,69 @@ func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance
 			return fmt.Errorf("failed to write Hermes Lite SOUL.md: %w", err)
 		}
 		chownTeamWorkspacePath(target)
+	}
+	return nil
+}
+
+func teamMemberPromptWorkspace(instance *models.Instance) string {
+	if instance == nil || instance.WorkspacePath == nil {
+		return ""
+	}
+	root := strings.TrimSpace(*instance.WorkspacePath)
+	if root == "" {
+		return ""
+	}
+	if strings.EqualFold(instance.Type, "openclaw") {
+		return filepath.Join(root, "home", ".openclaw", "workspace")
+	}
+	return root
+}
+
+func (s *teamService) syncLeaderTeamContextFiles(userID int, team *models.Team, members []models.TeamMember, rosterJSON, introduction string) error {
+	if s == nil || team == nil {
+		return nil
+	}
+	sharedRoot := filepath.Clean(s.teamRuntimeSharedPathFor(userID, team.ID))
+	if sharedRoot == "." || sharedRoot == string(filepath.Separator) {
+		return fmt.Errorf("invalid Team shared workspace root for Team %d: %q", team.ID, sharedRoot)
+	}
+	contextFiles := []struct {
+		name    string
+		content string
+	}{
+		{name: teamConfigFileName, content: rosterJSON},
+		{name: teamIntroductionFileName, content: introduction},
+	}
+	for _, file := range contextFiles {
+		if strings.TrimSpace(file.content) == "" {
+			continue
+		}
+		if err := writeManagedTeamContextFile(filepath.Join(sharedRoot, file.name), []byte(file.content), 0o664); err != nil {
+			return fmt.Errorf("failed to write shared Leader context file %s: %w", file.name, err)
+		}
+	}
+	leader := findTeamLeader(members)
+	if leader == nil {
+		return fmt.Errorf("Team %d has no active Leader", team.ID)
+	}
+	instance, err := s.teamMemberInstance(leader)
+	if err != nil {
+		return fmt.Errorf("failed to resolve Team %d Leader instance: %w", team.ID, err)
+	}
+	promptWorkspace := teamMemberPromptWorkspace(instance)
+	if promptWorkspace == "" {
+		// During compatibility imports and isolated unit tests an instance may
+		// not be attached yet. The shared copies remain authoritative and the
+		// instance creation path writes team.json when it becomes available.
+		return nil
+	}
+	for _, file := range contextFiles {
+		if strings.TrimSpace(file.content) == "" {
+			continue
+		}
+		if err := writeManagedTeamContextFile(filepath.Join(promptWorkspace, file.name), []byte(file.content), 0o644); err != nil {
+			return fmt.Errorf("failed to write Leader prompt workspace context file %s: %w", file.name, err)
+		}
 	}
 	return nil
 }
@@ -2692,14 +2835,15 @@ func (s *teamService) refreshTeamRosterConfig(userID int, team *models.Team) err
 	if err != nil {
 		return err
 	}
-	rosterJSON, err := buildTeamRosterConfigFromMembers(team, activeTeamMembers(members))
+	activeMembers := activeTeamMembers(members)
+	rosterJSON, err := buildTeamRosterConfigFromMembers(team, activeMembers)
 	if err != nil {
 		return err
 	}
 	configData := map[string]string{
 		teamConfigFileName: rosterJSON,
 	}
-	for _, member := range activeTeamMembers(members) {
+	for _, member := range activeMembers {
 		if member.RuntimeType != "hermes" {
 			continue
 		}
@@ -2722,7 +2866,18 @@ func (s *teamService) refreshTeamRosterConfig(userID int, team *models.Team) err
 	}); err != nil {
 		return err
 	}
-	return s.writeSharedTeamRosterConfig(userID, team, rosterJSON)
+	introduction := buildBackendBootstrapReport(
+		team,
+		activeMembers,
+		fmt.Sprintf("team-%d-context", team.ID),
+		map[string]interface{}{
+			"workspaceContract": map[string]interface{}{
+				"sharedDir":         team.SharedMountPath,
+				"physicalSharedDir": s.teamRuntimeSharedPathFor(userID, team.ID),
+			},
+		},
+	)
+	return s.syncLeaderTeamContextFiles(userID, team, activeMembers, rosterJSON, introduction)
 }
 
 func (s *teamService) requireOwnedTeam(userID, teamID int) (*models.Team, error) {
@@ -7321,6 +7476,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			return err
 		}
 	}
+	if err := s.requestLeaderCompletionRecovery(team, bus, task, member, payload, event); err != nil {
+		return err
+	}
 	if isCompletionProposal && !atomicRootCompletionAccepted {
 		decision := eventString(payload, "completionDecision", "completion_decision")
 		reason := eventString(payload, "completionDecisionReason", "completion_decision_reason")
@@ -7360,6 +7518,125 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 	}
 	s.publishTeamRootWorkflowState(bus, task)
+	return nil
+}
+
+func (s *teamService) requestLeaderCompletionRecovery(team *models.Team, bus *redisBus, task *models.TeamTask, member *models.TeamMember, payload map[string]interface{}, sourceEvent *models.TeamEvent) error {
+	if s == nil || s.repo == nil || team == nil || task == nil || member == nil || payload == nil || sourceEvent == nil {
+		return nil
+	}
+	if !isLeaderMediatedTeam(team) ||
+		!isLeaderTeamMember(member) ||
+		member.ID != task.TargetMemberID ||
+		isTerminalTeamTaskStatus(task.Status) ||
+		task.AcceptedCompletionID != nil ||
+		task.PlanVersion != 0 ||
+		task.CurrentPhaseID != nil {
+		return nil
+	}
+	workflowState := strings.ToLower(strings.TrimSpace(task.WorkflowState))
+	if workflowState != "" && workflowState != teamWorkflowStatePlanning {
+		return nil
+	}
+	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
+	if eventKind != "turn_finished_without_completion" ||
+		!eventBool(payload, "activeTurnFinished", "active_turn_finished") ||
+		!eventBool(payload, "hadAssistantNarrative", "had_assistant_narrative") ||
+		eventBool(payload, "hadOutboundAssignment", "had_outbound_assignment") ||
+		eventInt(payload, "completionRecoveryAttempt", "completion_recovery_attempt") > 0 {
+		return nil
+	}
+	taskPayload := map[string]interface{}{}
+	if strings.TrimSpace(task.PayloadJSON) != "" {
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &taskPayload); err != nil {
+			return fmt.Errorf("decode Team task %d before completion recovery: %w", task.ID, err)
+		}
+	}
+	if isLeaderControlPlaneSnapshotTask(task, taskPayload) {
+		return nil
+	}
+	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
+	if err != nil {
+		return err
+	}
+	if len(items) != 0 {
+		return nil
+	}
+	phases, err := s.repo.ListWorkflowPhasesByRootTaskID(task.ID)
+	if err != nil {
+		return err
+	}
+	if len(phases) != 0 {
+		return nil
+	}
+
+	rootTaskRef := fmt.Sprintf("team-%d-task-%d", team.ID, task.ID)
+	recoveryMessageID := fmt.Sprintf("leader-completion-recovery:%d:%d:1", team.ID, task.ID)
+	prompt := strings.Join([]string{
+		"Your previous model turn ended without an explicit Team completion receipt. This is one bounded continuation of the same root task; it is not permission to assume success.",
+		"Re-read ./team.json and ./team-introduction.md before deciding whether the prior answer is correct.",
+		"If the user request is fully and accurately answered, call team_complete_task now with status=\"succeeded\", a concise summary, and the complete resultMarkdown.",
+		"If work is genuinely still in progress or waiting on an external operation, call team_update_progress with status=\"running\" and state the concrete remaining action. Do not claim completion.",
+		"If the task cannot be completed, use the explicit failure path with the observed reason.",
+		"Do not return another natural-language-only final answer; no text from the previous turn will be converted into success automatically.",
+	}, "\n\n")
+	envelope := map[string]interface{}{
+		"v":                  1,
+		"messageId":          recoveryMessageID,
+		"teamId":             strconv.Itoa(team.ID),
+		"from":               "clawmanager",
+		"to":                 member.MemberKey,
+		"replyTo":            teamTaskReplyTarget,
+		"requiresCompletion": true,
+		"completionTool":     teamTaskCompletionTool,
+		"intent":             "leader_completion_recovery",
+		"taskId":             rootTaskRef,
+		"rootTaskId":         rootTaskRef,
+		"rootMessageId":      task.MessageID,
+		"title":              "Explicit Team completion receipt required",
+		"prompt":             prompt,
+		"rawPrompt":          prompt,
+		"monitorPolicy":      defaultTeamMonitorPolicy(),
+		"metadata": map[string]interface{}{
+			"intent":                    "leader_completion_recovery",
+			"completionRecoveryAttempt": 1,
+			"sourceEventId":             sourceEvent.ID,
+			"sourceEventType":           sourceEvent.EventType,
+			"activeTurnFinished":        true,
+		},
+		"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	applyTeamTaskEnvelopeContext(envelope, task, member.MemberKey)
+	envelopeJSON, err := marshalJSON(envelope)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	sourceEventID := eventString(payload, "eventId", "event_id")
+	if sourceEventID == "" {
+		sourceEventID = recoveryMessageID + ":source"
+	}
+	outbox := &models.TeamEventOutbox{
+		TeamID:        team.ID,
+		SourceEventID: sourceEventID,
+		Destination:   teamInboxKey(team.ID, member.MemberKey),
+		MessageID:     recoveryMessageID,
+		PayloadJSON:   envelopeJSON,
+		Status:        "pending",
+		AvailableAt:   now,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := s.repo.CreateEventOutbox(outbox); err != nil {
+		return err
+	}
+	if outbox.ID > 0 && bus != nil {
+		if err := s.deliverTeamEventOutbox(team, bus, outbox); err != nil {
+			_ = s.repo.MarkEventOutboxFailed(outbox.ID, now.Add(teamOutboxRetryDelay(outbox.Attempts)), err.Error())
+			return nil
+		}
+		return s.repo.MarkEventOutboxDelivered(outbox.ID, time.Now().UTC())
+	}
 	return nil
 }
 
@@ -10681,6 +10958,7 @@ func leaderMemberKey(member *models.TeamMember) string {
 type teamRosterConfig struct {
 	Version             int                           `json:"version"`
 	TeamID              string                        `json:"teamId"`
+	RosterHash          string                        `json:"rosterHash"`
 	LeaderMemberID      string                        `json:"leaderMemberId"`
 	CommunicationMode   string                        `json:"communicationMode"`
 	CollaborationPolicy teamRosterCollaborationPolicy `json:"collaborationPolicy"`
@@ -10778,7 +11056,7 @@ func buildTeamRosterConfigWithSharedDir(team *models.Team, members []plannedTeam
 	if config.LeaderMemberID == "" {
 		return "", fmt.Errorf("team must include exactly one leader")
 	}
-	return marshalJSON(config)
+	return marshalTeamRosterConfig(config)
 }
 
 func buildTeamRosterConfigFromMembers(team *models.Team, members []models.TeamMember) (string, error) {
@@ -10831,6 +11109,17 @@ func buildTeamRosterConfigFromMembersWithSharedDir(team *models.Team, members []
 	if config.LeaderMemberID == "" {
 		return "", fmt.Errorf("team must include exactly one leader")
 	}
+	return marshalTeamRosterConfig(config)
+}
+
+func marshalTeamRosterConfig(config teamRosterConfig) (string, error) {
+	config.RosterHash = ""
+	canonical, err := marshalJSON(config)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	config.RosterHash = "sha256:" + fmt.Sprintf("%x", sum[:])
 	return marshalJSON(config)
 }
 
