@@ -2105,6 +2105,10 @@ const TEAM_CHAT_COMPOSER_HEIGHTS = {
 
 function resizeTeamChatComposer(composer: HTMLTextAreaElement) {
   composer.style.height = `${TEAM_CHAT_COMPOSER_HEIGHTS.compact}px`;
+  if (!composer.value) {
+    composer.style.overflowY = "hidden";
+    return;
+  }
   const contentHeight = composer.scrollHeight;
   const targetHeight =
     contentHeight <= TEAM_CHAT_COMPOSER_HEIGHTS.compact + 2
@@ -2426,7 +2430,13 @@ function CollaborationPanel({
           <textarea
             ref={composerRef}
             value={taskPrompt}
-            onChange={(event) => onTaskPromptChange(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              onTaskPromptChange(value);
+              if (!value) {
+                resizeTeamChatComposer(event.target);
+              }
+            }}
             onInput={(event) => resizeTeamChatComposer(event.currentTarget)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {

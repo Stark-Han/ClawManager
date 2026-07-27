@@ -3546,6 +3546,15 @@ func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redi
 		"expiresAt":          now.Add(2 * time.Minute).Format(time.RFC3339Nano),
 	}
 	applyTeamTaskEnvelopeContext(envelope, task, leader.MemberKey)
+	resultRefs := make([]string, 0)
+	for idx := range resultItems {
+		resultRefs = appendUniqueTeamArtifactRefs(resultRefs, workItemArtifactRefs(resultItems[idx])...)
+	}
+	contextRefs := s.durableTeamTaskContextRefs(team, task, resultRefs...)
+	if len(contextRefs) > 0 {
+		envelope["artifactRefs"] = contextRefs
+		envelope["contextRefs"] = contextRefs
+	}
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
 		return err
@@ -3633,6 +3642,95 @@ func workItemArtifactRefs(item models.TeamWorkItem) []string {
 		return parsed
 	}
 	return nil
+}
+
+func appendUniqueTeamArtifactRefs(target []string, refs ...string) []string {
+	seen := make(map[string]struct{}, len(target)+len(refs))
+	for _, ref := range target {
+		seen[ref] = struct{}{}
+	}
+	for _, raw := range refs {
+		ref := trimTeamArtifactReferenceToken(raw)
+		if !strings.HasPrefix(ref, teamSharedMountPath+"/") || strings.HasSuffix(ref, "/") {
+			continue
+		}
+		safe := true
+		for _, segment := range strings.Split(strings.TrimPrefix(ref, teamSharedMountPath+"/"), "/") {
+			if segment == "" || segment == "." || segment == ".." {
+				safe = false
+				break
+			}
+		}
+		if !safe {
+			continue
+		}
+		if _, exists := seen[ref]; exists {
+			continue
+		}
+		seen[ref] = struct{}{}
+		target = append(target, ref)
+		if len(target) >= 64 {
+			break
+		}
+	}
+	return target
+}
+
+// durableTeamTaskContextRefs rebuilds the collaboration context from durable
+// Team facts. Runtime-local turn state is an optimization only: a later
+// assignment must still receive the Leader plan and already-confirmed upstream
+// deliveries after a Runtime restart or a context-only notification turn.
+func (s *teamService) durableTeamTaskContextRefs(team *models.Team, task *models.TeamTask, extraRefs ...string) []string {
+	refs := appendUniqueTeamArtifactRefs(nil, extraRefs...)
+	if s == nil || s.repo == nil || team == nil || task == nil || len(refs) >= 64 {
+		return refs
+	}
+	if events, err := s.repo.ListEventsByTeamID(team.ID, 1000); err == nil {
+		legacyPlanCaptured := false
+		for idx := range events {
+			event := events[idx]
+			payload := teamEventPayloadMap(event)
+			if !teamEventMatchesRootTask(event, payload, task) {
+				continue
+			}
+			eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "semanticEventKind", "semantic_event_kind", "eventKind", "event_kind", "kind")))
+			artifactKind := strings.ToLower(strings.TrimSpace(eventString(payload, "artifactKind", "artifact_kind")))
+			if eventKind != "leader_plan" && artifactKind != "plan" {
+				continue
+			}
+			eventPlanVersion := eventInt(payload, "planVersion", "plan_version")
+			if task.PlanVersion > 0 && eventPlanVersion > 0 && int64(eventPlanVersion) != task.PlanVersion {
+				continue
+			}
+			if eventPlanVersion == 0 {
+				if legacyPlanCaptured {
+					continue
+				}
+				legacyPlanCaptured = true
+			}
+			eventRefs := explicitTeamArtifactReferences(payload)
+			if len(eventRefs) == 0 {
+				eventRefs = collectTeamArtifactReferences(payload)
+			}
+			refs = appendUniqueTeamArtifactRefs(refs, eventRefs...)
+			if len(refs) >= 64 {
+				return refs
+			}
+		}
+	}
+	if items, err := s.repo.ListWorkItemsByRootTaskID(task.ID); err == nil {
+		for idx := range items {
+			item := items[idx]
+			if item.Status != models.TeamTaskStatusSucceeded || item.SupersededBy != nil {
+				continue
+			}
+			refs = appendUniqueTeamArtifactRefs(refs, workItemArtifactRefs(item)...)
+			if len(refs) >= 64 {
+				break
+			}
+		}
+	}
+	return refs
 }
 
 func shouldMonitorTeamWorkItem(item models.TeamWorkItem, cutoff time.Time) bool {
@@ -5479,7 +5577,10 @@ func normalizeTeamRoleEventPayload(payload map[string]interface{}, member *model
 		payload["semanticEventKind"] = semanticKind
 		payload["eventKind"] = semanticKind
 	}
-	if semanticKind == "leader_synthesis" || rootCompletion {
+	finalArtifact := semanticKind == "artifact_changed" &&
+		strings.EqualFold(eventString(payload, "artifactKind", "artifact_kind"), "final") &&
+		strings.EqualFold(eventString(payload, "artifactScope", "artifact_scope"), "team")
+	if semanticKind == "leader_synthesis" || rootCompletion || finalArtifact {
 		const finalWorkID = "leader-final-synthesis"
 		inheritedWorkID := eventString(payload, "assignmentId", "assignment_id", "canonicalWorkId", "canonical_work_id", "workId", "work_id")
 		if inheritedWorkID != "" && inheritedWorkID != finalWorkID && eventString(payload, "sourceWorkId", "source_work_id") == "" {
@@ -5488,8 +5589,9 @@ func normalizeTeamRoleEventPayload(payload map[string]interface{}, member *model
 		payload["assignmentId"] = finalWorkID
 		payload["canonicalWorkId"] = finalWorkID
 		payload["workId"] = finalWorkID
-		if eventString(payload, "phaseId", "phase_id") == "" || inheritedWorkID != "" && inheritedWorkID != finalWorkID {
+		if rootCompletion || finalArtifact || eventString(payload, "phaseId", "phase_id") == "" || inheritedWorkID != "" && inheritedWorkID != finalWorkID {
 			payload["phaseId"] = "phase-final-synthesis"
+			payload["currentPhaseId"] = "phase-final-synthesis"
 		}
 	}
 	if task != nil {
@@ -7546,6 +7648,11 @@ func (s *teamService) buildLeaderMediatedResultNotificationEnvelope(team *models
 		"createdAt":          time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	applyTeamTaskEnvelopeContext(envelope, task, leaderKey)
+	contextRefs := s.durableTeamTaskContextRefs(team, task, explicitTeamArtifactReferences(notificationPayload)...)
+	if len(contextRefs) > 0 {
+		envelope["artifactRefs"] = contextRefs
+		envelope["contextRefs"] = contextRefs
+	}
 	return envelope, leaderKey
 }
 

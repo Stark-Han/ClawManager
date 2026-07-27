@@ -2803,6 +2803,81 @@ func TestNormalizeTeamRoleEventPayloadSeparatesLeaderFromWorkerAssignment(t *tes
 		eventString(legacyProgress, "reportedEventKind") != "worker_progress" {
 		t.Fatalf("legacy Leader progress must be interpreted by actor role without losing its reported kind: %#v", legacyProgress)
 	}
+
+	rootCompletion := map[string]interface{}{
+		"eventKind":    "completion_proposed",
+		"assignmentId": "leader-final-synthesis",
+		"phaseId":      "phase-review",
+	}
+	normalizeTeamRoleEventPayload(rootCompletion, member, task, true)
+	if eventString(rootCompletion, "phaseId") != "phase-final-synthesis" ||
+		eventString(rootCompletion, "currentPhaseId") != "phase-final-synthesis" {
+		t.Fatalf("root completion must never retain the previous Reviewer phase: %#v", rootCompletion)
+	}
+
+	finalArtifact := map[string]interface{}{
+		"eventKind":     "artifact_changed",
+		"artifactKind":  "final",
+		"artifactScope": "team",
+		"assignmentId":  "review-01",
+		"phaseId":       "phase-review",
+	}
+	normalizeTeamRoleEventPayload(finalArtifact, member, task, false)
+	if eventString(finalArtifact, "assignmentId") != "leader-final-synthesis" ||
+		eventString(finalArtifact, "sourceWorkId") != "review-01" ||
+		eventString(finalArtifact, "phaseId") != "phase-final-synthesis" {
+		t.Fatalf("final Leader artifact must use final synthesis identity: %#v", finalArtifact)
+	}
+}
+
+func TestLeaderResultNotificationRestoresDurablePlanAndMemberArtifacts(t *testing.T) {
+	leaderID := 1
+	developerID := 2
+	task := &models.TeamTask{
+		ID: 178, TeamID: 88, TargetMemberID: leaderID,
+		MessageID: "team-88-task-178", WorkflowState: teamWorkflowStateExecuting, PlanVersion: 2,
+	}
+	team := &models.Team{ID: 88, CommunicationMode: teamCommunicationModeLeaderMediated}
+	leader := &models.TeamMember{ID: leaderID, TeamID: 88, MemberKey: "delivery-lead", Role: "leader"}
+	developer := &models.TeamMember{ID: developerID, TeamID: 88, MemberKey: "developer", Role: "developer"}
+	planPayload := `{"eventKind":"leader_plan","planVersion":2,"artifactRefs":["/team/results/team-88-task-178/plan/collaboration-plan.md"]}`
+	stalePlanPayload := `{"eventKind":"leader_plan","planVersion":1,"artifactRefs":["/team/results/team-88-task-178/plan/obsolete-plan.md"]}`
+	planEventID := "plan-178"
+	stalePlanEventID := "plan-177"
+	resultRefsJSON := `["/team/artifacts/team-88-task-178/members/developer/dev-1/backend-analysis.md"]`
+	repo := &teamRepositoryStub{
+		membersByID: map[int]*models.TeamMember{leaderID: leader, developerID: developer},
+		createdEvents: []models.TeamEvent{{
+			TeamID: 88, TaskID: &task.ID, EventID: &planEventID, EventType: "task_progress", PayloadJSON: &planPayload,
+		}, {
+			TeamID: 88, TaskID: &task.ID, EventID: &stalePlanEventID, EventType: "task_progress", PayloadJSON: &stalePlanPayload,
+		}},
+		workItems: []models.TeamWorkItem{{
+			TeamID: 88, RootTaskID: task.ID, WorkID: "dev-1", OwnerMemberID: &developerID,
+			Status: models.TeamTaskStatusSucceeded, ArtifactRefsJSON: &resultRefsJSON,
+		}},
+	}
+	service := &teamService{repo: repo}
+	envelope, _ := service.buildLeaderMediatedResultNotificationEnvelope(
+		team,
+		task,
+		developer,
+		map[string]interface{}{
+			"assignmentId":   "dev-1",
+			"resultMarkdown": "Developer delivered.",
+			"artifactRefs":   []interface{}{"/team/artifacts/team-88-task-178/members/developer/dev-1/backend-analysis.md"},
+		},
+		"member-result-178",
+	)
+	refs, ok := envelope["contextRefs"].([]string)
+	if !ok {
+		t.Fatalf("expected durable context refs on Leader notification, got %#v", envelope["contextRefs"])
+	}
+	if len(refs) != 2 ||
+		refs[0] != "/team/artifacts/team-88-task-178/members/developer/dev-1/backend-analysis.md" ||
+		refs[1] != "/team/results/team-88-task-178/plan/collaboration-plan.md" {
+		t.Fatalf("expected current member result plus durable plan context, got %#v", refs)
+	}
 }
 
 func TestNormalizeTrustedTeamChatOrderUsesOnlyBoundedNarrativeSourceTime(t *testing.T) {
