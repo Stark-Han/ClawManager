@@ -514,6 +514,10 @@ const eventTimeMs = (event: TeamEvent) => {
   return Number.isFinite(ms) ? ms : 0;
 };
 
+const WorkspaceMarkdownPreview = React.lazy(
+  () => import("../../components/WorkspaceMarkdownPreview"),
+);
+
 const chatEventTimeValue = (
   event: TeamEvent,
   payload: Record<string, unknown>,
@@ -1791,6 +1795,7 @@ function WorkspacePreviewModal({
   onDownload: () => void;
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const isMarkdown = isMarkdownWorkspacePath(preview.path || preview.name);
 
   const handleCopy = async () => {
     try {
@@ -1805,7 +1810,7 @@ function WorkspacePreviewModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
-      <div className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+      <div className="flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
           <div className="min-w-0">
             <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Preview</div>
@@ -1835,10 +1840,22 @@ function WorkspacePreviewModal({
             </button>
           </div>
         </div>
-        <div className="min-h-0 overflow-auto bg-slate-50 p-5">
-          <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-4 text-sm leading-6 text-slate-800 shadow-inner">
-            {preview.content}
-          </pre>
+        <div className="min-h-0 overflow-auto bg-slate-50 p-5 sm:p-6">
+          {isMarkdown ? (
+            <React.Suspense
+              fallback={
+                <div className="flex min-h-48 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm text-slate-500">
+                  正在渲染 Markdown…
+                </div>
+              }
+            >
+              <WorkspaceMarkdownPreview content={preview.content} />
+            </React.Suspense>
+          ) : (
+            <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-4 text-sm leading-6 text-slate-800 shadow-inner">
+              {preview.content}
+            </pre>
+          )}
         </div>
       </div>
     </div>
@@ -2006,6 +2023,10 @@ function workspaceLinkToRelativePath(raw: string) {
     return liteSharedMatch[1];
   }
   return normalized.replace(/^\/+/, "");
+}
+
+function isMarkdownWorkspacePath(path: string) {
+  return /\.(md|markdown|mdown|mkd)$/i.test(path.trim());
 }
 
 function canonicalizeLegacyPlanWorkspacePath(
