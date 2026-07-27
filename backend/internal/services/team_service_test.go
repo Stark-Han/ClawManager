@@ -910,6 +910,11 @@ func TestBuildTeamTaskEnvelopeCarriesLocaleAndMemberWorkspace(t *testing.T) {
 	if !ok || shared["physicalPath"] != "/workspaces/teams/user-1/team-54-shared" || shared["memberArtifactPhysicalRoot"] != "/workspaces/teams/user-1/team-54-shared/artifacts/team-54-task-88/members/ui-designer" {
 		t.Fatalf("member shared workspace was not resolved: %#v", envelope["sharedWorkspace"])
 	}
+	if shared["taskWorkPhysicalRoot"] != "/workspaces/teams/user-1/team-54-shared/work/team-54-task-88" ||
+		shared["taskWorkCanonicalRoot"] != "/team/work/team-54-task-88" ||
+		shared["taskContextCanonicalRoot"] != "/team/results/team-54-task-88/context" {
+		t.Fatalf("root-scoped shared work/context directories were not resolved: %#v", shared)
+	}
 	prompt, _ := envelope["prompt"].(string)
 	if !strings.Contains(prompt, "use zh-CN") || !strings.Contains(prompt, "team_artifact_write") {
 		t.Fatalf("runtime prompt is missing locale/artifact guidance: %s", prompt)
@@ -2396,6 +2401,11 @@ func TestEvaluateProtocolV3DynamicPhaseRequiresLeaderDecisionOrWorkflowSeal(t *t
 	if evaluation.Decision != teamCompletionDecisionAccepted {
 		t.Fatalf("explicitly sealed dynamic workflow should be accepted: %#v", evaluation)
 	}
+	if payload["reportedLedgerVersion"] != 4 ||
+		payload["effectiveLedgerVersion"] != int64(4) ||
+		payload["effectiveWorkflowState"] != teamWorkflowStateAwaitingLeaderDecision {
+		t.Fatalf("completion audit must preserve reported values and locked effective state: %#v", payload)
+	}
 }
 
 func TestEvaluateProtocolV3CompletionDoesNotTreatFeatureWordAsInterim(t *testing.T) {
@@ -2647,6 +2657,55 @@ func TestDuplicateDispatchCannotReopenTerminalWorkflow(t *testing.T) {
 	changed, err := service.projectTeamWorkflowLedger(team, task, reviewer, "team_send", payload, time.Now().UTC())
 	if err != nil || changed || task.WorkflowState != teamWorkflowStateSynthesizing {
 		t.Fatalf("same-revision duplicate dispatch must be idempotent, changed=%v err=%v task=%#v", changed, err, task)
+	}
+}
+
+func TestCompletedPhaseDoesNotHideAlreadyRunningRequiredPhase(t *testing.T) {
+	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	leaderID := 1
+	developerID := 2
+	reviewerID := 3
+	phaseBuild := "phase-build"
+	phaseReview := "phase-review"
+	developerAssignment := "dev-01"
+	reviewerAssignment := "review-01"
+	team := &models.Team{ID: 90, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{
+		ID: 182, TeamID: team.ID, TargetMemberID: leaderID,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateAwaitingPhaseResults,
+		PlanVersion: 1, LedgerVersion: 6,
+	}
+	repo := &teamRepositoryStub{
+		workItems: []models.TeamWorkItem{
+			{TeamID: team.ID, RootTaskID: task.ID, WorkID: developerAssignment, AssignmentID: &developerAssignment, PhaseID: &phaseBuild, OwnerMemberID: &developerID, RequiredForRoot: true, Status: models.TeamTaskStatusSucceeded},
+			{TeamID: team.ID, RootTaskID: task.ID, WorkID: reviewerAssignment, AssignmentID: &reviewerAssignment, PhaseID: &phaseReview, OwnerMemberID: &reviewerID, RequiredForRoot: true, Status: models.TeamTaskStatusRunning},
+		},
+		workflowPhases: []models.TeamWorkflowPhase{
+			{TeamID: team.ID, RootTaskID: task.ID, PhaseID: phaseBuild, PlanVersion: 1, RequiredForRoot: true, Status: teamPhaseStatusAwaitingResults},
+			{TeamID: team.ID, RootTaskID: task.ID, PhaseID: phaseReview, PlanVersion: 1, RequiredForRoot: true, Status: teamPhaseStatusAwaitingResults},
+		},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"assignmentResultOnly": true,
+		"assignmentId":         developerAssignment,
+		"phaseId":              phaseBuild,
+		"planVersion":          1,
+	}
+	changed, err := service.projectTeamWorkflowLedger(
+		team,
+		task,
+		&models.TeamMember{ID: developerID, TeamID: team.ID, MemberKey: "developer", Role: "developer"},
+		"completion_proposed",
+		payload,
+		now,
+	)
+	if err != nil || !changed {
+		t.Fatalf("expected completed phase to update the workflow ledger, changed=%v err=%v", changed, err)
+	}
+	if task.WorkflowState != teamWorkflowStateAwaitingPhaseResults ||
+		task.CurrentPhaseID == nil || *task.CurrentPhaseID != phaseReview {
+		t.Fatalf("running required review must remain the root state authority: %#v", task)
 	}
 }
 
@@ -4630,7 +4689,7 @@ func TestAssignmentMonitorEnvelopeIsNonTerminalAndAddressedToWorker(t *testing.T
 	owner := &models.TeamMember{ID: 301, TeamID: 46, MemberKey: "developer"}
 
 	envelope, messageID := buildAssignmentStatusCheckEnvelope(team, task, item, owner, now)
-	if messageID != "monitor:team-46-task-78:dev-papers-001:9908850" {
+	if messageID != "monitor:team-46-task-78:dev-papers-001:1783592760" {
 		t.Fatalf("unexpected monitor message id %q", messageID)
 	}
 	if envelope["intent"] != "assignment_status_check" || envelope["to"] != "developer" || envelope["from"] != "clawmanager-monitor" {
@@ -4639,8 +4698,12 @@ func TestAssignmentMonitorEnvelopeIsNonTerminalAndAddressedToWorker(t *testing.T
 	if envelope["requiresCompletion"] != false || envelope["rootTaskId"] != "team-46-task-78" || envelope["workId"] != "dev-papers-001" {
 		t.Fatalf("monitor envelope should be non-terminal and assignment scoped: %#v", envelope)
 	}
-	if envelope["checkId"] != messageID || envelope["checkSequence"] != int64(9908850) || envelope["requestedAt"] == "" {
+	if envelope["checkId"] != messageID || envelope["checkSequence"] != int64(1783592760) || envelope["requestedAt"] == "" {
 		t.Fatalf("monitor envelope must carry stable check identity: %#v", envelope)
+	}
+	_, repeatedMessageID := buildAssignmentStatusCheckEnvelope(team, task, item, owner, now.Add(3*time.Minute))
+	if repeatedMessageID != messageID {
+		t.Fatalf("unchanged work item should collapse repeated monitor checks, got %q then %q", messageID, repeatedMessageID)
 	}
 	monitorPolicy, ok := envelope["monitorPolicy"].(map[string]interface{})
 	if !ok || monitorPolicy["enabled"] != true || monitorPolicy["visibleToChat"] != true {
@@ -4656,6 +4719,71 @@ func TestAssignmentMonitorEnvelopeIsNonTerminalAndAddressedToWorker(t *testing.T
 	metadata, ok := envelope["metadata"].(map[string]interface{})
 	if !ok || metadata["monitor"] != true || metadata["monitorType"] != "assignment_status_check" || metadata["eventKind"] != "assignment_check_requested" || metadata["visibleToChat"] != false {
 		t.Fatalf("unexpected monitor metadata: %#v", envelope["metadata"])
+	}
+}
+
+func TestAssignmentActivitySnapshotProjectsStartedStateWithoutAgentProgress(t *testing.T) {
+	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	ownerID := 301
+	item := &models.TeamWorkItem{
+		ID:            9001,
+		TeamID:        46,
+		RootTaskID:    78,
+		WorkID:        "dev-papers-001",
+		Status:        models.TeamTaskStatusDispatched,
+		OwnerMemberID: &ownerID,
+		UpdatedAt:     now.Add(-4 * time.Minute),
+	}
+	snapshot := &teamAssignmentActivitySnapshot{
+		SchemaVersion: 1,
+		RootTaskID:    "team-46-task-78",
+		AssignmentID:  "dev-papers-001",
+		TurnState:     "waiting_tool",
+		StartedAt:     now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+		ObservedAt:    now.Format(time.RFC3339Nano),
+	}
+	if !snapshot.activeTurn() {
+		t.Fatal("waiting_tool must be treated as an active, non-interruptible turn")
+	}
+	if !projectWorkItemStartedFromActivity(item, snapshot, now) {
+		t.Fatal("expected activity snapshot to project the dispatched card to running")
+	}
+	if item.Status != models.TeamTaskStatusRunning || item.StartedAt == nil || !item.StartedAt.Equal(now.Add(-2*time.Minute)) {
+		t.Fatalf("unexpected work item projection: %#v", item)
+	}
+	stale := *snapshot
+	stale.ObservedAt = now.Add(-teamAssignmentActivityFreshFor - time.Second).Format(time.RFC3339Nano)
+	freshItem := &models.TeamWorkItem{
+		Status:    models.TeamTaskStatusDispatched,
+		UpdatedAt: now.Add(-4 * time.Minute),
+	}
+	if projectWorkItemStartedFromActivity(freshItem, &stale, now) {
+		t.Fatal("stale activity snapshots must not suppress legacy recovery or project a card")
+	}
+	terminal := *snapshot
+	terminal.TurnState = "completed"
+	terminal.Terminal = true
+	if terminal.activeTurn() {
+		t.Fatal("terminal snapshot must not suppress safe post-turn reconciliation")
+	}
+}
+
+func TestTaskStartedClearsPreviousAssignmentDisplayFields(t *testing.T) {
+	oldRuntimeTaskID := "team-90-task-181"
+	oldIntent := "review"
+	oldBlocker := "previous blocker"
+	oldSummary := "previous completed result"
+	member := &models.TeamMember{
+		Progress:      100,
+		RuntimeTaskID: &oldRuntimeTaskID,
+		RuntimeIntent: &oldIntent,
+		BlockedReason: &oldBlocker,
+		LastSummary:   &oldSummary,
+	}
+	resetTeamMemberAssignmentProjection(member, "task_started")
+	if member.Progress != 0 || member.RuntimeTaskID != nil || member.RuntimeIntent != nil ||
+		member.BlockedReason != nil || member.LastSummary != nil {
+		t.Fatalf("new assignment retained stale display state: %#v", member)
 	}
 }
 

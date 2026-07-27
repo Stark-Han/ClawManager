@@ -1087,7 +1087,11 @@ const TeamDetailPage: React.FC = () => {
       if (!details?.team.id) {
         return;
       }
-      const relPath = workspaceLinkToRelativePath(workspacePath);
+      const relPath = canonicalizeLegacyPlanWorkspacePath(
+        workspacePath,
+        details.team.id,
+        activeProcessGroup?.task?.id,
+      );
       const action = workspaceFileAction(relPath);
       if (!relPath || !action) {
         return;
@@ -1111,7 +1115,7 @@ const TeamDetailPage: React.FC = () => {
         );
       }
     },
-    [details?.team.id],
+    [activeProcessGroup?.task?.id, details?.team.id],
   );
 
   const handleDownloadWorkspacePreview = useCallback(async () => {
@@ -2002,6 +2006,18 @@ function workspaceLinkToRelativePath(raw: string) {
     return liteSharedMatch[1];
   }
   return normalized.replace(/^\/+/, "");
+}
+
+function canonicalizeLegacyPlanWorkspacePath(
+  path: string,
+  teamId?: number,
+  taskId?: number,
+) {
+  const normalized = workspaceLinkToRelativePath(path);
+  if (!/^plan\/[^/].+/i.test(normalized) || !teamId || !taskId) {
+    return normalized;
+  }
+  return `results/team-${teamId}-task-${taskId}/${normalized}`;
 }
 
 function isPreviewableWorkspacePath(path: string) {
