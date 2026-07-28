@@ -715,12 +715,12 @@ func TestBuildTeamMemberSoulMarkdownAddsBoundedVerificationPolicies(t *testing.T
 		{
 			name:     "evidence reviewer",
 			member:   plannedTeamMember{MemberKey: "reviewer", Role: "reviewer", ProfileKey: "agency.evidence-collector"},
-			expected: []string{"## Verification Policy", "at most twice", "at most 45 seconds", "browserVerification=unavailable", "do not invent or target a fixed number of issues"},
+			expected: []string{"## Verification Policy", "directly reachable HTTP(S) verification URL", "immediately continue with static review", "Never install dependencies", "reviewVerdict", "reviewedRevision"},
 		},
 		{
 			name:     "code reviewer alias",
 			member:   plannedTeamMember{MemberKey: "reviewer", Role: "code-reviewer"},
-			expected: []string{"## Verification Policy", "existing test evidence first", "normally unnecessary", "do not invent or target a fixed issue count"},
+			expected: []string{"## Verification Policy", "existing test evidence first", "directly reachable HTTP(S) URL", "immediately continue with source review", "reviewVerdict", "reviewedAssignmentId"},
 		},
 		{
 			name:     "api tester",
@@ -730,12 +730,12 @@ func TestBuildTeamMemberSoulMarkdownAddsBoundedVerificationPolicies(t *testing.T
 		{
 			name:      "leader remains unchanged",
 			member:    plannedTeamMember{MemberKey: "leader", Role: "leader", ProfileKey: "agency.agents-orchestrator", IsLeader: true},
-			forbidden: []string{"## Verification Policy", "at most twice", "at most 45 seconds"},
+			forbidden: []string{"## Verification Policy", "directly reachable HTTP(S)"},
 		},
 		{
 			name:      "ordinary developer remains unchanged",
 			member:    plannedTeamMember{MemberKey: "worker", Role: "developer", ProfileKey: "agency.senior-developer"},
-			forbidden: []string{"## Verification Policy", "at most twice", "at most 45 seconds"},
+			forbidden: []string{"## Verification Policy", "directly reachable HTTP(S)"},
 		},
 	}
 
@@ -2321,6 +2321,64 @@ func TestMarkStructuredCompletionDeferredRemainsVisibleInChat(t *testing.T) {
 	}
 }
 
+func TestPublicDeferredCompletionPayloadNeverRestoresPrivateDraft(t *testing.T) {
+	embedded := map[string]interface{}{
+		"event":          "completion_proposed",
+		"resultMarkdown": "# Final delivery\n\nThis draft is not accepted.",
+		"answer":         "private answer",
+		"collaborationStep": map[string]interface{}{
+			"type": "final_synthesis", "content": "# Final delivery\n\nNested private draft.",
+		},
+	}
+	raw, err := json.Marshal(embedded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]interface{}{
+		"event":                   "completion_deferred",
+		"completionDraftMarkdown": "# Final delivery\n\nThis draft is not accepted.",
+		"completionDraftSummary":  "private summary",
+		"summary":                 "Final delivery is still waiting for developer.",
+		"collaborationStep": map[string]interface{}{
+			"type": "final_synthesis", "content": "# Final delivery\n\nTop-level private draft.",
+		},
+		"payload": string(raw),
+	}
+	sanitizePublicTeamEventPayload("completion_deferred", payload)
+	for _, key := range []string{"resultMarkdown", "answer", "completionDraftMarkdown", "completionDraftSummary"} {
+		if eventString(payload, key) != "" {
+			t.Fatalf("public deferred payload leaked %s: %#v", key, payload)
+		}
+	}
+	var sanitizedEmbedded map[string]interface{}
+	if err := json.Unmarshal([]byte(eventString(payload, "payload")), &sanitizedEmbedded); err != nil {
+		t.Fatal(err)
+	}
+	if eventString(sanitizedEmbedded, "resultMarkdown", "answer") != "" {
+		t.Fatalf("embedded wire payload restored an unaccepted result: %#v", sanitizedEmbedded)
+	}
+	if step, _ := sanitizedEmbedded["collaborationStep"].(map[string]interface{}); eventString(step, "content") != "" {
+		t.Fatalf("embedded collaboration step leaked an unaccepted draft: %#v", sanitizedEmbedded)
+	}
+	if step, _ := payload["collaborationStep"].(map[string]interface{}); eventString(step, "content") != "" {
+		t.Fatalf("public collaboration step leaked an unaccepted draft: %#v", payload)
+	}
+	if eventString(payload, "summary") == "" {
+		t.Fatalf("public deferred diagnostic must remain visible: %#v", payload)
+	}
+}
+
+func TestPostTerminalMutableEventsIncludeLateAssignments(t *testing.T) {
+	for _, eventType := range []string{"outbound", "team_send", "task_assigned", "peer_request", "peer_handoff", "peer_review_request"} {
+		if !isPostTerminalMutableTeamEvent(eventType, map[string]interface{}{"event": eventType}) {
+			t.Fatalf("%s must be suppressed after root terminal acceptance", eventType)
+		}
+	}
+	if isPostTerminalMutableTeamEvent("task_completed", map[string]interface{}{"event": "task_completed"}) {
+		t.Fatal("the accepted terminal fact itself must not be classified as a late mutable event")
+	}
+}
+
 func TestReconcileDeferredCompletionAcceptsAfterLedgerRepair(t *testing.T) {
 	now := time.Now().UTC()
 	taskID := 202
@@ -2630,6 +2688,94 @@ func TestProjectTeamWorkItemKeepsSequentialAssignmentsForSameMember(t *testing.T
 	}
 	if len(repo.workItems) != 2 || repo.workItems[0].WorkID == repo.workItems[1].WorkID {
 		t.Fatalf("sequential assignments for one member must remain distinct: %#v", repo.workItems)
+	}
+}
+
+func TestProjectTeamWorkItemRevisionInheritsEstablishedReviewGate(t *testing.T) {
+	team := &models.Team{ID: 93, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 193, TeamID: 93, TargetMemberID: 315, Status: models.TeamTaskStatusRunning}
+	developer := &models.TeamMember{ID: 316, TeamID: 93, MemberKey: "developer", Role: "developer"}
+	assignmentID := "dev-01"
+	repo := &teamRepositoryStub{
+		membersByKey: map[string]*models.TeamMember{"developer": developer},
+		workItems: []models.TeamWorkItem{{
+			ID: 217, TeamID: team.ID, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			OwnerMemberID: &developer.ID, Revision: 1, RequiredForRoot: true, ReviewRequired: true,
+			Status: models.TeamTaskStatusSucceeded,
+		}},
+	}
+	payload := map[string]interface{}{
+		"assignmentId": assignmentID, "workId": assignmentID, "phaseId": "phase-1",
+		"required": true, "revision": 2, "reviewRequired": false,
+		"collaborationStep": map[string]interface{}{
+			"type": "assignment", "status": "dispatched", "actor": "leader", "target": "developer",
+			"workId": assignmentID, "phase": "phase-1", "title": "revision 2",
+		},
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamWorkItem(team, task, developer, "team_send", payload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 2 || !repo.workItems[1].ReviewRequired {
+		t.Fatalf("new revision must inherit the established review gate: %#v", repo.workItems)
+	}
+	if repo.workItems[0].SupersededBy == nil {
+		t.Fatalf("the old revision should still be superseded by the reviewed successor: %#v", repo.workItems)
+	}
+}
+
+func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) {
+	task := &models.TeamTask{ID: 193, TeamID: 93, TargetMemberID: 315, Status: models.TeamTaskStatusRunning, LedgerVersion: 20}
+	reviewer := &models.TeamMember{ID: 317, TeamID: 93, MemberKey: "reviewer", Role: "qa-engineer"}
+	developerID := 316
+	developerAssignmentID := "dev-01"
+	otherAssignmentID := "dev-02"
+	reviewerAssignmentID := "qa-01"
+	dependencies := `["dev-01"]`
+	repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{
+		{
+			ID: 217, TeamID: 93, RootTaskID: task.ID, WorkID: developerAssignmentID, AssignmentID: &developerAssignmentID,
+			OwnerMemberID: &developerID, Revision: 2, RequiredForRoot: true, ReviewRequired: true,
+			Status: models.TeamTaskStatusSucceeded,
+		},
+		{
+			ID: 218, TeamID: 93, RootTaskID: task.ID, WorkID: reviewerAssignmentID, AssignmentID: &reviewerAssignmentID,
+			OwnerMemberID: &reviewer.ID, Revision: 1, RequiredForRoot: true,
+			Status: models.TeamTaskStatusSucceeded, DependsOnJSON: &dependencies,
+		},
+		{
+			ID: 219, TeamID: 93, RootTaskID: task.ID, WorkID: otherAssignmentID, AssignmentID: &otherAssignmentID,
+			OwnerMemberID: &developerID, Revision: 1, RequiredForRoot: true, ReviewRequired: true,
+			Status: models.TeamTaskStatusSucceeded,
+		},
+	}}
+	payload := map[string]interface{}{
+		"assignmentResultOnly": true,
+		"assignmentId":         reviewerAssignmentID,
+		"reviewVerdict":        "pass",
+		"reviewedRevision":     2,
+	}
+	service := &teamService{repo: repo}
+	changed, err := service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	if err != nil || !changed {
+		t.Fatalf("structured Reviewer PASS should close the target review gate: changed=%v err=%v", changed, err)
+	}
+	if repo.workItems[0].ValidatedRevision == nil || *repo.workItems[0].ValidatedRevision != 2 || task.LedgerVersion != 21 {
+		t.Fatalf("review validation did not update the current target revision: item=%#v task=%#v", repo.workItems[0], task)
+	}
+
+	payload["reviewedRevision"] = 1
+	repo.workItems[0].ValidatedRevision = nil
+	changed, err = service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil {
+		t.Fatalf("a stale review revision must fail closed: changed=%v item=%#v err=%v", changed, repo.workItems[0], err)
+	}
+
+	payload["reviewedAssignmentId"] = otherAssignmentID
+	payload["reviewedRevision"] = 1
+	changed, err = service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	if err != nil || changed || repo.workItems[2].ValidatedRevision != nil {
+		t.Fatalf("a Reviewer must not validate a target outside its assigned dependencies: changed=%v item=%#v err=%v", changed, repo.workItems[2], err)
 	}
 }
 

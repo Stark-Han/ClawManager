@@ -14,6 +14,7 @@ import (
 	posixpath "path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2223,17 +2224,18 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 	case teamVerificationRoleEvidence:
 		return []string{
 			"- Use proportionate, static-first validation with the source, artifacts, and tools already available in the runtime.",
-			"- Browser verification is optional unless the assignment explicitly requires it. Attempt Browser startup at most twice and spend at most 45 seconds total on Browser setup.",
-			"- Never install or download browsers, browser drivers, test frameworks, package dependencies, or system packages just to perform verification.",
-			"- If Browser remains unavailable, record browserVerification=unavailable, continue with static/manual checks, and do not treat that environment limitation as a product defect.",
-			"- Report only actual findings; do not invent or target a fixed number of issues. Give a concise PASS/FAIL verdict with verification limits.",
+			"- If the assignment provides a directly reachable HTTP(S) verification URL, perform one brief Browser check. Otherwise, or after any Browser/environment error, immediately continue with static review.",
+			"- Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects.",
+			"- Say Browser verification passed only when it actually ran; otherwise report static-review scope and only concrete findings.",
+			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
 		}
 	case teamVerificationRoleCodeReview:
 		return []string{
 			"- Review the source, diff, architecture boundaries, and existing test evidence first; keep validation proportional to the assigned change.",
-			"- Do not create a new test environment or install/download browsers, drivers, frameworks, package dependencies, or system packages for the review.",
-			"- Browser verification is normally unnecessary. If the assignment explicitly benefits from it and Browser is ready, attempt startup at most twice and spend at most 45 seconds total before falling back to source review.",
+			"- Use Browser only for one brief check when the assignment provides a directly reachable HTTP(S) URL. On any Browser/environment error, immediately continue with source review.",
+			"- Do not install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup.",
 			"- Report only concrete findings and residual risks; do not invent or target a fixed issue count.",
+			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
 		}
 	case teamVerificationRoleAPITest:
 		return []string{
@@ -4900,14 +4902,16 @@ func isPostTerminalMutableTeamEvent(eventType string, payload map[string]interfa
 	case "task_received", "task_started", "task_progress", "progress", "assignment_heartbeat",
 		"assignment_check_requested", "completion_proposed", "completion_deferred",
 		"completion_rejected", "completion_needs_confirmation", "leader_decision_reminder",
-		"leader_synthesis_reminder":
+		"leader_synthesis_reminder", "outbound", "team_send", "task_assigned",
+		"peer_request", "peer_handoff", "peer_review_request":
 		return true
 	}
 	switch eventKind {
 	case "leader_plan", "leader_progress", "worker_plan", "worker_progress", "leader_synthesis",
 		"agent_narrative", "agent_plan", "agent_progress", "agent_synthesis",
 		"assignment_heartbeat", "assignment_check_requested", "assignment_check_result",
-		"leader_decision_reminder", "leader_synthesis_reminder", "completion_deferred":
+		"leader_decision_reminder", "leader_synthesis_reminder", "completion_deferred",
+		"agent_assignment", "agent_handoff":
 		return true
 	}
 	return false
@@ -7378,6 +7382,11 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			return err
 		}
 	}
+	reviewValidated, err := s.applyStructuredReviewValidation(task, member, payload, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	workflowChanged = workflowChanged || reviewValidated
 	if passiveMonitorEvent {
 		reconciled, reconcileErr := s.reconcileTerminalMonitorWorkItem(team, task, member, payload, time.Now().UTC())
 		if reconcileErr != nil {
@@ -8713,6 +8722,30 @@ func (s *teamService) projectTeamWorkItem(
 	if revision > 1 && !strings.HasSuffix(workID, fmt.Sprintf(":r%d", revision)) {
 		workID = fmt.Sprintf("%s:r%d", workID, revision)
 	}
+	var existingAssignmentItems []models.TeamWorkItem
+	if assignmentID != "" {
+		existingItems, listErr := s.repo.ListWorkItemsByRootTaskID(task.ID)
+		if listErr != nil {
+			return listErr
+		}
+		existingAssignmentItems = existingItems
+	}
+	reviewRequired := eventBool(payload, "reviewRequired", "review_required")
+	// Review is a property of the business assignment, not a mutable hint on
+	// one event. Results and later revisions inherit an established review
+	// gate so an Agent cannot clear it by emitting reviewRequired=false or by
+	// superseding the reviewed revision.
+	for idx := range existingAssignmentItems {
+		existing := existingAssignmentItems[idx]
+		existingAssignmentID := derefTeamString(existing.AssignmentID)
+		if existingAssignmentID == "" {
+			existingAssignmentID = existing.WorkID
+		}
+		if existingAssignmentID == assignmentID && existing.ReviewRequired {
+			reviewRequired = true
+			break
+		}
+	}
 	status := models.TeamTaskStatusRunning
 	switch stepType {
 	case "assignment":
@@ -8747,7 +8780,7 @@ func (s *teamService) projectTeamWorkItem(
 		Status:          status,
 		Revision:        revision,
 		RequiredForRoot: requiredForRoot,
-		ReviewRequired:  eventBool(payload, "reviewRequired", "review_required"),
+		ReviewRequired:  reviewRequired,
 		UpdatedAt:       now,
 	}
 	if assignmentID != "" {
@@ -8791,6 +8824,13 @@ func (s *teamService) projectTeamWorkItem(
 	if len(dependencies) == 0 {
 		dependencies = normalizeContextRefs(firstTeamValue(payload, "dependsOn", "depends_on"))
 	}
+	if reviewedAssignmentID := strings.TrimSpace(eventString(
+		payload,
+		"reviewedAssignmentId", "reviewed_assignment_id",
+		"reviewTargetAssignmentId", "review_target_assignment_id",
+	)); reviewedAssignmentID != "" && isTeamReviewMember(owner) {
+		dependencies = uniqueTeamStrings(append(dependencies, reviewedAssignmentID))
+	}
 	if len(dependencies) > 0 {
 		if encoded, err := json.Marshal(dependencies); err == nil {
 			value := string(encoded)
@@ -8798,12 +8838,8 @@ func (s *teamService) projectTeamWorkItem(
 		}
 	}
 	if assignmentID != "" && revision > 1 {
-		existingItems, listErr := s.repo.ListWorkItemsByRootTaskID(task.ID)
-		if listErr != nil {
-			return listErr
-		}
-		for idx := range existingItems {
-			existing := existingItems[idx]
+		for idx := range existingAssignmentItems {
+			existing := existingAssignmentItems[idx]
 			existingAssignmentID := derefTeamString(existing.AssignmentID)
 			if existingAssignmentID == "" {
 				existingAssignmentID = existing.WorkID
@@ -8820,6 +8856,119 @@ func (s *teamService) projectTeamWorkItem(
 		}
 	}
 	return s.repo.UpsertWorkItem(item)
+}
+
+func isTeamReviewMember(member *models.TeamMember) bool {
+	if member == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(member.Role)) {
+	case "reviewer", "qa", "qa-engineer", "evidence-collector", "code-reviewer":
+		return true
+	default:
+		return false
+	}
+}
+
+func workItemBusinessID(item models.TeamWorkItem) string {
+	if value := strings.TrimSpace(derefTeamString(item.AssignmentID)); value != "" {
+		return value
+	}
+	return strings.TrimSpace(item.WorkID)
+}
+
+// applyStructuredReviewValidation closes an existing assignment's review gate
+// only from an explicit PASS produced by a Reviewer. The reviewed revision
+// must still be the current unsuperseded revision. When a new Runtime does not
+// repeat the target id, one dependency on the Reviewer's own assignment is an
+// unambiguous compatibility source; zero or multiple candidates fail closed.
+func (s *teamService) applyStructuredReviewValidation(
+	task *models.TeamTask,
+	member *models.TeamMember,
+	payload map[string]interface{},
+	now time.Time,
+) (bool, error) {
+	if s == nil || s.repo == nil || task == nil || payload == nil || !isTeamReviewMember(member) ||
+		!eventBool(payload, "assignmentResultOnly", "assignment_result_only") ||
+		!strings.EqualFold(eventString(payload, "reviewVerdict", "review_verdict"), "pass") {
+		return false, nil
+	}
+	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
+	if err != nil {
+		return false, err
+	}
+	targetID := strings.TrimSpace(eventString(
+		payload,
+		"reviewedAssignmentId", "reviewed_assignment_id",
+		"reviewTargetAssignmentId", "review_target_assignment_id",
+	))
+	reviewerAssignmentID := strings.TrimSpace(eventString(payload, "assignmentId", "assignment_id", "workId", "work_id"))
+	authorizedTargets := make([]string, 0, 2)
+	for idx := range items {
+		item := items[idx]
+		if item.OwnerMemberID == nil || *item.OwnerMemberID != member.ID ||
+			workItemBusinessID(item) != reviewerAssignmentID {
+			continue
+		}
+		authorizedTargets = append(authorizedTargets, teamWorkItemDependencies(item)...)
+	}
+	authorizedTargets = uniqueTeamStrings(authorizedTargets)
+	// New assignments persist their structured review target as a dependency.
+	// If such authorization exists, a Reviewer cannot close a different gate by
+	// accidentally or deliberately naming another assignment. Empty dependencies
+	// remain compatible with review assignments created by older runtimes.
+	if targetID != "" && len(authorizedTargets) > 0 && !slices.Contains(authorizedTargets, targetID) {
+		return false, nil
+	}
+	if targetID == "" {
+		candidates := make([]string, 0, len(authorizedTargets))
+		for _, dependency := range authorizedTargets {
+			for idx := range items {
+				item := items[idx]
+				if item.SupersededBy == nil && item.ReviewRequired && workItemBusinessID(item) == dependency {
+					candidates = append(candidates, dependency)
+					break
+				}
+			}
+		}
+		candidates = uniqueTeamStrings(candidates)
+		if len(candidates) != 1 {
+			return false, nil
+		}
+		targetID = candidates[0]
+	}
+	var target *models.TeamWorkItem
+	for idx := range items {
+		item := items[idx]
+		if item.SupersededBy != nil || !item.ReviewRequired || workItemBusinessID(item) != targetID {
+			continue
+		}
+		if target == nil || teamMaxInt(item.Revision, 1) > teamMaxInt(target.Revision, 1) {
+			clone := item
+			target = &clone
+		}
+	}
+	if target == nil || target.Status != models.TeamTaskStatusSucceeded {
+		return false, nil
+	}
+	reviewedRevision := eventInt(payload, "reviewedRevision", "reviewed_revision", "validatedRevision", "validated_revision")
+	if reviewedRevision <= 0 {
+		reviewedRevision = teamMaxInt(target.Revision, 1)
+	}
+	if reviewedRevision != teamMaxInt(target.Revision, 1) {
+		return false, nil
+	}
+	if target.ValidatedRevision != nil && *target.ValidatedRevision >= reviewedRevision {
+		return false, nil
+	}
+	target.ValidatedRevision = &reviewedRevision
+	target.UpdatedAt = now
+	if err := s.repo.UpsertWorkItem(target); err != nil {
+		return false, err
+	}
+	task.LedgerVersion++
+	task.UpdatedAt = now
+	return true, nil
 }
 
 func normalizeExistingCollaborationStep(step map[string]interface{}, team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) {
@@ -10202,6 +10351,7 @@ func teamEventPayloads(events []models.TeamEvent) []TeamEventPayload {
 		if event.PayloadJSON != nil && strings.TrimSpace(*event.PayloadJSON) != "" {
 			_ = json.Unmarshal([]byte(*event.PayloadJSON), &payload.Payload)
 		}
+		sanitizePublicTeamEventPayload(event.EventType, payload.Payload)
 		chatPolicy := strings.ToLower(strings.TrimSpace(eventString(payload.Payload, "chatPolicy", "chat_policy")))
 		hidden, hiddenDefined := teamEventBoolValue(payload.Payload, "visibleToChat", "visible_to_chat")
 		eventKind := strings.ToLower(strings.TrimSpace(eventString(payload.Payload, "eventKind", "event_kind", "kind")))
@@ -10212,6 +10362,57 @@ func teamEventPayloads(events []models.TeamEvent) []TeamEventPayload {
 		result = append(result, payload)
 	}
 	return result
+}
+
+// Deferred completion reports must remain available to the internal ledger
+// reconciler, but they are not accepted deliveries and must never cross the
+// public Team-event boundary. Older Runtime events also retain their original
+// wire payload as a JSON string; sanitize that copy as well so clients cannot
+// accidentally restore a result field that the completion evaluator removed.
+func sanitizePublicTeamEventPayload(eventType string, payload map[string]interface{}) {
+	if payload == nil {
+		return
+	}
+	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind", "chatKind", "chat_kind")))
+	if strings.ToLower(strings.TrimSpace(eventType)) != "completion_deferred" && eventKind != "completion_deferred" {
+		return
+	}
+	removeDeferredCompletionResultFields(payload)
+	raw, ok := payload["payload"].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var embedded map[string]interface{}
+	if json.Unmarshal([]byte(raw), &embedded) != nil {
+		return
+	}
+	removeDeferredCompletionResultFields(embedded)
+	if encoded, err := json.Marshal(embedded); err == nil {
+		payload["payload"] = string(encoded)
+	}
+}
+
+func removeDeferredCompletionResultFields(payload map[string]interface{}) {
+	if payload == nil {
+		return
+	}
+	for _, key := range []string{
+		"resultMarkdown", "result_markdown", "result", "answer",
+		"completionDraftMarkdown", "completion_draft_markdown",
+		"completionDraftSummary", "completion_draft_summary",
+	} {
+		delete(payload, key)
+	}
+	for key, value := range payload {
+		if nested, ok := value.(map[string]interface{}); ok {
+			if strings.EqualFold(key, "collaborationStep") || strings.EqualFold(key, "collaboration_step") {
+				for _, resultKey := range []string{"content", "result", "resultMarkdown", "result_markdown", "answer"} {
+					delete(nested, resultKey)
+				}
+			}
+			removeDeferredCompletionResultFields(nested)
+		}
+	}
 }
 
 func teamWorkItemPayloads(items []models.TeamWorkItem) []TeamWorkItemPayload {

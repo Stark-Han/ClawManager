@@ -159,7 +159,33 @@ const oldestID = (items: { id: number }[]) =>
 const normalizeEventPayload = (event: TeamEvent) => {
   const payload = event.payload || {};
   const embedded = parseJsonRecord(payload.payload);
-  return embedded ? { ...embedded, ...payload } : payload;
+  const merged = embedded ? { ...embedded, ...payload } : { ...payload };
+  const eventType = String(event.event_type || "").toLowerCase();
+  const eventKind = payloadText(merged, ["eventKind", "event_kind", "kind", "chatKind", "chat_kind"]).toLowerCase();
+  if (eventType === "completion_deferred" || eventKind === "completion_deferred") {
+    for (const key of [
+      "resultMarkdown",
+      "result_markdown",
+      "result",
+      "answer",
+      "completionDraftMarkdown",
+      "completion_draft_markdown",
+      "completionDraftSummary",
+      "completion_draft_summary",
+    ]) {
+      delete merged[key];
+    }
+    for (const stepKey of ["collaborationStep", "collaboration_step"]) {
+      const step = parseJsonRecord(merged[stepKey]);
+      if (!step) continue;
+      const sanitizedStep = { ...step };
+      for (const key of ["content", "result", "resultMarkdown", "result_markdown", "answer"]) {
+        delete sanitizedStep[key];
+      }
+      merged[stepKey] = sanitizedStep;
+    }
+  }
+  return merged;
 };
 
 const payloadText = (
@@ -666,10 +692,14 @@ const collaborationContent = (
   eventType = "",
 ) => {
   const eventKind = payloadText(payload, ["eventKind", "event_kind", "kind"]).toLowerCase();
+  if (eventType === "completion_deferred" || eventKind === "completion_deferred") {
+    return (
+      payloadText(payload, ["summary", "diagnostic", "message"]) ||
+      "最终交付正在等待其余任务完成。"
+    );
+  }
   const isBusinessResult =
     isTerminalResultEventType(eventType) ||
-    eventType === "completion_deferred" ||
-    eventKind === "completion_deferred" ||
     payloadBool(payload, ["assignmentResultOnly", "assignment_result_only"]) === true;
   if (isBusinessResult) {
     const fullResult = terminalResultText(payload);
@@ -4846,7 +4876,7 @@ type TeamChatMessage = {
   content: string;
   time: number;
   sequence?: number;
-  tone?: "normal" | "leader" | "assignment" | "feedback" | "error";
+  tone?: "normal" | "leader" | "assignment" | "feedback" | "warning" | "error";
   dedupeKey?: string;
   threadKey?: string;
   sortPhase?: number;
@@ -5243,7 +5273,9 @@ function chatMessageFromItem(
           ? "feedback"
         : item.eventType === "task_failed" || item.eventType === "message_failed" || eventKind === "assignment_recovery_exhausted"
           ? "error"
-          : item.eventType === "completion_deferred" || eventKind === "completion_deferred" || eventKind === "completion_rejected" || eventKind === "completion_needs_confirmation"
+          : item.eventType === "completion_deferred" || eventKind === "completion_deferred"
+            ? "warning"
+          : eventKind === "completion_rejected" || eventKind === "completion_needs_confirmation"
             ? "error"
           : item.eventType.startsWith("peer_")
             ? "assignment"
@@ -5336,6 +5368,14 @@ function chatItemDedupeKey(
   const assignmentId =
     payloadTextDeep(item.payload, ["assignmentId", "assignment_id", "workId", "work_id"]);
   const displayKey = payloadTextDeep(item.payload, ["displayKey", "display_key"]);
+  if (item.eventType === "completion_deferred" || eventKind === "completion_deferred") {
+    const completionId =
+      payloadTextDeep(item.payload, ["completionId", "completion_id"]) ||
+      displayKey.replace(/:\d+$/, "");
+    return completionId
+      ? `replaceable:completion-deferred:${completionId}`
+      : `replaceable:completion-deferred:${taskId}:${senderKey}`;
+  }
   // Only root-final/completion display keys represent a singleton business
   // fact. Older worker-plan/progress keys can be shared by different workers
   // when assignmentId was absent, so content identity must win for them.
@@ -5509,6 +5549,8 @@ function TeamChatMessageRow({
       ? "relative overflow-hidden border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-green-50 text-gray-950 shadow-[0_14px_28px_-22px_rgba(5,150,105,0.55)]"
       : message.tone === "error"
       ? "border border-red-100 bg-red-50 text-red-800"
+      : message.tone === "warning"
+      ? "border border-amber-200 bg-amber-50 text-amber-900"
       : "bg-white text-gray-950";
   const isAssignment = message.tone === "assignment";
   const isFeedback = message.tone === "feedback";
