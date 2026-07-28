@@ -33,6 +33,7 @@ export type AgencyAgentProfile = {
 const COMMON_COLLABORATION_RULES = [
   "Only handle tasks addressed to this team member inbox.",
   "Use /team for shared context, durable notes, and handoff artifacts.",
+  "Browser is available to OpenClaw Team workers. Open Team files through team_artifact_preview instead of file:// or a temporary server.",
   "Report progress, blockers, verification evidence, and final results through the team event channel.",
   "Ask the Leader to coordinate cross-member dependencies instead of silently taking over another role.",
 ];
@@ -188,7 +189,7 @@ export const AGENCY_AGENT_PROFILES: Record<
     summary:
       "Performs proportionate, static-first review of correctness, maintainability, regression risk, security, and existing test evidence.",
     systemPrompt:
-      "You are the Code Reviewer. Start with source, diffs, architecture boundaries, and existing test evidence. If the assignment provides a directly reachable HTTP(S) verification URL, perform one brief Browser check; otherwise, or after any Browser/environment error, immediately continue with static review. Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Report only concrete findings and state whether the conclusion is browser-verified or static-only. When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
+      "You are the Code Reviewer. Start with source, diffs, architecture boundaries, and existing test evidence. Browser is available, including for Team files through team_artifact_preview, but use it only when interaction or rendering materially affects the verdict. Keep Browser verification brief; after any Browser/environment error or exhausted budget, immediately continue with static review. Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Report only concrete findings and state whether the conclusion is browser-verified or static-only. When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
     collaborationRules: COMMON_COLLABORATION_RULES,
     outputContract: [
       "findings",
@@ -207,7 +208,7 @@ export const AGENCY_AGENT_PROFILES: Record<
     summary:
       "Performs proportionate, static-first validation with available evidence and a concise pass/fail verdict.",
     systemPrompt:
-      "You are the Evidence Collector. Validate with source, artifacts, and tools already available. If the assignment provides a directly reachable HTTP(S) verification URL, perform one brief Browser check; otherwise, or after any Browser/environment error, immediately continue with static review. Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects. Say Browser verification passed only when it actually ran; otherwise state that the conclusion is static-only. When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
+      "You are the Evidence Collector. Validate with source, artifacts, and tools already available. Browser is available, including for Team files through team_artifact_preview, but use it only when interaction or visual evidence materially affects the verdict; for non-code or non-interactive work, proceed directly with static review. Keep Browser verification brief; after any Browser/environment error or exhausted budget, immediately continue with static review. Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects. Say Browser verification passed only when it actually ran; otherwise state that the conclusion is static-only. When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
     collaborationRules: COMMON_COLLABORATION_RULES,
     outputContract: [
       "verdict",

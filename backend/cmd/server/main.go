@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -178,7 +178,22 @@ func main() {
 	aiObservabilityHandler := handlers.NewAIObservabilityHandler(aiObservabilityService)
 	riskRuleHandler := handlers.NewRiskRuleHandler(riskRuleService)
 	clusterResourceHandler := handlers.NewClusterResourceHandler(clusterResourceService)
-	egressProxyHandler := handlers.NewEgressProxyHandler(auditEventService)
+	teamPreviewSecretService := k8s.NewSecretService()
+	egressProxyHandler := handlers.NewEgressProxyHandler(
+		auditEventService,
+		handlers.WithTeamArtifactPreview(
+			teamRepo,
+			teamPreviewSecretService,
+			cfg.Runtime.WorkspaceRoot,
+			func(userID int) string {
+				client := k8s.GetClient()
+				if client == nil {
+					return ""
+				}
+				return client.GetNamespace(userID)
+			},
+		),
+	)
 	openClawConfigHandler := handlers.NewOpenClawConfigHandler(openClawConfigService)
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)
 	skillHubHandler := handlers.NewSkillHubHandler(skillService, instanceService)

@@ -15,6 +15,7 @@ import (
 
 func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	t.Setenv("CLAWMANAGER_TEAM_MANAGER_BASE_URL", "http://manager.example")
+	t.Setenv("CLAWMANAGER_EGRESS_PROXY_URL", "http://clawmanager-egress-proxy.example:3128")
 
 	service := &teamService{}
 	env := service.teamMemberEnv(&models.Team{
@@ -54,6 +55,10 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	}
 	if env["CLAWMANAGER_TEAM_AUTORUN"] != "true" || env["CLAWMANAGER_TEAM_CONSUMER_GROUP"] != "team-members" {
 		t.Fatalf("expected Team autorun and consumer group env, got %#v", env)
+	}
+	if env["CLAWMANAGER_BROWSER_PROXY_URL"] != "http://clawmanager-egress-proxy.example:3128" ||
+		env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] != "http://clawmanager-team-preview.invalid" {
+		t.Fatalf("expected managed Team Browser proxy and preview env, got %#v", env)
 	}
 	for key := range env {
 		if strings.Contains(key, "REDIS_URL") || strings.Contains(key, "TOKEN") {
@@ -715,12 +720,12 @@ func TestBuildTeamMemberSoulMarkdownAddsBoundedVerificationPolicies(t *testing.T
 		{
 			name:     "evidence reviewer",
 			member:   plannedTeamMember{MemberKey: "reviewer", Role: "reviewer", ProfileKey: "agency.evidence-collector"},
-			expected: []string{"## Verification Policy", "directly reachable HTTP(S) verification URL", "immediately continue with static review", "Never install dependencies", "reviewVerdict", "reviewedRevision"},
+			expected: []string{"## Verification Policy", "Browser is available", "team_artifact_preview", "immediately continue with static review", "Never install dependencies", "reviewVerdict", "reviewedRevision"},
 		},
 		{
 			name:     "code reviewer alias",
 			member:   plannedTeamMember{MemberKey: "reviewer", Role: "code-reviewer"},
-			expected: []string{"## Verification Policy", "existing test evidence first", "directly reachable HTTP(S) URL", "immediately continue with source review", "reviewVerdict", "reviewedAssignmentId"},
+			expected: []string{"## Verification Policy", "existing test evidence first", "Browser is available", "team_artifact_preview", "immediately continue with source review", "reviewVerdict", "reviewedAssignmentId"},
 		},
 		{
 			name:     "api tester",
@@ -2234,7 +2239,7 @@ func TestProjectTeamEventLeaderMediatedInterimLeaderCompletionDoesNotCloseAfterM
 	}
 }
 
-func TestEvaluateProtocolV3CompletionAllowsUnusedPlannedPhaseAfterWorkflowSeal(t *testing.T) {
+func TestEvaluateProtocolV3LegacyCompletionAllowsUnusedPlannedPhaseAfterWorkflowSeal(t *testing.T) {
 	leaderID := 120
 	workerID := 121
 	task := &models.TeamTask{
@@ -2270,6 +2275,132 @@ func TestEvaluateProtocolV3CompletionAllowsUnusedPlannedPhaseAfterWorkflowSeal(t
 	}
 	if evaluation.Decision != teamCompletionDecisionAccepted {
 		t.Fatalf("an explicitly sealed workflow must ignore a planned phase with no dispatched work: %#v", evaluation)
+	}
+}
+
+func TestEvaluateProtocolV3ExplicitPhaseRequiresDispositionBeforeWorkflowSeal(t *testing.T) {
+	leaderID := 120
+	workerID := 121
+	task := &models.TeamTask{
+		ID: 191, TeamID: 31, TargetMemberID: leaderID, Status: models.TeamTaskStatusRunning,
+		WorkflowState: teamWorkflowStateAwaitingLeaderDecision, PlanVersion: 2, LedgerVersion: 7,
+	}
+	assignmentID := "research-pm"
+	phaseID := "research"
+	policy := teamPhaseCompletionPolicyExplicitV1
+	repo := &teamRepositoryStub{
+		workItems: []models.TeamWorkItem{{
+			TeamID: 31, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			PhaseID: &phaseID, Revision: 1, RequiredForRoot: true, OwnerMemberID: &workerID,
+			Status: models.TeamTaskStatusSucceeded,
+		}},
+		workflowPhases: []models.TeamWorkflowPhase{
+			{TeamID: 31, RootTaskID: task.ID, PhaseID: "research", PlanVersion: 2, Status: teamPhaseStatusCompleted, RequiredForRoot: true, CompletionPolicy: &policy},
+			{TeamID: 31, RootTaskID: task.ID, PhaseID: "implementation", PlanVersion: 2, Status: teamPhaseStatusPlanned, RequiredForRoot: true, CompletionPolicy: &policy},
+		},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"protocolVersion": 3, "completionId": "completion-191", "completionSource": teamTaskCompletionTool,
+		"explicitCompletion": true, "rootTaskTerminal": true, "workflowFinal": true, "finalAnswerReady": true,
+		"planVersion": 2, "ledgerVersion": 7, "status": "succeeded", "summary": "第一阶段完成",
+		"resultMarkdown": "第一阶段结果已经汇总。",
+	}
+	leader := &models.TeamMember{ID: leaderID, TeamID: 31, MemberKey: "leader", Role: "leader"}
+	team := &models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated}
+	evaluation, err := service.evaluateLeaderRootCompletion(team, task, leader, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluation.Decision != teamCompletionDecisionDeferred ||
+		evaluation.Reason != "open_workflow_phases" ||
+		len(evaluation.PendingPhases) != 1 ||
+		evaluation.PendingPhases[0] != "implementation:disposition" {
+		t.Fatalf("explicit phase without disposition must remain open: %#v", evaluation)
+	}
+
+	payload["phaseDispositions"] = []interface{}{map[string]interface{}{
+		"phaseId":  "implementation",
+		"decision": "skipped",
+		"reason":   "研究结论已证明无需进入实现阶段",
+	}}
+	evaluation, err = service.evaluateLeaderRootCompletion(team, task, leader, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluation.Decision != teamCompletionDecisionAccepted {
+		t.Fatalf("structured phase disposition must allow final sealing: %#v", evaluation)
+	}
+}
+
+func TestReconcileExplicitPlannedPhaseRequiresAndAppliesDisposition(t *testing.T) {
+	now := time.Now().UTC()
+	policy := teamPhaseCompletionPolicyExplicitV1
+	task := &models.TeamTask{
+		ID: 202, TeamID: 31, TargetMemberID: 120, Status: models.TeamTaskStatusRunning,
+		WorkflowState: teamWorkflowStateAwaitingLeaderDecision, PlanVersion: 1, LedgerVersion: 3,
+	}
+	repo := &teamRepositoryStub{
+		workflowPhases: []models.TeamWorkflowPhase{{
+			TeamID: 31, RootTaskID: task.ID, PhaseID: "phase-2", PlanVersion: 1,
+			Status: teamPhaseStatusPlanned, RequiredForRoot: true, CompletionPolicy: &policy,
+		}},
+	}
+	service := &teamService{repo: repo}
+	changed, err := service.reconcileTeamWorkflowLedgerWithDispositions(task, true, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || repo.workflowPhases[0].Status != teamPhaseStatusPlanned ||
+		task.WorkflowState != teamWorkflowStateAwaitingLeaderDecision {
+		t.Fatalf("explicit phase without disposition must stay planned: changed=%v task=%#v phases=%#v", changed, task, repo.workflowPhases)
+	}
+
+	changed, err = service.reconcileTeamWorkflowLedgerWithDispositions(task, true, map[string]teamPhaseDisposition{
+		"phase-2": {PhaseID: "phase-2", Decision: "cancelled", Reason: "用户目标已由第一阶段完整满足"},
+	}, now.Add(time.Second))
+	if err != nil || !changed {
+		t.Fatalf("expected explicit phase disposition to reconcile: changed=%v err=%v", changed, err)
+	}
+	if repo.workflowPhases[0].Status != teamPhaseStatusCancelled || task.WorkflowState != teamWorkflowStateSynthesizing {
+		t.Fatalf("explicit disposition was not applied: task=%#v phases=%#v", task, repo.workflowPhases)
+	}
+}
+
+func TestProjectLeaderPlanMarksPhasesWithExplicitDispositionPolicy(t *testing.T) {
+	now := time.Now().UTC()
+	task := &models.TeamTask{
+		ID: 203, TeamID: 31, TargetMemberID: 120, Status: models.TeamTaskStatusRunning,
+		WorkflowState: teamWorkflowStatePlanning,
+	}
+	repo := &teamRepositoryStub{}
+	service := &teamService{repo: repo}
+	changed, err := service.projectTeamWorkflowLedger(
+		&models.Team{ID: 31},
+		task,
+		&models.TeamMember{ID: 120, TeamID: 31, MemberKey: "leader", Role: "leader"},
+		"task_progress",
+		map[string]interface{}{
+			"eventKind":              "leader_plan",
+			"planVersion":            1,
+			"phaseDispositionPolicy": teamPhaseCompletionPolicyExplicitV1,
+			"phases": []interface{}{
+				map[string]interface{}{"phaseId": "phase-1", "status": "active"},
+				map[string]interface{}{"phaseId": "phase-2", "status": "planned"},
+			},
+		},
+		now,
+	)
+	if err != nil || !changed {
+		t.Fatalf("projectTeamWorkflowLedger() changed=%v err=%v", changed, err)
+	}
+	if len(repo.workflowPhases) != 2 {
+		t.Fatalf("expected two projected phases, got %#v", repo.workflowPhases)
+	}
+	for _, phase := range repo.workflowPhases {
+		if !phaseUsesExplicitDisposition(phase) {
+			t.Fatalf("phase missing explicit disposition policy: %#v", phase)
+		}
 	}
 }
 

@@ -46,6 +46,7 @@ const (
 	teamSharedUmask          = "0002"
 	teamRedisURLSecretKey    = "CLAWMANAGER_TEAM_REDIS_URL"
 	teamTokenSecretKey       = "CLAWMANAGER_TEAM_TOKEN"
+	teamPreviewBrowserHost   = "clawmanager-team-preview.invalid"
 
 	defaultTeamTaskStaleTimeout    = 30 * time.Minute
 	teamTaskStaleSweepInterval     = 30 * time.Second
@@ -82,6 +83,7 @@ const (
 	teamPhaseStatusCompleted              = "completed"
 	teamPhaseStatusCancelled              = "cancelled"
 	teamPhaseStatusSuperseded             = "superseded"
+	teamPhaseCompletionPolicyExplicitV1   = "explicit-disposition-v1"
 
 	teamCompletionDecisionAccepted          = "accepted"
 	teamCompletionDecisionDeferred          = "deferred"
@@ -837,12 +839,13 @@ func appendTeamTaskCompletionInstruction(prompt string, communicationMode, inten
 	instruction += "\n" + strings.Join([]string{
 		"- Publish meaningful process updates with team_update_progress. Use eventKind=\"worker_plan\" for worker execution plans, \"worker_progress\" for milestones, and \"leader_synthesis\" while reconciling member outputs. Use \"assignment_check_result\" only when replying to a ClawManager Monitor envelope carrying a monitor checkId; ordinary progress must remain worker_progress.",
 		"- The Runtime restores the canonical root task and assignment from the active Team envelope. Reuse IDs supplied by ClawManager when present; if an optional taskId, assignmentId, or workId is uncertain, omit it instead of inventing a new identifier.",
-		"- Prefer team_artifact_write, team_artifact_read, team_artifact_list, and team_artifact_mkdir for shared artifacts. Worker output must use the assignment-specific member artifact root injected by the Runtime, even when an assignment body mentions a Team-root filename. Team-scoped writes must declare kind=plan, kind=context, kind=review, or kind=final and always use the canonical path returned by the tool; never invent /team links.",
+		"- Prefer team_artifact_write, team_artifact_read, team_artifact_preview, team_artifact_list, and team_artifact_mkdir for shared artifacts. Use team_artifact_preview before opening a Team file in Browser; never use file:// or start a temporary file server. Worker output must use the assignment-specific member artifact root injected by the Runtime, even when an assignment body mentions a Team-root filename. Team-scoped writes must declare kind=plan, kind=context, kind=review, or kind=final and always use the canonical path returned by the tool; never invent /team links.",
 		"- Before delegating research that used an external article, issue, API response, or repository, the Leader should persist the fetched evidence with team_artifact_write scope=\"team\", kind=\"context\" and pass the returned canonical reference to workers. Workers should reuse available contextRefs instead of repeatedly fetching the same source.",
 		"- If a worker is still executing a long step, report concise progress and continue. If context was lost or an artifact path is wrong, report a recoverable blocker to the Leader instead of treating the root task as failed.",
 		"- Every Team message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
 		"- For multi-stage work, publish a structured leader_plan with planVersion and phases. Every team_send must carry a stable phaseId, assignmentId, workId, revision, required flag, and dependencies. Completing one phase never completes the user root task.",
 		"- The Leader may call team_complete_task for the root only after the workflow is sealed, remainingActions is empty, every required latest assignment and review is complete, and finalAnswerReady is true. Worker completion closes only that assignment.",
+		"- A required phase declared in leader_plan cannot disappear implicitly. If a planned phase is intentionally not started, the Leader must include phaseDispositions with phaseId, decision (cancelled, skipped, or superseded), and a concrete reason in team_complete_task. Never use a phase disposition for running or unfinished assigned work.",
 		"- A failed or stale required assignment blocks root success unless the Leader supplies a structured waiver containing assignmentId, reason, and accepted risk. Never waive running/pending work or omit the risk record.",
 		"- Optional work does not need to succeed, but every omitted optional assignment must be listed in skippedAssignments with assignmentId and a concrete reason.",
 		"- Report verification truthfully. If browser/DOM verification did not run or failed, label it as unverified; a hand-written simulator or static inspection is not a browser pass. Any artifact change after review invalidates that review and requires fresh validation.",
@@ -1174,6 +1177,10 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 	}
 	if len(collaborationPolicyJSON) > 0 {
 		env["CLAWMANAGER_TEAM_COLLABORATION_POLICY_JSON"] = string(collaborationPolicyJSON)
+	}
+	if proxyURL, ok := defaultEgressProxyURL(); ok {
+		env["CLAWMANAGER_BROWSER_PROXY_URL"] = proxyURL
+		env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] = "http://" + teamPreviewBrowserHost
 	}
 	if profileKey := strings.TrimSpace(member.ProfileKey); profileKey != "" {
 		env["CLAWMANAGER_TEAM_PROFILE_KEY"] = profileKey
@@ -1954,7 +1961,7 @@ func buildBackendBootstrapReport(team *models.Team, members []models.TeamMember,
 	b.WriteString("- `team_update_progress`：记录业务计划、阶段进度、长任务状态和检查反馈。\n")
 	b.WriteString("- `team_status`：查询成员和任务状态。\n")
 	b.WriteString("- `team_complete_task`：仅用于成员提交分配结果或 Leader 关闭根任务。\n")
-	b.WriteString("- `team_artifact_write/read/list/mkdir`：在当前 Team 共享目录内安全读写产物，自动限制路径并使用协作权限。\n")
+	b.WriteString("- `team_artifact_write/read/preview/list/mkdir`：在当前 Team 共享目录内安全读写产物；`preview` 返回与 Team 身份绑定、可在 Browser 中打开的签名只读地址。\n")
 	return b.String()
 }
 
@@ -2224,7 +2231,8 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 	case teamVerificationRoleEvidence:
 		return []string{
 			"- Use proportionate, static-first validation with the source, artifacts, and tools already available in the runtime.",
-			"- If the assignment provides a directly reachable HTTP(S) verification URL, perform one brief Browser check. Otherwise, or after any Browser/environment error, immediately continue with static review.",
+			"- Browser is available. For Team files, call team_artifact_preview and use its signed HTTP URL. Use Browser only when interaction or visual evidence materially affects the verdict; for non-code or non-interactive work, proceed directly with static review.",
+			"- After any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with static review.",
 			"- Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects.",
 			"- Say Browser verification passed only when it actually ran; otherwise report static-review scope and only concrete findings.",
 			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
@@ -2232,7 +2240,8 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 	case teamVerificationRoleCodeReview:
 		return []string{
 			"- Review the source, diff, architecture boundaries, and existing test evidence first; keep validation proportional to the assigned change.",
-			"- Use Browser only for one brief check when the assignment provides a directly reachable HTTP(S) URL. On any Browser/environment error, immediately continue with source review.",
+			"- Browser is available. For Team files, call team_artifact_preview and use its signed HTTP URL. Use Browser only when interaction or rendering materially affects the verdict.",
+			"- On any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with source review.",
 			"- Do not install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup.",
 			"- Report only concrete findings and residual risks; do not invent or target a fixed issue count.",
 			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
@@ -2266,6 +2275,7 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 		"- Use the available runtime tools normally, but coordinate Team work through the ClawManager Team channel.",
 		"- Use team_send for assignments, handoffs, clarifying questions, blockers, and final delivery messages.",
 		"- Use team_status / progress updates to report work state when available.",
+		"- Browser is available to every OpenClaw Team worker. Open Team files with team_artifact_preview; do not use file:// or start a temporary file server.",
 		"- Use team_complete_task only when the assigned task is actually complete and evidence has been reported.",
 		"- In an active Team turn, task and assignment identity is inherited by the Runtime. Reuse IDs supplied by ClawManager when present, but omit optional IDs rather than inventing replacements.",
 		"",
@@ -3390,8 +3400,14 @@ func (s *teamService) reconcileDeferredTeamCompletion(team *models.Team, bus *re
 			continue
 		}
 		// Only a current, explicitly sealed completion proposal may retire an
-		// unused planned phase. An older report must not mutate a newer plan.
-		if _, err := s.reconcileTeamWorkflowLedger(task, true, time.Now().UTC()); err != nil {
+		// unused planned phase. New plans also require a structured disposition;
+		// legacy plans keep their historical sealing behavior.
+		if _, err := s.reconcileTeamWorkflowLedgerWithDispositions(
+			task,
+			true,
+			structuredTeamPhaseDispositions(payload),
+			time.Now().UTC(),
+		); err != nil {
 			return false, err
 		}
 		payload["event"] = "completion_proposed"
@@ -5225,6 +5241,44 @@ type teamCompletionWaiver struct {
 	Risk         string
 }
 
+type teamPhaseDisposition struct {
+	PhaseID  string
+	Decision string
+	Reason   string
+}
+
+func structuredTeamPhaseDispositions(payload map[string]interface{}) map[string]teamPhaseDisposition {
+	result := map[string]teamPhaseDisposition{}
+	raw := firstTeamValue(payload, "phaseDispositions", "phase_dispositions")
+	values, ok := raw.([]interface{})
+	if !ok {
+		return result
+	}
+	for _, value := range values {
+		entry, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		disposition := teamPhaseDisposition{
+			PhaseID:  eventString(entry, "phaseId", "phase_id", "id"),
+			Decision: strings.ToLower(eventString(entry, "decision", "status")),
+			Reason:   eventString(entry, "reason"),
+		}
+		if disposition.PhaseID == "" || disposition.Reason == "" {
+			continue
+		}
+		switch disposition.Decision {
+		case "cancelled", "skipped", "superseded":
+			result[disposition.PhaseID] = disposition
+		}
+	}
+	return result
+}
+
+func phaseUsesExplicitDisposition(phase models.TeamWorkflowPhase) bool {
+	return strings.EqualFold(strings.TrimSpace(derefTeamString(phase.CompletionPolicy)), teamPhaseCompletionPolicyExplicitV1)
+}
+
 func structuredTeamCompletionWaivers(payload map[string]interface{}) map[string]teamCompletionWaiver {
 	result := map[string]teamCompletionWaiver{}
 	raw := firstTeamValue(payload, "waivers", "assignmentWaivers", "assignment_waivers")
@@ -5422,6 +5476,7 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 	workflowFinal := eventBool(payload, "workflowFinal", "workflow_final", "sealWorkflow", "seal_workflow")
 	finalAnswerReady := eventBool(payload, "finalAnswerReady", "final_answer_ready")
 	remainingActions := normalizeContextRefs(firstTeamValue(payload, "remainingActions", "remaining_actions", "nextActions", "next_actions"))
+	phaseDispositions := structuredTeamPhaseDispositions(payload)
 	if protocolVersion >= 3 && (!workflowFinal || !finalAnswerReady || len(remainingActions) > 0) {
 		result.Decision = teamCompletionDecisionDeferred
 		result.Reason = "workflow_not_sealed"
@@ -5436,14 +5491,19 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 		if !phase.RequiredForRoot || phase.Status == teamPhaseStatusCompleted || phase.Status == teamPhaseStatusCancelled || phase.Status == teamPhaseStatusSuperseded {
 			continue
 		}
-		// The phase ledger is a projection, not an additional source of work.  A
-		// planned phase with no dispatched required work must never keep an
-		// explicitly sealed workflow open (Team 58 was stuck exactly this way).
-		// Actual current work items and their dependencies were checked above.
 		if phaseHasIncompleteRequiredWork(phase.PhaseID, byBusinessID, member.ID, waivers) {
 			result.PendingPhases = append(result.PendingPhases, phase.PhaseID)
 			continue
 		}
+		if phaseUsesExplicitDisposition(phase) && !phaseHasRequiredWork(phase.PhaseID, byBusinessID, member.ID) {
+			if disposition := phaseDispositions[phase.PhaseID]; disposition.PhaseID == "" {
+				result.PendingPhases = append(result.PendingPhases, phase.PhaseID+":disposition")
+			}
+			continue
+		}
+		// Legacy plans did not declare an explicit phase-disposition policy.
+		// Preserve their historical workflow sealing semantics so an upgraded
+		// control plane cannot strand an already-running Team.
 		if phase.DecisionRequired && !workflowFinal {
 			result.PendingPhases = append(result.PendingPhases, phase.PhaseID+":leader_decision")
 		}
@@ -5575,12 +5635,37 @@ func phaseHasIncompleteRequiredWork(phaseID string, items map[string]models.Team
 	return false
 }
 
+func phaseHasRequiredWork(phaseID string, items map[string]models.TeamWorkItem, leaderID int) bool {
+	for _, item := range items {
+		if strings.TrimSpace(derefTeamString(item.PhaseID)) != strings.TrimSpace(phaseID) || item.SupersededBy != nil {
+			continue
+		}
+		if item.OwnerMemberID == nil || *item.OwnerMemberID == leaderID {
+			continue
+		}
+		if item.RequiredForRoot || item.AssignmentID == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // reconcileTeamWorkflowLedger repairs the derived phase view from the current
 // work-item ledger. It deliberately does not invent or complete work: a phase
 // moves to completed only when all of its actual required assignments succeeded.
-// A future planned phase without assignments remains planned until the Leader
-// explicitly seals the workflow, at which point it is cancelled as unused.
+// A future planned phase without assignments remains planned. Legacy plans may
+// retire it when the Leader seals the workflow; explicit-v1 plans also require
+// a structured phase disposition with a reason.
 func (s *teamService) reconcileTeamWorkflowLedger(task *models.TeamTask, workflowFinal bool, now time.Time) (bool, error) {
+	return s.reconcileTeamWorkflowLedgerWithDispositions(task, workflowFinal, nil, now)
+}
+
+func (s *teamService) reconcileTeamWorkflowLedgerWithDispositions(
+	task *models.TeamTask,
+	workflowFinal bool,
+	dispositions map[string]teamPhaseDisposition,
+	now time.Time,
+) (bool, error) {
 	if s == nil || s.repo == nil || task == nil || task.ID <= 0 || isTerminalTeamTaskStatus(task.Status) {
 		return false, nil
 	}
@@ -5646,6 +5731,19 @@ func (s *teamService) reconcileTeamWorkflowLedger(task *models.TeamTask, workflo
 		}
 		previousStatus := phase.Status
 		switch {
+		case !phaseHasWork && workflowFinal && phaseUsesExplicitDisposition(phase):
+			disposition := dispositions[phase.PhaseID]
+			switch disposition.Decision {
+			case "cancelled", "skipped":
+				phase.Status = teamPhaseStatusCancelled
+			case "superseded":
+				phase.Status = teamPhaseStatusSuperseded
+			default:
+				anyDecision = true
+				if currentPhase == "" {
+					currentPhase = phase.PhaseID
+				}
+			}
 		case !phaseHasWork && workflowFinal && phase.Status == teamPhaseStatusPlanned:
 			phase.Status = teamPhaseStatusCancelled
 		case phaseHasWork && phaseComplete && phase.DecisionRequired && !workflowFinal:
@@ -7078,7 +7176,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 				return identityErr
 			}
 			workflowFinal := eventBool(payload, "workflowFinal", "workflow_final", "sealWorkflow", "seal_workflow")
-			reconciled, reconcileErr := s.reconcileTeamWorkflowLedger(task, workflowFinal, time.Now().UTC())
+			reconciled, reconcileErr := s.reconcileTeamWorkflowLedgerWithDispositions(
+				task,
+				workflowFinal,
+				structuredTeamPhaseDispositions(payload),
+				time.Now().UTC(),
+			)
 			if reconcileErr != nil {
 				return reconcileErr
 			}
@@ -9096,9 +9199,13 @@ func (s *teamService) projectTeamWorkflowLedger(team *models.Team, task *models.
 
 	if isPlan {
 		phaseValues := firstTeamValue(payload, "phases", "workflowPhases", "workflow_phases")
+		phaseDispositionPolicy := eventString(payload, "phaseDispositionPolicy", "phase_disposition_policy")
 		if plan, ok := payload["workflowPlan"].(map[string]interface{}); ok {
 			if nested := firstTeamValue(plan, "phases", "workflowPhases", "workflow_phases"); nested != nil {
 				phaseValues = nested
+			}
+			if phaseDispositionPolicy == "" {
+				phaseDispositionPolicy = eventString(plan, "phaseDispositionPolicy", "phase_disposition_policy")
 			}
 		}
 		if rawPhases, ok := phaseValues.([]interface{}); ok {
@@ -9138,6 +9245,9 @@ func (s *teamService) projectTeamWorkflowLedger(team *models.Team, task *models.
 					phase.NextPhaseID = &nextPhaseID
 				}
 				if policy := eventString(phaseMap, "completionPolicy", "completion_policy"); policy != "" {
+					phase.CompletionPolicy = &policy
+				} else if strings.EqualFold(strings.TrimSpace(phaseDispositionPolicy), teamPhaseCompletionPolicyExplicitV1) {
+					policy := teamPhaseCompletionPolicyExplicitV1
 					phase.CompletionPolicy = &policy
 				}
 				if err := s.repo.UpsertWorkflowPhase(phase); err != nil {
