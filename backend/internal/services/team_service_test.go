@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1132,7 +1133,7 @@ func TestProjectTeamEventDoesNotTreatPlainFinalReplyAsTaskCompleted(t *testing.T
 	}
 }
 
-func TestProjectTeamEventQueuesBoundedRecoveryAfterLeaderTurnEnds(t *testing.T) {
+func TestProjectTeamEventDoesNotQueueForcedRecoveryWithoutExactTurnResult(t *testing.T) {
 	taskID := 69
 	messageID := "team-31-user-root"
 	task := &models.TeamTask{
@@ -1167,11 +1168,11 @@ func TestProjectTeamEventQueuesBoundedRecoveryAfterLeaderTurnEnds(t *testing.T) 
 	); err != nil {
 		t.Fatalf("projectTeamEvent returned error: %v", err)
 	}
-	if len(repo.outboxRows) != 1 || repo.outboxRows[0].MessageID != "leader-completion-recovery:31:69:1" {
-		t.Fatalf("expected one bounded completion recovery outbox row, got %#v", repo.outboxRows)
+	if len(repo.outboxRows) != 0 {
+		t.Fatalf("turn end must not create a forced Agent continuation, got %#v", repo.outboxRows)
 	}
 	if task.Status == models.TeamTaskStatusSucceeded || task.FinishedAt != nil || task.AcceptedCompletionID != nil {
-		t.Fatalf("turn-end recovery must not infer task success: %#v", task)
+		t.Fatalf("a turn without an exact paired narrative must remain non-terminal: %#v", task)
 	}
 }
 
@@ -2607,6 +2608,39 @@ func TestReconcileDeferredCompletionAcceptsAfterLedgerRepair(t *testing.T) {
 	}
 	if repo.workflowPhases[0].Status != teamPhaseStatusCompleted || repo.workflowPhases[1].Status != teamPhaseStatusCancelled {
 		t.Fatalf("expected repaired phase ledger before acceptance: %#v", repo.workflowPhases)
+	}
+}
+
+func TestDeferredAutomaticTurnRequiresFreshLeaderSynthesis(t *testing.T) {
+	taskID := 203
+	leaderID := 122
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 31, TargetMemberID: leaderID, MessageID: "team-31-task-203",
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateAwaitingLeaderDecision,
+		PlanVersion: 1, LedgerVersion: 9,
+	}
+	leader := &models.TeamMember{ID: leaderID, TeamID: 31, MemberKey: "leader", Role: "leader"}
+	payloadJSON, _ := json.Marshal(map[string]interface{}{
+		"protocolVersion": 4, "event": "completion_deferred",
+		"completionId": "completion-auto-203", "explicitCompletion": true,
+		"completionSource": teamTaskCompletionTool, "automaticTurnResult": true,
+		"workflowFinal": true, "finalAnswerReady": true, "planVersion": 1, "ledgerVersion": 4,
+		"completionDraftMarkdown": "# Phase 1 report", "pendingPhases": []interface{}{"phase-2"},
+	})
+	eventID := "deferred-auto-203"
+	repo := &teamRepositoryStub{
+		tasksByID: map[int]*models.TeamTask{taskID: task},
+		createdEvents: []models.TeamEvent{{
+			TeamID: 31, TaskID: &taskID, MemberID: &leaderID,
+			EventID: &eventID, EventType: "completion_deferred", PayloadJSON: stringPtr(string(payloadJSON)),
+		}},
+	}
+	reconciled, err := (&teamService{repo: repo}).reconcileDeferredTeamCompletion(
+		&models.Team{ID: 31, CommunicationMode: teamCommunicationModeLeaderMediated},
+		nil, task, leader,
+	)
+	if err != nil || reconciled || task.Status == models.TeamTaskStatusSucceeded || len(repo.createdEvents) != 1 {
+		t.Fatalf("premature natural report must not become the later phase's final answer: reconciled=%v task=%#v events=%#v err=%v", reconciled, task, repo.createdEvents, err)
 	}
 }
 
@@ -5774,6 +5808,34 @@ func TestLeaderSynthesisProgressExplicitlySealsWorkflow(t *testing.T) {
 	}
 }
 
+func TestLeaderSynthesisCompletesMatchingLeaderOwnedPhaseOnly(t *testing.T) {
+	now := time.Now().UTC()
+	task := &models.TeamTask{
+		ID: 138, TeamID: 68, Status: models.TeamTaskStatusRunning,
+		WorkflowState: teamWorkflowStateAwaitingLeaderDecision,
+		PlanVersion:   1, LedgerVersion: 4, TargetMemberID: 201,
+	}
+	team := &models.Team{ID: 68, CommunicationMode: teamCommunicationModeLeaderMediated}
+	leader := &models.TeamMember{ID: 201, TeamID: 68, MemberKey: "delivery-lead", Role: "leader"}
+	repo := &teamRepositoryStub{workflowPhases: []models.TeamWorkflowPhase{
+		{ID: 1, TeamID: 68, RootTaskID: task.ID, PhaseID: "phase-final-synthesis", PlanVersion: 1, Status: teamPhaseStatusPlanned, RequiredForRoot: true},
+		{ID: 2, TeamID: 68, RootTaskID: task.ID, PhaseID: "phase-other", PlanVersion: 1, Status: teamPhaseStatusPlanned, RequiredForRoot: true},
+	}}
+	changed, err := (&teamService{repo: repo}).projectTeamWorkflowLedger(team, task, leader, "task_progress", map[string]interface{}{
+		"eventKind": "leader_synthesis", "workflowState": teamWorkflowStateSynthesizing,
+		"phaseId": "phase-final-synthesis",
+	}, now)
+	if err != nil || !changed {
+		t.Fatalf("expected matching Leader phase completion, changed=%v err=%v", changed, err)
+	}
+	if repo.workflowPhases[0].Status != teamPhaseStatusCompleted || repo.workflowPhases[0].CompletedAt == nil {
+		t.Fatalf("matching Leader synthesis phase stayed open: %#v", repo.workflowPhases)
+	}
+	if repo.workflowPhases[1].Status != teamPhaseStatusPlanned {
+		t.Fatalf("Leader synthesis must not silently retire another planned phase: %#v", repo.workflowPhases)
+	}
+}
+
 func TestLeaderFinalWorkItemDoesNotInheritReviewerCanonicalIdentity(t *testing.T) {
 	task := &models.TeamTask{
 		ID: 150, TeamID: 75, TargetMemberID: 256,
@@ -6097,119 +6159,405 @@ func TestReconcileDeferredCompletionNeverReusesReportFromOlderPlan(t *testing.T)
 	}
 }
 
-func TestRequestLeaderCompletionRecoveryQueuesOneExplicitContinuation(t *testing.T) {
-	taskID := 245
-	task := &models.TeamTask{
-		ID: taskID, TeamID: 92, TargetMemberID: 920,
-		MessageID: "team-92-task-root-message", Status: models.TeamTaskStatusRunning,
-		WorkflowState: teamWorkflowStatePlanning,
-		PayloadJSON:   `{"prompt":"Describe the current Team members.","responseLocale":"zh-CN"}`,
-	}
-	leader := &models.TeamMember{ID: 920, TeamID: 92, MemberKey: "leader", Role: "leader"}
-	repo := &teamRepositoryStub{}
-	service := &teamService{repo: repo}
-	payload := map[string]interface{}{
-		"eventKind": "turn_finished_without_completion", "activeTurnFinished": true,
-		"hadAssistantNarrative": true, "hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
-	}
-	sourceEvent := &models.TeamEvent{ID: 501, TeamID: 92, TaskID: &taskID, EventType: "task_progress"}
-	team := &models.Team{ID: 92, CommunicationMode: teamCommunicationModeLeaderMediated}
-
-	if err := service.requestLeaderCompletionRecovery(team, nil, task, leader, payload, sourceEvent); err != nil {
-		t.Fatalf("requestLeaderCompletionRecovery returned error: %v", err)
-	}
-	if len(repo.outboxRows) != 1 {
-		t.Fatalf("expected one durable completion recovery envelope, got %#v", repo.outboxRows)
-	}
-	var envelope map[string]interface{}
-	if err := json.Unmarshal([]byte(repo.outboxRows[0].PayloadJSON), &envelope); err != nil {
-		t.Fatal(err)
-	}
-	if envelope["requiresCompletion"] != true || eventString(envelope, "intent") != "leader_completion_recovery" {
-		t.Fatalf("unexpected completion recovery contract: %#v", envelope)
-	}
-	metadata, _ := envelope["metadata"].(map[string]interface{})
-	if eventInt(metadata, "completionRecoveryAttempt") != 1 {
-		t.Fatalf("expected exactly one recovery attempt marker: %#v", metadata)
-	}
-	prompt := eventString(envelope, "prompt")
-	for _, expected := range []string{"not permission to assume success", "team_complete_task", "team_update_progress", "no text from the previous turn will be converted into success"} {
-		if !strings.Contains(prompt, expected) {
-			t.Fatalf("completion recovery prompt missing %q: %s", expected, prompt)
-		}
-	}
-	if task.Status != models.TeamTaskStatusRunning || task.AcceptedCompletionID != nil {
-		t.Fatalf("recovery must not terminalize the task: %#v", task)
-	}
-	if err := service.requestLeaderCompletionRecovery(team, nil, task, leader, payload, sourceEvent); err != nil {
-		t.Fatal(err)
-	}
-	if len(repo.outboxRows) != 1 {
-		t.Fatalf("recovery must be idempotent, got %#v", repo.outboxRows)
-	}
-}
-
-func TestRequestLeaderCompletionRecoveryRejectsUnsafeCases(t *testing.T) {
-	basePayload := func() map[string]interface{} {
+func TestTrustedRuntimeTurnResultSignalRejectsControlAndInterimTurns(t *testing.T) {
+	base := func() map[string]interface{} {
 		return map[string]interface{}{
-			"eventKind": "turn_finished_without_completion", "activeTurnFinished": true,
-			"hadAssistantNarrative": true, "hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
+			"protocolVersion": 3, "eventKind": "turn_finished_without_completion",
+			"activeTurnFinished": true, "hadAssistantNarrative": true,
+			"hadOutboundAssignment": false, "completionRecoveryAttempt": 0,
+			"messageId": "team-92-task-root-message",
 		}
+	}
+	if !isTrustedRuntimeTurnResultSignal("task_progress", base()) {
+		t.Fatal("a Runtime-authored final turn must be eligible for exact narrative correlation")
 	}
 	cases := []struct {
-		name       string
-		mutateTask func(*models.TeamTask)
-		mutate     func(map[string]interface{}, *teamRepositoryStub)
+		name   string
+		mutate func(map[string]interface{})
 	}{
-		{name: "turn still active", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["activeTurnFinished"] = false }},
-		{name: "no assistant narrative", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["hadAssistantNarrative"] = false }},
-		{name: "outbound assignment", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["hadOutboundAssignment"] = true }},
-		{name: "already recovery turn", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) { payload["completionRecoveryAttempt"] = 1 }},
-		{name: "existing work item", mutate: func(_ map[string]interface{}, repo *teamRepositoryStub) {
-			repo.workItems = []models.TeamWorkItem{{TeamID: 93, RootTaskID: 246, WorkID: "worker-1", Status: models.TeamTaskStatusRunning}}
-		}},
-		{name: "planned workflow", mutateTask: func(task *models.TeamTask) { task.PlanVersion = 1 }},
-		{name: "active phase", mutateTask: func(task *models.TeamTask) {
-			phase := "phase-1"
-			task.CurrentPhaseID = &phase
-		}},
-		{name: "long running turn heartbeat", mutate: func(payload map[string]interface{}, _ *teamRepositoryStub) {
-			payload["eventKind"] = "assignment_heartbeat"
-		}},
-		{name: "bootstrap control plane", mutateTask: func(task *models.TeamTask) {
-			task.MessageID = "team-93-bootstrap-introduction"
-			task.PayloadJSON = `{"intent":"team_bootstrap_introduction"}`
-		}},
+		{name: "old protocol", mutate: func(p map[string]interface{}) { p["protocolVersion"] = 2 }},
+		{name: "turn active", mutate: func(p map[string]interface{}) { p["activeTurnFinished"] = false }},
+		{name: "no narrative", mutate: func(p map[string]interface{}) { p["hadAssistantNarrative"] = false }},
+		{name: "outbound assignment", mutate: func(p map[string]interface{}) { p["hadOutboundAssignment"] = true }},
+		{name: "monitor", mutate: func(p map[string]interface{}) { p["messageId"] = "monitor:team-92-task-1:work:1" }},
+		{name: "recovery", mutate: func(p map[string]interface{}) { p["completionRecoveryAttempt"] = 1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			taskID := 246
-			task := &models.TeamTask{
-				ID: taskID, TeamID: 93, TargetMemberID: 930, MessageID: "root-message",
-				Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStatePlanning,
-				PayloadJSON: `{"prompt":"A direct Leader task"}`,
-			}
-			repo := &teamRepositoryStub{}
-			payload := basePayload()
-			if tc.mutateTask != nil {
-				tc.mutateTask(task)
-			}
-			if tc.mutate != nil {
-				tc.mutate(payload, repo)
-			}
-			service := &teamService{repo: repo}
-			leader := &models.TeamMember{ID: 930, TeamID: 93, MemberKey: "leader", Role: "leader"}
-			if err := service.requestLeaderCompletionRecovery(
-				&models.Team{ID: 93, CommunicationMode: teamCommunicationModeLeaderMediated},
-				nil, task, leader, payload,
-				&models.TeamEvent{ID: 601, TeamID: 93, TaskID: &taskID, EventType: "task_progress"},
-			); err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(repo.outboxRows) != 0 {
-				t.Fatalf("unsafe recovery case must not queue a continuation: %#v", repo.outboxRows)
+			payload := base()
+			tc.mutate(payload)
+			if isTrustedRuntimeTurnResultSignal("task_progress", payload) {
+				t.Fatalf("unsafe turn must not become a result candidate: %#v", payload)
 			}
 		})
+	}
+}
+
+func TestAutomaticRuntimeCompletionKeepsStrictEnvelopeAndSingleChatCopy(t *testing.T) {
+	payload := map[string]interface{}{
+		"protocolVersion": 4, "eventId": "evt-auto", "completionId": "completion-auto",
+		"taskId": "team-95-task-250", "rootTaskId": "team-95-task-250",
+		"memberId": "developer", "status": "succeeded",
+		"completionSource": teamTaskCompletionTool, "explicitCompletion": true,
+		"automaticTurnResult": true, "assignmentResultOnly": true,
+		"summary": "Implementation delivered.", "resultMarkdown": "# Implementation delivered",
+	}
+	if !isTeamTaskCompletionSignal("completion_proposed", "succeeded", payload) {
+		t.Fatalf("automatic Runtime submission must retain the strict completion envelope: %#v", payload)
+	}
+	applyTeamChatPolicy("completion_proposed", payload, nil, &models.TeamMember{MemberKey: "developer"})
+	if eventBool(payload, "visibleToChat") || eventString(payload, "chatPolicy") != "hidden" {
+		t.Fatalf("paired automatic completion must not duplicate the already projected narrative: %#v", payload)
+	}
+}
+
+func TestNaturalTurnCompletionCannotSkipUndispatchedFuturePhase(t *testing.T) {
+	taskID := 259
+	leaderID := 959
+	workerID := 958
+	phaseOne := "phase-1"
+	phaseTwo := "phase-2"
+	assignmentID := "assign-phase-1"
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 95, TargetMemberID: leaderID,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateAwaitingLeaderDecision,
+		PlanVersion: 1, LedgerVersion: 3,
+	}
+	repo := &teamRepositoryStub{
+		workItems: []models.TeamWorkItem{{
+			TeamID: 95, RootTaskID: taskID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			PhaseID: &phaseOne, Revision: 1, RequiredForRoot: true,
+			OwnerMemberID: &workerID, Status: models.TeamTaskStatusSucceeded,
+		}},
+		workflowPhases: []models.TeamWorkflowPhase{
+			{TeamID: 95, RootTaskID: taskID, PhaseID: phaseOne, PlanVersion: 1, Status: teamPhaseStatusCompleted, RequiredForRoot: true},
+			{TeamID: 95, RootTaskID: taskID, PhaseID: phaseTwo, PlanVersion: 1, Status: teamPhaseStatusPlanned, RequiredForRoot: true},
+		},
+	}
+	service := &teamService{repo: repo}
+	evaluation, err := service.evaluateLeaderRootCompletion(
+		&models.Team{ID: 95, CommunicationMode: teamCommunicationModeLeaderMediated},
+		task,
+		&models.TeamMember{ID: leaderID, TeamID: 95, MemberKey: "leader", Role: "leader"},
+		map[string]interface{}{
+			"protocolVersion": 4, "automaticTurnResult": true,
+			"completionId": "completion-auto-phase", "explicitCompletion": true,
+			"completionSource": teamTaskCompletionTool, "rootTaskTerminal": true,
+			"workflowFinal": true, "finalAnswerReady": true,
+			"resultMarkdown": "# Phase 1 complete", "summary": "Phase 1 complete",
+		},
+	)
+	if err != nil || evaluation.Decision != teamCompletionDecisionDeferred ||
+		!slices.Contains(evaluation.PendingPhases, phaseTwo) {
+		t.Fatalf("natural result skipped an undispatched future phase: evaluation=%#v err=%v", evaluation, err)
+	}
+}
+
+func TestNaturalTurnCompletionExecutesFinalSynthesisPhase(t *testing.T) {
+	taskID := 258
+	leaderID := 957
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 95, TargetMemberID: leaderID,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateAwaitingLeaderDecision,
+		PlanVersion: 1, LedgerVersion: 3,
+	}
+	explicitPolicy := teamPhaseCompletionPolicyExplicitV1
+	repo := &teamRepositoryStub{workflowPhases: []models.TeamWorkflowPhase{{
+		TeamID: 95, RootTaskID: taskID, PhaseID: "phase-final-synthesis",
+		PlanVersion: 1, Status: teamPhaseStatusPlanned, RequiredForRoot: true,
+		DecisionRequired: true, CompletionPolicy: &explicitPolicy,
+	}}}
+	evaluation, err := (&teamService{repo: repo}).evaluateLeaderRootCompletion(
+		&models.Team{ID: 95, CommunicationMode: teamCommunicationModeLeaderMediated},
+		task,
+		&models.TeamMember{ID: leaderID, TeamID: 95, MemberKey: "leader", Role: "leader"},
+		map[string]interface{}{
+			"protocolVersion": 4, "automaticTurnResult": true,
+			"completionId": "completion-auto-final", "explicitCompletion": true,
+			"completionSource": teamTaskCompletionTool, "rootTaskTerminal": true,
+			"workflowFinal": true, "finalAnswerReady": true,
+			"resultMarkdown": "# Final synthesis", "summary": "Final synthesis",
+		},
+	)
+	if err != nil || evaluation.Decision != teamCompletionDecisionAccepted {
+		t.Fatalf("the final answer itself must execute the dedicated final-synthesis phase: evaluation=%#v err=%v", evaluation, err)
+	}
+}
+
+func TestExecutionResultCannotRewriteIssuedAssignmentContract(t *testing.T) {
+	taskID := 260
+	ownerID := 961
+	assignmentID := "assign-build"
+	canonicalID := "canonical-build"
+	phaseID := "phase-build"
+	dependencyJSON := `["assign-input"]`
+	reviewTarget := "assign-input"
+	reviewRevision := 2
+	repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{{
+		ID: 1, TeamID: 96, RootTaskID: taskID, WorkID: assignmentID,
+		AssignmentID: &assignmentID, CanonicalWorkID: &canonicalID, PhaseID: &phaseID,
+		Revision: 2, RequiredForRoot: true, ReviewRequired: true,
+		ReviewTargetAssignmentID: &reviewTarget, ReviewTargetRevision: &reviewRevision,
+		OwnerMemberID: &ownerID, Title: "Issued build contract",
+		Status: models.TeamTaskStatusRunning, DependsOnJSON: &dependencyJSON,
+	}}}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"assignmentResultOnly": true,
+		"assignmentId":         assignmentID,
+		"canonicalWorkId":      "wrong-canonical",
+		"phaseId":              "phase-wrong",
+		"revision":             99,
+		"required":             false,
+		"reviewRequired":       false,
+		"dependsOn":            []interface{}{"phase-wrong"},
+		"summary":              "Build delivered.",
+		"resultMarkdown":       "# Build delivered",
+		"collaborationStep": map[string]interface{}{
+			"type": "result", "title": "Result tried to rewrite contract",
+		},
+	}
+	event := &models.TeamEvent{TeamID: 96, TaskID: &taskID, MemberID: &ownerID, EventType: "task_completed", CreatedAt: time.Now().UTC()}
+	if err := service.projectTeamWorkItem(
+		&models.Team{ID: 96, CommunicationMode: teamCommunicationModeLeaderMediated},
+		&models.TeamTask{ID: taskID, TeamID: 96, TargetMemberID: 960},
+		&models.TeamMember{ID: ownerID, TeamID: 96, MemberKey: "developer", Role: "developer"},
+		"task_completed", payload, event,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 1 {
+		t.Fatalf("result must not fork a second contract: %#v", repo.workItems)
+	}
+	got := repo.workItems[0]
+	if got.Status != models.TeamTaskStatusSucceeded || got.Revision != 2 ||
+		derefTeamString(got.CanonicalWorkID) != canonicalID || derefTeamString(got.PhaseID) != phaseID ||
+		!got.RequiredForRoot || !got.ReviewRequired || derefTeamString(got.DependsOnJSON) != dependencyJSON ||
+		derefTeamString(got.ReviewTargetAssignmentID) != reviewTarget || got.ReviewTargetRevision == nil || *got.ReviewTargetRevision != reviewRevision ||
+		got.Title != "Issued build contract" {
+		t.Fatalf("execution result rewrote immutable assignment contract: %#v", got)
+	}
+}
+
+func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
+	taskID := 261
+	developerID := 971
+	reviewerID := 972
+	developerAssignment := "assign-dev"
+	reviewerAssignment := "assign-review"
+	dependencyJSON := `["assign-dev"]`
+	reviewRevision := 1
+	repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{
+		{
+			ID: 1, TeamID: 97, RootTaskID: taskID, WorkID: developerAssignment,
+			AssignmentID: &developerAssignment, Revision: 1, RequiredForRoot: true,
+			ReviewRequired: true, OwnerMemberID: &developerID, Status: models.TeamTaskStatusSucceeded,
+		},
+		{
+			ID: 2, TeamID: 97, RootTaskID: taskID, WorkID: reviewerAssignment,
+			AssignmentID: &reviewerAssignment, Revision: 1, RequiredForRoot: true,
+			OwnerMemberID: &reviewerID, Status: models.TeamTaskStatusRunning,
+			DependsOnJSON: &dependencyJSON, ReviewTargetAssignmentID: &developerAssignment,
+			ReviewTargetRevision: &reviewRevision,
+		},
+	}}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"assignmentResultOnly": true, "assignmentId": reviewerAssignment,
+		"reviewVerdict": "pass", "reviewedAssignmentId": "phase-dev",
+		"reviewedRevision": 1, "summary": "18/18 PASS", "resultMarkdown": "# Review\n\n18/18 PASS",
+		"collaborationStep": map[string]interface{}{"type": "result"},
+	}
+	event := &models.TeamEvent{TeamID: 97, TaskID: &taskID, MemberID: &reviewerID, EventType: "task_completed", CreatedAt: time.Now().UTC()}
+	reviewer := &models.TeamMember{ID: reviewerID, TeamID: 97, MemberKey: "reviewer", Role: "reviewer"}
+	task := &models.TeamTask{ID: taskID, TeamID: 97, TargetMemberID: 970}
+	if err := service.projectTeamWorkItem(
+		&models.Team{ID: 97, CommunicationMode: teamCommunicationModeLeaderMediated},
+		task, reviewer, "task_completed", payload, event,
+	); err != nil {
+		t.Fatal(err)
+	}
+	validated, err := service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	if err != nil || !validated {
+		t.Fatalf("issued review target should validate despite wrong result hint: validated=%v err=%v payload=%#v", validated, err, payload)
+	}
+	items, _ := repo.ListWorkItemsByRootTaskID(taskID)
+	for _, item := range items {
+		switch workItemBusinessID(item) {
+		case developerAssignment:
+			if item.ValidatedRevision == nil || *item.ValidatedRevision != 1 {
+				t.Fatalf("developer assignment review gate was not closed: %#v", item)
+			}
+		case reviewerAssignment:
+			if got := teamWorkItemDependencies(item); len(got) != 1 || got[0] != developerAssignment {
+				t.Fatalf("Reviewer result contaminated dependency contract: %#v", item)
+			}
+		}
+	}
+	if eventString(payload, "ignoredReportedReviewTarget") != "phase-dev" {
+		t.Fatalf("wrong result hint should remain diagnostic only: %#v", payload)
+	}
+}
+
+func TestProtocolV3ExactTurnNarrativeCompletesDirectLeaderTaskWithoutRecovery(t *testing.T) {
+	taskID := 262
+	leaderID := 980
+	messageID := "team-98-root-message"
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 98, TargetMemberID: leaderID, MessageID: messageID,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStatePlanning,
+	}
+	leader := &models.TeamMember{
+		ID: leaderID, TeamID: 98, MemberKey: "leader", Role: "leader",
+		Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID,
+	}
+	narrativePayload, _ := json.Marshal(map[string]interface{}{
+		"protocolVersion": 3, "eventKind": "agent_narrative", "messageKind": "narrative",
+		"sourceMessageId": messageID, "nonAuthoritative": true, "stateEffect": "none",
+		"text":        "# Team members\n\nThe Leader coordinates the Developer and Reviewer.",
+		"contentHash": "abc123",
+	})
+	narrativeEventID := "agent-narrative-262"
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"leader": leader},
+		createdEvents: []models.TeamEvent{{
+			ID: 1, TeamID: 98, TaskID: &taskID, MemberID: &leaderID,
+			EventID: &narrativeEventID, EventType: "reply", PayloadJSON: stringPtr(string(narrativePayload)),
+		}},
+	}
+	service := &teamService{repo: repo}
+	turnPayload, _ := json.Marshal(map[string]interface{}{
+		"protocolVersion": 3, "event": "task_progress", "eventKind": "turn_finished_without_completion",
+		"messageId": messageID, "memberId": "leader", "taskId": "team-98-task-262",
+		"status": "waiting_completion", "activeTurnFinished": true,
+		"hadAssistantNarrative": true, "hadOutboundAssignment": false,
+		"completionRecoveryAttempt": 0,
+	})
+	if err := service.projectTeamEvent(
+		&models.Team{ID: 98, CommunicationMode: teamCommunicationModeLeaderMediated},
+		nil,
+		redisStreamMessage{ID: "262-1", Fields: map[string]string{"payload": string(turnPayload)}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != models.TeamTaskStatusSucceeded || task.AcceptedCompletionID == nil {
+		t.Fatalf("exact same-turn Runtime result was not accepted: %#v", task)
+	}
+	if len(repo.outboxRows) != 1 {
+		t.Fatalf("accepted natural turn must use the atomic completion/outbox path: %#v", repo.outboxRows)
+	}
+	finalPayload := teamEventPayloadMap(repo.createdEvents[len(repo.createdEvents)-1])
+	if !eventBool(finalPayload, "runtimeTurnResultCandidate") || eventBool(finalPayload, "visibleToChat") {
+		t.Fatalf("completion record must be private because the paired narrative is already visible: %#v", finalPayload)
+	}
+}
+
+func TestTimeoutScannerNeverPromotesHistoricalReplyToSuccess(t *testing.T) {
+	taskID := 263
+	leaderID := 990
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 99, TargetMemberID: leaderID, MessageID: "team-99-root",
+		Status: models.TeamTaskStatusRunning, UpdatedAt: old,
+	}
+	replyPayload, _ := json.Marshal(map[string]interface{}{
+		"messageId": task.MessageID, "memberId": "leader",
+		"text": "Reassign review, then close the task after /team/results/team-99-task-263/review.md is complete.",
+	})
+	repo := &teamRepositoryStub{
+		teamsByID:   map[int]*models.Team{99: {ID: 99}},
+		membersByID: map[int]*models.TeamMember{leaderID: {ID: leaderID, TeamID: 99}},
+		createdEvents: []models.TeamEvent{{
+			ID: 1, TeamID: 99, TaskID: &taskID, MemberID: &leaderID,
+			EventType: "reply", PayloadJSON: stringPtr(string(replyPayload)), CreatedAt: old,
+		}},
+	}
+	service := &teamService{repo: repo}
+	if err := service.markTaskStale(task, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != models.TeamTaskStatusStale || task.Status == models.TeamTaskStatusSucceeded {
+		t.Fatalf("timeout scanner invented a successful result from historical prose: %#v", task)
+	}
+}
+
+func TestOldRuntimeDispatchWrapperNeverStartsRecovery(t *testing.T) {
+	team := &models.Team{ID: 100, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 264, TeamID: 100, Status: models.TeamTaskStatusRunning}
+	member := &models.TeamMember{ID: 1001, TeamID: 100, MemberKey: "reviewer", Role: "reviewer"}
+	payload := map[string]interface{}{
+		"originalEvent": "task_failed", "nonAuthoritative": true,
+		"error": "dispatch finished without reply/completion", "rootTaskTerminal": false,
+	}
+	if isLeaderMediatedRecoverableWarning(team, "message_warning", payload, member, task) {
+		t.Fatal("old Runtime wrapper diagnostics must not trigger a recovery storm")
+	}
+}
+
+func TestLegacyReviewerTeamSendClosesUniqueReviewContract(t *testing.T) {
+	taskID := 264
+	leaderID := 1000
+	developerID := 1001
+	reviewerID := 1002
+	developerAssignment := "assign-dev"
+	reviewerAssignment := "assign-review"
+	dependencyJSON := `["assign-dev"]`
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 100, TargetMemberID: leaderID, MessageID: "team-100-root",
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateAwaitingPhaseResults,
+	}
+	reviewer := &models.TeamMember{
+		ID: reviewerID, TeamID: 100, MemberKey: "reviewer", Role: "reviewer",
+		Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID: map[int]*models.TeamTask{taskID: task},
+		membersByID: map[int]*models.TeamMember{
+			leaderID: {ID: leaderID, TeamID: 100, MemberKey: "leader", Role: "leader"},
+		},
+		membersByKey: map[string]*models.TeamMember{"reviewer": reviewer},
+		workItems: []models.TeamWorkItem{
+			{
+				ID: 1, TeamID: 100, RootTaskID: taskID, WorkID: developerAssignment,
+				AssignmentID: &developerAssignment, Revision: 1, RequiredForRoot: true,
+				ReviewRequired: true, OwnerMemberID: &developerID, Status: models.TeamTaskStatusSucceeded,
+			},
+			{
+				ID: 2, TeamID: 100, RootTaskID: taskID, WorkID: reviewerAssignment,
+				AssignmentID: &reviewerAssignment, Revision: 1, RequiredForRoot: true,
+				OwnerMemberID: &reviewerID, Status: models.TeamTaskStatusRunning, DependsOnJSON: &dependencyJSON,
+			},
+		},
+	}
+	service := &teamService{repo: repo}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"event": "team_send", "memberId": "reviewer", "to": "leader",
+		"taskId": "team-100-task-264", "rootTaskId": "team-100-task-264",
+		"assignmentId": reviewerAssignment, "workId": reviewerAssignment,
+		"summary": "Review complete: 28/28 PASS",
+		"text":    "# Review report\n\n28/28 PASS. Static verification completed.",
+	})
+	if err := service.projectTeamEvent(
+		&models.Team{ID: 100, CommunicationMode: teamCommunicationModeLeaderMediated},
+		nil,
+		redisStreamMessage{ID: "legacy-review-264", Fields: map[string]string{"payload": string(payload)}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := repo.ListWorkItemsByRootTaskID(taskID)
+	for _, item := range items {
+		switch workItemBusinessID(item) {
+		case developerAssignment:
+			if item.ValidatedRevision == nil || *item.ValidatedRevision != 1 {
+				t.Fatalf("legacy PASS did not validate the issued Developer revision: %#v", items)
+			}
+		case reviewerAssignment:
+			if item.Status != models.TeamTaskStatusSucceeded {
+				t.Fatalf("legacy Reviewer delivery did not close its unique contract: %#v", items)
+			}
+		}
 	}
 }
 
@@ -6477,7 +6825,7 @@ func (s *teamRepositoryStub) AcceptRootCompletion(task *models.TeamTask, expecte
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current := s.tasksByID[task.ID]
-	if current != nil && current != task && (current.LedgerVersion != expectedLedgerVersion || current.AcceptedCompletionID != nil || isTerminalTeamTaskStatus(current.Status)) {
+	if current != nil && current != task && (current.LedgerVersion != expectedLedgerVersion || current.AcceptedCompletionID != nil || isImmutableRootTaskStatus(current.Status)) {
 		return false, nil
 	}
 	cloneTask := *task
