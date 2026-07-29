@@ -3,6 +3,7 @@ package services
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -32,6 +33,77 @@ func TestWriteManagedTeamWorkspaceOverlayPreservesOpenClawDefaultsAndReplacesOld
 	}
 	if strings.Contains(got, "# First Team") || strings.Count(got, teamManagedOverlayStart) != 1 {
 		t.Fatalf("overlay should replace exactly one prior managed block: %s", got)
+	}
+}
+
+func TestRepairLitePromptWorkspaceOwnershipUsesInstanceUIDWithoutRecursing(t *testing.T) {
+	workspace := t.TempDir()
+	promptWorkspace := filepath.Join(workspace, "home", ".openclaw", "workspace")
+	nestedDir := filepath.Join(promptWorkspace, "skills")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{teamAgentsFileName, teamSoulFileName, teamConfigFileName, "TOOLS.md"} {
+		if err := os.WriteFile(filepath.Join(promptWorkspace, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unmanagedFile := filepath.Join(promptWorkspace, "USER.md")
+	if err := os.WriteFile(unmanagedFile, []byte("preserve user ownership"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nestedFile := filepath.Join(nestedDir, "user-skill.md")
+	if err := os.WriteFile(nestedFile, []byte("preserve"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	original := chownLitePromptWorkspacePath
+	t.Cleanup(func() { chownLitePromptWorkspacePath = original })
+	type call struct {
+		path     string
+		uid, gid int
+	}
+	var calls []call
+	chownLitePromptWorkspacePath = func(path string, uid, gid int) error {
+		calls = append(calls, call{path: filepath.Clean(path), uid: uid, gid: gid})
+		return nil
+	}
+
+	instance := &models.Instance{ID: 77, Type: "openclaw", InstanceMode: InstanceModeLite, WorkspacePath: &workspace}
+	if err := repairLitePromptWorkspaceOwnership(instance); err != nil {
+		t.Fatalf("repairLitePromptWorkspaceOwnership() error = %v", err)
+	}
+	sort.Slice(calls, func(i, j int) bool { return calls[i].path < calls[j].path })
+	for _, got := range calls {
+		if got.uid != RuntimeLinuxID(77) || got.gid != teamSharedGID {
+			t.Fatalf("chown %s used %d:%d, want %d:%d", got.path, got.uid, got.gid, RuntimeLinuxID(77), teamSharedGID)
+		}
+		if got.path == nestedDir || got.path == nestedFile || got.path == unmanagedFile {
+			t.Fatalf("ownership repair must not change user-managed prompt workspace paths")
+		}
+	}
+	if len(calls) != 5 {
+		t.Fatalf("ownership repair calls = %#v, want prompt root plus four immediate prompt files", calls)
+	}
+}
+
+func TestRepairLitePromptWorkspaceOwnershipKeepsReadableRootSquashedFilesUsable(t *testing.T) {
+	workspace := t.TempDir()
+	promptWorkspace := filepath.Join(workspace, "home", ".openclaw", "workspace")
+	if err := os.MkdirAll(promptWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptWorkspace, "TOOLS.md"), []byte("tools"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	original := chownLitePromptWorkspacePath
+	t.Cleanup(func() { chownLitePromptWorkspacePath = original })
+	chownLitePromptWorkspacePath = func(string, int, int) error {
+		return os.ErrPermission
+	}
+	instance := &models.Instance{ID: 96, Type: "openclaw", InstanceMode: InstanceModeLite, WorkspacePath: &workspace}
+	if err := repairLitePromptWorkspaceOwnership(instance); err != nil {
+		t.Fatalf("readable root-squashed prompt files must remain compatible: %v", err)
 	}
 }
 

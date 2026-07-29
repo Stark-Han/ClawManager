@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +52,7 @@ type EgressProxyHandler struct {
 	previewSecrets   teamPreviewSecretReader
 	workspaceRoot    string
 	namespaceForUser func(int) string
+	previewHosts     map[string]struct{}
 }
 
 // NewEgressProxyHandler creates a new egress proxy handler.
@@ -66,9 +68,10 @@ func NewEgressProxyHandler(audit services.AuditEventService, options ...EgressPr
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
-		dialContext: safeDialer.DialContext,
-		policy:      egresspolicy.LoadFromEnv(),
-		audit:       audit,
+		dialContext:  safeDialer.DialContext,
+		policy:       egresspolicy.LoadFromEnv(),
+		audit:        audit,
+		previewHosts: map[string]struct{}{teamPreviewHost: {}},
 	}
 	for _, option := range options {
 		if option != nil {
@@ -76,6 +79,22 @@ func NewEgressProxyHandler(audit services.AuditEventService, options ...EgressPr
 		}
 	}
 	return handler
+}
+
+// WithTeamArtifactPreviewOrigin registers the exact managed service host that
+// may serve signed Team previews. The legacy .invalid host remains accepted so
+// previously issued links remain compatible during rolling upgrades.
+func WithTeamArtifactPreviewOrigin(originValue string) EgressProxyOption {
+	return func(handler *EgressProxyHandler) {
+		origin, err := url.Parse(strings.TrimSpace(originValue))
+		if err != nil || !strings.EqualFold(origin.Scheme, "http") || strings.TrimSpace(origin.Hostname()) == "" {
+			return
+		}
+		if handler.previewHosts == nil {
+			handler.previewHosts = map[string]struct{}{}
+		}
+		handler.previewHosts[strings.ToLower(origin.Hostname())] = struct{}{}
+	}
 }
 
 type EgressProxyOption func(*EgressProxyHandler)
@@ -198,7 +217,9 @@ func (h *EgressProxyHandler) isTeamPreviewRequest(request *http.Request) bool {
 	if err == nil {
 		host = normalized
 	}
-	return strings.EqualFold(strings.Trim(strings.TrimSpace(host), "[]"), teamPreviewHost)
+	host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	_, ok := h.previewHosts[host]
+	return ok
 }
 
 func (h *EgressProxyHandler) handleTeamPreview(c *gin.Context) {

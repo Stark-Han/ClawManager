@@ -14,6 +14,7 @@ import (
 	posixpath "path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -46,8 +47,9 @@ const (
 	teamSharedUmask          = "0002"
 	teamRedisURLSecretKey    = "CLAWMANAGER_TEAM_REDIS_URL"
 	teamTokenSecretKey       = "CLAWMANAGER_TEAM_TOKEN"
-	teamPreviewBrowserHost   = "clawmanager-team-preview.invalid"
+)
 
+const (
 	defaultTeamTaskStaleTimeout    = 30 * time.Minute
 	teamTaskStaleSweepInterval     = 30 * time.Second
 	teamConsumerScanInterval       = 10 * time.Second
@@ -839,7 +841,7 @@ func appendTeamTaskCompletionInstruction(prompt string, communicationMode, inten
 	instruction += "\n" + strings.Join([]string{
 		"- Publish meaningful process updates with team_update_progress. Use eventKind=\"worker_plan\" for worker execution plans, \"worker_progress\" for milestones, and \"leader_synthesis\" while reconciling member outputs. Use \"assignment_check_result\" only when replying to a ClawManager Monitor envelope carrying a monitor checkId; ordinary progress must remain worker_progress.",
 		"- The Runtime restores the canonical root task and assignment from the active Team envelope. Reuse IDs supplied by ClawManager when present; if an optional taskId, assignmentId, or workId is uncertain, omit it instead of inventing a new identifier.",
-		"- Prefer team_artifact_write, team_artifact_read, team_artifact_preview, team_artifact_list, and team_artifact_mkdir for shared artifacts. Use team_artifact_preview before opening a Team file in Browser; never use file:// or start a temporary file server. Worker output must use the assignment-specific member artifact root injected by the Runtime, even when an assignment body mentions a Team-root filename. Team-scoped writes must declare kind=plan, kind=context, kind=review, or kind=final and always use the canonical path returned by the tool; never invent /team links.",
+		"- Prefer the Team artifact tools exposed by the Runtime for shared artifacts. When team_artifact_preview is available, use its managed URL before opening a Team file in Browser; never use file:// or start a temporary file server. Older Runtimes may not expose preview, so continue with file/static inspection instead of treating the missing tool as task failure. Worker output must use the assignment-specific member artifact root injected by the Runtime, even when an assignment body mentions a Team-root filename. Team-scoped writes must declare kind=plan, kind=context, kind=review, or kind=final and always use the canonical path returned by the tool; never invent /team links.",
 		"- Before delegating research that used an external article, issue, API response, or repository, the Leader should persist the fetched evidence with team_artifact_write scope=\"team\", kind=\"context\" and pass the returned canonical reference to workers. Workers should reuse available contextRefs instead of repeatedly fetching the same source.",
 		"- If a worker is still executing a long step, report concise progress and continue. If context was lost or an artifact path is wrong, report a recoverable blocker to the Leader instead of treating the root task as failed.",
 		"- Every Team message must preserve rootTaskId/messageId context when available and must clearly state whether it is an assignment, peer request, progress update, result, review, blocker, or final synthesis.",
@@ -1180,7 +1182,9 @@ func (s *teamService) teamMemberEnv(team *models.Team, member plannedTeamMember)
 	}
 	if proxyURL, ok := defaultEgressProxyURL(); ok {
 		env["CLAWMANAGER_BROWSER_PROXY_URL"] = proxyURL
-		env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] = "http://" + teamPreviewBrowserHost
+		if previewOrigin, previewOK := defaultTeamPreviewOrigin(); previewOK {
+			env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] = previewOrigin
+		}
 	}
 	if profileKey := strings.TrimSpace(member.ProfileKey); profileKey != "" {
 		env["CLAWMANAGER_TEAM_PROFILE_KEY"] = profileKey
@@ -1609,6 +1613,13 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	if member == nil {
 		return nil, fmt.Errorf("team member not found")
 	}
+	// Preserve the legacy fail-open behavior when optional instance metadata is
+	// temporarily unavailable; task dispatch must not acquire a new dependency
+	// on that lookup.
+	memberInstance, _ := s.teamMemberInstance(member)
+	if err := repairLitePromptWorkspaceOwnership(memberInstance); err != nil {
+		return nil, err
+	}
 
 	messageID := strings.TrimSpace(req.MessageID)
 	if messageID == "" {
@@ -1680,7 +1691,6 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		return nil, err
 	}
 	now := time.Now().UTC()
-	memberInstance, _ := s.teamMemberInstance(member)
 	memberContext := buildTeamMemberTaskContext(member, memberInstance)
 	communicationMode := normalizedTeamCommunicationMode(team.CommunicationMode)
 	memberContext["communicationMode"] = communicationMode
@@ -1961,7 +1971,7 @@ func buildBackendBootstrapReport(team *models.Team, members []models.TeamMember,
 	b.WriteString("- `team_update_progress`：记录业务计划、阶段进度、长任务状态和检查反馈。\n")
 	b.WriteString("- `team_status`：查询成员和任务状态。\n")
 	b.WriteString("- `team_complete_task`：仅用于成员提交分配结果或 Leader 关闭根任务。\n")
-	b.WriteString("- `team_artifact_write/read/preview/list/mkdir`：在当前 Team 共享目录内安全读写产物；`preview` 返回与 Team 身份绑定、可在 Browser 中打开的签名只读地址。\n")
+	b.WriteString("- `team_artifact_write/read/list/mkdir`：在当前 Team 共享目录内安全读写产物；新版 Runtime 还会提供 `team_artifact_preview`，返回与 Team 身份绑定、可在 Browser 中打开的签名只读地址。\n")
 	return b.String()
 }
 
@@ -2231,7 +2241,7 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 	case teamVerificationRoleEvidence:
 		return []string{
 			"- Use proportionate, static-first validation with the source, artifacts, and tools already available in the runtime.",
-			"- Browser is available. For Team files, call team_artifact_preview and use its signed HTTP URL. Use Browser only when interaction or visual evidence materially affects the verdict; for non-code or non-interactive work, proceed directly with static review.",
+			"- Browser is available. For Team files, use the signed HTTP URL from team_artifact_preview when that tool is exposed; on an older Runtime without it, continue with static file review. Use Browser only when interaction or visual evidence materially affects the verdict; for non-code or non-interactive work, proceed directly with static review.",
 			"- After any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with static review.",
 			"- Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects.",
 			"- Say Browser verification passed only when it actually ran; otherwise report static-review scope and only concrete findings.",
@@ -2240,7 +2250,7 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 	case teamVerificationRoleCodeReview:
 		return []string{
 			"- Review the source, diff, architecture boundaries, and existing test evidence first; keep validation proportional to the assigned change.",
-			"- Browser is available. For Team files, call team_artifact_preview and use its signed HTTP URL. Use Browser only when interaction or rendering materially affects the verdict.",
+			"- Browser is available. For Team files, use the signed HTTP URL from team_artifact_preview when that tool is exposed; on an older Runtime without it, continue with static file review. Use Browser only when interaction or rendering materially affects the verdict.",
 			"- On any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with source review.",
 			"- Do not install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup.",
 			"- Report only concrete findings and residual risks; do not invent or target a fixed issue count.",
@@ -2275,7 +2285,7 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 		"- Use the available runtime tools normally, but coordinate Team work through the ClawManager Team channel.",
 		"- Use team_send for assignments, handoffs, clarifying questions, blockers, and final delivery messages.",
 		"- Use team_status / progress updates to report work state when available.",
-		"- Browser is available to every OpenClaw Team worker. Open Team files with team_artifact_preview; do not use file:// or start a temporary file server.",
+		"- Browser is available to every OpenClaw Team worker. Open Team files with team_artifact_preview when that tool is exposed; on an older Runtime without it, use static file inspection. Do not use file:// or start a temporary file server.",
 		"- Use team_complete_task only when the assigned task is actually complete and evidence has been reported.",
 		"- In an active Team turn, task and assignment identity is inherited by the Runtime. Reuse IDs supplied by ClawManager when present, but omit optional IDs rather than inventing replacements.",
 		"",
@@ -2378,6 +2388,9 @@ func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance
 				return fmt.Errorf("failed to write Lite Team OpenClaw roster file: %w", err)
 			}
 		}
+		if err := repairLitePromptWorkspaceOwnership(instance); err != nil {
+			return fmt.Errorf("failed to repair Lite Team OpenClaw prompt workspace ownership: %w", err)
+		}
 	}
 	files := map[string]string{}
 	if !strings.EqualFold(instance.Type, "openclaw") {
@@ -2405,6 +2418,92 @@ func (s *teamService) writeLiteTeamMemberIdentityFiles(instance *models.Instance
 			return fmt.Errorf("failed to write Hermes Lite SOUL.md: %w", err)
 		}
 		chownTeamWorkspacePath(target)
+	}
+	return nil
+}
+
+var chownLitePromptWorkspacePath = func(path string, uid, gid int) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	return os.Chown(path, uid, gid)
+}
+
+var liteManagedPromptFileNames = map[string]struct{}{
+	teamAgentsFileName:       {},
+	teamSoulFileName:         {},
+	teamConfigFileName:       {},
+	teamIntroductionFileName: {},
+	"TOOLS.md":               {},
+}
+
+func repairLitePromptPathAccess(path string, info os.FileInfo, uid, gid int) error {
+	if err := chownLitePromptWorkspacePath(path, uid, gid); err == nil {
+		return nil
+	} else {
+		required := os.FileMode(0o004)
+		if info.IsDir() {
+			required = 0o005
+		}
+		if info.Mode().Perm()&required == required {
+			return nil
+		}
+		if chmodErr := os.Chmod(path, info.Mode().Perm()|required); chmodErr != nil {
+			return fmt.Errorf("chown failed: %v; readable fallback failed: %w", err, chmodErr)
+		}
+		return nil
+	}
+}
+
+// repairLitePromptWorkspaceOwnership repairs only the OpenClaw prompt root and
+// its immediate entries. It intentionally does not recurse into user-managed
+// skills or other workspace trees.
+func repairLitePromptWorkspaceOwnership(instance *models.Instance) error {
+	if instance == nil || instance.ID <= 0 || modeForExistingInstance(instance) != InstanceModeLite ||
+		!strings.EqualFold(instance.Type, "openclaw") || instance.WorkspacePath == nil {
+		return nil
+	}
+	workspaceRoot := strings.TrimSpace(*instance.WorkspacePath)
+	if workspaceRoot == "" {
+		return nil
+	}
+	promptRoot := filepath.Join(workspaceRoot, "home", ".openclaw", "workspace")
+	info, err := os.Lstat(promptRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect Lite OpenClaw prompt workspace: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("Lite OpenClaw prompt workspace is not a real directory")
+	}
+	uid := RuntimeLinuxID(instance.ID)
+	if err := repairLitePromptPathAccess(promptRoot, info, uid, teamSharedGID); err != nil {
+		return fmt.Errorf("failed to repair Lite OpenClaw prompt workspace owner: %w", err)
+	}
+	entries, err := os.ReadDir(promptRoot)
+	if err != nil {
+		return fmt.Errorf("failed to list Lite OpenClaw prompt workspace: %w", err)
+	}
+	for _, entry := range entries {
+		if _, managed := liteManagedPromptFileNames[entry.Name()]; !managed {
+			continue
+		}
+		target := filepath.Join(promptRoot, entry.Name())
+		entryInfo, err := os.Lstat(target)
+		if err != nil {
+			return fmt.Errorf("failed to inspect Lite OpenClaw prompt entry %s: %w", entry.Name(), err)
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if entryInfo.IsDir() {
+			continue
+		}
+		if err := repairLitePromptPathAccess(target, entryInfo, uid, teamSharedGID); err != nil {
+			return fmt.Errorf("failed to repair Lite OpenClaw prompt entry %s owner: %w", entry.Name(), err)
+		}
 	}
 	return nil
 }
@@ -5818,7 +5917,7 @@ func analyzeCompletionNarrativeContradictions(payload map[string]interface{}) []
 	}{
 		{"waiting_for_member", regexp.MustCompile(`(?i)(仍在等待|继续等待|等待\s*(pm|architect|designer|developer|reviewer|worker)|still waiting|waiting for\s+(pm|architect|designer|developer|reviewer|worker))`)},
 		{"future_dispatch", regexp.MustCompile(`(?i)((下一步|接下来|随后|然后).{0,10}(将|需要|必须|准备|继续).{0,24}(派发|下发|交给|发送给|实现|评审|验证)|(next|then).{0,12}(will|must|need to|going to|continue to).{0,24}(dispatch|assign|send to|implement|review|verify))`)},
-		{"phase_not_final", regexp.MustCompile(`(?i)(完成|结束|汇总).{0,12}(第一阶段|阶段一|phase\s*1).{0,30}(继续|下一阶段|phase\s*2)`)},
+		{"phase_not_final", regexp.MustCompile(`(?i)(((完成|结束|汇总|done|complete).{0,12}(第一阶段|阶段一|phase\s*1)|(第一阶段|阶段一|phase\s*1).{0,18}(完成|结束|done|complete)).{0,30}((接下来|下一步|随后|然后|仍需|还需|将|即将|准备|继续|进入|开始|next|then|will|need\s+to|continue\s+to|proceed\s+to).{0,24}(第二阶段|阶段二|phase\s*2|评审|验证|review|verify)|(第二阶段|阶段二|phase\s*2).{0,18}(尚未|未开始|待|仍需|还需|将|即将|准备|will|need\s+to)))`)},
 	}
 	result := []string{}
 	for _, text := range texts {

@@ -179,6 +179,7 @@ func main() {
 	riskRuleHandler := handlers.NewRiskRuleHandler(riskRuleService)
 	clusterResourceHandler := handlers.NewClusterResourceHandler(clusterResourceService)
 	teamPreviewSecretService := k8s.NewSecretService()
+	teamPreviewOrigin, _ := services.DefaultTeamPreviewOrigin()
 	egressProxyHandler := handlers.NewEgressProxyHandler(
 		auditEventService,
 		handlers.WithTeamArtifactPreview(
@@ -193,6 +194,7 @@ func main() {
 				return client.GetNamespace(userID)
 			},
 		),
+		handlers.WithTeamArtifactPreviewOrigin(teamPreviewOrigin),
 	)
 	openClawConfigHandler := handlers.NewOpenClawConfigHandler(openClawConfigService)
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)

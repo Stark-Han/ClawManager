@@ -156,7 +156,8 @@ func TestEgressProxyHandlerServesSignedTeamArtifactPreview(t *testing.T) {
 	prefix := "results/task-193"
 	encodedPrefix := base64.RawURLEncoding.EncodeToString([]byte(prefix))
 	signature := signTeamPreviewForTest(token, team.ID, prefix)
-	target := "http://" + teamPreviewHost + "/v1/94/" + encodedPrefix + "/" + signature + "/kanban.html"
+	const previewOrigin = "http://clawmanager-egress-proxy.clawmanager-hxc-peer-system.svc.cluster.local:3128"
+	target := previewOrigin + "/v1/94/" + encodedPrefix + "/" + signature + "/kanban.html"
 
 	handler := NewEgressProxyHandler(
 		nil,
@@ -166,6 +167,7 @@ func TestEgressProxyHandlerServesSignedTeamArtifactPreview(t *testing.T) {
 			workspaceRoot,
 			func(int) string { return "clawmanager-user-7" },
 		),
+		WithTeamArtifactPreviewOrigin(previewOrigin),
 	)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -183,6 +185,37 @@ func TestEgressProxyHandlerServesSignedTeamArtifactPreview(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("preview cache policy = %q", got)
+	}
+
+	directRecorder := httptest.NewRecorder()
+	directContext, _ := gin.CreateTestContext(directRecorder)
+	directContext.Request = httptest.NewRequest(
+		http.MethodHead,
+		"/v1/94/"+encodedPrefix+"/"+signature+"/kanban.html",
+		nil,
+	)
+	directContext.Request.Host = "clawmanager-egress-proxy.clawmanager-hxc-peer-system.svc.cluster.local:3128"
+	handler.Handle(directContext)
+	if directRecorder.Code != http.StatusOK {
+		t.Fatalf("direct managed-proxy origin preview expected 200, got %d: %s", directRecorder.Code, directRecorder.Body.String())
+	}
+	if directRecorder.Body.Len() != 0 {
+		t.Fatalf("HEAD preview must not return a body")
+	}
+}
+
+func TestEgressProxyHandlerDoesNotInterceptArbitraryPreviewLikeHost(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewEgressProxyHandler(
+		nil,
+		WithTeamArtifactPreviewOrigin("http://clawmanager-egress-proxy.clawmanager-hxc-peer-system.svc.cluster.local:3128"),
+	)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "http://attacker.example/v1/94/_/invalid/index.html", nil)
+	handler.Handle(ctx)
+	if recorder.Code == http.StatusBadRequest || recorder.Code == http.StatusForbidden {
+		t.Fatalf("arbitrary host was incorrectly treated as a Team preview: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 

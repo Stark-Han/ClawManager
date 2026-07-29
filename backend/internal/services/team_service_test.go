@@ -16,6 +16,7 @@ import (
 func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 	t.Setenv("CLAWMANAGER_TEAM_MANAGER_BASE_URL", "http://manager.example")
 	t.Setenv("CLAWMANAGER_EGRESS_PROXY_URL", "http://clawmanager-egress-proxy.example:3128")
+	t.Setenv("CLAWMANAGER_TEAM_PREVIEW_ORIGIN", "http://clawmanager-team-preview.example")
 
 	service := &teamService{}
 	env := service.teamMemberEnv(&models.Team{
@@ -57,12 +58,57 @@ func TestTeamMemberEnvUsesSecretBackedRedisAndToken(t *testing.T) {
 		t.Fatalf("expected Team autorun and consumer group env, got %#v", env)
 	}
 	if env["CLAWMANAGER_BROWSER_PROXY_URL"] != "http://clawmanager-egress-proxy.example:3128" ||
-		env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] != "http://clawmanager-team-preview.invalid" {
+		env["CLAWMANAGER_TEAM_PREVIEW_ORIGIN"] != "http://clawmanager-team-preview.example" {
 		t.Fatalf("expected managed Team Browser proxy and preview env, got %#v", env)
 	}
 	for key := range env {
 		if strings.Contains(key, "REDIS_URL") || strings.Contains(key, "TOKEN") {
 			t.Fatalf("sensitive Team env %s must come from Secret, not plain env", key)
+		}
+	}
+}
+
+func TestDefaultTeamPreviewOriginUsesResolvableService(t *testing.T) {
+	t.Setenv("CLAWMANAGER_TEAM_PREVIEW_ORIGIN", "")
+	t.Setenv("CLAWMANAGER_SYSTEM_NAMESPACE", "clawmanager-hxc-peer-system")
+	t.Setenv("CLAWMANAGER_EGRESS_PROXY_SERVICE_NAME", "")
+	t.Setenv("CLAWMANAGER_EGRESS_PROXY_SERVICE_PORT", "")
+
+	got, ok := defaultTeamPreviewOrigin()
+	if !ok {
+		t.Fatal("expected a managed Team preview origin")
+	}
+	const want = "http://clawmanager-egress-proxy.clawmanager-hxc-peer-system.svc.cluster.local:3128"
+	if got != want {
+		t.Fatalf("defaultTeamPreviewOrigin() = %q, want %q", got, want)
+	}
+}
+
+func TestCompletionNarrativePhaseHistoryIsNotFutureWork(t *testing.T) {
+	payload := map[string]interface{}{
+		"summary": "开发完成。Phase 1：Developer 已交付；Phase 2：Reviewer 审查 PASS；Phase 3：Leader 已完成最终整合。",
+		"resultMarkdown": `| 阶段 | 状态 |
+| --- | --- |
+| Phase 1: 开发 | 完成 |
+| Phase 2: 验证 | PASS |
+| Phase 3: 整合 | 完成 |`,
+	}
+	got := analyzeCompletionNarrativeContradictions(payload)
+	if containsTeamString(got, "phase_not_final") {
+		t.Fatalf("retrospective phase history must not block completion: %#v", got)
+	}
+}
+
+func TestCompletionNarrativeDetectsExplicitFuturePhase(t *testing.T) {
+	cases := []string{
+		"第一阶段已完成，接下来将进入第二阶段，由 Reviewer 继续验证。",
+		"第一阶段已完成，第二阶段将由 Reviewer 审查。",
+		"Phase 1 is complete; Phase 2 will begin with reviewer verification.",
+	}
+	for _, summary := range cases {
+		got := analyzeCompletionNarrativeContradictions(map[string]interface{}{"summary": summary})
+		if !containsTeamString(got, "phase_not_final") {
+			t.Fatalf("explicit future phase must block completion for %q: %#v", summary, got)
 		}
 	}
 }
