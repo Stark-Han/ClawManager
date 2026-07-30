@@ -398,6 +398,7 @@ func main() {
 			instances.POST("/:id/start", instanceHandler.StartInstance)
 			instances.POST("/:id/stop", instanceHandler.StopInstance)
 			instances.POST("/:id/restart", instanceHandler.RestartInstance)
+			instances.GET("/:id/environment-overrides", instanceHandler.GetInstanceEnvironmentOverrides)
 			instances.GET("/:id/status", instanceHandler.GetInstanceStatus)
 			instances.GET("/:id/runtime", instanceHandler.GetRuntimeDetails)
 			instances.GET("/:id/session-usage", instanceHandler.GetInstanceSessionUsage)
@@ -431,6 +432,9 @@ func main() {
 			instances.POST("/:id/skills/:skillId/import-to-library", instanceHandler.ImportInstanceSkillToLibrary)
 			instances.POST("/:id/skills/:skillId/retry-package-collect", instanceHandler.RetrySkillPackageCollect)
 			instances.POST("/:id/skills/:skillId/publish-to-hub", instanceHandler.PublishInstanceSkillToHub)
+			instances.POST("/:id/skills/:skillId/restore", instanceHandler.RestoreInstanceSkill)
+			instances.POST("/:id/skills/:skillId/save-back-to-library", instanceHandler.SaveBackInstanceSkillToLibrary)
+			instances.POST("/:id/skills/:skillId/save-to-my-library", instanceHandler.SaveForeignInstanceSkillToMyLibrary)
 			instances.DELETE("/:id/skills/:skillId", skillHandler.RemoveSkillFromInstance)
 		}
 
@@ -528,6 +532,7 @@ func main() {
 			skillHub.POST("/skills/import", skillHubHandler.ImportSkills)
 			skillHub.GET("/skills/:id", skillHubHandler.GetSkill)
 			skillHub.POST("/skills/:id/publish", skillHubHandler.PublishSkill)
+			skillHub.POST("/skills/:id/publish-as-new", skillHubHandler.PublishSkillAsNew)
 			skillHub.POST("/skills/:id/unpublish", skillHubHandler.UnpublishSkill)
 			skillHub.PUT("/skills/:id/tags", skillHubHandler.UpdateTags)
 			skillHub.DELETE("/skills/:id", skillHubHandler.DeleteSkill)

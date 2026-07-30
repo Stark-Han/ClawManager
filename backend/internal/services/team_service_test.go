@@ -810,6 +810,61 @@ func TestBuildTeamMemberSoulMarkdownAddsBoundedVerificationPolicies(t *testing.T
 	}
 }
 
+func TestResearchProfilesInheritGenericTeamCapabilities(t *testing.T) {
+	profiles := []struct {
+		key  string
+		role string
+	}{
+		{key: "agency.literature-researcher", role: "literature-researcher"},
+		{key: "agency.experiment-designer", role: "experiment-designer"},
+		{key: "agency.data-analyst", role: "data-analyst"},
+		{key: "agency.academic-editor", role: "academic-editor"},
+		{key: "agency.research-presenter", role: "research-presenter"},
+	}
+	team := &models.Team{
+		ID:                42,
+		CommunicationMode: teamCommunicationModeLeaderMediated,
+	}
+
+	for _, profile := range profiles {
+		t.Run(profile.role, func(t *testing.T) {
+			member := plannedTeamMember{
+				MemberKey:     profile.role,
+				DisplayName:   profile.role,
+				Role:          profile.role,
+				EffectiveRole: profile.role,
+				ProfileKey:    profile.key,
+			}
+			soul := buildTeamMemberSoulMarkdown(member, teamCommunicationModeLeaderMediated)
+			agents := buildTeamMemberAgentsMarkdown(team, member)
+
+			for _, expected := range []string{
+				"Only handle tasks addressed to your Team member inbox",
+				"exact CLAWMANAGER_TEAM_SHARED_DIR",
+				"Report shared artifact links as /team/<relative-path>",
+				"Report progress, blockers, verification evidence, and final results through the Team channel",
+			} {
+				if !strings.Contains(soul, expected) {
+					t.Fatalf("%s SOUL.md missing generic Team capability %q: %s", profile.key, expected, soul)
+				}
+			}
+			for _, expected := range []string{
+				"Browser is available to every OpenClaw Team worker",
+				"team_artifact_preview",
+				"Use team_complete_task only when the assigned task is actually complete",
+				"Prefer SOUL.md for your member identity",
+			} {
+				if !strings.Contains(agents, expected) {
+					t.Fatalf("%s AGENTS.md missing generic Team capability %q: %s", profile.key, expected, agents)
+				}
+			}
+			if strings.Contains(soul, "## Verification Policy") {
+				t.Fatalf("%s unexpectedly received a role-specific reviewer policy: %s", profile.key, soul)
+			}
+		})
+	}
+}
+
 func TestWriteLiteTeamMemberIdentityFiles(t *testing.T) {
 	workspace := t.TempDir()
 	profileEnv := map[string]string{

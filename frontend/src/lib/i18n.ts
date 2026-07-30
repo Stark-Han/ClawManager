@@ -1009,6 +1009,8 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     allTags: "All tags",
     upload: "Upload ZIP",
     publish: "Publish to Hub",
+    replacePublish: "Replace published version",
+    publishAsNew: "Publish as new skill",
     unpublish: "Unpublish",
     editTags: "Edit tags",
     install: "Install to instance",
@@ -1036,6 +1038,14 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     discoveredPublishHint: "For instance skills, retry package collect or upload a ZIP manually.",
     importToLibrarySuccess: "Skill saved to your library.",
     importToLibraryFailed: "Failed to save skill to library.",
+    contentDiverged: "Content changed",
+    contentDivergedHint: "Instance copy differs from the installed library version. Changes are not synced to Hub.",
+    restoreInstanceSkill: "Restore",
+    restoreInstanceSkillFailed: "Failed to restore skill on instance.",
+    saveBackToLibrary: "Save back to library",
+    saveBackToLibraryFailed: "Failed to save skill back to library.",
+    saveToMyLibrary: "Save to my library",
+    saveToMyLibraryFailed: "Failed to save skill to your library.",
     alreadyInLibrary: "In Skill Library",
     versionLabel: "v{version}",
     configCenterHint: "Upload skill packages here, then publish them from Skill Hub.",
@@ -1062,6 +1072,7 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     },
     notices: {
       published: "Skill published to hub",
+      publishedAsNew: "Published as a new skill",
       unpublished: "Skill unpublished",
       installed: "Skill installed to instance",
       deleted: "Skill deleted",
@@ -1106,6 +1117,8 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     allTags: "全部标签",
     upload: "上传 ZIP",
     publish: "发布到 Hub",
+    replacePublish: "用当前版本替换发布",
+    publishAsNew: "作为新 Skill 发布",
     unpublish: "下架",
     editTags: "编辑标签",
     install: "安装到实例",
@@ -1133,6 +1146,14 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     discoveredPublishHint: "实例内 skill 可重新采集包，或手动 ZIP 上传到 Skill Hub。",
     importToLibrarySuccess: "已收录到 Skill 库。",
     importToLibraryFailed: "收录到 Skill 库失败。",
+    contentDiverged: "内容已变化",
+    contentDivergedHint: "实例内副本与安装时的库版本不一致，不会自动同步到 Hub。",
+    restoreInstanceSkill: "还原",
+    restoreInstanceSkillFailed: "还原实例内 Skill 失败。",
+    saveBackToLibrary: "保存回库",
+    saveBackToLibraryFailed: "保存回库失败。",
+    saveToMyLibrary: "保存到我的库",
+    saveToMyLibraryFailed: "保存到我的库失败。",
     alreadyInLibrary: "已在 Skill 库",
     versionLabel: "v{version}",
     configCenterHint: "可在此上传 Skill 包，然后前往 Skill Hub 发布。",
@@ -1159,6 +1180,7 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     },
     notices: {
       published: "已发布到 Hub",
+      publishedAsNew: "已作为新 Skill 发布",
       unpublished: "已下架",
       installed: "已安装到实例",
       deleted: "已删除",
@@ -1203,6 +1225,8 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     allTags: "すべてのタグ",
     upload: "ZIP をアップロード",
     publish: "Hub に公開",
+    replacePublish: "公開版を現在のバージョンで置換",
+    publishAsNew: "新しい Skill として公開",
     unpublish: "公開解除",
     editTags: "タグを編集",
     install: "インスタンスにインストール",
@@ -1228,6 +1252,14 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     importToLibraryPending: "インスタンスから Skill パッケージを同期中です。しばらくしてから再試行してください。",
     importToLibrarySuccess: "Skill ライブラリに保存しました。",
     importToLibraryFailed: "Skill ライブラリへの保存に失敗しました。",
+    contentDiverged: "内容が変更されました",
+    contentDivergedHint: "インスタンス上のコピーはインストール時のライブラリ版と異なります。Hub へは自動同期されません。",
+    restoreInstanceSkill: "復元",
+    restoreInstanceSkillFailed: "インスタンス上の Skill 復元に失敗しました。",
+    saveBackToLibrary: "ライブラリへ保存",
+    saveBackToLibraryFailed: "ライブラリへの保存に失敗しました。",
+    saveToMyLibrary: "マイライブラリに保存",
+    saveToMyLibraryFailed: "マイライブラリへの保存に失敗しました。",
     alreadyInLibrary: "Skill ライブラリにあります",
     versionLabel: "v{version}",
     configCenterHint: "ここで Skill パッケージをアップロードし、Skill Hub から公開してください。",
@@ -1254,6 +1286,7 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     },
     notices: {
       published: "Hub に公開しました",
+      publishedAsNew: "新しい Skill として公開しました",
       unpublished: "公開を解除しました",
       installed: "インスタンスにインストールしました",
       deleted: "削除しました",
@@ -1298,6 +1331,8 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     allTags: "모든 태그",
     upload: "ZIP 업로드",
     publish: "Hub에 게시",
+    replacePublish: "현재 버전으로 게시본 교체",
+    publishAsNew: "새 Skill로 게시",
     unpublish: "게시 취소",
     editTags: "태그 편집",
     install: "인스턴스에 설치",
@@ -1323,6 +1358,14 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     importToLibraryPending: "인스턴스에서 Skill 패키지를 동기화 중입니다. 잠시 후 다시 시도하세요.",
     importToLibrarySuccess: "Skill 라이브러리에 저장되었습니다.",
     importToLibraryFailed: "Skill 라이브러리 저장에 실패했습니다.",
+    contentDiverged: "내용이 변경됨",
+    contentDivergedHint: "인스턴스 사본이 설치 시점 라이브러리 버전과 다릅니다. Hub로 자동 동기화되지 않습니다.",
+    restoreInstanceSkill: "복원",
+    restoreInstanceSkillFailed: "인스턴스 Skill 복원에 실패했습니다.",
+    saveBackToLibrary: "라이브러리에 다시 저장",
+    saveBackToLibraryFailed: "라이브러리 재저장에 실패했습니다.",
+    saveToMyLibrary: "내 라이브러리에 저장",
+    saveToMyLibraryFailed: "내 라이브러리 저장에 실패했습니다.",
     alreadyInLibrary: "Skill 라이브러리에 있음",
     versionLabel: "v{version}",
     configCenterHint: "여기서 Skill 패키지를 업로드한 뒤 Skill Hub에서 게시하세요.",
@@ -1349,6 +1392,7 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     },
     notices: {
       published: "Hub에 게시됨",
+      publishedAsNew: "새 Skill로 게시됨",
       unpublished: "게시 취소됨",
       installed: "인스턴스에 설치됨",
       deleted: "삭제됨",
@@ -1393,6 +1437,8 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     allTags: "Alle Tags",
     upload: "ZIP hochladen",
     publish: "Im Hub veröffentlichen",
+    replacePublish: "Veröffentlichte Version ersetzen",
+    publishAsNew: "Als neuen Skill veröffentlichen",
     unpublish: "Veröffentlichung zurückziehen",
     editTags: "Tags bearbeiten",
     install: "Auf Instanz installieren",
@@ -1418,6 +1464,14 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     importToLibraryPending: "Skill-Paket wird von der Instanz synchronisiert. Bitte später erneut versuchen.",
     importToLibrarySuccess: "In der Skill-Bibliothek gespeichert.",
     importToLibraryFailed: "Speichern in der Skill-Bibliothek fehlgeschlagen.",
+    contentDiverged: "Inhalt geändert",
+    contentDivergedHint: "Die Instanzkopie weicht von der installierten Bibliotheksversion ab. Keine automatische Hub-Synchronisierung.",
+    restoreInstanceSkill: "Wiederherstellen",
+    restoreInstanceSkillFailed: "Skill auf der Instanz konnte nicht wiederhergestellt werden.",
+    saveBackToLibrary: "Zurück in die Bibliothek speichern",
+    saveBackToLibraryFailed: "Zurückspeichern in die Bibliothek fehlgeschlagen.",
+    saveToMyLibrary: "In meine Bibliothek speichern",
+    saveToMyLibraryFailed: "Speichern in meine Bibliothek fehlgeschlagen.",
     alreadyInLibrary: "In Skill-Bibliothek",
     versionLabel: "v{version}",
     configCenterHint: "Laden Sie Skill-Pakete hier hoch und veröffentlichen Sie sie im Skill Hub.",
@@ -1444,6 +1498,7 @@ const skillHubTranslations: Record<Locale, TranslationTree> = {
     },
     notices: {
       published: "Im Hub veröffentlicht",
+      publishedAsNew: "Als neuer Skill veröffentlicht",
       unpublished: "Veröffentlichung zurückgezogen",
       installed: "Auf Instanz installiert",
       deleted: "Gelöscht",
@@ -2418,6 +2473,36 @@ export const translations: Record<Locale, TranslationTree> = {
         "Restarting the instance. The desktop may disconnect briefly while the new stream settings apply.",
       restartSubmitted:
         "Restart requested. The desktop will reconnect when the instance is available again.",
+      restartMenuLabel: "Restart options",
+      restartWithEnvironment: "Configure environment variables and restart...",
+      restartWithEnvironmentHint: "Add optional variables required by a skill.",
+      restartWithEnvironmentTitle:
+        "Configure environment variables and restart",
+      restartWithEnvironmentDescription:
+        "New values are merged with the instance configuration and apply to this and future restarts. Existing variables are preserved.",
+      restartWithEnvironmentSecurityNote:
+        "Use this for non-sensitive configuration only. Do not enter passwords, API keys, tokens, or other secrets.",
+      configuredEnvironmentVariables: "Configured variables",
+      configuredEnvironmentVariablesCount: "{{count}} configured",
+      configuredEnvironmentLoading: "Loading configured variables...",
+      configuredEnvironmentLoadFailed:
+        "Failed to load configured environment variables.",
+      configuredEnvironmentEmpty: "No custom environment variables configured.",
+      configuredEnvironmentValueHidden: "Configured · value hidden",
+      resetEnvironmentVariable: "Reset value",
+      resetEnvironmentVariablePending: "New value pending",
+      removeEnvironmentVariable: "Remove {{name}}",
+      environmentVariableWillBeRemoved: "Will be removed when saved",
+      undoEnvironmentVariableRemoval: "Undo",
+      newOrUpdatedEnvironmentVariables: "New or updated variables",
+      restartEnvironmentChangeConflict:
+        "{{name}} cannot be updated and removed at the same time.",
+      restartEnvironmentAtLeastOne:
+        "Add, update, or remove at least one environment variable before restarting.",
+      restartEnvironmentSaved:
+        "Environment variables were saved and the restart was requested.",
+      restartEnvironmentFailed:
+        "Failed to save environment variables and restart the instance.",
       governanceGatewayOk: "Gateway OK",
       governanceExternalLLM: "External LLM config",
       governanceSessionKeyMissing: "Session key missing",
@@ -2703,7 +2788,7 @@ export const translations: Record<Locale, TranslationTree> = {
       thisResourceType: "This resource type",
       notConfigurableYet: "{type} is not configurable yet.",
       onlyChannelConfigurable:
-        "Channel resources are supported today. Skill, Agent, and Scheduled Task editors will be added in a later update.",
+        "Channel, Skill, and Scheduled Task editors are available. Agent editor will be added in a later update.",
       bundlesSubtitle:
         "Compose reusable OpenClaw bootstrap packages in a dedicated popup editor.",
       loadingBundles: "Loading bundles...",
@@ -2818,6 +2903,65 @@ export const translations: Record<Locale, TranslationTree> = {
       editorModes: {
         form: "Form",
         json: "JSON",
+      },
+      scheduledTask: {
+        editorTitle: "Scheduled Task",
+        editorHint: "Tell the agent what to do, when to run, and where to send the result.",
+        advancedTitle: "Advanced options",
+        advancedHint: "OpenClaw-compatible cron fields. Most users can leave these alone.",
+        simple: {
+          prompt: "What should the agent do?",
+          promptPlaceholder: "e.g. Summarize overnight updates and send a short brief.",
+          when: "When to run",
+          where: "Where to send the result",
+          customAdvancedScheduleHint:
+            "This uses an advanced schedule (every/at). Edit it under Advanced options below.",
+        },
+        presets: {
+          daily9: "Every day at 09:00",
+          hourly: "Every hour",
+          every5m: "Every 5 minutes",
+          custom: "Custom schedule",
+        },
+        deliveryOptions: {
+          announce: "Last used channel",
+          webhook: "Webhook URL",
+          none: "Don't deliver",
+        },
+        fields: {
+          name: "Job name",
+          jobDescription: "Job description",
+          deleteAfterRun: "Delete after run",
+          scheduleKind: "Schedule kind",
+          expr: "Cron expression",
+          tz: "Timezone",
+          everyMs: "Every (ms)",
+          at: "Run at (ISO-8601)",
+          sessionTarget: "Session target",
+          wakeMode: "Wake mode",
+          payloadText: "System event text",
+          payloadMessage: "Agent turn message",
+          payloadModel: "Model override",
+          deliveryMode: "Delivery mode",
+          deliveryChannel: "Delivery channel",
+          deliveryTo: "Webhook URL",
+          deliveryBestEffort: "Best-effort delivery",
+        },
+        errors: {
+          invalid_json: "This scheduled task config is invalid.",
+          name_required: "Please enter a resource name (used as the job name).",
+          schedule_at_required: "Please set a run-at time.",
+          schedule_every_required: "Interval must be greater than 0.",
+          schedule_expr_required: "Please enter a cron expression.",
+          main_requires_system_event:
+            "Main session requires a system-event payload.",
+          isolated_requires_agent_turn:
+            "Isolated session requires an agent-turn message.",
+          payload_text_required: "Please enter the system event text.",
+          payload_message_required: "Please tell the agent what to do.",
+          delivery_webhook_url_required:
+            "Please enter an http(s) webhook URL.",
+        },
       },
       channelEditors: {
         dingtalkConnector: {
@@ -2952,6 +3096,8 @@ export const translations: Record<Locale, TranslationTree> = {
       bundleOptionCount: "{count} resources",
       channel: "Channel",
       noChannelResources: "No channel resources available.",
+      scheduledTask: "Scheduled Task",
+      noScheduledTaskResources: "No scheduled task resources available.",
       errors: {
         chooseBundle: "Choose a bundle before continuing.",
         chooseResource: "Choose at least one resource before continuing.",
@@ -3839,6 +3985,30 @@ export const translations: Record<Locale, TranslationTree> = {
       restartInProgress:
         "正在重启实例，桌面会短暂断开，新桌面流设置会在重连后生效。",
       restartSubmitted: "已发起重启，实例可用后桌面会自动重新连接。",
+      restartMenuLabel: "重启选项",
+      restartWithEnvironment: "配置环境变量并重启…",
+      restartWithEnvironmentHint: "添加 Skill 运行所需的可选变量。",
+      restartWithEnvironmentTitle: "配置环境变量并重启",
+      restartWithEnvironmentDescription:
+        "新变量会与实例现有配置合并，并在本次及后续重启中生效；未填写的现有变量不会被删除。",
+      restartWithEnvironmentSecurityNote:
+        "这里只用于非敏感配置，请勿填写密码、API Key、Token 或其他密钥。",
+      configuredEnvironmentVariables: "已配置变量",
+      configuredEnvironmentVariablesCount: "共 {{count}} 个",
+      configuredEnvironmentLoading: "正在加载已配置变量…",
+      configuredEnvironmentLoadFailed: "加载已配置环境变量失败。",
+      configuredEnvironmentEmpty: "当前没有自定义环境变量。",
+      configuredEnvironmentValueHidden: "已配置 · 值已隐藏",
+      resetEnvironmentVariable: "重新设置",
+      resetEnvironmentVariablePending: "等待填写新值",
+      removeEnvironmentVariable: "移除 {{name}}",
+      environmentVariableWillBeRemoved: "保存后将移除",
+      undoEnvironmentVariableRemoval: "撤销",
+      newOrUpdatedEnvironmentVariables: "新增或重新设置",
+      restartEnvironmentChangeConflict: "{{name}} 不能同时重新设置和移除。",
+      restartEnvironmentAtLeastOne: "请至少新增、修改或移除一个环境变量后再重启。",
+      restartEnvironmentSaved: "环境变量已保存，并已发起实例重启。",
+      restartEnvironmentFailed: "保存环境变量并重启实例失败。",
       governanceGatewayOk: "Gateway 正常",
       governanceExternalLLM: "检测到外部 LLM 配置",
       governanceSessionKeyMissing: "缺少 Session Key",
@@ -4109,7 +4279,7 @@ export const translations: Record<Locale, TranslationTree> = {
       thisResourceType: "该资源类型",
       notConfigurableYet: "{type} 暂不支持配置。",
       onlyChannelConfigurable:
-        "当前仅支持配置 Channel。Skill、Agent 和 Scheduled Task 的编辑器会在后续版本提供。",
+        "当前已支持配置 Channel、Skill 与 Scheduled Task。Agent 编辑器会在后续版本提供。",
       bundlesSubtitle:
         "把可复用的 OpenClaw 启动资源组合成资源包，并在弹窗中集中编辑。",
       loadingBundles: "正在加载资源包...",
@@ -4216,6 +4386,62 @@ export const translations: Record<Locale, TranslationTree> = {
       editorModes: {
         form: "表单",
         json: "JSON",
+      },
+      scheduledTask: {
+        editorTitle: "定时任务",
+        editorHint: "写清让 Agent 做什么、何时跑、结果发到哪即可。",
+        advancedTitle: "高级选项",
+        advancedHint: "兼容 OpenClaw 定时任务格式。一般不用改。",
+        simple: {
+          prompt: "让 Agent 做什么？",
+          promptPlaceholder: "例如：汇总一夜更新，发一条短简报。",
+          when: "何时执行",
+          where: "结果发到哪",
+          customAdvancedScheduleHint:
+            "当前为高级调度（every/at），请在下方「高级选项」中修改。",
+        },
+        presets: {
+          daily9: "每天 09:00",
+          hourly: "每小时",
+          every5m: "每 5 分钟",
+          custom: "自定义",
+        },
+        deliveryOptions: {
+          announce: "发到上次频道",
+          webhook: "发到 Webhook",
+          none: "不投递",
+        },
+        fields: {
+          name: "任务名称",
+          jobDescription: "任务描述",
+          deleteAfterRun: "执行后删除",
+          scheduleKind: "调度类型",
+          expr: "Cron 表达式",
+          tz: "时区",
+          everyMs: "间隔（毫秒）",
+          at: "执行时间（ISO-8601）",
+          sessionTarget: "会话目标",
+          wakeMode: "唤醒模式",
+          payloadText: "系统事件文本",
+          payloadMessage: "Agent 回合提示词",
+          payloadModel: "模型覆盖",
+          deliveryMode: "投递模式",
+          deliveryChannel: "投递通道",
+          deliveryTo: "Webhook URL",
+          deliveryBestEffort: "尽力投递（失败不阻断）",
+        },
+        errors: {
+          invalid_json: "定时任务配置无效。",
+          name_required: "请填写资源名称（会用作任务名）。",
+          schedule_at_required: "请填写执行时间。",
+          schedule_every_required: "间隔必须大于 0。",
+          schedule_expr_required: "请填写 Cron 表达式。",
+          main_requires_system_event: "主会话需要系统事件内容。",
+          isolated_requires_agent_turn: "独立会话需要 Agent 提示词。",
+          payload_text_required: "请填写系统事件文本。",
+          payload_message_required: "请填写让 Agent 做什么。",
+          delivery_webhook_url_required: "请填写 http(s) Webhook 地址。",
+        },
       },
       channelEditors: {
         dingtalkConnector: {
@@ -4347,6 +4573,8 @@ export const translations: Record<Locale, TranslationTree> = {
       bundleOptionCount: "{count} 个资源",
       channel: "通道",
       noChannelResources: "当前没有可用的通道资源。",
+      scheduledTask: "定时任务",
+      noScheduledTaskResources: "当前没有可用的定时任务资源。",
       errors: {
         chooseBundle: "请先选择一个资源包。",
         chooseResource: "请至少选择一个资源。",
@@ -5224,6 +5452,34 @@ export const translations: Record<Locale, TranslationTree> = {
         "Restarting the instance. The desktop may disconnect briefly while the new stream settings apply.",
       restartSubmitted:
         "Restart requested. The desktop will reconnect when the instance is available again.",
+      restartMenuLabel: "再起動オプション",
+      restartWithEnvironment: "環境変数を設定して再起動…",
+      restartWithEnvironmentHint: "Skill に必要な任意の変数を追加します。",
+      restartWithEnvironmentTitle: "環境変数を設定して再起動",
+      restartWithEnvironmentDescription:
+        "新しい値はインスタンス設定にマージされ、今回および今後の再起動に適用されます。既存の変数は保持されます。",
+      restartWithEnvironmentSecurityNote:
+        "機密ではない設定にのみ使用してください。パスワード、API キー、トークンなどの秘密情報は入力しないでください。",
+      configuredEnvironmentVariables: "設定済みの変数",
+      configuredEnvironmentVariablesCount: "{{count}} 件設定済み",
+      configuredEnvironmentLoading: "設定済み変数を読み込み中…",
+      configuredEnvironmentLoadFailed: "設定済み環境変数を読み込めませんでした。",
+      configuredEnvironmentEmpty: "カスタム環境変数は設定されていません。",
+      configuredEnvironmentValueHidden: "設定済み · 値は非表示",
+      resetEnvironmentVariable: "値を再設定",
+      resetEnvironmentVariablePending: "新しい値を入力待ち",
+      removeEnvironmentVariable: "{{name}} を削除",
+      environmentVariableWillBeRemoved: "保存時に削除されます",
+      undoEnvironmentVariableRemoval: "元に戻す",
+      newOrUpdatedEnvironmentVariables: "新規または更新する変数",
+      restartEnvironmentChangeConflict:
+        "{{name}} を同時に更新および削除することはできません。",
+      restartEnvironmentAtLeastOne:
+        "再起動する前に、環境変数を1つ以上追加、更新、または削除してください。",
+      restartEnvironmentSaved:
+        "環境変数を保存し、再起動をリクエストしました。",
+      restartEnvironmentFailed:
+        "環境変数の保存とインスタンスの再起動に失敗しました。",
       governanceGatewayOk: "Gateway OK",
       governanceExternalLLM: "外部 LLM 設定",
       governanceSessionKeyMissing: "Session key 未設定",
@@ -5510,7 +5766,7 @@ export const translations: Record<Locale, TranslationTree> = {
       thisResourceType: "このリソースタイプ",
       notConfigurableYet: "{type} はまだ設定できません。",
       onlyChannelConfigurable:
-        "現在設定できるのは Channel のみです。Skill、Agent、Scheduled Task のエディタは後続の更新で追加されます。",
+        "現在設定できるのは Channel、Skill、Scheduled Task です。Agent のエディタは後続の更新で追加されます。",
       bundlesSubtitle:
         "再利用可能な OpenClaw 起動パッケージを束ねて、専用ポップアップで編集します。",
       loadingBundles: "バンドルを読み込み中...",
@@ -6619,6 +6875,35 @@ export const translations: Record<Locale, TranslationTree> = {
         "Restarting the instance. The desktop may disconnect briefly while the new stream settings apply.",
       restartSubmitted:
         "Restart requested. The desktop will reconnect when the instance is available again.",
+      restartMenuLabel: "재시작 옵션",
+      restartWithEnvironment: "환경 변수를 설정하고 재시작…",
+      restartWithEnvironmentHint: "Skill에 필요한 선택적 변수를 추가합니다.",
+      restartWithEnvironmentTitle: "환경 변수를 설정하고 재시작",
+      restartWithEnvironmentDescription:
+        "새 값은 인스턴스 설정에 병합되어 이번 재시작과 이후 재시작에 적용됩니다. 기존 변수는 유지됩니다.",
+      restartWithEnvironmentSecurityNote:
+        "민감하지 않은 설정에만 사용하세요. 비밀번호, API 키, 토큰 또는 기타 비밀 정보는 입력하지 마세요.",
+      configuredEnvironmentVariables: "설정된 변수",
+      configuredEnvironmentVariablesCount: "{{count}}개 설정됨",
+      configuredEnvironmentLoading: "설정된 변수를 불러오는 중…",
+      configuredEnvironmentLoadFailed:
+        "설정된 환경 변수를 불러오지 못했습니다.",
+      configuredEnvironmentEmpty: "사용자 지정 환경 변수가 없습니다.",
+      configuredEnvironmentValueHidden: "설정됨 · 값 숨김",
+      resetEnvironmentVariable: "값 다시 설정",
+      resetEnvironmentVariablePending: "새 값 입력 대기",
+      removeEnvironmentVariable: "{{name}} 제거",
+      environmentVariableWillBeRemoved: "저장 시 제거됩니다",
+      undoEnvironmentVariableRemoval: "실행 취소",
+      newOrUpdatedEnvironmentVariables: "새 변수 또는 업데이트할 변수",
+      restartEnvironmentChangeConflict:
+        "{{name}}을(를) 동시에 업데이트하고 제거할 수 없습니다.",
+      restartEnvironmentAtLeastOne:
+        "재시작하기 전에 환경 변수를 하나 이상 추가, 업데이트 또는 제거하세요.",
+      restartEnvironmentSaved:
+        "환경 변수가 저장되었으며 재시작을 요청했습니다.",
+      restartEnvironmentFailed:
+        "환경 변수를 저장하고 인스턴스를 재시작하지 못했습니다.",
       governanceGatewayOk: "Gateway OK",
       governanceExternalLLM: "외부 LLM 설정",
       governanceSessionKeyMissing: "Session key 누락",
@@ -6905,7 +7190,7 @@ export const translations: Record<Locale, TranslationTree> = {
       thisResourceType: "이 리소스 유형은",
       notConfigurableYet: "{type} 아직 설정할 수 없습니다.",
       onlyChannelConfigurable:
-        "현재는 Channel만 설정할 수 있습니다. Skill, Agent, Scheduled Task 편집기는 이후 업데이트에서 추가됩니다.",
+        "현재는 Channel, Skill, Scheduled Task를 설정할 수 있습니다. Agent 편집기는 이후 업데이트에서 추가됩니다.",
       bundlesSubtitle:
         "재사용 가능한 OpenClaw 부트스트랩 패키지를 번들로 구성하고 전용 팝업에서 편집합니다.",
       loadingBundles: "번들을 불러오는 중...",
@@ -8039,6 +8324,38 @@ export const translations: Record<Locale, TranslationTree> = {
         "Restarting the instance. The desktop may disconnect briefly while the new stream settings apply.",
       restartSubmitted:
         "Restart requested. The desktop will reconnect when the instance is available again.",
+      restartMenuLabel: "Neustartoptionen",
+      restartWithEnvironment: "Umgebungsvariablen konfigurieren und neu starten…",
+      restartWithEnvironmentHint:
+        "Optionale Variablen hinzufügen, die ein Skill benötigt.",
+      restartWithEnvironmentTitle:
+        "Umgebungsvariablen konfigurieren und neu starten",
+      restartWithEnvironmentDescription:
+        "Neue Werte werden mit der Instanzkonfiguration zusammengeführt und gelten für diesen und zukünftige Neustarts. Bestehende Variablen bleiben erhalten.",
+      restartWithEnvironmentSecurityNote:
+        "Nur für nicht vertrauliche Konfiguration verwenden. Keine Passwörter, API-Schlüssel, Token oder andere Geheimnisse eingeben.",
+      configuredEnvironmentVariables: "Konfigurierte Variablen",
+      configuredEnvironmentVariablesCount: "{{count}} konfiguriert",
+      configuredEnvironmentLoading: "Konfigurierte Variablen werden geladen…",
+      configuredEnvironmentLoadFailed:
+        "Konfigurierte Umgebungsvariablen konnten nicht geladen werden.",
+      configuredEnvironmentEmpty:
+        "Keine benutzerdefinierten Umgebungsvariablen konfiguriert.",
+      configuredEnvironmentValueHidden: "Konfiguriert · Wert ausgeblendet",
+      resetEnvironmentVariable: "Wert neu setzen",
+      resetEnvironmentVariablePending: "Neuer Wert ausstehend",
+      removeEnvironmentVariable: "{{name}} entfernen",
+      environmentVariableWillBeRemoved: "Wird beim Speichern entfernt",
+      undoEnvironmentVariableRemoval: "Rückgängig",
+      newOrUpdatedEnvironmentVariables: "Neue oder aktualisierte Variablen",
+      restartEnvironmentChangeConflict:
+        "{{name}} kann nicht gleichzeitig aktualisiert und entfernt werden.",
+      restartEnvironmentAtLeastOne:
+        "Vor dem Neustart mindestens eine Umgebungsvariable hinzufügen, aktualisieren oder entfernen.",
+      restartEnvironmentSaved:
+        "Die Umgebungsvariablen wurden gespeichert und der Neustart wurde angefordert.",
+      restartEnvironmentFailed:
+        "Umgebungsvariablen konnten nicht gespeichert und die Instanz nicht neu gestartet werden.",
       governanceGatewayOk: "Gateway OK",
       governanceExternalLLM: "Externe LLM-Konfiguration",
       governanceSessionKeyMissing: "Session-Key fehlt",
@@ -8329,7 +8646,7 @@ export const translations: Record<Locale, TranslationTree> = {
       thisResourceType: "Dieser Ressourcentyp",
       notConfigurableYet: "{type} ist noch nicht konfigurierbar.",
       onlyChannelConfigurable:
-        "Derzeit werden nur Channel-Ressourcen unterstützt. Editoren für Skill, Agent und Scheduled Task folgen in einem späteren Update.",
+        "Derzeit werden Channel-, Skill- und Scheduled-Task-Ressourcen unterstützt. Der Agent-Editor folgt in einem späteren Update.",
       bundlesSubtitle:
         "Stellen Sie wiederverwendbare OpenClaw-Startpakete in einem separaten Popup-Editor zusammen.",
       loadingBundles: "Bundles werden geladen...",

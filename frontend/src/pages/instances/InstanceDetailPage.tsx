@@ -1,9 +1,10 @@
-﻿import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Ban,
   BarChart3,
+  ChevronDown,
   Clock3,
   Copy,
   Cpu,
@@ -21,9 +22,14 @@ import {
   X,
 } from "lucide-react";
 import ConfirmDialog from "../../components/ConfirmDialog";
+import {
+  instancePanelStorageKey,
+  readStoredCollapsed,
+} from "../../components/InstanceCollapsiblePanel";
 import InstanceSkillHubPanel from "../../components/InstanceSkillHubPanel";
 import InstanceSessionUsagePanel from "../../components/InstanceSessionUsagePanel";
 import { InstanceServiceFrame } from "../../components/InstanceServiceFrame";
+import RestartWithEnvironmentDialog from "../../components/RestartWithEnvironmentDialog";
 import UserLayout from "../../components/UserLayout";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
 import { useI18n } from "../../contexts/I18nContext";
@@ -45,6 +51,9 @@ import type {
 
 const META_POLL_INTERVAL_MS = 5000;
 const RUNTIME_POLL_INTERVAL_MS = 5000;
+const LITE_COLLAPSED_BOTTOM_FALLBACK_PX = 120;
+const LITE_COLLAPSED_BOTTOM_MAX_PX = 220;
+const LITE_ROOT_GAP_TOTAL_PX = 16; // two gap-2 rows between header / workspace / bottom
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
   labelKey: string;
@@ -54,6 +63,13 @@ const DESKTOP_STREAM_PROFILES: Array<{
   { id: "standard", labelKey: "instances.desktopStreamStandard", detail: "35 FPS / CRF 34" },
   { id: "high", labelKey: "instances.desktopStreamHigh", detail: "40 FPS / CRF 24" },
 ];
+
+function readPanelExpanded(panel: "skills" | "session-usage", instanceId: number | null): boolean {
+  if (!instanceId || Number.isNaN(instanceId)) {
+    return false;
+  }
+  return !readStoredCollapsed(instancePanelStorageKey(panel, instanceId), true);
+}
 
 function availabilityForStatus(status: string): InstanceAvailability {
   if (status === "running") {
@@ -293,6 +309,19 @@ const InstanceDetailPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [restartMenuOpen, setRestartMenuOpen] = useState(false);
+  const [showRestartEnvironmentDialog, setShowRestartEnvironmentDialog] =
+    useState(false);
+  const [restartEnvironmentError, setRestartEnvironmentError] = useState<
+    string | null
+  >(null);
+  const [restartEnvironmentNames, setRestartEnvironmentNames] = useState<
+    string[]
+  >([]);
+  const [restartEnvironmentNamesLoading, setRestartEnvironmentNamesLoading] =
+    useState(false);
+  const [restartEnvironmentNamesError, setRestartEnvironmentNamesError] =
+    useState<string | null>(null);
   const [externalAccess, setExternalAccess] = useState<InstanceExternalAccess | null>(null);
   const [externalShareURL, setExternalShareURL] = useState("");
   const [externalPassword, setExternalPassword] = useState("");
@@ -316,10 +345,20 @@ const InstanceDetailPage: React.FC = () => {
     useState<DesktopStreamProfile | "">("");
   const [desktopStreamMessage, setDesktopStreamMessage] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [skillPanelExpanded, setSkillPanelExpanded] = useState(false);
-  const [sessionPanelExpanded, setSessionPanelExpanded] = useState(false);
+  const [skillPanelExpanded, setSkillPanelExpanded] = useState(() =>
+    readPanelExpanded("skills", instanceId),
+  );
+  const [sessionPanelExpanded, setSessionPanelExpanded] = useState(() =>
+    readPanelExpanded("session-usage", instanceId),
+  );
   const [workspaceHeightPx, setWorkspaceHeightPx] = useState<number | null>(null);
+  const [collapsedBottomHeightPx, setCollapsedBottomHeightPx] = useState<number | null>(null);
   const workspaceSectionRef = useRef<HTMLElement>(null);
+  const liteRootRef = useRef<HTMLDivElement>(null);
+  const liteHeaderRef = useRef<HTMLDivElement>(null);
+  const liteBottomRef = useRef<HTMLDivElement>(null);
+  const bottomPanelExpandedRef = useRef(false);
+  const restartMenuRef = useRef<HTMLDivElement>(null);
 
   const fetchMeta = useCallback(
     async (targetInstanceId: number, options?: { background?: boolean }) => {
@@ -421,6 +460,31 @@ const InstanceDetailPage: React.FC = () => {
     ),
   );
 
+  useEffect(() => {
+    if (!restartMenuOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        restartMenuRef.current &&
+        !restartMenuRef.current.contains(event.target as Node)
+      ) {
+        setRestartMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRestartMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [restartMenuOpen]);
+
   const isDedicatedInstance = useMemo(
     () =>
       Boolean(
@@ -456,16 +520,47 @@ const InstanceDetailPage: React.FC = () => {
     if (isDedicatedInstance) {
       return;
     }
-    const section = workspaceSectionRef.current;
-    if (!section) {
+
+    const bottomExpanded = skillPanelExpanded || sessionPanelExpanded;
+    bottomPanelExpandedRef.current = bottomExpanded;
+
+    // Freeze workspace height while any bottom panel is expanded — avoid ResizeObserver races.
+    if (bottomExpanded) {
       return;
     }
 
     const syncWorkspaceHeight = () => {
-      if (skillPanelExpanded || sessionPanelExpanded) {
+      if (bottomPanelExpandedRef.current) {
         return;
       }
-      const nextHeight = section.getBoundingClientRect().height;
+
+      const root = liteRootRef.current;
+      const header = liteHeaderRef.current;
+      const bottom = liteBottomRef.current;
+      if (!root || !header) {
+        return;
+      }
+
+      const parent = root.parentElement;
+      if (!parent) {
+        return;
+      }
+
+      let bottomReserve = collapsedBottomHeightPx ?? LITE_COLLAPSED_BOTTOM_FALLBACK_PX;
+      if (bottom) {
+        const measuredBottom = bottom.offsetHeight;
+        if (measuredBottom > 0 && measuredBottom <= LITE_COLLAPSED_BOTTOM_MAX_PX) {
+          bottomReserve = measuredBottom;
+          setCollapsedBottomHeightPx(measuredBottom);
+        }
+      }
+
+      const parentStyle = window.getComputedStyle(parent);
+      const padY =
+        (Number.parseFloat(parentStyle.paddingTop) || 0) +
+        (Number.parseFloat(parentStyle.paddingBottom) || 0);
+      const nextHeight =
+        parent.clientHeight - padY - header.offsetHeight - bottomReserve - LITE_ROOT_GAP_TOTAL_PX;
       if (nextHeight > 0) {
         setWorkspaceHeightPx(nextHeight);
       }
@@ -473,21 +568,38 @@ const InstanceDetailPage: React.FC = () => {
 
     syncWorkspaceHeight();
     const observer = new ResizeObserver(syncWorkspaceHeight);
-    observer.observe(section);
+    const parent = liteRootRef.current?.parentElement;
+    if (parent) {
+      observer.observe(parent);
+    }
+    if (liteHeaderRef.current) {
+      observer.observe(liteHeaderRef.current);
+    }
     window.addEventListener("resize", syncWorkspaceHeight);
 
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", syncWorkspaceHeight);
     };
-  }, [isDedicatedInstance, sessionPanelExpanded, skillPanelExpanded]);
+  }, [
+    collapsedBottomHeightPx,
+    instance?.id,
+    isDedicatedInstance,
+    sessionPanelExpanded,
+    skillPanelExpanded,
+  ]);
+
+  useEffect(() => {
+    const nextSkillExpanded = readPanelExpanded("skills", instanceId);
+    const nextSessionExpanded = readPanelExpanded("session-usage", instanceId);
+    setSkillPanelExpanded(nextSkillExpanded);
+    setSessionPanelExpanded(nextSessionExpanded);
+  }, [instanceId]);
 
   const bottomPanelExpanded = skillPanelExpanded || sessionPanelExpanded;
+  bottomPanelExpandedRef.current = bottomPanelExpanded;
 
-  useLayoutEffect(() => {
-    if (isDedicatedInstance || !bottomPanelExpanded || workspaceHeightPx !== null) {
-      return;
-    }
+  const pinWorkspaceHeightBeforeExpand = useCallback(() => {
     const section = workspaceSectionRef.current;
     if (!section) {
       return;
@@ -496,27 +608,27 @@ const InstanceDetailPage: React.FC = () => {
     if (nextHeight > 0) {
       setWorkspaceHeightPx(nextHeight);
     }
-  }, [bottomPanelExpanded, isDedicatedInstance, workspaceHeightPx]);
-
-  const handleSkillPanelExpandedChange = useCallback((expanded: boolean) => {
-    if (expanded && workspaceSectionRef.current) {
-      const nextHeight = workspaceSectionRef.current.getBoundingClientRect().height;
-      if (nextHeight > 0) {
-        setWorkspaceHeightPx(nextHeight);
-      }
-    }
-    setSkillPanelExpanded(expanded);
   }, []);
 
-  const handleSessionPanelExpandedChange = useCallback((expanded: boolean) => {
-    if (expanded && workspaceSectionRef.current) {
-      const nextHeight = workspaceSectionRef.current.getBoundingClientRect().height;
-      if (nextHeight > 0) {
-        setWorkspaceHeightPx(nextHeight);
+  const handleSkillPanelExpandedChange = useCallback(
+    (expanded: boolean) => {
+      if (expanded) {
+        pinWorkspaceHeightBeforeExpand();
       }
-    }
-    setSessionPanelExpanded(expanded);
-  }, []);
+      setSkillPanelExpanded(expanded);
+    },
+    [pinWorkspaceHeightBeforeExpand],
+  );
+
+  const handleSessionPanelExpandedChange = useCallback(
+    (expanded: boolean) => {
+      if (expanded) {
+        pinWorkspaceHeightBeforeExpand();
+      }
+      setSessionPanelExpanded(expanded);
+    },
+    [pinWorkspaceHeightBeforeExpand],
+  );
 
   const availability = useMemo<InstanceAvailability>(() => {
     if (status?.availability) {
@@ -563,6 +675,77 @@ const InstanceDetailPage: React.FC = () => {
     } finally {
       setActionLoading(null);
     }
+  };
+
+  const handleRestartWithEnvironment = async (
+    environmentOverrides: Record<string, string>,
+    environmentOverrideRemovals: string[],
+  ) => {
+    if (!instance) {
+      return;
+    }
+
+    try {
+      setActionLoading("restart-environment");
+      setRestartEnvironmentError(null);
+      setActionMessage(t("instances.restartInProgress"));
+      await instanceService.restartInstance(instance.id, {
+        environment_overrides: environmentOverrides,
+        environment_override_removals: environmentOverrideRemovals,
+      });
+      setRestartEnvironmentNames((current) => {
+        const next = new Set(current);
+        environmentOverrideRemovals.forEach((name) => next.delete(name));
+        Object.keys(environmentOverrides).forEach((name) => next.add(name));
+        return Array.from(next).sort((left, right) => left.localeCompare(right));
+      });
+      setShowRestartEnvironmentDialog(false);
+      setActionMessage(t("instances.restartEnvironmentSaved"));
+      await fetchMeta(instance.id, { background: true });
+    } catch (restartError) {
+      setActionMessage(null);
+      setRestartEnvironmentError(
+        getErrorMessage(
+          restartError,
+          t("instances.restartEnvironmentFailed"),
+        ),
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const loadRestartEnvironmentNames = useCallback(
+    async (targetInstanceID: number) => {
+      try {
+        setRestartEnvironmentNamesLoading(true);
+        setRestartEnvironmentNamesError(null);
+        const result =
+          await instanceService.getEnvironmentOverrides(targetInstanceID);
+        setRestartEnvironmentNames(result.names ?? []);
+      } catch (loadError) {
+        setRestartEnvironmentNamesError(
+          getErrorMessage(
+            loadError,
+            t("instances.configuredEnvironmentLoadFailed"),
+          ),
+        );
+      } finally {
+        setRestartEnvironmentNamesLoading(false);
+      }
+    },
+    [t],
+  );
+
+  const openRestartEnvironmentDialog = () => {
+    if (!instance) {
+      return;
+    }
+    setRestartMenuOpen(false);
+    setRestartEnvironmentError(null);
+    setRestartEnvironmentNames([]);
+    setShowRestartEnvironmentDialog(true);
+    void loadRestartEnvironmentNames(instance.id);
   };
 
   const buildExternalAccessRequest = (): ExternalAccessRequest | null => {
@@ -778,15 +961,66 @@ const InstanceDetailPage: React.FC = () => {
               {t("common.start")}
             </button>
           ) : null}
-          <button
-            type="button"
-            className="app-button-secondary"
-            onClick={() => void handleAction("restart")}
-            disabled={actionLoading === "restart" || instance.status === "deleting"}
-          >
-            <RotateCw className="h-4 w-4" />
-            {t("common.restart")}
-          </button>
+          <div ref={restartMenuRef} className="relative inline-flex">
+            <button
+              type="button"
+              className="app-button-secondary rounded-r-none"
+              onClick={() => {
+                setRestartMenuOpen(false);
+                void handleAction("restart");
+              }}
+              disabled={
+                actionLoading === "restart" ||
+                actionLoading === "restart-environment" ||
+                instance.status === "deleting"
+              }
+            >
+              <RotateCw className="h-4 w-4" />
+              {t("common.restart")}
+            </button>
+            <button
+              type="button"
+              aria-label={t("instances.restartMenuLabel")}
+              aria-haspopup="menu"
+              aria-expanded={restartMenuOpen}
+              className="app-button-secondary -ml-px rounded-l-none px-2"
+              onClick={() => setRestartMenuOpen((open) => !open)}
+              disabled={
+                actionLoading === "restart" ||
+                actionLoading === "restart-environment" ||
+                instance.status === "deleting"
+              }
+            >
+              <ChevronDown
+                className={`h-4 w-4 transition-transform ${
+                  restartMenuOpen ? "rotate-180" : ""
+                }`}
+              />
+            </button>
+            {restartMenuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-30 mt-2 w-72 rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left transition hover:bg-slate-50"
+                  onClick={openRestartEnvironmentDialog}
+                >
+                  <RotateCw className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+                  <span>
+                    <span className="block text-sm font-medium text-slate-900">
+                      {t("instances.restartWithEnvironment")}
+                    </span>
+                    <span className="mt-0.5 block text-xs leading-5 text-slate-500">
+                      {t("instances.restartWithEnvironmentHint")}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             type="button"
             className="app-button-secondary border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800"
@@ -1037,26 +1271,27 @@ const InstanceDetailPage: React.FC = () => {
   );
 
   const renderLiteWorkspace = () => {
-    const pinnedWorkspaceHeight = workspaceHeightPx ?? 360;
+    const pinnedWorkspaceHeight = workspaceHeightPx;
 
     return (
     <div
-      className={`flex flex-col gap-2 ${
-        bottomPanelExpanded ? "min-h-0" : "min-h-0 flex-1 overflow-hidden"
+      ref={liteRootRef}
+      className={`flex min-h-0 flex-1 flex-col gap-2 ${
+        bottomPanelExpanded ? "" : "overflow-hidden"
       }`}
     >
-      {renderHeaderSection(shareLinkControl)}
-      {renderActionMessage()}
+      <div ref={liteHeaderRef} className="flex shrink-0 flex-col gap-2">
+        {renderHeaderSection(shareLinkControl)}
+        {renderActionMessage()}
+      </div>
       <section
         ref={workspaceSectionRef}
         style={
-          bottomPanelExpanded
+          pinnedWorkspaceHeight
             ? { height: pinnedWorkspaceHeight, minHeight: pinnedWorkspaceHeight, flexShrink: 0 }
-            : undefined
+            : { minHeight: 420, flex: 1 }
         }
-        className={`grid shrink-0 gap-4 overflow-hidden max-xl:h-auto max-xl:min-h-[420px] max-xl:overflow-y-auto xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)] xl:grid-rows-[minmax(0,1fr)] ${
-          bottomPanelExpanded ? "" : "min-h-0 flex-1"
-        }`}
+        className="grid shrink-0 grid-cols-1 grid-rows-[minmax(0,1fr)] gap-4 overflow-hidden min-h-[420px] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]"
       >
         <div className="h-full min-h-0 min-w-0">
           <InstanceServiceFrame
@@ -1076,7 +1311,7 @@ const InstanceDetailPage: React.FC = () => {
           </div>
         )}
       </section>
-      <div className="flex shrink-0 flex-col gap-2">
+      <div ref={liteBottomRef} className="flex shrink-0 flex-col gap-2">
         <InstanceSkillHubPanel
           instance={instance}
           onRuntimeDetailsChange={setRuntimeDetails}
@@ -1109,7 +1344,10 @@ const InstanceDetailPage: React.FC = () => {
     ...overviewResourceRows,
   ];
   const desktopStreamDirty = desktopStreamProfile !== desktopStreamSavedProfile;
-  const restartActionActive = actionLoading === "restart" || actionLoading === "desktop-stream-restart";
+  const restartActionActive =
+    actionLoading === "restart" ||
+    actionLoading === "restart-environment" ||
+    actionLoading === "desktop-stream-restart";
 
   const renderActionMessage = () =>
     actionMessage ? (
@@ -1312,6 +1550,29 @@ const InstanceDetailPage: React.FC = () => {
         loading={actionLoading === "delete"}
         onCancel={() => setShowDeleteDialog(false)}
         onConfirm={() => void handleAction("delete")}
+      />
+      <RestartWithEnvironmentDialog
+        key={showRestartEnvironmentDialog ? "open" : "closed"}
+        open={showRestartEnvironmentDialog}
+        instanceName={instance.name}
+        loading={actionLoading === "restart-environment"}
+        existingNames={restartEnvironmentNames}
+        existingLoading={restartEnvironmentNamesLoading}
+        existingError={restartEnvironmentNamesError}
+        serverError={restartEnvironmentError}
+        onRetryExisting={() => void loadRestartEnvironmentNames(instance.id)}
+        onCancel={() => {
+          if (actionLoading !== "restart-environment") {
+            setShowRestartEnvironmentDialog(false);
+            setRestartEnvironmentError(null);
+          }
+        }}
+        onConfirm={(environmentOverrides, environmentOverrideRemovals) =>
+          void handleRestartWithEnvironment(
+            environmentOverrides,
+            environmentOverrideRemovals,
+          )
+        }
       />
 
       {isDedicatedInstance ? renderProWorkspace() : renderLiteWorkspace()}
