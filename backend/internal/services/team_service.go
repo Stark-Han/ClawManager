@@ -92,6 +92,7 @@ const (
 	teamCompletionDecisionDeferred          = "deferred"
 	teamCompletionDecisionNeedsConfirmation = "needs_confirmation"
 	teamCompletionDecisionRejected          = "rejected"
+	teamCompletionEvaluationVersion         = 2
 )
 
 var (
@@ -3436,7 +3437,13 @@ func (s *teamService) sweepLeaderSynthesisReminders(team *models.Team, bus *redi
 		if !ready {
 			continue
 		}
-		monitorKey := fmt.Sprintf("%d:%d:%s:%d", team.ID, task.ID, task.WorkflowState, task.LedgerVersion)
+		monitorKey := fmt.Sprintf(
+			"%d:%d:%s:%s",
+			team.ID,
+			task.ID,
+			task.WorkflowState,
+			leaderSynthesisResultFingerprint(task, resultItems),
+		)
 		if !s.claimAssignmentMonitorSlot(monitorKey, now) {
 			continue
 		}
@@ -3524,10 +3531,17 @@ func (s *teamService) reconcileDeferredTeamCompletion(team *models.Team, bus *re
 		if err != nil {
 			return false, err
 		}
-		if !ledgerRepaired && deferredLedgerVersion > 0 && task.LedgerVersion <= deferredLedgerVersion {
+		evaluationRulesChanged := eventInt(
+			payload,
+			"completionEvaluationVersion",
+			"completion_evaluation_version",
+		) < teamCompletionEvaluationVersion
+		if !ledgerRepaired && !evaluationRulesChanged &&
+			deferredLedgerVersion > 0 && task.LedgerVersion <= deferredLedgerVersion {
 			// Re-evaluation is driven by a real business-ledger change, never by
-			// a timer. This makes long-running work quiet and prevents the same
-			// deferred draft from generating reminder/reconcile loops.
+			// a timer or an unchanged evaluator. A newer evaluator may retry one
+			// older deferred draft exactly once, allowing a control-plane upgrade
+			// to heal prior overly strict decisions without another Agent turn.
 			return false, nil
 		}
 		payload["event"] = "completion_proposed"
@@ -3542,6 +3556,8 @@ func (s *teamService) reconcileDeferredTeamCompletion(team *models.Team, bus *re
 		payload["memberId"] = leader.MemberKey
 		payload["taskId"] = fmt.Sprintf("team-%d-task-%d", team.ID, task.ID)
 		payload["rootTaskId"] = fmt.Sprintf("team-%d-task-%d", team.ID, task.ID)
+		payload["completionReconcile"] = true
+		payload["completionEvaluationVersion"] = teamCompletionEvaluationVersion
 		delete(payload, "completionDecision")
 		delete(payload, "completionDecisionReason")
 		delete(payload, "pendingAssignments")
@@ -3723,6 +3739,10 @@ func leaderMediatedRootNeedsSynthesisReminder(task *models.TeamTask, items []mod
 		}
 		switch item.Status {
 		case models.TeamTaskStatusSucceeded:
+			if item.ReviewRequired &&
+				(item.ValidatedRevision == nil || *item.ValidatedRevision < teamMaxInt(item.Revision, 1)) {
+				return false, nil
+			}
 			resultItems = append(resultItems, item)
 		case models.TeamTaskStatusFailed, models.TeamTaskStatusStale:
 			return false, nil
@@ -3752,11 +3772,52 @@ func isLeaderFinalSynthesisWorkItem(item models.TeamWorkItem) bool {
 			strings.Contains(text, "complete"))
 }
 
+func leaderSynthesisResultFingerprint(task *models.TeamTask, resultItems []models.TeamWorkItem) string {
+	parts := make([]string, 0, len(resultItems)+1)
+	if task != nil {
+		parts = append(parts, fmt.Sprintf(
+			"task=%d|plan=%d|workflow=%s|phase=%s",
+			task.ID,
+			task.PlanVersion,
+			strings.TrimSpace(task.WorkflowState),
+			strings.TrimSpace(derefTeamString(task.CurrentPhaseID)),
+		))
+	}
+	for idx := range resultItems {
+		item := resultItems[idx]
+		validatedRevision := 0
+		if item.ValidatedRevision != nil {
+			validatedRevision = *item.ValidatedRevision
+		}
+		parts = append(parts, fmt.Sprintf(
+			"work=%s|revision=%d|status=%s|required=%t|review=%t|validated=%d|result=%s|artifacts=%s",
+			workItemBusinessID(item),
+			teamMaxInt(item.Revision, 1),
+			strings.TrimSpace(item.Status),
+			item.RequiredForRoot || item.AssignmentID == nil,
+			item.ReviewRequired,
+			validatedRevision,
+			strings.TrimSpace(derefTeamString(item.ResultJSON)),
+			strings.TrimSpace(derefTeamString(item.ArtifactRefsJSON)),
+		))
+	}
+	sort.Strings(parts)
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(digest[:])
+}
+
 func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redisBus, task *models.TeamTask, leader *models.TeamMember, resultItems []models.TeamWorkItem, now time.Time) error {
 	if s == nil || s.repo == nil || team == nil || task == nil || leader == nil || len(resultItems) == 0 {
 		return nil
 	}
-	eventID := fmt.Sprintf("leader-workflow-reminder:%d:%d:%s:%d", team.ID, task.ID, normalizeTeamRedisKeyPart(task.WorkflowState), task.LedgerVersion)
+	resultFingerprint := leaderSynthesisResultFingerprint(task, resultItems)
+	eventID := fmt.Sprintf(
+		"leader-workflow-reminder:%d:%d:%s:%s",
+		team.ID,
+		task.ID,
+		normalizeTeamRedisKeyPart(task.WorkflowState),
+		resultFingerprint,
+	)
 	exists, err := s.repo.EventExistsByEventID(team.ID, eventID)
 	if err != nil || exists {
 		return err
@@ -3816,6 +3877,7 @@ func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redi
 		"workflowState":      task.WorkflowState,
 		"planVersion":        task.PlanVersion,
 		"ledgerVersion":      task.LedgerVersion,
+		"resultFingerprint":  resultFingerprint,
 		"expiresAt":          now.Add(2 * time.Minute).Format(time.RFC3339Nano),
 		"visibleToChat":      true,
 		"chatDigestEligible": true,
@@ -5538,12 +5600,13 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 			result.PendingAssignments = append(result.PendingAssignments, key+":review")
 			continue
 		}
-		for _, dependency := range teamWorkItemDependencies(item) {
-			dependencyItem, ok := byBusinessID[dependency]
-			if !ok || dependencyItem.Status != models.TeamTaskStatusSucceeded {
-				result.PendingAssignments = append(result.PendingAssignments, key+":depends_on:"+dependency)
-			}
-		}
+		// dependsOn is planning metadata authored by models and older runtimes.
+		// It may contain an assignment ID, a phase ID, or a natural label. Once
+		// this downstream contract has actually succeeded, that advisory text
+		// must not recreate a blocker. Any real required predecessor is already
+		// evaluated independently above, and incomplete phase work is evaluated
+		// below. This keeps completion safe without requiring Agents to reproduce
+		// an exact control-plane identifier.
 	}
 	sort.Strings(result.PendingAssignments)
 	result.PendingAssignments = uniqueTeamStrings(result.PendingAssignments)
@@ -5593,21 +5656,23 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 			continue
 		}
 		hasRequiredWork := phaseHasRequiredWork(phase.PhaseID, byBusinessID, member.ID)
-		naturalLeaderFinalPhase := naturalTurnCompletion && !hasRequiredWork && isLeaderFinalWorkflowPhase(phase)
-		if naturalTurnCompletion && !hasRequiredWork && !naturalLeaderFinalPhase {
+		finalSynthesisExecuted := !hasRequiredWork &&
+			isLeaderFinalWorkflowPhase(phase) &&
+			completionExecutesFinalSynthesis(payload)
+		if naturalTurnCompletion && !hasRequiredWork && !finalSynthesisExecuted {
 			// A natural final turn cannot silently retire a future phase that
 			// was planned but never executed. The Leader must actually execute
 			// it or use the explicit tool disposition path.
 			result.PendingPhases = append(result.PendingPhases, phase.PhaseID)
 			continue
 		}
-		if phaseUsesExplicitDisposition(phase) && !hasRequiredWork && !naturalLeaderFinalPhase {
+		if phaseUsesExplicitDisposition(phase) && !hasRequiredWork && !finalSynthesisExecuted {
 			if disposition := phaseDispositions[phase.PhaseID]; disposition.PhaseID == "" {
 				result.PendingPhases = append(result.PendingPhases, phase.PhaseID+":disposition")
 			}
 			continue
 		}
-		if naturalLeaderFinalPhase {
+		if finalSynthesisExecuted {
 			continue
 		}
 		// Legacy plans did not declare an explicit phase-disposition policy.
@@ -5632,6 +5697,24 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 		return result, nil
 	}
 	return result, nil
+}
+
+func completionExecutesFinalSynthesis(payload map[string]interface{}) bool {
+	if payload == nil ||
+		!eventBool(payload, "workflowFinal", "workflow_final", "sealWorkflow", "seal_workflow") ||
+		!eventBool(payload, "finalAnswerReady", "final_answer_ready") ||
+		len(normalizeContextRefs(firstTeamValue(payload, "remainingActions", "remaining_actions", "nextActions", "next_actions"))) > 0 {
+		return false
+	}
+	return strings.TrimSpace(eventString(
+		payload,
+		"resultMarkdown",
+		"result_markdown",
+		"result",
+		"answer",
+		"completionDraftMarkdown",
+		"completion_draft_markdown",
+	)) != ""
 }
 
 func firstTeamValue(payload map[string]interface{}, keys ...string) interface{} {
@@ -6027,6 +6110,7 @@ func markStructuredCompletionDecision(eventType string, payload map[string]inter
 	payload["availability"] = models.TeamMemberAvailabilityBusy
 	payload["rootTaskTerminal"] = false
 	payload["completionProposalPreserved"] = true
+	payload["completionEvaluationVersion"] = teamCompletionEvaluationVersion
 	// A deferred completion is business information, but its delivery draft is
 	// not a final result.  Showing that full draft in the group chat makes a
 	// still-running task look complete. Preserve an explicit diagnostic only;
@@ -6060,7 +6144,8 @@ func markStructuredCompletionDecision(eventType string, payload map[string]inter
 	if reason := completionDecisionMessage(evaluation); reason != "" {
 		payload["summary"] = reason
 	}
-	if eventBool(payload, "automaticTurnResult", "automatic_turn_result") {
+	if eventBool(payload, "automaticTurnResult", "automatic_turn_result") ||
+		eventBool(payload, "completionReconcile", "completion_reconcile") {
 		// Runtime-generated final-turn proposals are control-plane evidence.
 		// A rejected/deferred proposal must not impersonate the Leader in chat;
 		// the underlying assistant narrative remains governed by the existing
@@ -7625,6 +7710,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			payload["event"] = "task_completed"
 			payload["type"] = "task_completed"
 			payload["completionDecision"] = teamCompletionDecisionAccepted
+			payload["completionEvaluationVersion"] = teamCompletionEvaluationVersion
+			delete(payload, "completionReconcile")
+			delete(payload, "completion_reconcile")
 			payload["chatKind"] = "final_delivery"
 			if eventBool(payload, "runtimeTurnResultCandidate", "runtime_turn_result_candidate") {
 				// The exact assistant narrative was already projected for this
