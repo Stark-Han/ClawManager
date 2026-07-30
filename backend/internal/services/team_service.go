@@ -3989,6 +3989,35 @@ func workItemArtifactRefs(item models.TeamWorkItem) []string {
 	return nil
 }
 
+func teamArtifactMetadataHashes(value interface{}) map[string]string {
+	result := map[string]string{}
+	appendEntry := func(entry map[string]interface{}) {
+		path := strings.TrimSpace(eventString(entry, "path", "artifactRef", "artifact_ref"))
+		hash := strings.TrimSpace(eventString(entry, "contentHash", "content_hash", "sha256"))
+		if path != "" && hash != "" {
+			result[path] = strings.TrimPrefix(strings.ToLower(hash), "sha256:")
+		}
+	}
+	switch typed := value.(type) {
+	case []interface{}:
+		for _, raw := range typed {
+			if entry, ok := raw.(map[string]interface{}); ok {
+				appendEntry(entry)
+			}
+		}
+	case []map[string]interface{}:
+		for _, entry := range typed {
+			appendEntry(entry)
+		}
+	}
+	return result
+}
+
+func workItemArtifactMetadataHashes(item models.TeamWorkItem) map[string]string {
+	payload := workItemResultPayload(item)
+	return teamArtifactMetadataHashes(firstTeamValue(payload, "artifactMetadata", "artifact_metadata"))
+}
+
 func appendUniqueTeamArtifactRefs(target []string, refs ...string) []string {
 	seen := make(map[string]struct{}, len(target)+len(refs))
 	for _, ref := range target {
@@ -6031,10 +6060,22 @@ func markStructuredCompletionDecision(eventType string, payload map[string]inter
 	if reason := completionDecisionMessage(evaluation); reason != "" {
 		payload["summary"] = reason
 	}
-	payload["visibleToChat"] = true
-	payload["visible_to_chat"] = true
-	payload["chatPolicy"] = "warning"
-	payload["chatKind"] = "completion_" + evaluation.Decision
+	if eventBool(payload, "automaticTurnResult", "automatic_turn_result") {
+		// Runtime-generated final-turn proposals are control-plane evidence.
+		// A rejected/deferred proposal must not impersonate the Leader in chat;
+		// the underlying assistant narrative remains governed by the existing
+		// narrative policy and is intentionally not changed here.
+		payload["visibleToChat"] = false
+		payload["visible_to_chat"] = false
+		payload["chatPolicy"] = "hidden"
+		payload["chatKind"] = "runtime_completion_" + evaluation.Decision
+		payload["nonAuthoritative"] = true
+	} else {
+		payload["visibleToChat"] = true
+		payload["visible_to_chat"] = true
+		payload["chatPolicy"] = "warning"
+		payload["chatKind"] = "completion_" + evaluation.Decision
+	}
 	if completionID := eventString(payload, "completionId", "completion_id"); completionID != "" {
 		// One proposal remains one chat item while its blockers evolve.
 		payload["displayKey"] = fmt.Sprintf("completion:%s", completionID)
@@ -6157,6 +6198,22 @@ func applyTeamChatPolicy(eventType string, payload map[string]interface{}, task 
 		return
 	}
 	automaticTurnResult := eventBool(payload, "automaticTurnResult", "automatic_turn_result")
+	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
+	if automaticTurnResult {
+		decision := eventString(payload, "completionDecision", "completion_decision")
+		if decision != "" && decision != teamCompletionDecisionAccepted {
+			payload["chatPolicy"] = "hidden"
+			payload["visibleToChat"] = false
+			payload["visible_to_chat"] = false
+			return
+		}
+	}
+	if eventKind == "turn_finished_without_completion" {
+		payload["chatPolicy"] = "hidden"
+		payload["visibleToChat"] = false
+		payload["visible_to_chat"] = false
+		return
+	}
 	if eventBool(payload, "runtimeTurnResultCandidate", "runtime_turn_result_candidate") ||
 		(automaticTurnResult &&
 			(eventBool(payload, "assignmentResultOnly", "assignment_result_only") ||
@@ -6169,7 +6226,6 @@ func applyTeamChatPolicy(eventType string, payload map[string]interface{}, task 
 		return
 	}
 	normalizedEvent := strings.ToLower(strings.TrimSpace(eventType))
-	eventKind := strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind")))
 	// Runtime-provided visibility is advisory. A real plan, assignment,
 	// narrative, delivery, review, or synthesis must not be hidden simply
 	// because an older adapter labelled it as transport traffic.
@@ -6258,6 +6314,23 @@ func applyTeamChatPolicy(eventType string, payload map[string]interface{}, task 
 	if displayKey != "" {
 		payload["displayKey"] = displayKey
 	}
+}
+
+func markAutomaticCompletionDiagnosticStateNeutral(payload map[string]interface{}) bool {
+	if payload == nil || !eventBool(payload, "automaticTurnResult", "automatic_turn_result") {
+		return false
+	}
+	decision := eventString(payload, "completionDecision", "completion_decision")
+	if decision == "" || decision == teamCompletionDecisionAccepted {
+		return false
+	}
+	payload["stateEffect"] = "none"
+	payload["nonAuthoritative"] = true
+	payload["rootTaskTerminal"] = false
+	payload["chatPolicy"] = "hidden"
+	payload["visibleToChat"] = false
+	payload["visible_to_chat"] = false
+	return true
 }
 
 func teamChatAssignmentIdentity(payload map[string]interface{}) string {
@@ -6923,6 +6996,13 @@ func isLeaderMediatedWorkerToLeaderResult(team *models.Team, eventType string, p
 	if teamRedisProtocolVersion(payload) >= 2 && isExplicitTeamTaskCompletion(payload) {
 		return true
 	}
+	if teamRedisProtocolVersion(payload) >= 4 {
+		// Protocol v4+ always follows a Worker delivery turn with a structured
+		// automatic or explicit completion proposal. Treating the preceding
+		// team_send/outbound prose as a second terminal result caused duplicate
+		// cards, notifications, and content-hash "updates" for one turn.
+		return false
+	}
 	body := eventString(payload, "resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary")
 	if looksLikeLeaderDispatchOnlyText(body) {
 		return false
@@ -7330,6 +7410,15 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	normalizeUnauthorizedAssignmentCheckResult(payload)
 	passiveMonitorEvent := isPassiveAssignmentMonitorEvent(eventType, payload)
 	stateNeutralAssignmentEvent := false
+	if strings.EqualFold(eventString(payload, "eventKind", "event_kind", "kind"), "turn_finished_without_completion") {
+		stateNeutralAssignmentEvent = true
+		payload["stateEffect"] = "none"
+		payload["nonAuthoritative"] = true
+		payload["rootTaskTerminal"] = false
+		payload["chatPolicy"] = "hidden"
+		payload["visibleToChat"] = false
+		payload["visible_to_chat"] = false
+	}
 	if isAssignmentHeartbeatEvent(eventType, payload) {
 		normalizeAssignmentHeartbeatPayload(payload)
 		if task != nil && isTerminalTeamTaskStatus(task.Status) {
@@ -7410,10 +7499,21 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			if confirmErr != nil {
 				return confirmErr
 			}
-			if alreadyProjected {
+			sameSourceTurn, sourceErr := s.hasLeaderMediatedResultConfirmationForSource(
+				team.ID,
+				task.ID,
+				member.MemberKey,
+				assignmentID,
+				eventString(payload, "sourceMessageId", "source_message_id"),
+			)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			if alreadyProjected || sameSourceTurn {
 				payload["visibleToChat"] = false
 				payload["visible_to_chat"] = false
 				payload["duplicateResultProjection"] = true
+				payload["duplicateResultSourceTurn"] = sameSourceTurn
 			}
 		}
 	}
@@ -7541,6 +7641,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			}
 			payload["displayKey"] = fmt.Sprintf("root-final:%d", task.ID)
 		}
+	}
+	if markAutomaticCompletionDiagnosticStateNeutral(payload) {
+		stateNeutralAssignmentEvent = true
 	}
 	s.normalizeTeamArtifactReferences(team, payload)
 	if eventSignalsCompletion {
@@ -7797,9 +7900,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			return err
 		}
 	}
-	reviewInvalidated, err := s.invalidateModifiedTeamArtifactReviews(task, payload, time.Now().UTC())
-	if err != nil {
-		return err
+	reviewInvalidated := false
+	if !stateNeutralAssignmentEvent {
+		reviewInvalidated, err = s.invalidateModifiedTeamArtifactReviews(task, payload, time.Now().UTC())
+		if err != nil {
+			return err
+		}
 	}
 	workflowChanged := reviewInvalidated
 	if !stateNeutralAssignmentEvent {
@@ -7807,19 +7913,22 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			return err
 		}
 	}
-	reviewValidated, err := s.applyStructuredReviewValidation(task, member, payload, time.Now().UTC())
-	if err != nil {
-		return err
+	reviewValidated := false
+	if !stateNeutralAssignmentEvent {
+		reviewValidated, err = s.applyStructuredAssignmentValidation(task, member, payload, time.Now().UTC())
+		if err != nil {
+			return err
+		}
 	}
 	workflowChanged = workflowChanged || reviewValidated
-	if passiveMonitorEvent {
+	if passiveMonitorEvent && !stateNeutralAssignmentEvent {
 		reconciled, reconcileErr := s.reconcileTerminalMonitorWorkItem(team, task, member, payload, time.Now().UTC())
 		if reconcileErr != nil {
 			return reconcileErr
 		}
 		workflowChanged = workflowChanged || reconciled
 	}
-	if !atomicRootCompletionAccepted {
+	if !atomicRootCompletionAccepted && !stateNeutralAssignmentEvent {
 		ledgerChanged, ledgerErr := s.projectTeamWorkflowLedger(team, task, member, eventType, payload, time.Now().UTC())
 		err = ledgerErr
 		if err != nil {
@@ -8165,11 +8274,26 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 	if contentHash == "" {
 		contentHash = teamResultContentHash(sourcePayload)
 	}
+	sourceMessageID := eventString(sourcePayload, "sourceMessageId", "source_message_id")
+	sameSourceTurn, err := s.hasLeaderMediatedResultConfirmationForSource(
+		team.ID,
+		task.ID,
+		member.MemberKey,
+		workID,
+		sourceMessageID,
+	)
+	if err != nil || sameSourceTurn {
+		return err
+	}
 	alreadyConfirmed, err := s.hasLeaderMediatedResultConfirmation(team.ID, task.ID, member.MemberKey, workID, contentHash)
 	if err != nil || alreadyConfirmed {
 		return err
 	}
-	confirmationSeed := fmt.Sprintf("%d:%d:%s:%s:%d:%s", team.ID, task.ID, normalizeTeamMemberRouteKey(member.MemberKey), workID, revision, contentHash)
+	resultIdentity := "content:" + contentHash
+	if sourceMessageID != "" {
+		resultIdentity = "source:" + sourceMessageID
+	}
+	confirmationSeed := fmt.Sprintf("%d:%d:%s:%s:%d:%s", team.ID, task.ID, normalizeTeamMemberRouteKey(member.MemberKey), workID, revision, resultIdentity)
 	confirmationDigest := sha256.Sum256([]byte(confirmationSeed))
 	eventID := fmt.Sprintf("member-result-confirmed:%d:%d:%x", team.ID, task.ID, confirmationDigest[:12])
 	exists, err := s.repo.EventExistsByEventID(team.ID, eventID)
@@ -8205,6 +8329,7 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 		"visible_to_chat":        false,
 		"chatPolicy":             "hidden",
 		"sourceEventId":          sourceEventID,
+		"sourceMessageId":        sourceMessageID,
 		"sourceCompletionId":     sourceCompletionID,
 		"sourceWorkId":           sourceWorkID,
 		"contentHash":            contentHash,
@@ -8362,6 +8487,38 @@ func (s *teamService) hasLeaderMediatedResultConfirmation(teamID, taskID int, me
 			continue
 		}
 		if confirmedHash == expectedHash {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *teamService) hasLeaderMediatedResultConfirmationForSource(teamID, taskID int, memberKey string, assignmentID, sourceMessageID string) (bool, error) {
+	if s == nil || s.repo == nil || strings.TrimSpace(sourceMessageID) == "" {
+		return false, nil
+	}
+	events, err := s.repo.ListEventsByTeamID(teamID, 500)
+	if err != nil {
+		return false, err
+	}
+	normalizedMember := normalizeTeamMemberRouteKey(memberKey)
+	expectedAssignment := strings.TrimSpace(assignmentID)
+	expectedSource := strings.TrimSpace(sourceMessageID)
+	for idx := range events {
+		event := events[idx]
+		if event.EventType != "member_result_confirmed" || event.TaskID == nil || *event.TaskID != taskID {
+			continue
+		}
+		payload := teamEventPayloadMap(event)
+		from := normalizeTeamMemberRouteKey(eventString(payload, "from", "memberId", "member_id"))
+		if from == "" || !teamMemberRouteEquivalent(from, normalizedMember) {
+			continue
+		}
+		confirmedAssignmentID := eventString(payload, "assignmentId", "assignment_id", "workId", "work_id")
+		if expectedAssignment != "" && confirmedAssignmentID != "" && confirmedAssignmentID != expectedAssignment {
+			continue
+		}
+		if eventString(payload, "sourceMessageId", "source_message_id") == expectedSource {
 			return true, nil
 		}
 	}
@@ -9080,7 +9237,7 @@ func (s *teamService) projectTeamWorkItem(
 			revision = teamMaxInt(immutableContract.Revision, 1)
 		}
 	}
-	reviewRequired := eventBool(payload, "reviewRequired", "review_required")
+	reviewRequired := eventBool(payload, "reviewRequired", "review_required", "validationRequired", "validation_required")
 	// Review is a property of the business assignment, not a mutable hint on
 	// one event. Results and later revisions inherit an established review
 	// gate so an Agent cannot clear it by emitting reviewRequired=false or by
@@ -9198,11 +9355,13 @@ func (s *teamService) projectTeamWorkItem(
 			item.DependsOnJSON = &value
 		}
 	}
-	if authoritativeAssignment && isTeamReviewMember(owner) {
+	if authoritativeAssignment && isTeamValidationAssignment(payload, owner, dependencies) {
 		reviewTargetID := strings.TrimSpace(eventString(
 			payload,
 			"reviewedAssignmentId", "reviewed_assignment_id",
 			"reviewTargetAssignmentId", "review_target_assignment_id",
+			"validatedAssignmentId", "validated_assignment_id",
+			"validationTargetAssignmentId", "validation_target_assignment_id",
 		))
 		// Explicit targets are accepted only when they agree with the issued
 		// dependency contract. Older runtimes do not send a target; a sole
@@ -9217,8 +9376,7 @@ func (s *teamService) projectTeamWorkItem(
 			var reviewTarget *models.TeamWorkItem
 			for idx := range existingAssignmentItems {
 				candidate := existingAssignmentItems[idx]
-				if candidate.SupersededBy != nil || !candidate.ReviewRequired ||
-					workItemBusinessID(candidate) != reviewTargetID {
+				if candidate.SupersededBy != nil || workItemBusinessID(candidate) != reviewTargetID {
 					continue
 				}
 				if reviewTarget == nil || teamMaxInt(candidate.Revision, 1) > teamMaxInt(reviewTarget.Revision, 1) {
@@ -9230,6 +9388,13 @@ func (s *teamService) projectTeamWorkItem(
 				reviewTargetRevision := teamMaxInt(reviewTarget.Revision, 1)
 				item.ReviewTargetAssignmentID = &reviewTargetID
 				item.ReviewTargetRevision = &reviewTargetRevision
+				if !reviewTarget.ReviewRequired {
+					reviewTarget.ReviewRequired = true
+					reviewTarget.UpdatedAt = now
+					if err := s.repo.UpsertWorkItem(reviewTarget); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -9266,6 +9431,32 @@ func isTeamReviewMember(member *models.TeamMember) bool {
 	}
 }
 
+func isTeamValidationAssignment(payload map[string]interface{}, member *models.TeamMember, dependencies []string) bool {
+	if payload == nil {
+		return false
+	}
+	if eventBool(payload,
+		"validationAssignment", "validation_assignment",
+		"isValidation", "is_validation",
+	) {
+		return true
+	}
+	if eventString(
+		payload,
+		"reviewedAssignmentId", "reviewed_assignment_id",
+		"reviewTargetAssignmentId", "review_target_assignment_id",
+		"validatedAssignmentId", "validated_assignment_id",
+		"validationTargetAssignmentId", "validation_target_assignment_id",
+		"validationKind", "validation_kind",
+	) != "" {
+		return true
+	}
+	// Compatibility for already-issued Reviewer/QA contracts that only carried
+	// one dependency. New contracts are capability/target based and may be
+	// assigned to any member role.
+	return isTeamReviewMember(member) && len(dependencies) > 0
+}
+
 func workItemBusinessID(item models.TeamWorkItem) string {
 	if value := strings.TrimSpace(derefTeamString(item.AssignmentID)); value != "" {
 		return value
@@ -9273,20 +9464,21 @@ func workItemBusinessID(item models.TeamWorkItem) string {
 	return strings.TrimSpace(item.WorkID)
 }
 
-// applyStructuredReviewValidation closes an existing assignment's review gate
-// only from an explicit PASS produced by a Reviewer. The immutable target is
-// captured when the review assignment is issued. Rows created before that
-// contract field existed remain compatible through one unambiguous dependency;
-// zero or multiple candidates fail closed.
-func (s *teamService) applyStructuredReviewValidation(
+// applyStructuredAssignmentValidation closes an existing assignment's
+// validation gate only from an explicit PASS produced under an immutable
+// validation contract. The validator may have any role. Rows created before
+// the generic contract remain compatible through one unambiguous dependency
+// owned by a legacy Reviewer/QA member; zero or multiple candidates fail closed.
+func (s *teamService) applyStructuredAssignmentValidation(
 	task *models.TeamTask,
 	member *models.TeamMember,
 	payload map[string]interface{},
 	now time.Time,
 ) (bool, error) {
-	if s == nil || s.repo == nil || task == nil || payload == nil || !isTeamReviewMember(member) ||
+	verdict := eventString(payload, "validationVerdict", "validation_verdict", "reviewVerdict", "review_verdict")
+	if s == nil || s.repo == nil || task == nil || member == nil || payload == nil ||
 		!eventBool(payload, "assignmentResultOnly", "assignment_result_only") ||
-		!strings.EqualFold(eventString(payload, "reviewVerdict", "review_verdict"), "pass") {
+		!strings.EqualFold(verdict, "pass") {
 		return false, nil
 	}
 	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
@@ -9297,6 +9489,8 @@ func (s *teamService) applyStructuredReviewValidation(
 		payload,
 		"reviewedAssignmentId", "reviewed_assignment_id",
 		"reviewTargetAssignmentId", "review_target_assignment_id",
+		"validatedAssignmentId", "validated_assignment_id",
+		"validationTargetAssignmentId", "validation_target_assignment_id",
 	))
 	reviewerAssignmentID := strings.TrimSpace(eventString(payload, "assignmentId", "assignment_id", "workId", "work_id"))
 	authorizedTargets := make([]string, 0, 2)
@@ -9318,7 +9512,11 @@ func (s *teamService) applyStructuredReviewValidation(
 		}
 		// Compatibility for review assignments issued before migration 042 and
 		// for old runtimes: dependencies were the only contract representation.
-		authorizedTargets = append(authorizedTargets, teamWorkItemDependencies(item)...)
+		// Do not infer this for arbitrary roles without an explicit validation
+		// contract.
+		if isTeamReviewMember(member) {
+			authorizedTargets = append(authorizedTargets, teamWorkItemDependencies(item)...)
+		}
 	}
 	authorizedTargets = uniqueTeamStrings(authorizedTargets)
 	targetID := ""
@@ -9356,7 +9554,11 @@ func (s *teamService) applyStructuredReviewValidation(
 	if target == nil || target.Status != models.TeamTaskStatusSucceeded {
 		return false, nil
 	}
-	reviewedRevision := eventInt(payload, "reviewedRevision", "reviewed_revision", "validatedRevision", "validated_revision")
+	reviewedRevision := eventInt(
+		payload,
+		"validatedRevision", "validated_revision",
+		"reviewedRevision", "reviewed_revision",
+	)
 	if reviewedRevision <= 0 {
 		reviewedRevision = authorizedRevision
 	}
@@ -9365,6 +9567,24 @@ func (s *teamService) applyStructuredReviewValidation(
 	}
 	if reviewedRevision != teamMaxInt(target.Revision, 1) {
 		return false, nil
+	}
+	explicitGenericContract := eventString(
+		payload,
+		"validationTargetAssignmentId", "validation_target_assignment_id",
+		"validatedAssignmentId", "validated_assignment_id",
+		"validationVerdict", "validation_verdict",
+	) != ""
+	targetArtifactHashes := workItemArtifactMetadataHashes(*target)
+	if explicitGenericContract && len(targetArtifactHashes) > 0 {
+		reviewedArtifactHashes := teamArtifactMetadataHashes(firstTeamValue(
+			payload,
+			"reviewedArtifactMetadata", "reviewed_artifact_metadata",
+		))
+		for path, expectedHash := range targetArtifactHashes {
+			if actualHash := reviewedArtifactHashes[path]; actualHash == "" || actualHash != expectedHash {
+				return false, nil
+			}
+		}
 	}
 	if target.ValidatedRevision != nil && *target.ValidatedRevision >= reviewedRevision {
 		return false, nil

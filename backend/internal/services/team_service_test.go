@@ -2967,7 +2967,7 @@ func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) 
 		"reviewedRevision":     2,
 	}
 	service := &teamService{repo: repo}
-	changed, err := service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	changed, err := service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || !changed {
 		t.Fatalf("structured Reviewer PASS should close the target review gate: changed=%v err=%v", changed, err)
 	}
@@ -2977,16 +2977,92 @@ func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) 
 
 	payload["reviewedRevision"] = 1
 	repo.workItems[0].ValidatedRevision = nil
-	changed, err = service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	changed, err = service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil {
 		t.Fatalf("a stale review revision must fail closed: changed=%v item=%#v err=%v", changed, repo.workItems[0], err)
 	}
 
 	payload["reviewedAssignmentId"] = otherAssignmentID
 	payload["reviewedRevision"] = 1
-	changed, err = service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	changed, err = service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || changed || repo.workItems[2].ValidatedRevision != nil {
 		t.Fatalf("a Reviewer must not validate a target outside its assigned dependencies: changed=%v item=%#v err=%v", changed, repo.workItems[2], err)
+	}
+}
+
+func TestValidationContractIsGenericAndBindsExactArtifactRevision(t *testing.T) {
+	team := &models.Team{ID: 103, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 213, TeamID: team.ID, TargetMemberID: 501, Status: models.TeamTaskStatusRunning}
+	developer := &models.TeamMember{ID: 502, TeamID: team.ID, MemberKey: "developer", Role: "developer"}
+	auditor := &models.TeamMember{ID: 503, TeamID: team.ID, MemberKey: "auditor", Role: "domain-specialist"}
+	targetID := "build-kanban"
+	validatorID := "validate-kanban"
+	targetResult := `{"artifactRefs":["/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html"],"artifactMetadata":[{"path":"/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html","contentHash":"abc123"}]}`
+	repo := &teamRepositoryStub{
+		membersByKey: map[string]*models.TeamMember{"developer": developer, "auditor": auditor},
+		workItems: []models.TeamWorkItem{{
+			ID: 1, TeamID: team.ID, RootTaskID: task.ID, WorkID: targetID, AssignmentID: &targetID,
+			OwnerMemberID: &developer.ID, Revision: 2, RequiredForRoot: true,
+			Status: models.TeamTaskStatusSucceeded, ResultJSON: &targetResult,
+		}},
+	}
+	service := &teamService{repo: repo}
+	assignmentPayload := map[string]interface{}{
+		"protocolVersion": 4, "assignmentId": validatorID, "workId": validatorID,
+		"validationAssignment": true, "validationTargetAssignmentId": targetID,
+		"validationTargetRevision": 2, "dependsOn": []interface{}{targetID},
+		"collaborationStep": map[string]interface{}{
+			"type": "assignment", "status": "dispatched", "actor": "leader", "target": "auditor",
+			"workId": validatorID, "title": "Validate kanban",
+		},
+	}
+	if err := service.projectTeamWorkItem(team, task, auditor, "outbound", assignmentPayload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 2 || !repo.workItems[0].ReviewRequired {
+		t.Fatalf("a generic validation contract must establish the target gate: %#v", repo.workItems)
+	}
+	validatorItem := repo.workItems[1]
+	if validatorItem.ReviewTargetAssignmentID == nil || *validatorItem.ReviewTargetAssignmentID != targetID ||
+		validatorItem.ReviewTargetRevision == nil || *validatorItem.ReviewTargetRevision != 2 {
+		t.Fatalf("validator contract did not bind the immutable target: %#v", validatorItem)
+	}
+
+	mismatch := map[string]interface{}{
+		"assignmentResultOnly": true, "assignmentId": validatorID,
+		"validationTargetAssignmentId": targetID, "validationTargetRevision": 2,
+		"validationVerdict": "pass",
+		"reviewedArtifactMetadata": []interface{}{map[string]interface{}{
+			"path":        "/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html",
+			"contentHash": "different",
+		}},
+	}
+	changed, err := service.applyStructuredAssignmentValidation(task, auditor, mismatch, time.Now().UTC())
+	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil {
+		t.Fatalf("PASS against different bytes must fail closed: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
+	}
+	mismatch["reviewedArtifactMetadata"] = []interface{}{map[string]interface{}{
+		"path":        "/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html",
+		"contentHash": "abc123",
+	}}
+	changed, err = service.applyStructuredAssignmentValidation(task, auditor, mismatch, time.Now().UTC())
+	if err != nil || !changed || repo.workItems[0].ValidatedRevision == nil || *repo.workItems[0].ValidatedRevision != 2 {
+		t.Fatalf("exact generic validation should close the gate: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
+	}
+}
+
+func TestValidationRequiredDoesNotTurnBusinessAssignmentIntoValidator(t *testing.T) {
+	developer := &models.TeamMember{ID: 502, TeamID: 103, MemberKey: "developer", Role: "developer"}
+	payload := map[string]interface{}{
+		"validationRequired": true,
+		"dependsOn":          []interface{}{"requirements"},
+	}
+	if isTeamValidationAssignment(payload, developer, []string{"requirements"}) {
+		t.Fatal("validationRequired is a gate on a business assignment, not a validator assignment contract")
+	}
+	payload["validationAssignment"] = true
+	if !isTeamValidationAssignment(payload, developer, []string{"requirements"}) {
+		t.Fatal("an explicit validationAssignment must remain role-agnostic")
 	}
 }
 
@@ -6211,6 +6287,81 @@ func TestAutomaticRuntimeCompletionKeepsStrictEnvelopeAndSingleChatCopy(t *testi
 	}
 }
 
+func TestProtocolV4WorkerOutboundWaitsForStructuredTurnResult(t *testing.T) {
+	team := &models.Team{ID: 103, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 213, TeamID: team.ID, TargetMemberID: 1, Status: models.TeamTaskStatusRunning}
+	worker := &models.TeamMember{ID: 2, TeamID: team.ID, MemberKey: "developer", Role: "developer"}
+	payload := map[string]interface{}{
+		"protocolVersion": 4, "to": "leader", "assignmentId": "build-kanban",
+		"text": "Implementation complete: /team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html",
+	}
+	if isLeaderMediatedWorkerToLeaderResult(team, "outbound", payload, worker, task) {
+		t.Fatal("protocol v4 outbound prose must not become a first terminal result")
+	}
+	payload["protocolVersion"] = 3
+	if !isLeaderMediatedWorkerToLeaderResult(team, "outbound", payload, worker, task) {
+		t.Fatal("supported protocol v3 must retain tolerant outbound-result compatibility")
+	}
+	payload["protocolVersion"] = 4
+	payload["explicitCompletion"] = true
+	payload["completionSource"] = teamTaskCompletionTool
+	payload["completionId"] = "completion:103:213:developer:build-kanban:1"
+	payload["resultMarkdown"] = "# Implementation complete"
+	if !isLeaderMediatedWorkerToLeaderResult(team, "completion_proposed", payload, worker, task) {
+		t.Fatal("protocol v4 structured completion must close the Worker assignment")
+	}
+}
+
+func TestMemberResultIdentityUsesSourceTurnAcrossSupportedLegacyProse(t *testing.T) {
+	taskID := 213
+	payloadJSON := `{"from":"developer","assignmentId":"build-kanban","sourceMessageId":"msg-worker-turn-1","contentHash":"old-prose-hash"}`
+	repo := &teamRepositoryStub{createdEvents: []models.TeamEvent{{
+		TeamID: 103, TaskID: &taskID, EventType: "member_result_confirmed", PayloadJSON: &payloadJSON,
+	}}}
+	service := &teamService{repo: repo}
+	same, err := service.hasLeaderMediatedResultConfirmationForSource(
+		103, taskID, "developer", "build-kanban", "msg-worker-turn-1",
+	)
+	if err != nil || !same {
+		t.Fatalf("same source turn must remain one result even when prose hashes differ: same=%v err=%v", same, err)
+	}
+	different, err := service.hasLeaderMediatedResultConfirmationForSource(
+		103, taskID, "developer", "build-kanban", "msg-worker-turn-2",
+	)
+	if err != nil || different {
+		t.Fatalf("a later correction turn must remain eligible: different=%v err=%v", different, err)
+	}
+}
+
+func TestAutomaticCompletionDiagnosticsAndTurnFinishedStayInternal(t *testing.T) {
+	payload := map[string]interface{}{
+		"automaticTurnResult": true,
+		"completionId":        "completion-team-103-dispatch",
+		"resultMarkdown":      "Developer assignment dispatched; waiting for delivery.",
+	}
+	markStructuredCompletionDecision("completion_proposed", payload, teamCompletionEvaluation{
+		Decision: teamCompletionDecisionRejected,
+		Reason:   "invalid_completion_envelope",
+	})
+	if !markAutomaticCompletionDiagnosticStateNeutral(payload) ||
+		!eventBool(payload, "nonAuthoritative") ||
+		eventString(payload, "stateEffect") != "none" {
+		t.Fatalf("automatic completion rejection must be state-neutral: %#v", payload)
+	}
+	applyTeamChatPolicy("completion_rejected", payload, nil, nil)
+	if eventBool(payload, "visibleToChat") || eventString(payload, "chatPolicy") != "hidden" {
+		t.Fatalf("automatic completion diagnostics must not impersonate the Leader in chat: %#v", payload)
+	}
+	turnFinished := map[string]interface{}{
+		"eventKind": "turn_finished_without_completion",
+		"summary":   "Agent turn finished.",
+	}
+	applyTeamChatPolicy("task_progress", turnFinished, nil, nil)
+	if eventBool(turnFinished, "visibleToChat") || eventString(turnFinished, "chatPolicy") != "hidden" {
+		t.Fatalf("turn-finished transport diagnostics must remain internal: %#v", turnFinished)
+	}
+}
+
 func TestNaturalTurnCompletionCannotSkipUndispatchedFuturePhase(t *testing.T) {
 	taskID := 259
 	leaderID := 959
@@ -6377,7 +6528,7 @@ func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	validated, err := service.applyStructuredReviewValidation(task, reviewer, payload, time.Now().UTC())
+	validated, err := service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || !validated {
 		t.Fatalf("issued review target should validate despite wrong result hint: validated=%v err=%v payload=%#v", validated, err, payload)
 	}
