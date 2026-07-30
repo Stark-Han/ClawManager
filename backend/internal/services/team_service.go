@@ -2247,7 +2247,6 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 			"- After any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with static review.",
 			"- Never install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup. Environment limitations are not product defects.",
 			"- Say Browser verification passed only when it actually ran; otherwise report static-review scope and only concrete findings.",
-			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
 		}
 	case teamVerificationRoleCodeReview:
 		return []string{
@@ -2256,7 +2255,6 @@ func teamMemberVerificationGuidance(member plannedTeamMember) []string {
 			"- On any Browser/environment error or when the brief Browser budget is exhausted, immediately continue with source review.",
 			"- Do not install dependencies, start a temporary server, bypass navigation policy, or retry Browser setup.",
 			"- Report only concrete findings and residual risks; do not invent or target a fixed issue count.",
-			"- When completing a review assignment, set reviewVerdict to pass or fail and identify the exact reviewedAssignmentId and reviewedRevision from the assignment.",
 		}
 	case teamVerificationRoleAPITest:
 		return []string{
@@ -3466,6 +3464,10 @@ func (s *teamService) reconcileDeferredTeamCompletion(team *models.Team, bus *re
 	if s == nil || team == nil || task == nil || leader == nil || isTerminalTeamTaskStatus(task.Status) {
 		return false, nil
 	}
+	validationRepaired, err := s.reconcileCompletedAssignmentValidations(task, time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
 	events, err := s.repo.ListEventsByTeamID(team.ID, 500)
 	if err != nil {
 		return false, err
@@ -3536,7 +3538,7 @@ func (s *teamService) reconcileDeferredTeamCompletion(team *models.Team, bus *re
 			"completionEvaluationVersion",
 			"completion_evaluation_version",
 		) < teamCompletionEvaluationVersion
-		if !ledgerRepaired && !evaluationRulesChanged &&
+		if !validationRepaired && !ledgerRepaired && !evaluationRulesChanged &&
 			deferredLedgerVersion > 0 && task.LedgerVersion <= deferredLedgerVersion {
 			// Re-evaluation is driven by a real business-ledger change, never by
 			// a timer or an unchanged evaluator. A newer evaluator may retry one
@@ -3739,10 +3741,6 @@ func leaderMediatedRootNeedsSynthesisReminder(task *models.TeamTask, items []mod
 		}
 		switch item.Status {
 		case models.TeamTaskStatusSucceeded:
-			if item.ReviewRequired &&
-				(item.ValidatedRevision == nil || *item.ValidatedRevision < teamMaxInt(item.Revision, 1)) {
-				return false, nil
-			}
 			resultItems = append(resultItems, item)
 		case models.TeamTaskStatusFailed, models.TeamTaskStatusStale:
 			return false, nil
@@ -5596,17 +5594,16 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 			result.PendingAssignments = append(result.PendingAssignments, key)
 			continue
 		}
-		if item.ReviewRequired && (item.ValidatedRevision == nil || *item.ValidatedRevision < teamMaxInt(item.Revision, 1)) {
-			result.PendingAssignments = append(result.PendingAssignments, key+":review")
-			continue
-		}
 		// dependsOn is planning metadata authored by models and older runtimes.
 		// It may contain an assignment ID, a phase ID, or a natural label. Once
 		// this downstream contract has actually succeeded, that advisory text
 		// must not recreate a blocker. Any real required predecessor is already
 		// evaluated independently above, and incomplete phase work is evaluated
-		// below. This keeps completion safe without requiring Agents to reproduce
-		// an exact control-plane identifier.
+		// below. ReviewRequired is likewise contract metadata: the issued
+		// validator/reviewer is its own required work item and is checked above,
+		// so the reviewed assignment never needs a second Agent-authored closure.
+		// This keeps completion safe without requiring Agents to reproduce an
+		// exact control-plane identifier.
 	}
 	sort.Strings(result.PendingAssignments)
 	result.PendingAssignments = uniqueTeamStrings(result.PendingAssignments)
@@ -7121,39 +7118,11 @@ func markLeaderMediatedAssignmentResult(eventType string, payload map[string]int
 	if member != nil {
 		payload["from"] = member.MemberKey
 		payload["memberId"] = member.MemberKey
-		if teamRedisProtocolVersion(payload) < 2 && isTeamReviewMember(member) &&
-			eventString(payload, "reviewVerdict", "review_verdict") == "" {
-			if verdict := legacyReviewResultVerdict(payload); verdict != "" {
-				payload["reviewVerdict"] = verdict
-				payload["legacyReviewVerdictNormalized"] = true
-			}
-		}
 	}
 	if leaderMediatedRouteTarget(payload) == "" {
 		payload["to"] = "leader"
 		payload["target"] = "leader"
 	}
-}
-
-func legacyReviewResultVerdict(payload map[string]interface{}) string {
-	text := strings.TrimSpace(eventString(
-		payload,
-		"resultMarkdown", "result_markdown", "result", "answer", "text", "message", "summary",
-	))
-	if text == "" {
-		return ""
-	}
-	lower := strings.ToLower(text)
-	for _, marker := range []string{" fail", "failed", "failure", "not pass", "needs revision", "rejected", "不通过", "未通过", "需修改"} {
-		if strings.Contains(lower, marker) {
-			return "fail"
-		}
-	}
-	passPattern := regexp.MustCompile(`(?i)(^|[^a-z])pass(?:ed)?([^a-z]|$)`)
-	if passPattern.MatchString(text) || strings.Contains(text, "验收通过") || strings.Contains(text, "审查通过") {
-		return "pass"
-	}
-	return ""
 }
 
 func teamResultContentHash(payload map[string]interface{}) string {
@@ -7664,6 +7633,10 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		// delivery. This is local projection repair, not a concurrent-plan change,
 		// so carry the repaired ledger version into this evaluation.
 		if task != nil {
+			validationRepaired, validationErr := s.reconcileCompletedAssignmentValidations(task, time.Now().UTC())
+			if validationErr != nil {
+				return validationErr
+			}
 			identityRepaired, identityErr := s.reconcileUnissuedRunningWorkItems(team, task, time.Now().UTC())
 			if identityErr != nil {
 				return identityErr
@@ -7682,7 +7655,7 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			if reconcileErr != nil {
 				return reconcileErr
 			}
-			if reconciled || identityRepaired {
+			if reconciled || identityRepaired || validationRepaired {
 				payload["ledgerVersion"] = task.LedgerVersion
 				payload["planVersion"] = task.PlanVersion
 				payload["workflowLedgerReconciled"] = true
@@ -9507,19 +9480,7 @@ func (s *teamService) projectTeamWorkItem(
 	return s.repo.UpsertWorkItem(item)
 }
 
-func isTeamReviewMember(member *models.TeamMember) bool {
-	if member == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(member.Role)) {
-	case "reviewer", "qa", "qa-engineer", "evidence-collector", "code-reviewer":
-		return true
-	default:
-		return false
-	}
-}
-
-func isTeamValidationAssignment(payload map[string]interface{}, member *models.TeamMember, dependencies []string) bool {
+func isTeamValidationAssignment(payload map[string]interface{}, _ *models.TeamMember, _ []string) bool {
 	if payload == nil {
 		return false
 	}
@@ -9539,10 +9500,10 @@ func isTeamValidationAssignment(payload map[string]interface{}, member *models.T
 	) != "" {
 		return true
 	}
-	// Compatibility for already-issued Reviewer/QA contracts that only carried
-	// one dependency. New contracts are capability/target based and may be
-	// assigned to any member role.
-	return isTeamReviewMember(member) && len(dependencies) > 0
+	// A member role and a dependency describe who should do work and in what
+	// order; they do not create a second completion gate. Only an explicitly
+	// issued validation contract may bind one assignment as another's validator.
+	return false
 }
 
 func workItemBusinessID(item models.TeamWorkItem) string {
@@ -9552,139 +9513,132 @@ func workItemBusinessID(item models.TeamWorkItem) string {
 	return strings.TrimSpace(item.WorkID)
 }
 
-// applyStructuredAssignmentValidation closes an existing assignment's
-// validation gate only from an explicit PASS produced under an immutable
-// validation contract. The validator may have any role. Rows created before
-// the generic contract remain compatible through one unambiguous dependency
-// owned by a legacy Reviewer/QA member; zero or multiple candidates fail closed.
+// applyStructuredAssignmentValidation closes a validation gate from the
+// control-plane ledger: the bound validator assignment itself must have
+// succeeded against the current target revision. Agent-authored verdict,
+// target, revision, and hash fields are optional diagnostics and are never
+// required to finish an otherwise completed workflow.
 func (s *teamService) applyStructuredAssignmentValidation(
 	task *models.TeamTask,
 	member *models.TeamMember,
 	payload map[string]interface{},
 	now time.Time,
 ) (bool, error) {
-	verdict := eventString(payload, "validationVerdict", "validation_verdict", "reviewVerdict", "review_verdict")
 	if s == nil || s.repo == nil || task == nil || member == nil || payload == nil ||
-		!eventBool(payload, "assignmentResultOnly", "assignment_result_only") ||
-		!strings.EqualFold(verdict, "pass") {
+		!eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
 		return false, nil
 	}
 	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
 	if err != nil {
 		return false, err
 	}
-	reportedTargetID := strings.TrimSpace(eventString(
-		payload,
-		"reviewedAssignmentId", "reviewed_assignment_id",
-		"reviewTargetAssignmentId", "review_target_assignment_id",
-		"validatedAssignmentId", "validated_assignment_id",
-		"validationTargetAssignmentId", "validation_target_assignment_id",
-	))
-	reviewerAssignmentID := strings.TrimSpace(eventString(payload, "assignmentId", "assignment_id", "workId", "work_id"))
-	authorizedTargets := make([]string, 0, 2)
+	validatorAssignmentID := strings.TrimSpace(eventString(payload, "assignmentId", "assignment_id", "workId", "work_id"))
+	for idx := range items {
+		validator := items[idx]
+		if validator.SupersededBy != nil || validator.OwnerMemberID == nil || *validator.OwnerMemberID != member.ID ||
+			workItemBusinessID(validator) != validatorAssignmentID {
+			continue
+		}
+		return s.applyCompletedValidationWorkItem(task, items, validator, now)
+	}
+	return false, nil
+}
+
+func (s *teamService) applyCompletedValidationWorkItem(
+	task *models.TeamTask,
+	items []models.TeamWorkItem,
+	validator models.TeamWorkItem,
+	now time.Time,
+) (bool, error) {
+	if s == nil || s.repo == nil || task == nil || validator.SupersededBy != nil ||
+		validator.Status != models.TeamTaskStatusSucceeded {
+		return false, nil
+	}
 	authorizedRevision := 0
-	hasImmutableReviewTarget := false
-	for idx := range items {
-		item := items[idx]
-		if item.SupersededBy != nil || item.OwnerMemberID == nil || *item.OwnerMemberID != member.ID ||
-			workItemBusinessID(item) != reviewerAssignmentID {
-			continue
-		}
-		if target := strings.TrimSpace(derefTeamString(item.ReviewTargetAssignmentID)); target != "" {
-			authorizedTargets = append(authorizedTargets, target)
-			hasImmutableReviewTarget = true
-			if item.ReviewTargetRevision != nil {
-				authorizedRevision = teamMaxInt(*item.ReviewTargetRevision, 1)
+	if targetID := strings.TrimSpace(derefTeamString(validator.ReviewTargetAssignmentID)); targetID != "" {
+		var target *models.TeamWorkItem
+		for idx := range items {
+			item := items[idx]
+			if item.SupersededBy != nil || !item.ReviewRequired || workItemBusinessID(item) != targetID {
+				continue
 			}
-			continue
-		}
-		// Compatibility for review assignments issued before migration 042 and
-		// for old runtimes: dependencies were the only contract representation.
-		// Do not infer this for arbitrary roles without an explicit validation
-		// contract.
-		if isTeamReviewMember(member) {
-			authorizedTargets = append(authorizedTargets, teamWorkItemDependencies(item)...)
-		}
-	}
-	authorizedTargets = uniqueTeamStrings(authorizedTargets)
-	targetID := ""
-	switch {
-	case hasImmutableReviewTarget && len(authorizedTargets) == 1:
-		targetID = authorizedTargets[0]
-	case hasImmutableReviewTarget:
-		return false, nil
-	case reportedTargetID != "" && slices.Contains(authorizedTargets, reportedTargetID):
-		// Pre-migration review rows had no dedicated target. An old Runtime may
-		// disambiguate one target, but only from the immutable dependency set.
-		targetID = reportedTargetID
-	case len(authorizedTargets) == 1:
-		targetID = authorizedTargets[0]
-	default:
-		return false, nil
-	}
-	if hasImmutableReviewTarget && reportedTargetID != "" && reportedTargetID != targetID {
-		// A result is an observation, not a contract update. Team 101 reported a
-		// phase id here; retaining the issued target lets the valid PASS close
-		// the correct review gate without poisoning dependencies.
-		payload["ignoredReportedReviewTarget"] = reportedTargetID
-	}
-	var target *models.TeamWorkItem
-	for idx := range items {
-		item := items[idx]
-		if item.SupersededBy != nil || !item.ReviewRequired || workItemBusinessID(item) != targetID {
-			continue
-		}
-		if target == nil || teamMaxInt(item.Revision, 1) > teamMaxInt(target.Revision, 1) {
-			clone := item
-			target = &clone
-		}
-	}
-	if target == nil || target.Status != models.TeamTaskStatusSucceeded {
-		return false, nil
-	}
-	reviewedRevision := eventInt(
-		payload,
-		"validatedRevision", "validated_revision",
-		"reviewedRevision", "reviewed_revision",
-	)
-	if reviewedRevision <= 0 {
-		reviewedRevision = authorizedRevision
-	}
-	if reviewedRevision <= 0 {
-		reviewedRevision = teamMaxInt(target.Revision, 1)
-	}
-	if reviewedRevision != teamMaxInt(target.Revision, 1) {
-		return false, nil
-	}
-	explicitGenericContract := eventString(
-		payload,
-		"validationTargetAssignmentId", "validation_target_assignment_id",
-		"validatedAssignmentId", "validated_assignment_id",
-		"validationVerdict", "validation_verdict",
-	) != ""
-	targetArtifactHashes := workItemArtifactMetadataHashes(*target)
-	if explicitGenericContract && len(targetArtifactHashes) > 0 {
-		reviewedArtifactHashes := teamArtifactMetadataHashes(firstTeamValue(
-			payload,
-			"reviewedArtifactMetadata", "reviewed_artifact_metadata",
-		))
-		for path, expectedHash := range targetArtifactHashes {
-			if actualHash := reviewedArtifactHashes[path]; actualHash == "" || actualHash != expectedHash {
-				return false, nil
+			if target == nil || teamMaxInt(item.Revision, 1) > teamMaxInt(target.Revision, 1) {
+				clone := item
+				target = &clone
 			}
 		}
+		if target == nil || target.Status != models.TeamTaskStatusSucceeded {
+			return false, nil
+		}
+		targetRevision := teamMaxInt(target.Revision, 1)
+		if validator.ReviewTargetRevision != nil {
+			authorizedRevision = teamMaxInt(*validator.ReviewTargetRevision, 1)
+		}
+		if authorizedRevision > 0 && authorizedRevision != targetRevision {
+			return false, nil
+		}
+		validatorFinishedAt := validator.UpdatedAt
+		if validator.FinishedAt != nil {
+			validatorFinishedAt = *validator.FinishedAt
+		}
+		if !target.UpdatedAt.IsZero() && !validatorFinishedAt.IsZero() && validatorFinishedAt.Before(target.UpdatedAt) {
+			// A completed validator cannot validate target bytes changed afterwards.
+			return false, nil
+		}
+		if target.ValidatedRevision != nil && *target.ValidatedRevision >= targetRevision {
+			return false, nil
+		}
+		target.ValidatedRevision = &targetRevision
+		target.UpdatedAt = now
+		if err := s.repo.UpsertWorkItem(target); err != nil {
+			return false, err
+		}
+		task.LedgerVersion++
+		task.UpdatedAt = now
+		return true, nil
 	}
-	if target.ValidatedRevision != nil && *target.ValidatedRevision >= reviewedRevision {
+	return false, nil
+}
+
+// reconcileCompletedAssignmentValidations repairs workflows projected by older
+// control-plane code that opened a validation gate but then waited for
+// Agent-authored verdict fields. The persisted successful validator work item
+// is the completion fact; no Agent retry is required.
+func (s *teamService) reconcileCompletedAssignmentValidations(task *models.TeamTask, now time.Time) (bool, error) {
+	if s == nil || s.repo == nil || task == nil || isTerminalTeamTaskStatus(task.Status) {
 		return false, nil
 	}
-	target.ValidatedRevision = &reviewedRevision
-	target.UpdatedAt = now
-	if err := s.repo.UpsertWorkItem(target); err != nil {
+	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
+	if err != nil {
 		return false, err
 	}
-	task.LedgerVersion++
-	task.UpdatedAt = now
-	return true, nil
+	changed := false
+	repairedTargets := map[string]struct{}{}
+	for idx := range items {
+		validator := items[idx]
+		if validator.SupersededBy != nil || validator.Status != models.TeamTaskStatusSucceeded ||
+			validator.ReviewTargetAssignmentID == nil {
+			continue
+		}
+		targetID := strings.TrimSpace(derefTeamString(validator.ReviewTargetAssignmentID))
+		if _, alreadyRepaired := repairedTargets[targetID]; alreadyRepaired {
+			continue
+		}
+		applied, applyErr := s.applyCompletedValidationWorkItem(task, items, validator, now)
+		if applyErr != nil {
+			return changed, applyErr
+		}
+		if applied {
+			repairedTargets[targetID] = struct{}{}
+		}
+		changed = changed || applied
+	}
+	if changed {
+		if err := s.repo.UpdateTask(task); err != nil {
+			return false, err
+		}
+	}
+	return changed, nil
 }
 
 func normalizeExistingCollaborationStep(step map[string]interface{}, team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) {

@@ -765,14 +765,16 @@ func TestBuildTeamMemberSoulMarkdownAddsBoundedVerificationPolicies(t *testing.T
 		forbidden []string
 	}{
 		{
-			name:     "evidence reviewer",
-			member:   plannedTeamMember{MemberKey: "reviewer", Role: "reviewer", ProfileKey: "agency.evidence-collector"},
-			expected: []string{"## Verification Policy", "Browser is available", "team_artifact_preview", "immediately continue with static review", "Never install dependencies", "reviewVerdict", "reviewedRevision"},
+			name:      "evidence reviewer",
+			member:    plannedTeamMember{MemberKey: "reviewer", Role: "reviewer", ProfileKey: "agency.evidence-collector"},
+			expected:  []string{"## Verification Policy", "Browser is available", "team_artifact_preview", "immediately continue with static review", "Never install dependencies"},
+			forbidden: []string{"reviewVerdict", "reviewedRevision", "reviewedAssignmentId"},
 		},
 		{
-			name:     "code reviewer alias",
-			member:   plannedTeamMember{MemberKey: "reviewer", Role: "code-reviewer"},
-			expected: []string{"## Verification Policy", "existing test evidence first", "Browser is available", "team_artifact_preview", "immediately continue with source review", "reviewVerdict", "reviewedAssignmentId"},
+			name:      "code reviewer alias",
+			member:    plannedTeamMember{MemberKey: "reviewer", Role: "code-reviewer"},
+			expected:  []string{"## Verification Policy", "existing test evidence first", "Browser is available", "team_artifact_preview", "immediately continue with source review"},
+			forbidden: []string{"reviewVerdict", "reviewedRevision", "reviewedAssignmentId"},
 		},
 		{
 			name:     "api tester",
@@ -3076,7 +3078,7 @@ func TestProjectTeamWorkItemRevisionInheritsEstablishedReviewGate(t *testing.T) 
 	}
 }
 
-func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) {
+func TestCompletedReviewerAssignmentClosesOnlyItsPersistedTargetGate(t *testing.T) {
 	task := &models.TeamTask{ID: 193, TeamID: 93, TargetMemberID: 315, Status: models.TeamTaskStatusRunning, LedgerVersion: 20}
 	reviewer := &models.TeamMember{ID: 317, TeamID: 93, MemberKey: "reviewer", Role: "qa-engineer"}
 	developerID := 316
@@ -3084,6 +3086,7 @@ func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) 
 	otherAssignmentID := "dev-02"
 	reviewerAssignmentID := "qa-01"
 	dependencies := `["dev-01"]`
+	reviewTargetRevision := 2
 	repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{
 		{
 			ID: 217, TeamID: 93, RootTaskID: task.ID, WorkID: developerAssignmentID, AssignmentID: &developerAssignmentID,
@@ -3094,6 +3097,7 @@ func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) 
 			ID: 218, TeamID: 93, RootTaskID: task.ID, WorkID: reviewerAssignmentID, AssignmentID: &reviewerAssignmentID,
 			OwnerMemberID: &reviewer.ID, Revision: 1, RequiredForRoot: true,
 			Status: models.TeamTaskStatusSucceeded, DependsOnJSON: &dependencies,
+			ReviewTargetAssignmentID: &developerAssignmentID, ReviewTargetRevision: &reviewTargetRevision,
 		},
 		{
 			ID: 219, TeamID: 93, RootTaskID: task.ID, WorkID: otherAssignmentID, AssignmentID: &otherAssignmentID,
@@ -3104,34 +3108,34 @@ func TestStructuredReviewerPassValidatesOnlyCurrentTargetRevision(t *testing.T) 
 	payload := map[string]interface{}{
 		"assignmentResultOnly": true,
 		"assignmentId":         reviewerAssignmentID,
-		"reviewVerdict":        "pass",
-		"reviewedRevision":     2,
 	}
 	service := &teamService{repo: repo}
 	changed, err := service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || !changed {
-		t.Fatalf("structured Reviewer PASS should close the target review gate: changed=%v err=%v", changed, err)
+		t.Fatalf("a completed Reviewer assignment should close its persisted target gate without special Agent fields: changed=%v err=%v", changed, err)
 	}
 	if repo.workItems[0].ValidatedRevision == nil || *repo.workItems[0].ValidatedRevision != 2 || task.LedgerVersion != 21 {
 		t.Fatalf("review validation did not update the current target revision: item=%#v task=%#v", repo.workItems[0], task)
 	}
 
-	payload["reviewedRevision"] = 1
 	repo.workItems[0].ValidatedRevision = nil
+	staleTargetRevision := 1
+	repo.workItems[1].ReviewTargetRevision = &staleTargetRevision
 	changed, err = service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil {
-		t.Fatalf("a stale review revision must fail closed: changed=%v item=%#v err=%v", changed, repo.workItems[0], err)
+		t.Fatalf("a validator bound to an old target revision must not validate current work: changed=%v item=%#v err=%v", changed, repo.workItems[0], err)
 	}
 
+	repo.workItems[1].ReviewTargetRevision = &reviewTargetRevision
 	payload["reviewedAssignmentId"] = otherAssignmentID
 	payload["reviewedRevision"] = 1
 	changed, err = service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
-	if err != nil || changed || repo.workItems[2].ValidatedRevision != nil {
-		t.Fatalf("a Reviewer must not validate a target outside its assigned dependencies: changed=%v item=%#v err=%v", changed, repo.workItems[2], err)
+	if err != nil || !changed || repo.workItems[2].ValidatedRevision != nil {
+		t.Fatalf("Agent-authored target hints must not override the persisted contract: changed=%v other=%#v err=%v", changed, repo.workItems[2], err)
 	}
 }
 
-func TestValidationContractIsGenericAndBindsExactArtifactRevision(t *testing.T) {
+func TestValidationContractIsGenericAndClosesFromSuccessfulBoundWorkItem(t *testing.T) {
 	team := &models.Team{ID: 103, CommunicationMode: teamCommunicationModeLeaderMediated}
 	task := &models.TeamTask{ID: 213, TeamID: team.ID, TargetMemberID: 501, Status: models.TeamTaskStatusRunning}
 	developer := &models.TeamMember{ID: 502, TeamID: team.ID, MemberKey: "developer", Role: "developer"}
@@ -3169,26 +3173,24 @@ func TestValidationContractIsGenericAndBindsExactArtifactRevision(t *testing.T) 
 		t.Fatalf("validator contract did not bind the immutable target: %#v", validatorItem)
 	}
 
-	mismatch := map[string]interface{}{
-		"assignmentResultOnly": true, "assignmentId": validatorID,
-		"validationTargetAssignmentId": targetID, "validationTargetRevision": 2,
-		"validationVerdict": "pass",
-		"reviewedArtifactMetadata": []interface{}{map[string]interface{}{
-			"path":        "/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html",
-			"contentHash": "different",
-		}},
+	resultPayload := map[string]interface{}{
+		"assignmentResultOnly": true,
+		"assignmentId":         validatorID,
+		"summary":              "Validation work completed.",
+		"collaborationStep": map[string]interface{}{
+			"type": "result", "status": models.TeamTaskStatusSucceeded,
+		},
 	}
-	changed, err := service.applyStructuredAssignmentValidation(task, auditor, mismatch, time.Now().UTC())
+	changed, err := service.applyStructuredAssignmentValidation(task, auditor, resultPayload, time.Now().UTC())
 	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil {
-		t.Fatalf("PASS against different bytes must fail closed: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
+		t.Fatalf("an unfinished validator work item must not close the target gate: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
 	}
-	mismatch["reviewedArtifactMetadata"] = []interface{}{map[string]interface{}{
-		"path":        "/team/artifacts/team-103-task-213/members/developer/build-kanban/kanban.html",
-		"contentHash": "abc123",
-	}}
-	changed, err = service.applyStructuredAssignmentValidation(task, auditor, mismatch, time.Now().UTC())
+	if err := service.projectTeamWorkItem(team, task, auditor, "task_completed", resultPayload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = service.applyStructuredAssignmentValidation(task, auditor, resultPayload, time.Now().UTC())
 	if err != nil || !changed || repo.workItems[0].ValidatedRevision == nil || *repo.workItems[0].ValidatedRevision != 2 {
-		t.Fatalf("exact generic validation should close the gate: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
+		t.Fatalf("the successful bound work item should close the gate without verdict/hash fields: changed=%v err=%v item=%#v", changed, err, repo.workItems[0])
 	}
 }
 
@@ -3204,6 +3206,179 @@ func TestValidationRequiredDoesNotTurnBusinessAssignmentIntoValidator(t *testing
 	payload["validationAssignment"] = true
 	if !isTeamValidationAssignment(payload, developer, []string{"requirements"}) {
 		t.Fatal("an explicit validationAssignment must remain role-agnostic")
+	}
+	reviewer := &models.TeamMember{ID: 503, TeamID: 103, MemberKey: "reviewer", Role: "reviewer"}
+	if isTeamValidationAssignment(map[string]interface{}{}, reviewer, []string{"build"}) {
+		t.Fatal("a Reviewer role plus dependency must not create a hidden second completion gate")
+	}
+}
+
+func TestOrdinaryDeveloperReviewerLeaderFlowDoesNotFinishEarlyOrRequireSecondClosure(t *testing.T) {
+	team := &models.Team{ID: 108, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{
+		ID: 226, TeamID: team.ID, TargetMemberID: 1080,
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateSynthesizing,
+		PlanVersion: 1, LedgerVersion: 12,
+	}
+	leader := &models.TeamMember{ID: 1080, TeamID: team.ID, MemberKey: "delivery-lead", Role: "leader"}
+	developer := &models.TeamMember{ID: 1081, TeamID: team.ID, MemberKey: "developer", Role: "developer"}
+	reviewer := &models.TeamMember{ID: 1082, TeamID: team.ID, MemberKey: "reviewer", Role: "reviewer"}
+	developerAssignment := "kanban-dev-assignment"
+	reviewerAssignment := "kanban-review-assignment"
+	repo := &teamRepositoryStub{
+		membersByKey: map[string]*models.TeamMember{"developer": developer, "reviewer": reviewer},
+		workItems: []models.TeamWorkItem{{
+			ID: 1, TeamID: team.ID, RootTaskID: task.ID, WorkID: developerAssignment,
+			AssignmentID: &developerAssignment, OwnerMemberID: &developer.ID,
+			Revision: 1, RequiredForRoot: true, ReviewRequired: false,
+			Status: models.TeamTaskStatusSucceeded,
+		}},
+	}
+	service := &teamService{repo: repo}
+	reviewerAssignmentPayload := map[string]interface{}{
+		"protocolVersion": 4, "assignmentId": reviewerAssignment, "workId": reviewerAssignment,
+		"dependsOn": []interface{}{developerAssignment},
+		"collaborationStep": map[string]interface{}{
+			"type": "assignment", "status": "dispatched", "actor": "leader", "target": "reviewer",
+			"workId": reviewerAssignment, "title": "Review delivered kanban",
+		},
+	}
+	if err := service.projectTeamWorkItem(team, task, reviewer, "outbound", reviewerAssignmentPayload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 2 || repo.workItems[0].ReviewRequired ||
+		repo.workItems[1].ReviewTargetAssignmentID != nil {
+		t.Fatalf("ordinary Reviewer work must remain one required assignment, not create a hidden second gate: %#v", repo.workItems)
+	}
+	// Reproduce a row already marked by the previous control-plane version.
+	// The Reviewer card itself remains the required completion fact; the
+	// Developer must not need a second Agent-authored closure.
+	repo.workItems[0].ReviewRequired = true
+
+	completionPayload := map[string]interface{}{
+		"protocolVersion": 3, "event": "task_completed", "completionId": "team-108-final",
+		"completionSource": teamTaskCompletionTool, "explicitCompletion": true, "rootTaskTerminal": true,
+		"workflowFinal": true, "finalAnswerReady": true, "remainingActions": []interface{}{},
+		"resultMarkdown": "# Final delivery\n\nImplementation and review are complete.",
+	}
+	evaluation, err := service.evaluateLeaderRootCompletion(team, task, leader, completionPayload)
+	if err != nil || evaluation.Decision != teamCompletionDecisionDeferred ||
+		!slices.Contains(evaluation.PendingAssignments, reviewerAssignment) {
+		t.Fatalf("root completion must wait for the dispatched Reviewer assignment: evaluation=%#v err=%v", evaluation, err)
+	}
+
+	reviewerResultPayload := map[string]interface{}{
+		"assignmentResultOnly": true, "assignmentId": reviewerAssignment,
+		"summary":           "Review completed.",
+		"collaborationStep": map[string]interface{}{"type": "result"},
+	}
+	if err := service.projectTeamWorkItem(team, task, reviewer, "task_completed", reviewerResultPayload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	evaluation, err = service.evaluateLeaderRootCompletion(team, task, leader, completionPayload)
+	if err != nil || evaluation.Decision != teamCompletionDecisionAccepted {
+		t.Fatalf("all required assignments plus the Leader final result should complete without extra Agent fields: evaluation=%#v err=%v", evaluation, err)
+	}
+}
+
+func TestReconcileDeferredCompletionRepairsTeam108ValidationGateWithoutAgentRetry(t *testing.T) {
+	now := time.Now().UTC()
+	taskID := 226
+	leaderID := 1080
+	developerID := 1081
+	reviewerID := 1082
+	developerAssignment := "kanban-dev-assignment"
+	reviewerAssignment := "kanban-review-assignment"
+	reviewRevision := 1
+	task := &models.TeamTask{
+		ID: taskID, TeamID: 108, TargetMemberID: leaderID, MessageID: "team-108-task-226",
+		Status: models.TeamTaskStatusRunning, WorkflowState: teamWorkflowStateSynthesizing,
+		PlanVersion: 1, LedgerVersion: 15, UpdatedAt: now.Add(-time.Minute),
+	}
+	leader := &models.TeamMember{ID: leaderID, TeamID: 108, MemberKey: "delivery-lead", Role: "leader"}
+	deferredPayload, err := json.Marshal(map[string]interface{}{
+		"protocolVersion": 3, "event": "completion_deferred", "completionId": "team-108-final",
+		"completionSource": teamTaskCompletionTool, "explicitCompletion": true,
+		"workflowFinal": true, "finalAnswerReady": true, "remainingActions": []interface{}{},
+		"planVersion": 1, "ledgerVersion": 15,
+		"completionEvaluationVersion": teamCompletionEvaluationVersion,
+		"completionDraftSummary":      "Implementation and review completed.",
+		"completionDraftMarkdown":     "# Final delivery\n\nImplementation and review completed.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := "team-108-deferred"
+	dependencies := `["kanban-dev-assignment"]`
+	developerUpdatedAt := now.Add(-2 * time.Minute)
+	reviewerFinishedAt := now.Add(-time.Minute)
+	repo := &teamRepositoryStub{
+		tasksByID: map[int]*models.TeamTask{taskID: task},
+		membersByKey: map[string]*models.TeamMember{
+			"delivery-lead": leader,
+		},
+		workItems: []models.TeamWorkItem{
+			{
+				ID: 1, TeamID: 108, RootTaskID: taskID, WorkID: developerAssignment,
+				AssignmentID: &developerAssignment, OwnerMemberID: &developerID,
+				Revision: 1, RequiredForRoot: true, ReviewRequired: true,
+				Status: models.TeamTaskStatusSucceeded, UpdatedAt: developerUpdatedAt,
+			},
+			{
+				ID: 2, TeamID: 108, RootTaskID: taskID, WorkID: reviewerAssignment,
+				AssignmentID: &reviewerAssignment, OwnerMemberID: &reviewerID,
+				Revision: 1, RequiredForRoot: true, Status: models.TeamTaskStatusSucceeded,
+				DependsOnJSON: &dependencies, ReviewTargetAssignmentID: &developerAssignment,
+				ReviewTargetRevision: &reviewRevision, FinishedAt: &reviewerFinishedAt,
+				UpdatedAt: reviewerFinishedAt,
+			},
+		},
+		createdEvents: []models.TeamEvent{{
+			TeamID: 108, TaskID: &taskID, MemberID: &leaderID, EventID: &eventID,
+			EventType: "completion_deferred", PayloadJSON: stringPtr(string(deferredPayload)),
+		}},
+	}
+	reconciled, err := (&teamService{repo: repo}).reconcileDeferredTeamCompletion(
+		&models.Team{ID: 108, CommunicationMode: teamCommunicationModeLeaderMediated},
+		nil,
+		task,
+		leader,
+	)
+	if err != nil || !reconciled || task.Status != models.TeamTaskStatusSucceeded {
+		t.Fatalf("Team 108 shape should heal and accept its existing Leader final result: reconciled=%v task=%#v err=%v", reconciled, task, err)
+	}
+	if repo.workItems[0].ValidatedRevision == nil || *repo.workItems[0].ValidatedRevision != 1 {
+		t.Fatalf("successful bound Reviewer work did not repair the old hidden gate: %#v", repo.workItems)
+	}
+}
+
+func TestCompletedValidatorCannotRevalidateTargetChangedAfterItsResult(t *testing.T) {
+	now := time.Now().UTC()
+	task := &models.TeamTask{ID: 227, TeamID: 109, Status: models.TeamTaskStatusRunning, LedgerVersion: 7}
+	targetID := "implementation"
+	validatorID := "validation"
+	targetOwnerID := 1091
+	validatorOwnerID := 1092
+	targetRevision := 1
+	validatorFinishedAt := now.Add(-time.Minute)
+	dependencies := `["implementation"]`
+	repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{
+		{
+			ID: 1, TeamID: 109, RootTaskID: task.ID, WorkID: targetID, AssignmentID: &targetID,
+			OwnerMemberID: &targetOwnerID, Revision: targetRevision, RequiredForRoot: true,
+			ReviewRequired: true, Status: models.TeamTaskStatusSucceeded, UpdatedAt: now,
+		},
+		{
+			ID: 2, TeamID: 109, RootTaskID: task.ID, WorkID: validatorID, AssignmentID: &validatorID,
+			OwnerMemberID: &validatorOwnerID, Revision: 1, RequiredForRoot: true,
+			Status: models.TeamTaskStatusSucceeded, DependsOnJSON: &dependencies,
+			ReviewTargetAssignmentID: &targetID, ReviewTargetRevision: &targetRevision,
+			FinishedAt: &validatorFinishedAt, UpdatedAt: validatorFinishedAt,
+		},
+	}}
+	changed, err := (&teamService{repo: repo}).reconcileCompletedAssignmentValidations(task, now)
+	if err != nil || changed || repo.workItems[0].ValidatedRevision != nil || task.LedgerVersion != 7 {
+		t.Fatalf("a stale validator result must not validate target bytes changed later: changed=%v task=%#v items=%#v err=%v", changed, task, repo.workItems, err)
 	}
 }
 
@@ -6000,29 +6175,42 @@ func TestLeaderSynthesisReminderCreatedWhenWorkersDone(t *testing.T) {
 	}
 }
 
-func TestLeaderSynthesisReminderWaitsForGenericValidationGate(t *testing.T) {
+func TestLeaderSynthesisReminderWaitsForValidatorWorkItemNotSecondClosure(t *testing.T) {
 	task := &models.TeamTask{ID: 94, TeamID: 52, TargetMemberID: 230, Status: models.TeamTaskStatusRunning}
 	workerID := 231
+	validatorID := 232
 	worker := &models.TeamMember{
 		ID: workerID, TeamID: 52, MemberKey: "worker", Role: "developer",
 		Status: models.TeamMemberStatusIdle, Availability: models.TeamMemberAvailabilityIdle,
 	}
+	validator := &models.TeamMember{
+		ID: validatorID, TeamID: 52, MemberKey: "validator", Role: "domain-specialist",
+		Status: models.TeamMemberStatusIdle, Availability: models.TeamMemberAvailabilityIdle,
+	}
 	assignmentID := "build-deliverable"
-	items := []models.TeamWorkItem{{
-		TeamID: 52, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
-		OwnerMemberID: &workerID, Revision: 2, RequiredForRoot: true, ReviewRequired: true,
-		Status: models.TeamTaskStatusSucceeded,
-	}}
-	ready, resultItems := leaderMediatedRootNeedsSynthesisReminder(task, items, map[int]*models.TeamMember{workerID: worker})
+	validatorAssignmentID := "validate-deliverable"
+	items := []models.TeamWorkItem{
+		{
+			TeamID: 52, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			OwnerMemberID: &workerID, Revision: 2, RequiredForRoot: true, ReviewRequired: true,
+			Status: models.TeamTaskStatusSucceeded,
+		},
+		{
+			TeamID: 52, RootTaskID: task.ID, WorkID: validatorAssignmentID, AssignmentID: &validatorAssignmentID,
+			OwnerMemberID: &validatorID, Revision: 1, RequiredForRoot: true,
+			Status: models.TeamTaskStatusRunning,
+		},
+	}
+	members := map[int]*models.TeamMember{workerID: worker, validatorID: validator}
+	ready, resultItems := leaderMediatedRootNeedsSynthesisReminder(task, items, members)
 	if ready || len(resultItems) != 0 {
-		t.Fatalf("a succeeded result with an unsatisfied generic validation contract is not ready for final synthesis: ready=%v items=%#v", ready, resultItems)
+		t.Fatalf("a running validator assignment must prevent final synthesis: ready=%v items=%#v", ready, resultItems)
 	}
 
-	validatedRevision := 2
-	items[0].ValidatedRevision = &validatedRevision
-	ready, resultItems = leaderMediatedRootNeedsSynthesisReminder(task, items, map[int]*models.TeamMember{workerID: worker})
-	if !ready || len(resultItems) != 1 {
-		t.Fatalf("the reminder should become eligible once the same generic validation contract is satisfied: ready=%v items=%#v", ready, resultItems)
+	items[1].Status = models.TeamTaskStatusSucceeded
+	ready, resultItems = leaderMediatedRootNeedsSynthesisReminder(task, items, members)
+	if !ready || len(resultItems) != 2 {
+		t.Fatalf("the successful validator work item should be sufficient without a second closure on the Developer: ready=%v items=%#v", ready, resultItems)
 	}
 }
 
@@ -6708,7 +6896,7 @@ func TestExecutionResultCannotRewriteIssuedAssignmentContract(t *testing.T) {
 	}
 }
 
-func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
+func TestReviewerResultUsesIssuedTargetWithoutAgentContractFields(t *testing.T) {
 	taskID := 261
 	developerID := 971
 	reviewerID := 972
@@ -6733,8 +6921,7 @@ func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
 	service := &teamService{repo: repo}
 	payload := map[string]interface{}{
 		"assignmentResultOnly": true, "assignmentId": reviewerAssignment,
-		"reviewVerdict": "pass", "reviewedAssignmentId": "phase-dev",
-		"reviewedRevision": 1, "summary": "18/18 PASS", "resultMarkdown": "# Review\n\n18/18 PASS",
+		"summary": "18/18 PASS", "resultMarkdown": "# Review\n\n18/18 PASS",
 		"collaborationStep": map[string]interface{}{"type": "result"},
 	}
 	event := &models.TeamEvent{TeamID: 97, TaskID: &taskID, MemberID: &reviewerID, EventType: "task_completed", CreatedAt: time.Now().UTC()}
@@ -6748,7 +6935,7 @@ func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
 	}
 	validated, err := service.applyStructuredAssignmentValidation(task, reviewer, payload, time.Now().UTC())
 	if err != nil || !validated {
-		t.Fatalf("issued review target should validate despite wrong result hint: validated=%v err=%v payload=%#v", validated, err, payload)
+		t.Fatalf("issued review target should validate without Agent-authored contract fields: validated=%v err=%v payload=%#v", validated, err, payload)
 	}
 	items, _ := repo.ListWorkItemsByRootTaskID(taskID)
 	for _, item := range items {
@@ -6762,9 +6949,6 @@ func TestReviewerResultUsesIssuedTargetAndIgnoresReportedPhaseID(t *testing.T) {
 				t.Fatalf("Reviewer result contaminated dependency contract: %#v", item)
 			}
 		}
-	}
-	if eventString(payload, "ignoredReportedReviewTarget") != "phase-dev" {
-		t.Fatalf("wrong result hint should remain diagnostic only: %#v", payload)
 	}
 }
 
@@ -6919,8 +7103,8 @@ func TestLegacyReviewerTeamSendClosesUniqueReviewContract(t *testing.T) {
 	for _, item := range items {
 		switch workItemBusinessID(item) {
 		case developerAssignment:
-			if item.ValidatedRevision == nil || *item.ValidatedRevision != 1 {
-				t.Fatalf("legacy PASS did not validate the issued Developer revision: %#v", items)
+			if item.Status != models.TeamTaskStatusSucceeded {
+				t.Fatalf("legacy delivery must not rewrite the completed Developer card: %#v", items)
 			}
 		case reviewerAssignment:
 			if item.Status != models.TeamTaskStatusSucceeded {
