@@ -1,0 +1,128 @@
+# ClawReef Kubernetes 配置文件
+# 用于配置 K8s 连接方式和相关参数
+
+kubernetes:
+  # 连接模式: auto | incluster | outofcluster
+  # auto: 自动检测，优先尝试 in-cluster，失败则使用 kubeconfig（推荐）
+  # incluster: 强制使用 in-cluster 配置（适用于 Pod 内运行）
+  # outofcluster: 强制使用 kubeconfig（适用于本地开发）
+  mode: "auto"
+  
+  # Out-of-cluster 配置（当 mode 为 outofcluster 或 auto 回退时使用）
+  outOfCluster:
+    # kubeconfig 文件路径
+    # 空字符串时自动查找顺序：
+    # 1. 环境变量 KUBECONFIG
+    # 2. 环境变量 K8S_KUBECONFIG
+    # 3. ~/.kube/config
+    kubeconfig: ""
+    
+    # 当前上下文（空字符串使用 kubeconfig 中的 current-context）
+    context: ""
+    
+    # API Server 地址（可选，覆盖 kubeconfig 中的配置）
+    # 示例: https://192.168.1.100:6443
+    apiServer: ""
+    
+    # TLS 配置（可选）
+    tls:
+      # 是否跳过 TLS 验证（仅开发环境使用）
+      insecureSkipVerify: false
+      
+      # CA 证书路径（可选）
+      caFile: ""
+      
+      # 客户端证书路径（可选）
+      certFile: ""
+      
+      # 客户端私钥路径（可选）
+      keyFile: ""
+  
+  # In-cluster 配置（当 mode 为 incluster 时使用，通常无需修改）
+  inCluster:
+    # Service Account Token 路径（通常无需修改）
+    tokenPath: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    
+    # CA 证书路径（通常无需修改）
+    caPath: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    
+    # Namespace 文件路径（通常无需修改）
+    namespacePath: "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+  
+  # 通用配置
+  common:
+    # 默认命名空间前缀
+    # 实际命名空间会加上用户ID: {namespace}-user-{userID}
+    namespace: "clawreef"
+    
+    # 默认 StorageClass
+    # 空字符串使用集群默认 StorageClass
+    storageClass: "external-default-sc"
+    
+    # 请求超时时间（秒）
+    timeout: 30
+    
+    # 连接重试次数
+    retryCount: 3
+    
+    # 是否创建命名空间（如果不存在）
+    autoCreateNamespace: true
+
+# 运行时配置
+runtime:
+  # Pod 配置
+  pod:
+    # 默认镜像仓库
+    imageRegistry: "docker.io/clawreef"
+    
+    # 默认容器端口
+    containerPort: 8080
+    
+    # 默认挂载路径
+    mountPath: "/home/user/data"
+    
+    # 是否启用特权模式（某些桌面环境需要）
+    privileged: false
+    
+    # 额外的标签（会添加到所有 Pod）
+    extraLabels: {}
+      # env: production
+      # team: devops
+    
+    # 节点选择器
+    nodeSelector: {}
+      # kubernetes.io/os: linux
+    
+    # 容忍配置
+    tolerations: []
+      # - key: "dedicated"
+      #   operator: "Equal"
+      #   value: "desktop"
+      #   effect: "NoSchedule"
+  
+  # PVC 配置
+  pvc:
+    # 访问模式: ReadWriteOnce | ReadWriteMany | ReadOnlyMany
+    accessMode: "ReadWriteOnce"
+    
+    # 存储卷模式: Filesystem | Block
+    volumeMode: "Filesystem"
+    
+    # 是否启用卷扩展
+    allowVolumeExpansion: true
+    
+    # 保留策略: Retain | Delete | Recycle
+    reclaimPolicy: "Delete"
+
+    # HostPath 前缀（用于手动创建 PV 时的主机路径）
+    # 注意：不要使用 /tmp/ 等临时目录，节点重启可能导致数据丢失
+    # 环境变量覆盖: K8S_PV_HOST_PATH_PREFIX
+    hostPathPrefix: "/data/clawreef"
+
+# 日志配置
+logging:
+  # 日志级别: debug | info | warn | error
+  level: "info"
+  
+  # 是否记录 K8s API 调用详情
+  logApiCalls: false

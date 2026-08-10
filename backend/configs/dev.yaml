@@ -1,0 +1,15 @@
+server:
+  address: ":9001"
+  mode: "debug"
+
+database:
+  host: "localhost"
+  port: 13306
+  user: "root"
+  password: "123456"
+  database: "clawreef"
+
+jwt:
+  secret: "clawreef-dev-secret-key-change-in-production"
+  access_expiry: 60
+  refresh_expiry: 168

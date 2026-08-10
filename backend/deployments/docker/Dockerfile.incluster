@@ -1,0 +1,9 @@
+FROM scratch
+
+WORKDIR /
+
+COPY bin/server /server
+
+EXPOSE 9001
+
+ENTRYPOINT ["/server"]

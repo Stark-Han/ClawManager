@@ -1,0 +1,96 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/backend/bin/
+/backend/tmp/
+/runtimeagent/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go vendor directory
+/backend/vendor/
+
+# Node modules
+/frontend/node_modules/
+/frontend/dist/
+/frontend/dist-ssr/
+/outputs/
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+
+# OS files
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+/test_*
+/deploy/
+/test.tar
+/fix-install-plan.md
+/docs/deployment-storage-remediation-plan.zh-CN.md
+
+# Local API / debug artifacts (do not commit)
+/_*.json
+/_*.txt
+/_test_*.js
+/_pr*.md
+.clawmanager-last-image
+/pr138.patch
+
+# Team runtime config snapshots
+/team-*.json
+/agency-agents-main/
+
+
+.codex-logs/
+.codex-temp/
+.cache/
+.VSCodeCounter/
+.superpowers/
+dev_docs/
+devplan.md
+AGENTS.md
+TASK_BREAKDOWN.md
+dev_progress.md
+CLAUDE.md
+TEAM_IMAGE_DEPLOY_STEPS.md
+TEAM_PROFILES_LOCAL_TESTING.md
+/team-optimization-docs/
+/clawmanager-apply.sh
+/clawmanager-team-profiles-test.yaml
+/clawmanager-tenant.yaml
+.codex
+/litellm-five-highlights-design.md

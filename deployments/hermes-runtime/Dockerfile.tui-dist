@@ -1,0 +1,9 @@
+ARG HERMES_RUNTIME_BASE_IMAGE=172.16.1.12:5010/hermes:team-lite-envfix-20260610123402
+FROM ${HERMES_RUNTIME_BASE_IMAGE}
+
+USER root
+
+RUN cd /usr/local/lib/hermes-agent/ui-tui \
+    && npm run build \
+    && test -f dist/entry.js \
+    && chmod -R a+rX dist

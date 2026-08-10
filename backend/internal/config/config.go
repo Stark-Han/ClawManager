@@ -1,0 +1,711 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config holds all application configuration
+type Config struct {
+	Server         ServerConfig         `yaml:"server"`
+	Database       DatabaseConfig       `yaml:"database"`
+	JWT            JWTConfig            `yaml:"jwt"`
+	Kubernetes     KubernetesConfig     `yaml:"kubernetes"`
+	Storage        StorageConfig        `yaml:"storage"`
+	Runtime        RuntimePoolConfig    `yaml:"runtime"`
+	ObjectStorage  ObjectStorageConfig  `yaml:"objectStorage"`
+	SkillScanner   SkillScannerConfig   `yaml:"skillScanner"`
+	SkillMaterialize SkillMaterializeConfig `yaml:"skillMaterialize"`
+	LeaderElection LeaderElectionConfig `yaml:"leaderElection"`
+}
+
+// LeaderElectionConfig controls the control-plane leader election that gates
+// singleton background loops (SyncService + Team event consumers + stale-task
+// monitor) so they run on exactly one replica when clawmanager-app is scaled
+// horizontally. The HTTP API and the in-pod nginx data plane run on every
+// replica regardless.
+type LeaderElectionConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Namespace     string `yaml:"namespace"`
+	LeaseName     string `yaml:"leaseName"`
+	Identity      string `yaml:"identity"`
+	LeaseDuration int    `yaml:"leaseDuration"` // seconds
+	RenewDeadline int    `yaml:"renewDeadline"` // seconds
+	RetryPeriod   int    `yaml:"retryPeriod"`   // seconds
+}
+
+const (
+	StorageProfileCluster   = "cluster"
+	StorageProfileSingle    = "single-node"
+	StorageProfileLegacyNFS = "legacy-nfs"
+	DefaultPVCBindTimeout   = 2 * time.Minute
+)
+
+// ServerConfig holds server-related configuration
+type ServerConfig struct {
+	Address string `yaml:"address"`
+	Mode    string `yaml:"mode"`
+}
+
+// DatabaseConfig holds database-related configuration
+type DatabaseConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	Database string `yaml:"database"`
+}
+
+// JWTConfig holds JWT-related configuration
+type JWTConfig struct {
+	Secret        string `yaml:"secret"`
+	AccessExpiry  int    `yaml:"access_expiry"`  // minutes
+	RefreshExpiry int    `yaml:"refresh_expiry"` // hours
+}
+
+// KubernetesConfig holds Kubernetes-related configuration
+type KubernetesConfig struct {
+	Mode         string                  `yaml:"mode"` // 连接模式: auto, incluster, outofcluster
+	OutOfCluster OutOfClusterConfig      `yaml:"outOfCluster"`
+	InCluster    InClusterConfig         `yaml:"inCluster"`
+	Common       CommonKubernetesConfig  `yaml:"common"`
+	Runtime      KubernetesRuntimeConfig `yaml:"runtime"`
+	Logging      LoggingConfig           `yaml:"logging"`
+}
+
+// OutOfClusterConfig holds out-of-cluster Kubernetes configuration
+type OutOfClusterConfig struct {
+	Kubeconfig string    `yaml:"kubeconfig"`
+	Context    string    `yaml:"context"`
+	APIServer  string    `yaml:"apiServer"`
+	TLS        TLSConfig `yaml:"tls"`
+}
+
+// TLSConfig holds TLS configuration
+type TLSConfig struct {
+	InsecureSkipVerify bool   `yaml:"insecureSkipVerify"`
+	CAFile             string `yaml:"caFile"`
+	CertFile           string `yaml:"certFile"`
+	KeyFile            string `yaml:"keyFile"`
+}
+
+// InClusterConfig holds in-cluster Kubernetes configuration
+type InClusterConfig struct {
+	TokenPath     string `yaml:"tokenPath"`
+	CAPath        string `yaml:"caPath"`
+	NamespacePath string `yaml:"namespacePath"`
+}
+
+// CommonKubernetesConfig holds common Kubernetes configuration
+type CommonKubernetesConfig struct {
+	Namespace           string `yaml:"namespace"`
+	StorageClass        string `yaml:"storageClass"`
+	Timeout             int    `yaml:"timeout"`
+	RetryCount          int    `yaml:"retryCount"`
+	AutoCreateNamespace bool   `yaml:"autoCreateNamespace"`
+}
+
+// KubernetesRuntimeConfig holds Kubernetes runtime configuration
+type KubernetesRuntimeConfig struct {
+	Pod RuntimePodConfig `yaml:"pod"`
+	PVC RuntimePVCConfig `yaml:"pvc"`
+}
+
+// RuntimePodConfig holds pod runtime configuration
+type RuntimePodConfig struct {
+	ImageRegistry string            `yaml:"imageRegistry"`
+	ContainerPort int32             `yaml:"containerPort"`
+	MountPath     string            `yaml:"mountPath"`
+	Privileged    bool              `yaml:"privileged"`
+	ExtraLabels   map[string]string `yaml:"extraLabels"`
+	NodeSelector  map[string]string `yaml:"nodeSelector"`
+	Tolerations   []Toleration      `yaml:"tolerations"`
+}
+
+// Toleration represents a Kubernetes toleration
+type Toleration struct {
+	Key      string `yaml:"key"`
+	Operator string `yaml:"operator"`
+	Value    string `yaml:"value"`
+	Effect   string `yaml:"effect"`
+}
+
+// RuntimePVCConfig holds PVC runtime configuration
+type RuntimePVCConfig struct {
+	AccessMode           string `yaml:"accessMode"`
+	VolumeMode           string `yaml:"volumeMode"`
+	AllowVolumeExpansion bool   `yaml:"allowVolumeExpansion"`
+	ReclaimPolicy        string `yaml:"reclaimPolicy"`
+	HostPathPrefix       string `yaml:"hostPathPrefix"`
+}
+
+// StorageConfig controls the validated installation storage profile.
+type StorageConfig struct {
+	Profile                  string        `yaml:"profile"`
+	HostPathFallbackEnabled  bool          `yaml:"hostPathFallbackEnabled"`
+	PVCBindTimeout           time.Duration `yaml:"pvcBindTimeout"`
+	ControlPlaneStorageClass string        `yaml:"controlPlaneStorageClass"`
+	InstanceStorageClass     string        `yaml:"instanceStorageClass"`
+	WorkspaceStorageClass    string        `yaml:"workspaceStorageClass"`
+	WorkspaceAccessMode      string        `yaml:"workspaceAccessMode"`
+}
+
+// RuntimePoolConfig holds shared V2 runtime pool configuration.
+type RuntimePoolConfig struct {
+	Namespace                 string        `yaml:"namespace"`
+	WorkspaceRoot             string        `yaml:"workspaceRoot"`
+	WorkspacePVCClaimName     string        `yaml:"workspacePvcClaimName"`
+	WorkspaceNFSServer        string        `yaml:"workspaceNfsServer"`
+	WorkspaceNFSPath          string        `yaml:"workspaceNfsPath"`
+	AgentControlToken         string        `yaml:"agentControlToken"`
+	AgentReportToken          string        `yaml:"agentReportToken"`
+	BackendReplicaID          string        `yaml:"backendReplicaId"`
+	RedisURL                  string        `yaml:"redisUrl"`
+	SchedulerEnabled          bool          `yaml:"schedulerEnabled"`
+	HeartbeatTimeout          time.Duration `yaml:"heartbeatTimeout"`
+	SchedulerTick             time.Duration `yaml:"schedulerTick"`
+	OpenClawImage             string        `yaml:"openClawImage"`
+	HermesImage               string        `yaml:"hermesImage"`
+	MaxGatewaysPerPod         int           `yaml:"maxGatewaysPerPod"`
+	GatewayStartInFlightLimit int           `yaml:"gatewayStartInFlightLimit"`
+	GatewayPortStart          int           `yaml:"gatewayPortStart"`
+	GatewayPortEnd            int           `yaml:"gatewayPortEnd"`
+}
+
+// LoggingConfig holds logging configuration
+type LoggingConfig struct {
+	Level       string `yaml:"level"`
+	LogAPICalls bool   `yaml:"logApiCalls"`
+}
+
+type ObjectStorageConfig struct {
+	Endpoint       string `yaml:"endpoint"`
+	Region         string `yaml:"region"`
+	AccessKey      string `yaml:"accessKey"`
+	SecretKey      string `yaml:"secretKey"`
+	Bucket         string `yaml:"bucket"`
+	UseSSL         bool   `yaml:"useSSL"`
+	BasePath       string `yaml:"basePath"`
+	ForcePathStyle bool   `yaml:"forcePathStyle"`
+	LocalFallback  string `yaml:"localFallback"`
+}
+
+type SkillScannerConfig struct {
+	BaseURL        string `yaml:"baseUrl"`
+	APIKey         string `yaml:"apiKey"`
+	TimeoutSeconds int    `yaml:"timeoutSeconds"`
+	Enabled        bool   `yaml:"enabled"`
+}
+
+type SkillMaterializeConfig struct {
+	Enabled              bool `yaml:"enabled"`
+	TickMS               int  `yaml:"tickMs"`
+	BatchSize            int  `yaml:"batchSize"`
+	Concurrency          int  `yaml:"concurrency"`
+	PerInstanceConcurrency int `yaml:"perInstanceConcurrency"`
+}
+
+// Load loads configuration from file and environment variables
+func Load() (*Config, error) {
+	runtimeNamespace := getEnv("RUNTIME_NAMESPACE", getEnv("K8S_NAMESPACE", "clawmanager-system"))
+	defaultStorageClass := getEnv("K8S_STORAGE_CLASS", "standard")
+	config := &Config{
+		Server: ServerConfig{
+			Address: ":9001",
+			Mode:    "debug",
+		},
+		Database: DatabaseConfig{
+			Host:     "localhost",
+			Port:     3306,
+			User:     "clawreef",
+			Password: "clawreef123",
+			Database: "clawreef",
+		},
+		JWT: JWTConfig{
+			Secret:        getEnv("JWT_SECRET", "clawreef-secret-key-change-in-production"),
+			AccessExpiry:  60,  // 60 minutes
+			RefreshExpiry: 168, // 7 days
+		},
+		Kubernetes: KubernetesConfig{
+			Mode: getEnv("K8S_MODE", "auto"),
+			OutOfCluster: OutOfClusterConfig{
+				Kubeconfig: getEnv("KUBECONFIG", getEnv("K8S_KUBECONFIG", "")),
+			},
+			InCluster: InClusterConfig{
+				TokenPath:     "/var/run/secrets/kubernetes.io/serviceaccount/token",
+				CAPath:        "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+				NamespacePath: "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+			},
+			Common: CommonKubernetesConfig{
+				Namespace:           getEnv("K8S_NAMESPACE", "clawreef"),
+				StorageClass:        defaultStorageClass,
+				Timeout:             30,
+				RetryCount:          3,
+				AutoCreateNamespace: true,
+			},
+			Runtime: KubernetesRuntimeConfig{
+				Pod: RuntimePodConfig{
+					ImageRegistry: "docker.io/clawreef",
+					ContainerPort: 3001,
+					MountPath:     "/home/user/data",
+					Privileged:    false,
+					ExtraLabels:   make(map[string]string),
+					NodeSelector:  make(map[string]string),
+				},
+				PVC: RuntimePVCConfig{
+					AccessMode:           "ReadWriteOnce",
+					VolumeMode:           "Filesystem",
+					AllowVolumeExpansion: true,
+					ReclaimPolicy:        "Delete",
+					HostPathPrefix:       getEnv("K8S_PV_HOST_PATH_PREFIX", "/data/clawreef"),
+				},
+			},
+			Logging: LoggingConfig{
+				Level:       "info",
+				LogAPICalls: false,
+			},
+		},
+		Storage: StorageConfig{
+			Profile:                  getEnv("CLAWMANAGER_STORAGE_PROFILE", StorageProfileCluster),
+			HostPathFallbackEnabled:  getEnvBool("K8S_HOSTPATH_FALLBACK_ENABLED", false),
+			PVCBindTimeout:           getEnvDuration("K8S_PVC_BIND_TIMEOUT", DefaultPVCBindTimeout),
+			ControlPlaneStorageClass: getEnv("K8S_CONTROL_PLANE_STORAGE_CLASS", defaultStorageClass),
+			InstanceStorageClass:     getEnv("K8S_INSTANCE_STORAGE_CLASS", defaultStorageClass),
+			WorkspaceStorageClass:    getEnv("K8S_WORKSPACE_STORAGE_CLASS", defaultStorageClass),
+			WorkspaceAccessMode:      getEnv("K8S_WORKSPACE_ACCESS_MODE", "ReadWriteMany"),
+		},
+		Runtime: RuntimePoolConfig{
+			Namespace:                 runtimeNamespace,
+			WorkspaceRoot:             getEnv("RUNTIME_WORKSPACE_ROOT", "/workspaces"),
+			WorkspacePVCClaimName:     getEnv("RUNTIME_WORKSPACE_PVC_CLAIM", ""),
+			WorkspaceNFSServer:        getEnv("RUNTIME_WORKSPACE_NFS_SERVER", ""),
+			WorkspaceNFSPath:          getEnv("RUNTIME_WORKSPACE_NFS_PATH", "/"),
+			AgentControlToken:         getEnv("RUNTIME_AGENT_CONTROL_TOKEN", ""),
+			AgentReportToken:          getEnv("RUNTIME_AGENT_REPORT_TOKEN", ""),
+			BackendReplicaID:          getEnv("HOSTNAME", "clawmanager-backend-local"),
+			RedisURL:                  getEnv("PLATFORM_REDIS_URL", getEnv("TEAM_REDIS_URL", "")),
+			SchedulerEnabled:          getEnvBool("RUNTIME_SCHEDULER_ENABLED", true),
+			HeartbeatTimeout:          getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", 10*time.Second),
+			SchedulerTick:             getEnvDuration("RUNTIME_SCHEDULER_TICK", 2*time.Second),
+			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"),
+			HermesImage:               getEnv("HERMES_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
+			MaxGatewaysPerPod:         getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),
+			GatewayStartInFlightLimit: getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", 32),
+			GatewayPortStart:          getEnvInt("RUNTIME_GATEWAY_PORT_START", 20000),
+			GatewayPortEnd:            getEnvInt("RUNTIME_GATEWAY_PORT_END", 20299),
+		},
+		ObjectStorage: ObjectStorageConfig{
+			Endpoint:       getEnv("OBJECT_STORAGE_ENDPOINT", ""),
+			Region:         getEnv("OBJECT_STORAGE_REGION", ""),
+			AccessKey:      getEnv("OBJECT_STORAGE_ACCESS_KEY", ""),
+			SecretKey:      getEnv("OBJECT_STORAGE_SECRET_KEY", ""),
+			Bucket:         getEnv("OBJECT_STORAGE_BUCKET", "clawmanager-skills"),
+			UseSSL:         strings.EqualFold(getEnv("OBJECT_STORAGE_USE_SSL", "false"), "true"),
+			BasePath:       getEnv("OBJECT_STORAGE_BASE_PATH", "skills"),
+			ForcePathStyle: strings.EqualFold(getEnv("OBJECT_STORAGE_FORCE_PATH_STYLE", "true"), "true"),
+			LocalFallback:  getEnv("OBJECT_STORAGE_LOCAL_FALLBACK", ".data/object-storage"),
+		},
+		SkillScanner: SkillScannerConfig{
+			BaseURL:        getEnv("SKILL_SCANNER_BASE_URL", ""),
+			APIKey:         getEnv("SKILL_SCANNER_API_KEY", ""),
+			TimeoutSeconds: 30,
+			Enabled:        strings.EqualFold(getEnv("SKILL_SCANNER_ENABLED", "false"), "true"),
+		},
+		SkillMaterialize: SkillMaterializeConfig{
+			Enabled:                strings.EqualFold(getEnv("SKILL_MATERIALIZE_WORKER_ENABLED", "true"), "true"),
+			TickMS:                 2000,
+			BatchSize:              5,
+			Concurrency:            5,
+			PerInstanceConcurrency: 2,
+		},
+		LeaderElection: LeaderElectionConfig{
+			Enabled:       strings.EqualFold(getEnv("CLAWMANAGER_LEADER_ELECTION", "true"), "true"),
+			Namespace:     getEnv("POD_NAMESPACE", "clawmanager-system"),
+			LeaseName:     getEnv("CLAWMANAGER_LEADER_LEASE_NAME", "clawmanager-controlplane-leader"),
+			Identity:      getEnv("POD_NAME", ""),
+			LeaseDuration: 15,
+			RenewDeadline: 10,
+			RetryPeriod:   2,
+		},
+	}
+
+	// Try to load from k8s config file
+	configPaths := []string{
+		"configs/k8s.yaml",
+		"../configs/k8s.yaml",
+		"/app/configs/k8s.yaml",
+	}
+
+	for _, path := range configPaths {
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("Loading k8s config from: %s\n", path)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read k8s config file: %w", err)
+			}
+			if err := yaml.Unmarshal(data, config); err != nil {
+				return nil, fmt.Errorf("failed to parse k8s config file: %w", err)
+			}
+			break
+		}
+	}
+
+	// Try to load from legacy dev.yaml config file
+	if _, err := os.Stat("configs/dev.yaml"); err == nil {
+		data, err := os.ReadFile("configs/dev.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
+		if err := yaml.Unmarshal(data, config); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
+	}
+
+	// Override with environment variables
+	applyEnvOverrides(config)
+	normalizeStorageConfig(config)
+
+	return config, nil
+}
+
+// applyEnvOverrides applies environment variable overrides
+func applyEnvOverrides(config *Config) {
+	// Server config
+	if addr := os.Getenv("SERVER_ADDRESS"); addr != "" {
+		config.Server.Address = addr
+	}
+	if mode := os.Getenv("SERVER_MODE"); mode != "" {
+		config.Server.Mode = mode
+	}
+
+	// Database config
+	if host := os.Getenv("DB_HOST"); host != "" {
+		config.Database.Host = host
+	}
+	if port := os.Getenv("DB_PORT"); port != "" {
+		fmt.Sscanf(port, "%d", &config.Database.Port)
+	}
+	if user := os.Getenv("DB_USER"); user != "" {
+		config.Database.User = user
+	}
+	if pass := os.Getenv("DB_PASSWORD"); pass != "" {
+		config.Database.Password = pass
+	}
+	if db := os.Getenv("DB_NAME"); db != "" {
+		config.Database.Database = db
+	}
+
+	// JWT config
+	if secret := os.Getenv("JWT_SECRET"); secret != "" {
+		config.JWT.Secret = secret
+	}
+
+	// Kubernetes config
+	if mode := os.Getenv("K8S_MODE"); mode != "" {
+		config.Kubernetes.Mode = mode
+	}
+	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
+		config.Kubernetes.OutOfCluster.Kubeconfig = kubeconfig
+	}
+	if kubeconfig := os.Getenv("K8S_KUBECONFIG"); kubeconfig != "" {
+		config.Kubernetes.OutOfCluster.Kubeconfig = kubeconfig
+	}
+	if namespace := os.Getenv("K8S_NAMESPACE"); namespace != "" {
+		config.Kubernetes.Common.Namespace = namespace
+	}
+	if storageClass := os.Getenv("K8S_STORAGE_CLASS"); storageClass != "" {
+		config.Kubernetes.Common.StorageClass = storageClass
+	}
+	if hostPathPrefix := os.Getenv("K8S_PV_HOST_PATH_PREFIX"); hostPathPrefix != "" {
+		config.Kubernetes.Runtime.PVC.HostPathPrefix = hostPathPrefix
+	}
+	if profile := os.Getenv("CLAWMANAGER_STORAGE_PROFILE"); profile != "" {
+		config.Storage.Profile = profile
+	}
+	if fallback := os.Getenv("K8S_HOSTPATH_FALLBACK_ENABLED"); fallback != "" {
+		config.Storage.HostPathFallbackEnabled = strings.EqualFold(fallback, "true")
+	}
+	if timeout := os.Getenv("K8S_PVC_BIND_TIMEOUT"); timeout != "" {
+		if parsed, err := time.ParseDuration(timeout); err == nil {
+			config.Storage.PVCBindTimeout = parsed
+		}
+	}
+	if storageClass := os.Getenv("K8S_CONTROL_PLANE_STORAGE_CLASS"); storageClass != "" {
+		config.Storage.ControlPlaneStorageClass = storageClass
+	}
+	if storageClass := os.Getenv("K8S_INSTANCE_STORAGE_CLASS"); storageClass != "" {
+		config.Storage.InstanceStorageClass = storageClass
+	}
+	if storageClass := os.Getenv("K8S_WORKSPACE_STORAGE_CLASS"); storageClass != "" {
+		config.Storage.WorkspaceStorageClass = storageClass
+	}
+	if accessMode := os.Getenv("K8S_WORKSPACE_ACCESS_MODE"); accessMode != "" {
+		config.Storage.WorkspaceAccessMode = accessMode
+	}
+
+	config.Runtime.Namespace = getEnv("RUNTIME_NAMESPACE", getEnv("K8S_NAMESPACE", config.Runtime.Namespace))
+	config.Runtime.WorkspaceRoot = getEnv("RUNTIME_WORKSPACE_ROOT", config.Runtime.WorkspaceRoot)
+	config.Runtime.WorkspacePVCClaimName = getEnv("RUNTIME_WORKSPACE_PVC_CLAIM", config.Runtime.WorkspacePVCClaimName)
+	config.Runtime.WorkspaceNFSServer = getEnv("RUNTIME_WORKSPACE_NFS_SERVER", config.Runtime.WorkspaceNFSServer)
+	config.Runtime.WorkspaceNFSPath = getEnv("RUNTIME_WORKSPACE_NFS_PATH", config.Runtime.WorkspaceNFSPath)
+	if strings.TrimSpace(config.Runtime.WorkspaceNFSPath) == "" {
+		config.Runtime.WorkspaceNFSPath = "/"
+	}
+	config.Runtime.AgentControlToken = getEnv("RUNTIME_AGENT_CONTROL_TOKEN", config.Runtime.AgentControlToken)
+	config.Runtime.AgentReportToken = getEnv("RUNTIME_AGENT_REPORT_TOKEN", config.Runtime.AgentReportToken)
+	config.Runtime.BackendReplicaID = getEnv("HOSTNAME", config.Runtime.BackendReplicaID)
+	config.Runtime.RedisURL = getEnv("PLATFORM_REDIS_URL", getEnv("TEAM_REDIS_URL", config.Runtime.RedisURL))
+	config.Runtime.SchedulerEnabled = getEnvBool("RUNTIME_SCHEDULER_ENABLED", config.Runtime.SchedulerEnabled)
+	config.Runtime.HeartbeatTimeout = getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", config.Runtime.HeartbeatTimeout)
+	config.Runtime.SchedulerTick = getEnvDuration("RUNTIME_SCHEDULER_TICK", config.Runtime.SchedulerTick)
+	config.Runtime.OpenClawImage = getEnv("OPENCLAW_RUNTIME_IMAGE", config.Runtime.OpenClawImage)
+	config.Runtime.HermesImage = getEnv("HERMES_RUNTIME_IMAGE", config.Runtime.HermesImage)
+	config.Runtime.MaxGatewaysPerPod = getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", config.Runtime.MaxGatewaysPerPod)
+	config.Runtime.GatewayStartInFlightLimit = getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", config.Runtime.GatewayStartInFlightLimit)
+	config.Runtime.GatewayPortStart = getEnvInt("RUNTIME_GATEWAY_PORT_START", config.Runtime.GatewayPortStart)
+	config.Runtime.GatewayPortEnd = getEnvInt("RUNTIME_GATEWAY_PORT_END", config.Runtime.GatewayPortEnd)
+	config.LeaderElection.Enabled = getEnvBool("CLAWMANAGER_LEADER_ELECTION", config.LeaderElection.Enabled)
+	config.LeaderElection.Namespace = getEnv("POD_NAMESPACE", config.LeaderElection.Namespace)
+	config.LeaderElection.LeaseName = getEnv("CLAWMANAGER_LEADER_LEASE_NAME", config.LeaderElection.LeaseName)
+	config.LeaderElection.Identity = getEnv("POD_NAME", config.LeaderElection.Identity)
+	config.LeaderElection.LeaseDuration = getEnvInt("CLAWMANAGER_LEADER_LEASE_DURATION", config.LeaderElection.LeaseDuration)
+	config.LeaderElection.RenewDeadline = getEnvInt("CLAWMANAGER_LEADER_RENEW_DEADLINE", config.LeaderElection.RenewDeadline)
+	config.LeaderElection.RetryPeriod = getEnvInt("CLAWMANAGER_LEADER_RETRY_PERIOD", config.LeaderElection.RetryPeriod)
+
+	if endpoint := os.Getenv("OBJECT_STORAGE_ENDPOINT"); endpoint != "" {
+		config.ObjectStorage.Endpoint = endpoint
+	}
+	if region := os.Getenv("OBJECT_STORAGE_REGION"); region != "" {
+		config.ObjectStorage.Region = region
+	}
+	if accessKey := os.Getenv("OBJECT_STORAGE_ACCESS_KEY"); accessKey != "" {
+		config.ObjectStorage.AccessKey = accessKey
+	}
+	if secretKey := os.Getenv("OBJECT_STORAGE_SECRET_KEY"); secretKey != "" {
+		config.ObjectStorage.SecretKey = secretKey
+	}
+	if bucket := os.Getenv("OBJECT_STORAGE_BUCKET"); bucket != "" {
+		config.ObjectStorage.Bucket = bucket
+	}
+	if useSSL := os.Getenv("OBJECT_STORAGE_USE_SSL"); useSSL != "" {
+		config.ObjectStorage.UseSSL = strings.EqualFold(useSSL, "true")
+	}
+	if basePath := os.Getenv("OBJECT_STORAGE_BASE_PATH"); basePath != "" {
+		config.ObjectStorage.BasePath = basePath
+	}
+	if forcePathStyle := os.Getenv("OBJECT_STORAGE_FORCE_PATH_STYLE"); forcePathStyle != "" {
+		config.ObjectStorage.ForcePathStyle = strings.EqualFold(forcePathStyle, "true")
+	}
+	if localFallback := os.Getenv("OBJECT_STORAGE_LOCAL_FALLBACK"); localFallback != "" {
+		config.ObjectStorage.LocalFallback = localFallback
+	}
+	if baseURL := os.Getenv("SKILL_SCANNER_BASE_URL"); baseURL != "" {
+		config.SkillScanner.BaseURL = baseURL
+	}
+	if apiKey := os.Getenv("SKILL_SCANNER_API_KEY"); apiKey != "" {
+		config.SkillScanner.APIKey = apiKey
+	}
+	if enabled := os.Getenv("SKILL_SCANNER_ENABLED"); enabled != "" {
+		config.SkillScanner.Enabled = strings.EqualFold(enabled, "true")
+	}
+	if timeoutSeconds := os.Getenv("SKILL_SCANNER_TIMEOUT_SECONDS"); timeoutSeconds != "" {
+		fmt.Sscanf(timeoutSeconds, "%d", &config.SkillScanner.TimeoutSeconds)
+	}
+	if enabled := os.Getenv("SKILL_MATERIALIZE_WORKER_ENABLED"); enabled != "" {
+		config.SkillMaterialize.Enabled = strings.EqualFold(enabled, "true")
+	}
+	if tickMS := os.Getenv("SKILL_MATERIALIZE_TICK_MS"); tickMS != "" {
+		fmt.Sscanf(tickMS, "%d", &config.SkillMaterialize.TickMS)
+	}
+	if batchSize := os.Getenv("SKILL_MATERIALIZE_BATCH_SIZE"); batchSize != "" {
+		fmt.Sscanf(batchSize, "%d", &config.SkillMaterialize.BatchSize)
+	}
+	if concurrency := os.Getenv("SKILL_MATERIALIZE_CONCURRENCY"); concurrency != "" {
+		fmt.Sscanf(concurrency, "%d", &config.SkillMaterialize.Concurrency)
+	}
+	if perInstance := os.Getenv("SKILL_MATERIALIZE_PER_INSTANCE_CONCURRENCY"); perInstance != "" {
+		fmt.Sscanf(perInstance, "%d", &config.SkillMaterialize.PerInstanceConcurrency)
+	}
+}
+
+func normalizeStorageConfig(config *Config) {
+	if config == nil {
+		return
+	}
+	config.Storage.Profile = normalizeStorageProfile(config.Storage.Profile)
+	if config.Storage.PVCBindTimeout <= 0 {
+		config.Storage.PVCBindTimeout = DefaultPVCBindTimeout
+	}
+	if strings.TrimSpace(config.Kubernetes.Common.StorageClass) == "" {
+		config.Kubernetes.Common.StorageClass = "standard"
+	}
+	if strings.TrimSpace(config.Storage.ControlPlaneStorageClass) == "" {
+		config.Storage.ControlPlaneStorageClass = config.Kubernetes.Common.StorageClass
+	}
+	if strings.TrimSpace(config.Storage.InstanceStorageClass) == "" {
+		config.Storage.InstanceStorageClass = config.Kubernetes.Common.StorageClass
+	}
+	if strings.TrimSpace(config.Storage.WorkspaceStorageClass) == "" {
+		config.Storage.WorkspaceStorageClass = config.Kubernetes.Common.StorageClass
+	}
+	if strings.TrimSpace(config.Storage.WorkspaceAccessMode) == "" {
+		config.Storage.WorkspaceAccessMode = "ReadWriteMany"
+	}
+	if config.Storage.Profile == StorageProfileLegacyNFS && strings.TrimSpace(config.Runtime.WorkspaceNFSServer) == "" {
+		config.Runtime.WorkspaceNFSServer = defaultWorkspaceNFSServer(config.Runtime.Namespace)
+	}
+	if strings.TrimSpace(config.Runtime.WorkspaceNFSPath) == "" {
+		config.Runtime.WorkspaceNFSPath = "/"
+	}
+}
+
+func normalizeStorageProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "cluster", "cluster-csi", "csi":
+		return StorageProfileCluster
+	case "single", "single-node", "single_node", "hostpath":
+		return StorageProfileSingle
+	case "legacy", "legacy-nfs", "legacy_nfs", "nfs":
+		return StorageProfileLegacyNFS
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func defaultWorkspaceNFSServer(namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = "clawmanager-system"
+	}
+	return fmt.Sprintf("workspace-store.%s.svc.cluster.local", namespace)
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+// GetKubeconfigPath returns the kubeconfig path for out-of-cluster mode
+func (c *Config) GetKubeconfigPath() string {
+	return c.Kubernetes.OutOfCluster.Kubeconfig
+}
+
+// GetNamespace returns the namespace prefix
+func (c *Config) GetNamespace() string {
+	return c.Kubernetes.Common.Namespace
+}
+
+// GetStorageClass returns the storage class
+func (c *Config) GetStorageClass() string {
+	return c.Kubernetes.Common.StorageClass
+}
+
+func (c *Config) GetStorageProfile() string {
+	if c == nil {
+		return StorageProfileCluster
+	}
+	return normalizeStorageProfile(c.Storage.Profile)
+}
+
+func (c *Config) GetPVCBindTimeout() time.Duration {
+	if c == nil || c.Storage.PVCBindTimeout <= 0 {
+		return DefaultPVCBindTimeout
+	}
+	return c.Storage.PVCBindTimeout
+}
+
+func (c *Config) GetControlPlaneStorageClass() string {
+	if c == nil {
+		return "standard"
+	}
+	if value := strings.TrimSpace(c.Storage.ControlPlaneStorageClass); value != "" {
+		return value
+	}
+	return c.GetStorageClass()
+}
+
+func (c *Config) GetInstanceStorageClass() string {
+	if c == nil {
+		return "standard"
+	}
+	if value := strings.TrimSpace(c.Storage.InstanceStorageClass); value != "" {
+		return value
+	}
+	return c.GetStorageClass()
+}
+
+func (c *Config) GetWorkspaceStorageClass() string {
+	if c == nil {
+		return "standard"
+	}
+	if value := strings.TrimSpace(c.Storage.WorkspaceStorageClass); value != "" {
+		return value
+	}
+	return c.GetStorageClass()
+}
+
+func (c *Config) GetWorkspaceAccessMode() string {
+	if c == nil {
+		return "ReadWriteMany"
+	}
+	if value := strings.TrimSpace(c.Storage.WorkspaceAccessMode); value != "" {
+		return value
+	}
+	return "ReadWriteMany"
+}
+
+// GetHostPathPrefix returns the host path prefix for PV creation
+func (c *Config) GetHostPathPrefix() string {
+	if c.Kubernetes.Runtime.PVC.HostPathPrefix != "" {
+		return c.Kubernetes.Runtime.PVC.HostPathPrefix
+	}
+	return "/data/clawreef"
+}
+
+// GetMode returns the K8s connection mode
+func (c *Config) GetMode() string {
+	return c.Kubernetes.Mode
+}

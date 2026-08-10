@@ -1,0 +1,654 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clawreef-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clawreef-secrets
+  namespace: clawreef-system
+type: Opaque
+stringData:
+  mysql-root-password: root123
+  mysql-password: clawreef123
+  jwt-secret: clawreef-dev-secret-key-change-in-production
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clawreef-mysql-init
+  namespace: clawreef-system
+data:
+  001_init_schema.sql: |
+    CREATE DATABASE IF NOT EXISTS clawreef CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    USE clawreef;
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(255) UNIQUE NOT NULL,
+      email VARCHAR(320) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      role ENUM('admin', 'user') DEFAULT 'user',
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      last_login TIMESTAMP,
+      INDEX idx_username (username),
+      INDEX idx_role (role)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS instances (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      description TEXT,
+      type ENUM('openclaw', 'ubuntu', 'debian', 'centos', 'custom', 'webtop', 'hermes') DEFAULT 'ubuntu',
+      runtime_type ENUM('desktop', 'shell') NOT NULL DEFAULT 'desktop',
+      status ENUM('creating', 'running', 'stopped', 'error', 'deleting') DEFAULT 'creating',
+      cpu_cores DECIMAL(10,2) NOT NULL,
+      memory_gb INT NOT NULL,
+      disk_gb INT NOT NULL,
+      gpu_enabled BOOLEAN DEFAULT FALSE,
+      gpu_type VARCHAR(100),
+      gpu_count INT DEFAULT 0,
+      os_type VARCHAR(50) NOT NULL,
+      os_version VARCHAR(50) NOT NULL,
+      image_registry VARCHAR(255),
+      image_tag VARCHAR(100),
+      storage_class VARCHAR(50) DEFAULT 'standard',
+      mount_path VARCHAR(255) DEFAULT '/data',
+      pod_name VARCHAR(255),
+      pod_namespace VARCHAR(255),
+      pod_ip VARCHAR(45),
+      access_url VARCHAR(500),
+      access_token VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      started_at TIMESTAMP,
+      stopped_at TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_user_id (user_id),
+      INDEX idx_status (status),
+      INDEX idx_type (type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS persistent_volumes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_id INT NOT NULL,
+      pvc_name VARCHAR(255) UNIQUE NOT NULL,
+      pvc_namespace VARCHAR(255) NOT NULL,
+      storage_size_gb INT NOT NULL,
+      storage_class VARCHAR(50),
+      mount_path VARCHAR(255),
+      status ENUM('pending', 'bound', 'released', 'failed') DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE,
+      INDEX idx_instance_id (instance_id),
+      UNIQUE KEY uk_pvc_name_namespace (pvc_name, pvc_namespace)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS backups (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_id INT NOT NULL,
+      backup_name VARCHAR(255) NOT NULL,
+      backup_size_gb INT,
+      backup_path VARCHAR(500),
+      status ENUM('creating', 'completed', 'failed', 'deleted') DEFAULT 'creating',
+      backup_type ENUM('manual', 'scheduled') DEFAULT 'manual',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      completed_at TIMESTAMP,
+      expires_at TIMESTAMP,
+      FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE,
+      INDEX idx_instance_id (instance_id),
+      INDEX idx_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS backup_schedules (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_id INT NOT NULL,
+      schedule_name VARCHAR(255),
+      cron_expression VARCHAR(100) NOT NULL,
+      retention_days INT DEFAULT 30,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE,
+      INDEX idx_instance_id (instance_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS user_quotas (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL UNIQUE,
+      max_instances INT DEFAULT 10,
+      max_cpu_cores DECIMAL(10,2) DEFAULT 40,
+      max_memory_gb INT DEFAULT 100,
+      max_storage_gb INT DEFAULT 500,
+      max_gpu_count INT DEFAULT 2,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_user_id (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS instance_usage (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_id INT NOT NULL,
+      cpu_usage_percent DECIMAL(5,2),
+      memory_usage_gb DECIMAL(10,2),
+      disk_usage_gb DECIMAL(10,2),
+      gpu_usage_percent DECIMAL(5,2),
+      uptime_seconds INT,
+      recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (instance_id) REFERENCES instances(id) ON DELETE CASCADE,
+      INDEX idx_instance_recorded (instance_id, recorded_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT,
+      action VARCHAR(100) NOT NULL,
+      resource_type VARCHAR(50) NOT NULL,
+      resource_id INT,
+      details JSON,
+      ip_address VARCHAR(45),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_user_id (user_id),
+      INDEX idx_action (action),
+      INDEX idx_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    INSERT INTO users (username, email, password_hash, role, is_active)
+    SELECT 'admin', 'admin@clawreef.local', '$2a$10$pbenze514mwv3pvQySQBVOsF5J4DBXL2kVo1hLa8JFhQu5x3AKvBi', 'admin', TRUE
+    WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = 'admin');
+
+    INSERT INTO user_quotas (user_id, max_instances, max_cpu_cores, max_memory_gb, max_storage_gb, max_gpu_count)
+    SELECT id, 100, 200, 1000, 5000, 10 FROM users
+    WHERE username = 'admin'
+      AND NOT EXISTS (SELECT 1 FROM user_quotas WHERE user_id = users.id);
+  002_add_webtop_instance_type.sql: |
+    USE clawreef;
+    ALTER TABLE instances
+    MODIFY COLUMN type ENUM('openclaw', 'ubuntu', 'debian', 'centos', 'custom', 'webtop', 'hermes') DEFAULT 'ubuntu';
+  003_add_system_image_settings.sql: |
+    USE clawreef;
+    CREATE TABLE IF NOT EXISTS system_image_settings (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_type VARCHAR(50) NOT NULL,
+      runtime_type ENUM('desktop', 'shell') NOT NULL DEFAULT 'desktop',
+      display_name VARCHAR(255) NOT NULL,
+      image VARCHAR(500) NOT NULL,
+      is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_instance_type (instance_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  004_fix_seeded_admin_password.sql: |
+    USE clawreef;
+    UPDATE users
+    SET password_hash = '$2a$10$pbenze514mwv3pvQySQBVOsF5J4DBXL2kVo1hLa8JFhQu5x3AKvBi'
+    WHERE username = 'admin'
+      AND password_hash = '$2a$10$N9qo8uLOickgx2ZMRZoMy.MqrzL9wGC3qD3Q.ZHqQH6t3q7l1L5uG';
+  005_update_openclaw_default_image.sql: |
+    USE clawreef;
+    UPDATE system_image_settings
+    SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest'
+    WHERE instance_type = 'openclaw'
+      AND image IN (
+        'ericpearlee/openclaw:v2026.3.24',
+        'ghcr.io/yuan-lab-llm/clawmanager-openclaw-image/openclaw:latest'
+      );
+  006_add_openclaw_config_center.sql: |
+    USE clawreef;
+    SET @openclaw_snapshot_column_exists = (
+      SELECT COUNT(*)
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'instances'
+        AND COLUMN_NAME = 'openclaw_config_snapshot_id'
+    );
+    SET @openclaw_snapshot_column_sql = IF(
+      @openclaw_snapshot_column_exists = 0,
+      'ALTER TABLE instances ADD COLUMN openclaw_config_snapshot_id INT NULL AFTER access_token',
+      'SELECT 1'
+    );
+    PREPARE openclaw_snapshot_column_stmt FROM @openclaw_snapshot_column_sql;
+    EXECUTE openclaw_snapshot_column_stmt;
+    DEALLOCATE PREPARE openclaw_snapshot_column_stmt;
+
+    CREATE TABLE IF NOT EXISTS openclaw_config_resources (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      resource_type VARCHAR(50) NOT NULL,
+      resource_key VARCHAR(100) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      description TEXT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      version INT NOT NULL DEFAULT 1,
+      tags_json LONGTEXT NOT NULL,
+      content_json LONGTEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE KEY uk_openclaw_resource_key (user_id, resource_type, resource_key),
+      INDEX idx_openclaw_resource_user_type (user_id, resource_type),
+      INDEX idx_openclaw_resource_user_enabled (user_id, enabled)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS openclaw_config_bundles (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      description TEXT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      version INT NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_openclaw_bundle_user (user_id),
+      INDEX idx_openclaw_bundle_user_enabled (user_id, enabled)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS openclaw_config_bundle_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      bundle_id INT NOT NULL,
+      resource_id INT NOT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      required BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (bundle_id) REFERENCES openclaw_config_bundles(id) ON DELETE CASCADE,
+      FOREIGN KEY (resource_id) REFERENCES openclaw_config_resources(id) ON DELETE CASCADE,
+      UNIQUE KEY uk_openclaw_bundle_resource (bundle_id, resource_id),
+      INDEX idx_openclaw_bundle_item_bundle (bundle_id, sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS openclaw_injection_snapshots (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      instance_id INT NULL,
+      user_id INT NOT NULL,
+      mode VARCHAR(20) NOT NULL,
+      bundle_id INT NULL,
+      selected_resource_ids_json LONGTEXT NOT NULL,
+      resolved_resources_json LONGTEXT NOT NULL,
+      rendered_manifest_json LONGTEXT NOT NULL,
+      rendered_env_json LONGTEXT NOT NULL,
+      secret_name VARCHAR(255) NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      error_message TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      activated_at TIMESTAMP NULL,
+      INDEX idx_openclaw_snapshot_user_created (user_id, created_at),
+      INDEX idx_openclaw_snapshot_instance (instance_id),
+      INDEX idx_openclaw_snapshot_bundle (bundle_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  011_add_hermes_instance_type.sql: |
+    USE clawreef;
+    ALTER TABLE instances
+    MODIFY COLUMN type ENUM('openclaw', 'ubuntu', 'debian', 'centos', 'custom', 'webtop', 'hermes') DEFAULT 'ubuntu';
+  012_update_agents_runtime_default_images.sql: |
+    USE clawreef;
+    UPDATE system_image_settings
+    SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest'
+    WHERE instance_type = 'openclaw'
+      AND image IN (
+        'ericpearlee/openclaw:v2026.3.24',
+        'ghcr.io/yuan-lab-llm/clawmanager-openclaw-image/openclaw:latest'
+      );
+
+    UPDATE system_image_settings
+    SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest'
+    WHERE instance_type = 'hermes'
+      AND image IN (
+        'registry.example.com/hermes-webtop:latest',
+        'lscr.io/linuxserver/webtop:ubuntu-xfce'
+      );
+  013_normalize_agents_runtime_image_names.sql: |
+    USE clawreef;
+    UPDATE system_image_settings
+    SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest'
+    WHERE image = 'ghcr.io/Yuan-lab-LLM/AgentsRuntime/openclaw:latest';
+
+    UPDATE system_image_settings
+    SET image = 'ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest'
+    WHERE image = 'ghcr.io/Yuan-lab-LLM/AgentsRuntime/hermes:latest';
+  019_add_instance_runtime_type.sql: |
+    USE clawreef;
+    SET @instance_runtime_type_column_exists = (
+      SELECT COUNT(*)
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'instances'
+        AND COLUMN_NAME = 'runtime_type'
+    );
+    SET @instance_runtime_type_column_sql = IF(
+      @instance_runtime_type_column_exists = 0,
+      'ALTER TABLE instances ADD COLUMN runtime_type ENUM(''desktop'', ''shell'') NOT NULL DEFAULT ''desktop'' AFTER type',
+      'SELECT 1'
+    );
+    PREPARE instance_runtime_type_column_stmt FROM @instance_runtime_type_column_sql;
+    EXECUTE instance_runtime_type_column_stmt;
+    DEALLOCATE PREPARE instance_runtime_type_column_stmt;
+  020_add_system_image_runtime_type.sql: |
+    USE clawreef;
+    SET @system_image_runtime_type_column_exists = (
+      SELECT COUNT(*)
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'system_image_settings'
+        AND COLUMN_NAME = 'runtime_type'
+    );
+    SET @system_image_runtime_type_column_sql = IF(
+      @system_image_runtime_type_column_exists = 0,
+      'ALTER TABLE system_image_settings ADD COLUMN runtime_type ENUM(''desktop'', ''shell'') NOT NULL DEFAULT ''desktop'' AFTER instance_type',
+      'SELECT 1'
+    );
+    PREPARE system_image_runtime_type_column_stmt FROM @system_image_runtime_type_column_sql;
+    EXECUTE system_image_runtime_type_column_stmt;
+    DEALLOCATE PREPARE system_image_runtime_type_column_stmt;
+  021_add_openclaw_shell_runtime_image.sql: |
+    USE clawreef;
+    SET @system_image_is_enabled_column_exists = (
+      SELECT COUNT(*)
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'system_image_settings'
+        AND COLUMN_NAME = 'is_enabled'
+    );
+    SET @system_image_is_enabled_column_sql = IF(
+      @system_image_is_enabled_column_exists = 0,
+      'ALTER TABLE system_image_settings ADD COLUMN is_enabled BOOLEAN NOT NULL DEFAULT TRUE',
+      'SELECT 1'
+    );
+    PREPARE system_image_is_enabled_column_stmt FROM @system_image_is_enabled_column_sql;
+    EXECUTE system_image_is_enabled_column_stmt;
+    DEALLOCATE PREPARE system_image_is_enabled_column_stmt;
+
+    SET @system_image_unique_instance_type_index_name = (
+      SELECT INDEX_NAME
+      FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'system_image_settings'
+        AND COLUMN_NAME = 'instance_type'
+        AND NON_UNIQUE = 0
+        AND INDEX_NAME <> 'PRIMARY'
+      LIMIT 1
+    );
+    SET @system_image_unique_instance_type_index_sql = IF(
+      @system_image_unique_instance_type_index_name IS NOT NULL,
+      CONCAT(
+        'ALTER TABLE system_image_settings DROP INDEX `',
+        REPLACE(@system_image_unique_instance_type_index_name, '`', '``'),
+        '`'
+      ),
+      'SELECT 1'
+    );
+    PREPARE system_image_unique_instance_type_index_stmt FROM @system_image_unique_instance_type_index_sql;
+    EXECUTE system_image_unique_instance_type_index_stmt;
+    DEALLOCATE PREPARE system_image_unique_instance_type_index_stmt;
+
+    INSERT INTO system_image_settings (instance_type, runtime_type, display_name, image, is_enabled)
+    SELECT
+      'openclaw',
+      'desktop',
+      'OpenClaw Desktop',
+      'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest',
+      TRUE
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'openclaw'
+        AND runtime_type = 'desktop'
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'openclaw'
+        AND is_enabled = FALSE
+    );
+
+    INSERT INTO system_image_settings (instance_type, runtime_type, display_name, image, is_enabled)
+    SELECT
+      'openclaw',
+      'shell',
+      'OpenClaw Lite',
+      'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest',
+      TRUE
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'openclaw'
+        AND runtime_type = 'shell'
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'openclaw'
+        AND is_enabled = FALSE
+    );
+  022_add_openclaw_config_bundle_skills.sql: |
+    USE clawreef;
+    CREATE TABLE IF NOT EXISTS openclaw_config_bundle_skills (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      bundle_id INT NOT NULL,
+      skill_id INT NOT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      required BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (bundle_id) REFERENCES openclaw_config_bundles(id) ON DELETE CASCADE,
+      FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+      UNIQUE KEY uk_openclaw_bundle_skill (bundle_id, skill_id),
+      INDEX idx_openclaw_bundle_skill_bundle (bundle_id, sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  023_normalize_runtime_config_mounts.sql: |
+    USE clawreef;
+    UPDATE instances
+    SET mount_path = '/config',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE type IN ('openclaw', 'ubuntu', 'webtop', 'hermes')
+      AND mount_path IN ('/data', '/home/user/data', '/config/.hermes');
+  031_add_hermes_lite_runtime_image.sql: |
+    USE clawreef;
+    UPDATE system_image_settings
+    SET
+      image = 'ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest',
+      display_name = 'Hermes Lite',
+      is_enabled = TRUE
+    WHERE instance_type = 'hermes'
+      AND runtime_type = 'shell'
+      AND image IN (
+        'ghcr.io/yuan-lab-llm/agentsruntime/hermes-shell:latest',
+        'registry.example.com/your-custom-shell-image:latest'
+      );
+
+    INSERT INTO system_image_settings (instance_type, runtime_type, display_name, image, is_enabled)
+    SELECT
+      'hermes',
+      'shell',
+      'Hermes Lite',
+      'ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest',
+      TRUE
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'hermes'
+        AND runtime_type = 'shell'
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM system_image_settings
+      WHERE instance_type = 'hermes'
+        AND is_enabled = FALSE
+    );
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data
+  namespace: clawreef-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: clawreef-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clawreef-secrets
+                  key: mysql-root-password
+            - name: MYSQL_DATABASE
+              value: clawreef
+            - name: MYSQL_USER
+              value: clawreef
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clawreef-secrets
+                  key: mysql-password
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: mysql-init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-data
+        - name: mysql-init
+          configMap:
+            name: clawreef-mysql-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: clawreef-system
+spec:
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clawreef-backend
+  namespace: clawreef-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clawreef-backend-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: clawreef-backend
+    namespace: clawreef-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clawreef-backend
+  namespace: clawreef-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clawreef-backend
+  template:
+    metadata:
+      labels:
+        app: clawreef-backend
+    spec:
+      serviceAccountName: clawreef-backend
+      containers:
+        - name: backend
+          image: clawreef-backend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9001
+          env:
+            - name: SERVER_ADDRESS
+              value: ":9001"
+            - name: SERVER_MODE
+              value: "debug"
+            - name: DB_HOST
+              value: "host.lima.internal"
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_USER
+              value: "clawreef"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clawreef-secrets
+                  key: mysql-password
+            - name: DB_NAME
+              value: "clawreef"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clawreef-secrets
+                  key: jwt-secret
+            - name: K8S_MODE
+              value: "incluster"
+            - name: K8S_NAMESPACE
+              value: "clawreef"
+            - name: K8S_STORAGE_CLASS
+              value: "local-path"
+            - name: CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB
+              value: "500"
+          readinessProbe:
+            tcpSocket:
+              port: 9001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawreef-backend
+  namespace: clawreef-system
+spec:
+  selector:
+    app: clawreef-backend
+  ports:
+    - name: http
+      port: 9001
+      targetPort: 9001

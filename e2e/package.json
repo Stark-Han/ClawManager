@@ -1,0 +1,28 @@
+{
+  "name": "clawmanager-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test:p0": "tsx scripts/run-with-log.ts p0",
+    "test:p1": "tsx scripts/run-with-log.ts p1",
+    "test:p2": "tsx scripts/run-with-log.ts p2",
+    "test:all": "tsx scripts/run-with-log.ts all",
+    "ci:p0": "tsx scripts/run-with-log.ts p0 --ci",
+    "target": "tsx scripts/run-target.ts",
+    "test:target-script": "tsx scripts/runner-utils.test.ts && tsx scripts/run-with-log.test.ts && tsx scripts/run-target.test.ts",
+    "pw:p0": "playwright test --grep @p0",
+    "pw:p1": "playwright test --grep @p1",
+    "pw:p2": "playwright test --grep @p2",
+    "pw:all": "playwright test",
+    "test:report": "playwright show-report playwright-report",
+    "db:reset": "tsx scripts/reset-db.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^24.12.0",
+    "mysql2": "^3.11.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

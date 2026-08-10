@@ -1,0 +1,219 @@
+package db
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestSplitSQLStatements(t *testing.T) {
+	input := `
+-- create table comment
+CREATE TABLE demo (
+  id INT PRIMARY KEY,
+  note VARCHAR(255) DEFAULT 'hello;world'
+);
+
+/* block comment */
+INSERT INTO demo (id, note) VALUES (1, 'value');
+UPDATE demo SET note = "a;quoted" WHERE id = 1;
+`
+
+	got := splitSQLStatements(input)
+	want := []string{
+		"CREATE TABLE demo (\n  id INT PRIMARY KEY,\n  note VARCHAR(255) DEFAULT 'hello;world'\n)",
+		"INSERT INTO demo (id, note) VALUES (1, 'value')",
+		`UPDATE demo SET note = "a;quoted" WHERE id = 1`,
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected statements:\nwant: %#v\ngot: %#v", want, got)
+	}
+}
+
+func TestMigration023IsEmbedded(t *testing.T) {
+	files, err := embeddedMigrations.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+
+	found := false
+	for _, file := range files {
+		if file.Name() == "023_add_runtime_pool_v2.sql" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("migration 023_add_runtime_pool_v2.sql is not embedded")
+	}
+}
+
+func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/034_update_lite_default_images.sql")
+	if err != nil {
+		t.Fatalf("read migration 034: %v", err)
+	}
+	sql := string(raw)
+	for _, image := range []string{
+		"ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest",
+		"ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest",
+	} {
+		if !strings.Contains(sql, image) {
+			t.Fatalf("migration 034 must update lite image %s", image)
+		}
+	}
+}
+
+func TestMigration023IsRetrySafe(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/023_add_runtime_pool_v2.sql")
+	if err != nil {
+		t.Fatalf("read migration 023: %v", err)
+	}
+
+	sql := string(raw)
+	if !strings.Contains(sql, "information_schema.COLUMNS") {
+		t.Fatalf("migration 023 must guard instance column additions with information_schema.COLUMNS")
+	}
+	for _, column := range []string{
+		"workspace_path",
+		"workspace_usage_bytes",
+		"runtime_generation",
+		"runtime_error_message",
+	} {
+		if !strings.Contains(sql, "COLUMN_NAME = '"+column+"'") {
+			t.Fatalf("migration 023 must guard %s column addition", column)
+		}
+	}
+	for _, table := range []string{
+		"runtime_pods",
+		"instance_runtime_bindings",
+		"runtime_rollouts",
+		"workspace_file_audits",
+	} {
+		if !strings.Contains(sql, "CREATE TABLE IF NOT EXISTS "+table) {
+			t.Fatalf("migration 023 must create %s idempotently", table)
+		}
+	}
+}
+
+func TestMigration035HardensTeamEventProtocol(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/035_harden_team_event_protocol.sql")
+	if err != nil {
+		t.Fatalf("read migration 035: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"event_id",
+		"completion_id",
+		"sequence_no",
+		"uk_team_events_event_id",
+		"uk_team_events_completion_id",
+		"CREATE TABLE IF NOT EXISTS team_work_items",
+		"uk_team_work_items_work",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 035 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration036AddsReliableTeamEventOutbox(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/036_add_team_event_outbox.sql")
+	if err != nil {
+		t.Fatalf("read migration 036: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS team_event_outbox",
+		"uk_team_event_outbox_message",
+		"idx_team_event_outbox_pending",
+		"source_event_id",
+		"available_at",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 036 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration037AddsTeamWorkflowLedger(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/037_add_team_workflow_ledger.sql")
+	if err != nil {
+		t.Fatalf("read migration 037: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"workflow_state",
+		"plan_version",
+		"ledger_version",
+		"accepted_completion_id",
+		"assignment_id",
+		"canonical_work_id",
+		"phase_id",
+		"required_for_root",
+		"CREATE TABLE IF NOT EXISTS team_workflow_phases",
+		"uk_team_workflow_phase",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 037 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration038AddsGatewayTokenAliases(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/038_add_instance_gateway_token_aliases.sql")
+	if err != nil {
+		t.Fatalf("read migration 038: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS instance_gateway_token_aliases",
+		"token_hash CHAR(64)",
+		"expires_at TIMESTAMP NOT NULL",
+		"last_used_at TIMESTAMP NULL",
+		"uk_instance_gateway_token_aliases_hash",
+		"ON DELETE CASCADE",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 038 must contain %s", required)
+		}
+	}
+	if strings.Contains(sql, "access_token") {
+		t.Fatalf("migration 038 must not store raw access tokens")
+	}
+}
+
+func TestMigration041AddsSessionUsageIndexes(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/041_add_session_usage_indexes.sql")
+	if err != nil {
+		t.Fatalf("read migration 041: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"idx_cost_records_instance_id",
+		"idx_cost_records_session_id",
+		"idx_model_invocations_instance_session",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 041 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration042AddsImmutableReviewContractTarget(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/042_add_team_review_contract.sql")
+	if err != nil {
+		t.Fatalf("read migration 042: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"review_target_assignment_id",
+		"review_target_revision",
+		"idx_team_work_items_review_target",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 042 must contain %s", required)
+		}
+	}
+}

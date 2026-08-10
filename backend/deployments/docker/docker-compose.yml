@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: clawreef-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: clawreef
+      MYSQL_USER: clawreef
+      MYSQL_PASSWORD: clawreef123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../internal/db/migrations:/docker-entrypoint-initdb.d
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    container_name: clawreef-backend
+    environment:
+      SERVER_ADDRESS: ":9001"
+      SERVER_MODE: "debug"
+      DB_HOST: "mysql"
+      DB_PORT: "3306"
+      DB_USER: "clawreef"
+      DB_PASSWORD: "clawreef123"
+      DB_NAME: "clawreef"
+      JWT_SECRET: "clawreef-dev-secret-key"
+      CLAWMANAGER_WORKSPACE_ARCHIVE_MAX_MIB: "500"
+    ports:
+      - "9001:9001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ../../configs:/app/configs
+
+volumes:
+  mysql_data:
