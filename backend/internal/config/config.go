@@ -12,16 +12,17 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	Server         ServerConfig         `yaml:"server"`
-	Database       DatabaseConfig       `yaml:"database"`
-	JWT            JWTConfig            `yaml:"jwt"`
-	Kubernetes     KubernetesConfig     `yaml:"kubernetes"`
-	Storage        StorageConfig        `yaml:"storage"`
-	Runtime        RuntimePoolConfig    `yaml:"runtime"`
-	ObjectStorage  ObjectStorageConfig  `yaml:"objectStorage"`
-	SkillScanner   SkillScannerConfig   `yaml:"skillScanner"`
+	Server           ServerConfig           `yaml:"server"`
+	Database         DatabaseConfig         `yaml:"database"`
+	JWT              JWTConfig              `yaml:"jwt"`
+	Northbound       NorthboundConfig       `yaml:"northbound"`
+	Kubernetes       KubernetesConfig       `yaml:"kubernetes"`
+	Storage          StorageConfig          `yaml:"storage"`
+	Runtime          RuntimePoolConfig      `yaml:"runtime"`
+	ObjectStorage    ObjectStorageConfig    `yaml:"objectStorage"`
+	SkillScanner     SkillScannerConfig     `yaml:"skillScanner"`
 	SkillMaterialize SkillMaterializeConfig `yaml:"skillMaterialize"`
-	LeaderElection LeaderElectionConfig `yaml:"leaderElection"`
+	LeaderElection   LeaderElectionConfig   `yaml:"leaderElection"`
 }
 
 // LeaderElectionConfig controls the control-plane leader election that gates
@@ -66,6 +67,36 @@ type JWTConfig struct {
 	Secret        string `yaml:"secret"`
 	AccessExpiry  int    `yaml:"access_expiry"`  // minutes
 	RefreshExpiry int    `yaml:"refresh_expiry"` // hours
+}
+
+// NorthboundConfig controls the separately deployed northbound gateway and
+// the private Core listener used by that gateway. It is disabled by default;
+// enabling either process requires explicit key and TLS configuration.
+type NorthboundConfig struct {
+	Enabled               bool          `yaml:"enabled"`
+	GatewayAddress        string        `yaml:"gatewayAddress"`
+	GatewayTrustedProxies []string      `yaml:"gatewayTrustedProxies"`
+	CoreInternalAddress   string        `yaml:"coreInternalAddress"`
+	CoreBaseURL           string        `yaml:"coreBaseUrl"`
+	GatewayTLSCertFile    string        `yaml:"gatewayTlsCertFile"`
+	GatewayTLSKeyFile     string        `yaml:"gatewayTlsKeyFile"`
+	GatewayClientCertFile string        `yaml:"gatewayClientCertFile"`
+	GatewayClientKeyFile  string        `yaml:"gatewayClientKeyFile"`
+	CoreTLSCertFile       string        `yaml:"coreTlsCertFile"`
+	CoreTLSKeyFile        string        `yaml:"coreTlsKeyFile"`
+	CoreClientCAFile      string        `yaml:"coreClientCaFile"`
+	CoreCAFile            string        `yaml:"coreCaFile"`
+	JWEPrivateKeyFile     string        `yaml:"jwePrivateKeyFile"`
+	JWEKeyID              string        `yaml:"jweKeyId"`
+	JWTSecret             string        `yaml:"jwtSecret"`
+	RefreshTokenPepper    string        `yaml:"refreshTokenPepper"`
+	InternalJWTSecret     string        `yaml:"internalJwtSecret"`
+	ChallengeTTL          time.Duration `yaml:"challengeTtl"`
+	AccessTokenTTL        time.Duration `yaml:"accessTokenTtl"`
+	RefreshTokenTTL       time.Duration `yaml:"refreshTokenTtl"`
+	OperationTick         time.Duration `yaml:"operationTick"`
+	OperationLease        time.Duration `yaml:"operationLease"`
+	OperationMaxAttempts  int           `yaml:"operationMaxAttempts"`
 }
 
 // KubernetesConfig holds Kubernetes-related configuration
@@ -203,11 +234,11 @@ type SkillScannerConfig struct {
 }
 
 type SkillMaterializeConfig struct {
-	Enabled              bool `yaml:"enabled"`
-	TickMS               int  `yaml:"tickMs"`
-	BatchSize            int  `yaml:"batchSize"`
-	Concurrency          int  `yaml:"concurrency"`
-	PerInstanceConcurrency int `yaml:"perInstanceConcurrency"`
+	Enabled                bool `yaml:"enabled"`
+	TickMS                 int  `yaml:"tickMs"`
+	BatchSize              int  `yaml:"batchSize"`
+	Concurrency            int  `yaml:"concurrency"`
+	PerInstanceConcurrency int  `yaml:"perInstanceConcurrency"`
 }
 
 // Load loads configuration from file and environment variables
@@ -230,6 +261,19 @@ func Load() (*Config, error) {
 			Secret:        getEnv("JWT_SECRET", "clawreef-secret-key-change-in-production"),
 			AccessExpiry:  60,  // 60 minutes
 			RefreshExpiry: 168, // 7 days
+		},
+		Northbound: NorthboundConfig{
+			Enabled:              getEnvBool("CLAWMANAGER_NORTHBOUND_ENABLED", false),
+			GatewayAddress:       getEnv("NORTHBOUND_GATEWAY_ADDRESS", ":9443"),
+			CoreInternalAddress:  getEnv("NORTHBOUND_CORE_INTERNAL_ADDRESS", ":9002"),
+			CoreBaseURL:          getEnv("NORTHBOUND_CORE_BASE_URL", "https://clawmanager-core:9002"),
+			JWEKeyID:             getEnv("NORTHBOUND_JWE_KEY_ID", "northbound-login-v1"),
+			ChallengeTTL:         getEnvDuration("NORTHBOUND_CHALLENGE_TTL", time.Minute),
+			AccessTokenTTL:       getEnvDuration("NORTHBOUND_ACCESS_TOKEN_TTL", 30*time.Minute),
+			RefreshTokenTTL:      getEnvDuration("NORTHBOUND_REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			OperationTick:        getEnvDuration("NORTHBOUND_OPERATION_TICK", time.Second),
+			OperationLease:       getEnvDuration("NORTHBOUND_OPERATION_LEASE", 30*time.Second),
+			OperationMaxAttempts: getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", 5),
 		},
 		Kubernetes: KubernetesConfig{
 			Mode: getEnv("K8S_MODE", "auto"),
@@ -404,6 +448,33 @@ func applyEnvOverrides(config *Config) {
 	if secret := os.Getenv("JWT_SECRET"); secret != "" {
 		config.JWT.Secret = secret
 	}
+
+	config.Northbound.Enabled = getEnvBool("CLAWMANAGER_NORTHBOUND_ENABLED", config.Northbound.Enabled)
+	config.Northbound.GatewayAddress = getEnv("NORTHBOUND_GATEWAY_ADDRESS", config.Northbound.GatewayAddress)
+	if raw := strings.TrimSpace(os.Getenv("NORTHBOUND_TRUSTED_PROXIES")); raw != "" {
+		config.Northbound.GatewayTrustedProxies = splitNonEmpty(raw)
+	}
+	config.Northbound.CoreInternalAddress = getEnv("NORTHBOUND_CORE_INTERNAL_ADDRESS", config.Northbound.CoreInternalAddress)
+	config.Northbound.CoreBaseURL = getEnv("NORTHBOUND_CORE_BASE_URL", config.Northbound.CoreBaseURL)
+	config.Northbound.GatewayTLSCertFile = getEnv("NORTHBOUND_GATEWAY_TLS_CERT_FILE", config.Northbound.GatewayTLSCertFile)
+	config.Northbound.GatewayTLSKeyFile = getEnv("NORTHBOUND_GATEWAY_TLS_KEY_FILE", config.Northbound.GatewayTLSKeyFile)
+	config.Northbound.GatewayClientCertFile = getEnv("NORTHBOUND_GATEWAY_CLIENT_CERT_FILE", config.Northbound.GatewayClientCertFile)
+	config.Northbound.GatewayClientKeyFile = getEnv("NORTHBOUND_GATEWAY_CLIENT_KEY_FILE", config.Northbound.GatewayClientKeyFile)
+	config.Northbound.CoreTLSCertFile = getEnv("NORTHBOUND_CORE_TLS_CERT_FILE", config.Northbound.CoreTLSCertFile)
+	config.Northbound.CoreTLSKeyFile = getEnv("NORTHBOUND_CORE_TLS_KEY_FILE", config.Northbound.CoreTLSKeyFile)
+	config.Northbound.CoreClientCAFile = getEnv("NORTHBOUND_CORE_CLIENT_CA_FILE", config.Northbound.CoreClientCAFile)
+	config.Northbound.CoreCAFile = getEnv("NORTHBOUND_CORE_CA_FILE", config.Northbound.CoreCAFile)
+	config.Northbound.JWEPrivateKeyFile = getEnv("NORTHBOUND_JWE_PRIVATE_KEY_FILE", config.Northbound.JWEPrivateKeyFile)
+	config.Northbound.JWEKeyID = getEnv("NORTHBOUND_JWE_KEY_ID", config.Northbound.JWEKeyID)
+	config.Northbound.JWTSecret = getEnv("NORTHBOUND_JWT_SECRET", config.Northbound.JWTSecret)
+	config.Northbound.RefreshTokenPepper = getEnv("NORTHBOUND_REFRESH_TOKEN_PEPPER", config.Northbound.RefreshTokenPepper)
+	config.Northbound.InternalJWTSecret = getEnv("NORTHBOUND_INTERNAL_JWT_SECRET", config.Northbound.InternalJWTSecret)
+	config.Northbound.ChallengeTTL = getEnvDuration("NORTHBOUND_CHALLENGE_TTL", config.Northbound.ChallengeTTL)
+	config.Northbound.AccessTokenTTL = getEnvDuration("NORTHBOUND_ACCESS_TOKEN_TTL", config.Northbound.AccessTokenTTL)
+	config.Northbound.RefreshTokenTTL = getEnvDuration("NORTHBOUND_REFRESH_TOKEN_TTL", config.Northbound.RefreshTokenTTL)
+	config.Northbound.OperationTick = getEnvDuration("NORTHBOUND_OPERATION_TICK", config.Northbound.OperationTick)
+	config.Northbound.OperationLease = getEnvDuration("NORTHBOUND_OPERATION_LEASE", config.Northbound.OperationLease)
+	config.Northbound.OperationMaxAttempts = getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", config.Northbound.OperationMaxAttempts)
 
 	// Kubernetes config
 	if mode := os.Getenv("K8S_MODE"); mode != "" {
@@ -582,6 +653,17 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func splitNonEmpty(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func defaultWorkspaceNFSServer(namespace string) string {

@@ -669,6 +669,21 @@ func TestSharedInstanceSessionRequiresPasswordEntrySession(t *testing.T) {
 	}
 }
 
+func TestSharePasswordResetChangesSessionBindingWithoutChangingURL(t *testing.T) {
+	oldHash := "old-password-hash"
+	newHash := "new-password-hash"
+	oldAccess := &models.InstanceExternalAccess{AuthMode: services.ExternalAccessModePassword, PasswordHash: &oldHash}
+	newAccess := &models.InstanceExternalAccess{AuthMode: services.ExternalAccessModePassword, PasswordHash: &newHash}
+	oldBinding := sharedExternalAccessSessionBinding("sl_test", oldAccess)
+	newBinding := sharedExternalAccessSessionBinding("sl_test", newAccess)
+	if oldBinding == newBinding {
+		t.Fatal("password reset must invalidate existing share sessions")
+	}
+	if got := sharedExternalAccessSessionBinding("sl_test"); got == "" {
+		t.Fatal("legacy share-link binding must remain available")
+	}
+}
+
 func TestProxyAccessTokenPrefersCookieOverRuntimeQueryToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	accessService := services.NewInstanceAccessService()
@@ -693,6 +708,64 @@ func TestProxyAccessTokenPrefersCookieOverRuntimeQueryToken(t *testing.T) {
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected response status %d", recorder.Code)
+	}
+}
+
+func TestProxyAccessTokenRejectsShareSessionAfterPasswordReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	accessService := services.NewInstanceAccessService()
+	defer accessService.Stop()
+
+	slug := "sl_test"
+	oldHash := "old-password-hash"
+	newHash := "new-password-hash"
+	oldAccess := &models.InstanceExternalAccess{
+		InstanceID:   76,
+		Enabled:      true,
+		AuthMode:     services.ExternalAccessModePassword,
+		PublicSlug:   &slug,
+		PasswordHash: &oldHash,
+	}
+	currentAccess := &models.InstanceExternalAccess{
+		InstanceID:   76,
+		Enabled:      true,
+		AuthMode:     services.ExternalAccessModePassword,
+		PublicSlug:   &slug,
+		PasswordHash: &newHash,
+	}
+	staleToken, err := accessService.GenerateBoundToken(
+		1, 76, "hermes", "/api/v1/instances/76/proxy/", "", 3000, time.Hour,
+		sharedExternalAccessSessionBinding(slug, oldAccess),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentToken, err := accessService.GenerateBoundToken(
+		1, 76, "hermes", "/api/v1/instances/76/proxy/", "", 3000, time.Hour,
+		sharedExternalAccessSessionBinding(slug, currentAccess),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &InstanceHandler{
+		accessService:         accessService,
+		externalAccessService: &fakeSharedExternalAccessService{access: currentAccess},
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/instances/76/proxy/", nil)
+	c.Request.AddCookie(&http.Cookie{Name: "instance_access_76", Value: staleToken.Token})
+	if got, ok := handler.proxyAccessToken(c, 76); ok || got != "" {
+		t.Fatalf("stale share token = %q/%v, want rejected", got, ok)
+	}
+
+	recorder = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/instances/76/proxy/", nil)
+	c.Request.AddCookie(&http.Cookie{Name: "instance_access_76", Value: currentToken.Token})
+	if got, ok := handler.proxyAccessToken(c, 76); !ok || got != currentToken.Token {
+		t.Fatalf("current share token = %q/%v, want accepted", got, ok)
 	}
 }
 

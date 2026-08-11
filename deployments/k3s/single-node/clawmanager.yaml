@@ -910,6 +910,8 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "--innodb-use-native-aio=0"
+            - "--binlog-expire-logs-seconds=259200"
+            - "--max-binlog-size=134217728"
           ports:
             - containerPort: 3306
           env:

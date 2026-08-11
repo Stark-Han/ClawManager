@@ -17,6 +17,7 @@ import (
 	"clawreef/internal/handlers"
 	"clawreef/internal/middleware"
 	"clawreef/internal/models"
+	"clawreef/internal/northbound"
 	"clawreef/internal/repository"
 	"clawreef/internal/services"
 	"clawreef/internal/services/k8s"
@@ -78,6 +79,7 @@ func main() {
 	skillRepo := repository.NewSkillRepository(database)
 	securityScanRepo := repository.NewSecurityScanRepository(database)
 	instanceExternalAccessRepo := repository.NewInstanceExternalAccessRepository(database)
+	northboundRepo := repository.NewNorthboundRepository(database)
 
 	if repaired, repairErr := services.RepairSeededAdminPassword(userRepo); repairErr != nil {
 		log.Printf("Warning: failed to repair seeded admin password: %v", repairErr)
@@ -119,6 +121,36 @@ func main() {
 		services.WithPrivilegedInstancePods(cfg.Kubernetes.Runtime.Pod.Privileged),
 		services.WithV2RuntimeLifecycle(runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot),
 	)
+	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
+	var northboundCoreServer *http.Server
+	var northboundOperationWorker *northbound.OperationWorker
+	if cfg.Northbound.Enabled {
+		coreTLSConfig, tlsErr := northbound.CoreTLSConfig(cfg.Northbound)
+		if tlsErr != nil {
+			log.Fatalf("Failed to initialize northbound Core TLS: %v", tlsErr)
+		}
+		if len(cfg.Northbound.InternalJWTSecret) < 32 {
+			log.Fatal("Failed to initialize northbound Core: NORTHBOUND_INTERNAL_JWT_SECRET must contain at least 32 bytes")
+		}
+		coreService := northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound)
+		coreService.SetAuditRepository(auditEventRepo)
+		northboundOperationWorker = northbound.NewOperationWorker(coreService, cfg.Runtime.BackendReplicaID)
+		coreHandler := northbound.NewCoreHandler(coreService, cfg.Northbound.InternalJWTSecret)
+		coreRouter := gin.New()
+		_ = coreRouter.SetTrustedProxies(nil)
+		coreRouter.Use(gin.Logger(), gin.Recovery(), northbound.RequestContext(), northbound.BodyLimit(64<<10))
+		northbound.RegisterCoreRoutes(coreRouter, coreHandler)
+		northboundCoreServer = &http.Server{
+			Addr:              cfg.Northbound.CoreInternalAddress,
+			Handler:           coreRouter,
+			TLSConfig:         coreTLSConfig,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      35 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+		}
+	}
 	instanceAgentService := services.NewInstanceAgentService(instanceRepo, instanceAgentRepo, instanceDesiredStateRepo, instanceRuntimeStatusRepo, instanceCommandRepo)
 	instanceRuntimeStatusService := services.NewInstanceRuntimeStatusService(instanceRuntimeStatusRepo, instanceAgentRepo, instanceDesiredStateRepo)
 	instanceCommandService := services.NewInstanceCommandService(instanceCommandRepo, instanceRuntimeStatusRepo, instanceDesiredStateRepo, skillRepo)
@@ -156,7 +188,6 @@ func main() {
 	)
 	services.ConfigureSkillRuntimeSync(skillService, bindingRepo, runtimePodRepo, runtimeAgentClient)
 	securityScanService := services.NewSecurityScanService(securityScanRepo, skillRepo, objectStorageService, skillScannerClient)
-	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	aiGatewayService := aigateway.NewService(llmModelRepo, modelInvocationService, auditEventService, costRecordService, riskDetectionService, riskHitService, chatSessionService, chatMessageService)
 
 	// Initialize handlers
@@ -277,6 +308,9 @@ func main() {
 		syncService.Start()
 		materializeWorker.Start()
 		teamService.StartBackground(ctx)
+		if northboundOperationWorker != nil {
+			northboundOperationWorker.Start(ctx)
+		}
 		if runtimeScheduler != nil {
 			runtimeSchedulerMu.Lock()
 			if runtimeSchedulerCancel == nil {
@@ -291,6 +325,9 @@ func main() {
 	stopBackground := func() {
 		log.Printf("Stopping leader-only background loops (identity=%s)", cfg.LeaderElection.Identity)
 		materializeWorker.Stop()
+		if northboundOperationWorker != nil {
+			northboundOperationWorker.Stop()
+		}
 		runtimeSchedulerMu.Lock()
 		if runtimeSchedulerCancel != nil {
 			runtimeSchedulerCancel()
@@ -422,6 +459,8 @@ func main() {
 			instances.GET("/:id/external-access", instanceHandler.GetExternalAccess)
 			instances.POST("/:id/external-access/share-link", instanceHandler.EnableShareLink)
 			instances.POST("/:id/external-access/password", instanceHandler.CreateExternalAccessPassword)
+			instances.POST("/:id/external-access/share-link/reset", instanceHandler.ResetExternalAccessURL)
+			instances.POST("/:id/external-access/password/reset", instanceHandler.ResetExternalAccessPassword)
 			instances.DELETE("/:id/external-access", instanceHandler.DisableExternalAccess)
 			instances.GET("/:id/workspace/files", workspaceFileHandler.List)
 			instances.GET("/:id/workspace/preview", workspaceFileHandler.Preview)
@@ -702,6 +741,15 @@ func main() {
 	}
 
 	// Start server with graceful shutdown
+	if northboundCoreServer != nil {
+		go func() {
+			log.Printf("Northbound Core mTLS server starting on %s", cfg.Northbound.CoreInternalAddress)
+			if err := northboundCoreServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Failed to start northbound Core server: %v", err)
+			}
+		}()
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.Server.Address,
 		Handler: r,
@@ -726,6 +774,11 @@ func main() {
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server forced to shutdown: %v", err)
+	}
+	if northboundCoreServer != nil {
+		if err := northboundCoreServer.Shutdown(ctx); err != nil {
+			log.Printf("Northbound Core server forced to shutdown: %v", err)
+		}
 	}
 
 	// Stop background services. Cancelling leaderCtx releases the lease (and,

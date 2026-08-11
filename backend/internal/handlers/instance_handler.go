@@ -1626,7 +1626,8 @@ func (h *InstanceHandler) ProxyInstance(c *gin.Context) {
 func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool) {
 	cookieName := fmt.Sprintf("instance_access_%d", id)
 	if cookieToken, err := c.Cookie(cookieName); err == nil && strings.TrimSpace(cookieToken) != "" {
-		if accessToken, validateErr := h.accessService.ValidateToken(cookieToken); validateErr == nil && accessToken.InstanceID == id {
+		if accessToken, validateErr := h.accessService.ValidateToken(cookieToken); validateErr == nil &&
+			accessToken.InstanceID == id && h.validCurrentExternalSession(c, accessToken) {
 			return cookieToken, true
 		}
 	}
@@ -1637,7 +1638,7 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 		return "", false
 	}
 	accessToken, err := h.accessService.ValidateToken(queryToken)
-	if err != nil || accessToken.InstanceID != id {
+	if err != nil || accessToken.InstanceID != id || !h.validCurrentExternalSession(c, accessToken) {
 		utils.Error(c, http.StatusUnauthorized, "Access token expired or invalid")
 		return "", false
 	}
@@ -1654,6 +1655,26 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 		true,
 	)
 	return queryToken, true
+}
+
+// validCurrentExternalSession makes a share-issued instance token revocable.
+// Ordinary owner-issued tokens have no session binding and are unaffected.
+func (h *InstanceHandler) validCurrentExternalSession(c *gin.Context, accessToken *services.AccessToken) bool {
+	if accessToken == nil {
+		return false
+	}
+	if strings.TrimSpace(accessToken.SessionBinding) == "" {
+		return true
+	}
+	if h.externalAccessService == nil {
+		return false
+	}
+	access, err := h.externalAccessService.Get(c.Request.Context(), accessToken.InstanceID)
+	if err != nil || access == nil || !access.Enabled || access.PublicSlug == nil {
+		return false
+	}
+	code := strings.TrimSpace(*access.PublicSlug)
+	return code != "" && accessToken.SessionBinding == sharedExternalAccessSessionBinding(code, access)
 }
 
 func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token string) {
@@ -2146,6 +2167,50 @@ func (h *InstanceHandler) CreateExternalAccessPassword(c *gin.Context) {
 	utils.Success(c, http.StatusOK, "Share link password created successfully", result)
 }
 
+func (h *InstanceHandler) ResetExternalAccessURL(c *gin.Context) {
+	instance, ok := h.requireOwnedInstance(c)
+	if !ok {
+		return
+	}
+	if h.externalAccessService == nil {
+		utils.Error(c, http.StatusServiceUnavailable, "External access is not configured")
+		return
+	}
+	userID, _ := c.Get("userID")
+	result, err := h.externalAccessService.ResetURL(c.Request.Context(), instance.ID, userID.(int))
+	if err != nil {
+		if errors.Is(err, services.ErrExternalAccessNotEnabled) {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "Share link URL reset successfully", result)
+}
+
+func (h *InstanceHandler) ResetExternalAccessPassword(c *gin.Context) {
+	instance, ok := h.requireOwnedInstance(c)
+	if !ok {
+		return
+	}
+	if h.externalAccessService == nil {
+		utils.Error(c, http.StatusServiceUnavailable, "External access is not configured")
+		return
+	}
+	userID, _ := c.Get("userID")
+	result, err := h.externalAccessService.ResetPassword(c.Request.Context(), instance.ID, userID.(int))
+	if err != nil {
+		if errors.Is(err, services.ErrExternalAccessNotEnabled) || errors.Is(err, services.ErrExternalAccessPasswordNotEnabled) {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "Share link password reset successfully", result)
+}
+
 func (h *InstanceHandler) DisableExternalAccess(c *gin.Context) {
 	instance, ok := h.requireOwnedInstance(c)
 	if !ok {
@@ -2184,7 +2249,7 @@ func (h *InstanceHandler) OpenShortExternalAccess(c *gin.Context) {
 			return
 		}
 	case services.ExternalAccessModePassword:
-		token = h.validShortLinkAccessToken(c, code, access.InstanceID)
+		token = h.validShortLinkAccessToken(c, code, access)
 		if token == "" {
 			password := externalPassword(c)
 			isPasswordFormPost := c.Request.Method == http.MethodPost && password == ""
@@ -2212,7 +2277,7 @@ func (h *InstanceHandler) OpenShortExternalAccess(c *gin.Context) {
 			if !ok {
 				return
 			}
-			instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code)
+			instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code, access)
 			if !ok {
 				return
 			}
@@ -2236,7 +2301,7 @@ func (h *InstanceHandler) OpenShortExternalAccess(c *gin.Context) {
 		}
 	}
 	if token == "" {
-		instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code)
+		instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code, access)
 		if !ok {
 			return
 		}
@@ -2291,7 +2356,7 @@ func (h *InstanceHandler) GetSharedInstanceSession(c *gin.Context) {
 	}
 	switch access.AuthMode {
 	case services.ExternalAccessModePassword:
-		if h.validShortLinkAccessToken(c, code, access.InstanceID) == "" {
+		if h.validShortLinkAccessToken(c, code, access) == "" {
 			utils.Error(c, http.StatusUnauthorized, "Share link password authentication is required")
 			return
 		}
@@ -2309,7 +2374,7 @@ func (h *InstanceHandler) GetSharedInstanceSession(c *gin.Context) {
 	if !ok {
 		return
 	}
-	instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code)
+	instanceToken, ok := h.issueShortExternalAccessToken(c, instance, code, access)
 	if !ok {
 		return
 	}
@@ -2395,7 +2460,7 @@ func (h *InstanceHandler) requireExternalAccessInstance(c *gin.Context, access *
 	return instance, true
 }
 
-func (h *InstanceHandler) issueShortExternalAccessToken(c *gin.Context, instance *models.Instance, code string) (*services.AccessToken, bool) {
+func (h *InstanceHandler) issueShortExternalAccessToken(c *gin.Context, instance *models.Instance, code string, access *models.InstanceExternalAccess) (*services.AccessToken, bool) {
 	accessURL := h.proxyService.GetProxyURLForInstance(instance, "")
 	if accessURL == "" {
 		utils.Error(c, http.StatusServiceUnavailable, "Unable to generate access URL")
@@ -2411,7 +2476,7 @@ func (h *InstanceHandler) issueShortExternalAccessToken(c *gin.Context, instance
 		upstream,
 		targetPort,
 		1*time.Hour,
-		sharedExternalAccessSessionBinding(code),
+		sharedExternalAccessSessionBinding(code, access),
 	)
 	if err != nil {
 		utils.HandleError(c, err)
@@ -2421,8 +2486,11 @@ func (h *InstanceHandler) issueShortExternalAccessToken(c *gin.Context, instance
 	return instanceToken, true
 }
 
-func (h *InstanceHandler) validShortLinkAccessToken(c *gin.Context, code string, instanceID int) string {
+func (h *InstanceHandler) validShortLinkAccessToken(c *gin.Context, code string, access *models.InstanceExternalAccess) string {
 	if h == nil || h.accessService == nil {
+		return ""
+	}
+	if access == nil {
 		return ""
 	}
 	token, err := c.Cookie(shortExternalAccessCookieName(code))
@@ -2431,8 +2499,8 @@ func (h *InstanceHandler) validShortLinkAccessToken(c *gin.Context, code string,
 	}
 	accessToken, err := h.accessService.ValidateToken(token)
 	if err != nil ||
-		accessToken.InstanceID != instanceID ||
-		accessToken.SessionBinding != sharedExternalAccessSessionBinding(code) {
+		accessToken.InstanceID != access.InstanceID ||
+		accessToken.SessionBinding != sharedExternalAccessSessionBinding(code, access) {
 		return ""
 	}
 	return token
@@ -2530,12 +2598,20 @@ func sharedExternalAccessCSRFToken(code, token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func sharedExternalAccessSessionBinding(code string) string {
+func sharedExternalAccessSessionBinding(code string, accesses ...*models.InstanceExternalAccess) string {
 	code = strings.Trim(strings.TrimSpace(code), "/")
 	if code == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte("shared-instance-session\x00" + code))
+	credentialVersion := ""
+	if len(accesses) > 0 && accesses[0] != nil && accesses[0].AuthMode == services.ExternalAccessModePassword && accesses[0].PasswordHash != nil {
+		credentialVersion = strings.TrimSpace(*accesses[0].PasswordHash)
+	}
+	payload := "shared-instance-session\x00" + code
+	if credentialVersion != "" {
+		payload += "\x00" + credentialVersion
+	}
+	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }
 

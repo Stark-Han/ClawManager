@@ -166,26 +166,27 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 
 // CreateInstanceRequest holds data for creating an instance
 type CreateInstanceRequest struct {
-	Name                 string              `json:"name" validate:"required,min=3,max=50"`
-	Description          *string             `json:"description,omitempty"`
-	Type                 string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
-	Mode                 string              `json:"mode" validate:"omitempty,oneof=lite pro"`
-	InstanceMode         string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
-	RuntimeType          string              `json:"runtime_type" validate:"omitempty,oneof=gateway desktop shell"`
-	DesktopStreamProfile string              `json:"desktop_stream_profile,omitempty" validate:"omitempty,oneof=low standard high"`
-	CPUCores             float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
-	MemoryGB             int                 `json:"memory_gb" validate:"required,min=1,max=128"`
-	DiskGB               int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
-	GPUEnabled           bool                `json:"gpu_enabled"`
-	GPUCount             int                 `json:"gpu_count" validate:"min=0,max=4"`
-	OSType               string              `json:"os_type" validate:"required"`
-	OSVersion            string              `json:"os_version" validate:"required"`
-	ImageRegistry        *string             `json:"image_registry,omitempty"`
-	ImageTag             *string             `json:"image_tag,omitempty"`
-	EnvironmentOverrides map[string]string   `json:"environment_overrides,omitempty"`
-	StorageClass         string              `json:"storage_class"`
-	OpenClawConfigPlan   *OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
-	Team                 *TeamInstanceConfig `json:"-"`
+	Name                    string              `json:"name" validate:"required,min=3,max=50"`
+	Description             *string             `json:"description,omitempty"`
+	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
+	Mode                    string              `json:"mode" validate:"omitempty,oneof=lite pro"`
+	InstanceMode            string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
+	RuntimeType             string              `json:"runtime_type" validate:"omitempty,oneof=gateway desktop shell"`
+	DesktopStreamProfile    string              `json:"desktop_stream_profile,omitempty" validate:"omitempty,oneof=low standard high"`
+	CPUCores                float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
+	MemoryGB                int                 `json:"memory_gb" validate:"required,min=1,max=128"`
+	DiskGB                  int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
+	GPUEnabled              bool                `json:"gpu_enabled"`
+	GPUCount                int                 `json:"gpu_count" validate:"min=0,max=4"`
+	OSType                  string              `json:"os_type" validate:"required"`
+	OSVersion               string              `json:"os_version" validate:"required"`
+	ImageRegistry           *string             `json:"image_registry,omitempty"`
+	ImageTag                *string             `json:"image_tag,omitempty"`
+	EnvironmentOverrides    map[string]string   `json:"environment_overrides,omitempty"`
+	StorageClass            string              `json:"storage_class"`
+	OpenClawConfigPlan      *OpenClawConfigPlan `json:"openclaw_config_plan,omitempty"`
+	Team                    *TeamInstanceConfig `json:"-"`
+	ProvisioningOperationID string              `json:"-"`
 }
 
 type TeamInstanceConfig struct {
@@ -318,6 +319,23 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	ctx := context.Background()
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	req.ProvisioningOperationID = strings.TrimSpace(req.ProvisioningOperationID)
+	if req.ProvisioningOperationID != "" {
+		if repo, ok := s.instanceRepo.(interface {
+			GetByProvisioningOperationID(string) (*models.Instance, error)
+		}); ok {
+			existing, err := repo.GetByProvisioningOperationID(req.ProvisioningOperationID)
+			if err != nil {
+				return nil, err
+			}
+			if existing != nil {
+				if existing.UserID != userID {
+					return nil, fmt.Errorf("provisioning operation belongs to another user")
+				}
+				return existing, nil
+			}
+		}
+	}
 	environmentOverrides, err := normalizeEnvironmentOverrides(req.EnvironmentOverrides)
 	if err != nil {
 		return nil, err
@@ -472,6 +490,7 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 		EnvironmentOverridesJSON: environmentOverridesJSON,
 		StorageClass:             req.StorageClass,
 		MountPath:                runtimeConfig.MountPath,
+		ProvisioningOperationID:  trimOptionalString(&req.ProvisioningOperationID),
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
@@ -778,6 +797,7 @@ func (s *instanceService) createV2Instance(ctx context.Context, userID int, req 
 		StorageClass:             strings.TrimSpace(req.StorageClass),
 		MountPath:                workspaceRoot,
 		RuntimeGeneration:        1,
+		ProvisioningOperationID:  trimOptionalString(&req.ProvisioningOperationID),
 		CreatedAt:                now,
 		UpdatedAt:                now,
 		StartedAt:                &now,

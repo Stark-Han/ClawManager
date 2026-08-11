@@ -45,6 +45,9 @@ lerna-debug.log*
 .env
 .env.local
 .env.*.local
+/.venv-northbound/
+__pycache__/
+*.py[cod]
 
 # Database
 *.db

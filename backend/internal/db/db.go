@@ -14,6 +14,35 @@ var Session db.Session
 
 // Initialize initializes the database connection
 func Initialize(cfg config.DatabaseConfig) (db.Session, error) {
+	session, err := connect(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyEmbeddedMigrations(session); err != nil {
+		_ = session.Close()
+		return nil, fmt.Errorf("failed to apply database migrations: %w", err)
+	}
+
+	Session = session
+	log.Println("Database connected successfully")
+	return session, nil
+}
+
+// Connect opens an application database session without applying migrations.
+// It is used by the separately deployed northbound gateway so that the edge
+// service can run with a least-privilege database account. Core must apply
+// migrations before the gateway is started.
+func Connect(cfg config.DatabaseConfig) (db.Session, error) {
+	session, err := connect(cfg)
+	if err != nil {
+		return nil, err
+	}
+	Session = session
+	log.Println("Database connected successfully (migrations disabled)")
+	return session, nil
+}
+
+func connect(cfg config.DatabaseConfig) (db.Session, error) {
 	hostPort := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	settings := mysql.ConnectionURL{
 		Host:     hostPort,
@@ -35,13 +64,6 @@ func Initialize(cfg config.DatabaseConfig) (db.Session, error) {
 		_ = session.Close()
 		return nil, fmt.Errorf("failed to configure database connection charset: %w", err)
 	}
-	if err := applyEmbeddedMigrations(session); err != nil {
-		_ = session.Close()
-		return nil, fmt.Errorf("failed to apply database migrations: %w", err)
-	}
-
-	Session = session
-	log.Println("Database connected successfully")
 	return session, nil
 }
 
