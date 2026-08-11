@@ -53,6 +53,31 @@ func TestLoadRuntimeGatewayStartInFlightLimitOverride(t *testing.T) {
 	}
 }
 
+func TestLoadNorthboundDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("CLAWMANAGER_NORTHBOUND_ENABLED", "true")
+	t.Setenv("NORTHBOUND_GATEWAY_ADDRESS", ":10443")
+	t.Setenv("NORTHBOUND_TRUSTED_PROXIES", "10.0.0.0/8, 192.0.2.10")
+	t.Setenv("NORTHBOUND_CHALLENGE_TTL", "45s")
+	t.Setenv("NORTHBOUND_OPERATION_MAX_ATTEMPTS", "7")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Northbound.Enabled || cfg.Northbound.GatewayAddress != ":10443" {
+		t.Fatalf("unexpected northbound endpoint config: %+v", cfg.Northbound)
+	}
+	if len(cfg.Northbound.GatewayTrustedProxies) != 2 || cfg.Northbound.GatewayTrustedProxies[1] != "192.0.2.10" {
+		t.Fatalf("unexpected northbound trusted proxies: %v", cfg.Northbound.GatewayTrustedProxies)
+	}
+	if cfg.Northbound.ChallengeTTL != 45*time.Second || cfg.Northbound.OperationMaxAttempts != 7 {
+		t.Fatalf("unexpected northbound lifecycle config: %+v", cfg.Northbound)
+	}
+	if cfg.Northbound.CoreInternalAddress != ":9002" || cfg.Northbound.CoreBaseURL == "" {
+		t.Fatalf("northbound Core defaults are incomplete: %+v", cfg.Northbound)
+	}
+}
+
 func TestLoadStorageProfileDefaultsDisableHostPathFallback(t *testing.T) {
 	for _, key := range []string{
 		"CLAWMANAGER_STORAGE_PROFILE",

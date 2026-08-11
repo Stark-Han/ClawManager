@@ -120,6 +120,12 @@ func (s *fakeSharedExternalAccessService) EnableShareLink(ctx context.Context, i
 func (s *fakeSharedExternalAccessService) CreatePassword(ctx context.Context, instanceID, createdBy int, expiration services.ExternalAccessExpirationRequest) (*services.PasswordExternalAccessResult, error) {
 	return nil, fmt.Errorf("not implemented")
 }
+func (s *fakeSharedExternalAccessService) ResetURL(ctx context.Context, instanceID, createdBy int) (*services.EnableShareLinkResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (s *fakeSharedExternalAccessService) ResetPassword(ctx context.Context, instanceID, createdBy int) (*services.PasswordExternalAccessResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
 func (s *fakeSharedExternalAccessService) Disable(ctx context.Context, instanceID int) error {
 	return fmt.Errorf("not implemented")
 }

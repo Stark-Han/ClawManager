@@ -204,6 +204,22 @@ export const instanceService = {
     return response.data.data;
   },
 
+  resetExternalShareURL: async (id: number): Promise<EnableShareLinkResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/share-link/reset`,
+    );
+    return response.data.data;
+  },
+
+  resetExternalAccessPassword: async (
+    id: number,
+  ): Promise<PasswordExternalAccessResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/password/reset`,
+    );
+    return response.data.data;
+  },
+
   disableExternalAccess: async (id: number): Promise<void> => {
     await api.delete(`/instances/${id}/external-access`);
   },

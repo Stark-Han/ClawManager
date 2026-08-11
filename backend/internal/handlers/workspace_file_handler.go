@@ -338,7 +338,7 @@ func (h *WorkspaceFileHandler) sharedWorkspaceScope(c *gin.Context) (*models.Ins
 	accessToken, tokenErr := h.instanceAccessService.ValidateToken(token)
 	if tokenErr != nil ||
 		accessToken.InstanceID != access.InstanceID ||
-		accessToken.SessionBinding != sharedExternalAccessSessionBinding(code) {
+		accessToken.SessionBinding != sharedExternalAccessSessionBinding(code, access) {
 		utils.Error(c, http.StatusUnauthorized, "Share session expired or invalid")
 		return nil, nil, services.WorkspaceFileScope{}, false
 	}

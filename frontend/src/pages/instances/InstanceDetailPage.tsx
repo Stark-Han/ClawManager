@@ -1,4 +1,4 @@
-﻿import React, {
+import React, {
   useCallback,
   useEffect,
   useMemo,
@@ -61,6 +61,12 @@ const RUNTIME_POLL_INTERVAL_MS = 5000;
 const LITE_COLLAPSED_BOTTOM_FALLBACK_PX = 120;
 const LITE_COLLAPSED_BOTTOM_MAX_PX = 220;
 const LITE_ROOT_GAP_TOTAL_PX = 16; // two gap-2 rows between header / workspace / bottom
+type ExternalAccessAction =
+  | "share-link"
+  | "password"
+  | "reset-url"
+  | "reset-password"
+  | "disable";
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
   labelKey: string;
@@ -368,6 +374,7 @@ const InstanceDetailPage: React.FC = () => {
   const [externalActionLoading, setExternalActionLoading] = useState<
     string | null
   >(null);
+  const [externalResetTarget, setExternalResetTarget] = useState<"url" | "password" | null>(null);
   const [externalError, setExternalError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<string | null>(null);
   const [externalExpiresMode, setExternalExpiresMode] =
@@ -922,7 +929,7 @@ const InstanceDetailPage: React.FC = () => {
   };
 
   const handleExternalAction = async (
-    action: "share-link" | "password" | "disable",
+    action: ExternalAccessAction,
   ) => {
     if (!instance) {
       return;
@@ -957,6 +964,20 @@ const InstanceDetailPage: React.FC = () => {
         setExternalPassword(result.password);
         setExternalPasswordVisible(false);
         setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalAccessPanelOpen(true);
+      } else if (action === "reset-url") {
+        const result = await instanceService.resetExternalShareURL(instance.id);
+        setExternalAccess(result.access);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalResetTarget(null);
+        setExternalAccessPanelOpen(true);
+      } else if (action === "reset-password") {
+        const result = await instanceService.resetExternalAccessPassword(instance.id);
+        setExternalAccess(result.access);
+        setExternalPassword(result.password);
+        setExternalPasswordVisible(false);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalResetTarget(null);
         setExternalAccessPanelOpen(true);
       } else {
         await instanceService.disableExternalAccess(instance.id);
@@ -1369,6 +1390,28 @@ const InstanceDetailPage: React.FC = () => {
                 <KeyRound className="h-4 w-4" />
                 Create Password
               </button>
+              {externalAccess?.enabled && (
+                <button
+                  type="button"
+                  className="app-button-secondary"
+                  disabled={externalActionLoading !== null}
+                  onClick={() => setExternalResetTarget("url")}
+                >
+                  <RotateCw className="h-4 w-4" />
+                  Reset URL
+                </button>
+              )}
+              {externalAccess?.enabled && externalAccess.auth_mode === "password" && (
+                <button
+                  type="button"
+                  className="app-button-secondary"
+                  disabled={externalActionLoading !== null}
+                  onClick={() => setExternalResetTarget("password")}
+                >
+                  <KeyRound className="h-4 w-4" />
+                  Reset Password
+                </button>
+              )}
               {externalAccess?.enabled && (
                 <button
                   type="button"
@@ -1833,6 +1876,32 @@ const InstanceDetailPage: React.FC = () => {
         !isDedicatedInstance && (skillPanelExpanded || sessionPanelExpanded)
       }
     >
+      <ConfirmDialog
+        open={externalResetTarget !== null}
+        title={externalResetTarget === "password" ? "Reset share password" : "Reset share URL"}
+        message={
+          externalResetTarget === "password"
+            ? "The old password and existing authenticated share sessions will stop working immediately. The share URL, expiration, and workspace permissions will stay unchanged."
+            : "The old share URL will stop working immediately. Password, expiration, and workspace permissions will stay unchanged."
+        }
+        confirmLabel={externalResetTarget === "password" ? "Reset Password" : "Reset URL"}
+        cancelLabel={t("common.cancel")}
+        destructive
+        loading={
+          externalActionLoading ===
+          (externalResetTarget === "password" ? "reset-password" : "reset-url")
+        }
+        onCancel={() => {
+          if (externalActionLoading === null) {
+            setExternalResetTarget(null);
+          }
+        }}
+        onConfirm={() =>
+          void handleExternalAction(
+            externalResetTarget === "password" ? "reset-password" : "reset-url",
+          )
+        }
+      />
       <ConfirmDialog
         open={showDeleteDialog}
         title={t("common.delete")}

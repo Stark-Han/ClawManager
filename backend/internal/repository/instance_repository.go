@@ -75,6 +75,25 @@ func (r *instanceRepository) GetByID(id int) (*models.Instance, error) {
 	return &instance, nil
 }
 
+// GetByProvisioningOperationID returns the instance created for a durable
+// northbound operation. It remains an optional repository capability so
+// existing InstanceRepository test doubles stay independent of northbound.
+func (r *instanceRepository) GetByProvisioningOperationID(operationID string) (*models.Instance, error) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return nil, nil
+	}
+	var instance models.Instance
+	err := r.sess.Collection("instances").Find(db.Cond{"provisioning_operation_id": operationID}).One(&instance)
+	if err != nil {
+		if err == db.ErrNoMoreRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get instance by provisioning operation: %w", err)
+	}
+	return &instance, nil
+}
+
 // FindByPodIP returns the first instance whose recorded pod_ip matches.
 func (r *instanceRepository) FindByPodIP(podIP string) (*models.Instance, error) {
 	podIP = strings.TrimSpace(podIP)

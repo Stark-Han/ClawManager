@@ -116,6 +116,30 @@ func TestRuntimeManifestsExposeOpenClawGatewayOnPodIP(t *testing.T) {
 	}
 }
 
+func TestMySQLManifestsBoundBinaryLogDiskUsage(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	manifests := append(
+		deploymentRuntimeManifests(repoRoot),
+		filepath.Join(repoRoot, "backend", "deployments", "k8s", "clawreef-incluster.yaml"),
+	)
+	for _, manifest := range manifests {
+		t.Run(manifest, func(t *testing.T) {
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			for _, option := range []string{
+				"--binlog-expire-logs-seconds=259200",
+				"--max-binlog-size=134217728",
+			} {
+				if !strings.Contains(string(raw), option) {
+					t.Fatalf("manifest %s must configure MySQL option %s", manifest, option)
+				}
+			}
+		})
+	}
+}
+
 func deploymentRuntimeManifests(repoRoot string) []string {
 	return []string{
 		filepath.Join(repoRoot, "deployments", "k8s", "cluster", "clawmanager.yaml"),

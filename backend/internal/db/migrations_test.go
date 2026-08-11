@@ -201,6 +201,28 @@ func TestMigration041AddsSessionUsageIndexes(t *testing.T) {
 	}
 }
 
+func TestMigration045AddsNorthboundSecurityState(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/045_add_northbound_api.sql")
+	if err != nil {
+		t.Fatalf("read migration 045: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS northbound_auth_challenges",
+		"CREATE TABLE IF NOT EXISTS northbound_sessions",
+		"previous_refresh_token_hash",
+		"refresh_token_history",
+		"CREATE TABLE IF NOT EXISTS northbound_operations",
+		"uk_northbound_operation_idempotency",
+		"provisioning_operation_id",
+		"uk_instances_provisioning_operation",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 045 must contain %s", required)
+		}
+	}
+}
+
 func TestMigration042AddsImmutableReviewContractTarget(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/042_add_team_review_contract.sql")
 	if err != nil {
