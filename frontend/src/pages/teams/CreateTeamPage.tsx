@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import OpenClawConfigPlanSection, {
   type OpenClawInjectionMode,
 } from "../../components/OpenClawConfigPlanSection";
@@ -9,6 +9,8 @@ import {
   type SystemImageSetting,
 } from "../../services/systemSettingsService";
 import { teamService } from "../../services/teamService";
+import { customTeamTemplateService } from "../../services/customTeamTemplateService";
+import type { CustomTeamTemplate } from "../../types/customTeamTemplate";
 import {
   buildAgencyAgentEnvironment,
   getAgencyAgentProfile,
@@ -38,6 +40,48 @@ type TeamMemberDraft = TeamMemberTemplateMember & {
   id: string;
   instanceMode: InstanceMode;
 };
+
+const memberTemplateFromCustom = (
+  template: CustomTeamTemplate,
+): TeamMemberTemplate => ({
+  id: `custom-${template.id}`,
+  name: template.name,
+  teamName: template.name,
+  description: template.spec.summary,
+  communicationMode: "leader_mediated",
+  source: "custom",
+  members: template.spec.members.map((member) => ({
+    memberId: member.memberId,
+    name: member.displayName,
+    role: member.role,
+    runtimeType: "openclaw",
+    instanceMode: "lite",
+    description: member.summary || member.mission,
+    resourcePreset: "small",
+    isLeader: member.isLeader,
+    cpuCores: 2,
+    memoryGb: 4,
+    diskGb: 20,
+    gpuEnabled: false,
+    gpuCount: 0,
+    image: "",
+    roleProfile: {
+      schema_version: 1,
+      profile_key: `custom.team-template.${template.id}.${member.memberId}`,
+      display_name: member.displayName,
+      role_hint: member.role,
+      summary: member.summary,
+      mission: member.mission,
+      responsibilities: member.responsibilities,
+      boundaries: member.boundaries,
+      expected_inputs: member.expectedInputs,
+      deliverables: member.deliverables,
+      acceptance_criteria: member.acceptanceCriteria,
+      collaboration_notes: member.collaborationNotes,
+      capability_tags: member.capabilityTags,
+    },
+  })),
+});
 
 const TEAM_COMMUNICATION_MODE_OPTIONS: Array<{
   value: TeamCommunicationMode;
@@ -241,10 +285,15 @@ const uniqueMemberId = (raw: string, usedIds: Set<string>, fallbackIndex: number
 
 const CreateTeamPage: React.FC = () => {
   const navigate = useNavigate();
+  const requestedTemplateId = useMemo(
+    () => new URLSearchParams(window.location.search).get("template"),
+    [],
+  );
   const initialTemplate = SORTED_BUILTIN_MEMBER_TEMPLATES[0];
   const [name, setName] = useState(initialTemplate?.teamName || "");
   const [sharedStorageGb, setSharedStorageGb] = useState(10);
   const [images, setImages] = useState<SystemImageSetting[]>([]);
+  const [customTemplates, setCustomTemplates] = useState<CustomTeamTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     initialTemplate?.id || "",
   );
@@ -266,7 +315,13 @@ const CreateTeamPage: React.FC = () => {
     null,
   );
 
-  const memberTemplates = SORTED_BUILTIN_MEMBER_TEMPLATES;
+  const memberTemplates = useMemo(
+    () => [
+      ...SORTED_BUILTIN_MEMBER_TEMPLATES,
+      ...customTemplates.map(memberTemplateFromCustom),
+    ],
+    [customTemplates],
+  );
   const selectedTemplate = useMemo(
     () =>
       memberTemplates.find((template) => template.id === selectedTemplateId) ||
@@ -286,7 +341,10 @@ const CreateTeamPage: React.FC = () => {
   const selectedImage = defaultOpenClawMemberImages[0];
   const openClawLiteImage = selectedImage?.image || "";
   const imageForRuntime = useCallback(
-    (_runtimeType: RuntimeType) => openClawLiteImage,
+    (runtimeType: RuntimeType) => {
+      void runtimeType;
+      return openClawLiteImage;
+    },
     [openClawLiteImage],
   );
 
@@ -304,6 +362,26 @@ const CreateTeamPage: React.FC = () => {
     };
     void loadImages();
   }, []);
+
+  useEffect(() => {
+    const loadCustomTemplates = async () => {
+      try {
+        const items = await customTeamTemplateService.list();
+        setCustomTemplates(items);
+        const requested = items
+          .map(memberTemplateFromCustom)
+          .find((template) => template.id === requestedTemplateId);
+        if (requested) {
+          setSelectedTemplateId(requested.id);
+          setName(requested.teamName || "");
+          setMembers(buildTemplateMembers(requested, () => ""));
+        }
+      } catch {
+        setCustomTemplates([]);
+      }
+    };
+    void loadCustomTemplates();
+  }, [requestedTemplateId]);
 
   const applyTemplate = (templateId: string) => {
     const template =
@@ -392,6 +470,9 @@ const CreateTeamPage: React.FC = () => {
     if (profile?.roleHint && profile.roleHint !== "leader") {
       return profile.roleHint;
     }
+    if (member.roleProfile?.role_hint && member.roleProfile.role_hint !== "leader") {
+      return member.roleProfile.role_hint;
+    }
     return member.role.trim() || "member";
   };
 
@@ -400,7 +481,7 @@ const CreateTeamPage: React.FC = () => {
     if (explicit) {
       return explicit;
     }
-    return profileForMember(member)?.summary || "";
+    return member.roleProfile?.summary || profileForMember(member)?.summary || "";
   };
 
   const displayNameForMember = (member: TeamMemberDraft) => {
@@ -410,7 +491,7 @@ const CreateTeamPage: React.FC = () => {
 
   const profileLabelForMember = (member: TeamMemberDraft) => {
     const profile = profileForMember(member);
-    return profile?.displayName || profile?.name || member.agentProfileKey || "未指定";
+    return member.roleProfile?.display_name || profile?.displayName || profile?.name || member.agentProfileKey || "未指定";
   };
 
   const buildMemberEnvironmentOverrides = (
@@ -554,6 +635,7 @@ const CreateTeamPage: React.FC = () => {
             member,
             normalizedMemberId,
           ),
+          role_profile: member.roleProfile,
           openclaw_config_plan: openClawConfigPlan,
         };
       }),
@@ -722,9 +804,17 @@ const CreateTeamPage: React.FC = () => {
                     当前 {members.length} 个成员，{members.filter((member) => member.isLeader).length} 个 Leader
                   </p>
                 </div>
-                <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                  OpenClaw Lite
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    to="/teams/custom-templates"
+                    className="app-button-primary inline-flex items-center justify-center px-4 py-2 text-sm"
+                  >
+                    + 自定义 Team
+                  </Link>
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                    仅 OpenClaw Lite
+                  </span>
+                </div>
               </div>
 
               <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -770,9 +860,7 @@ const CreateTeamPage: React.FC = () => {
                   </p>
                 </label>
                 <label className="block md:col-span-2">
-                  <span className="text-sm font-medium text-gray-700">
-                    选择模板包
-                  </span>
+                  <span className="text-sm font-medium text-gray-700">选择模板包</span>
                   <select
                     value={selectedTemplate?.id || ""}
                     onChange={(event) => applyTemplate(event.target.value)}
@@ -780,6 +868,7 @@ const CreateTeamPage: React.FC = () => {
                   >
                     {memberTemplates.map((template) => (
                       <option key={template.id} value={template.id}>
+                        {template.source === "custom" ? "自定义 · " : ""}
                         {getTemplateDisplayName(template)} · {template.members.length} 成员
                       </option>
                     ))}
@@ -835,15 +924,9 @@ const CreateTeamPage: React.FC = () => {
                         <div className="text-xs font-medium text-gray-500 lg:hidden">
                           运行时
                         </div>
-                        {member.isLeader ? (
-                          <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
-                            OpenClaw Lite
-                          </div>
-                        ) : (
-                          <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
-                            OpenClaw Lite
-                          </div>
-                        )}
+                        <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
+                          OpenClaw Lite
+                        </div>
                       </div>
                       <div>
                         <div className="text-xs font-medium text-gray-500 lg:hidden">
