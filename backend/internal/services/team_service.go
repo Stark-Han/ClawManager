@@ -13553,27 +13553,46 @@ func compileTeamMemberRoleProfile(member CreateTeamMemberRequest) (CreateTeamMem
 	if summary == "" {
 		summary = strings.TrimSpace(profile.Mission)
 	}
-	systemPrompt := buildGeneratedTeamRolePrompt(profileName, *profile)
+	isLeader := member.IsLeader || isTeamLeaderRole(member.Role)
+	domainProfile := *profile
+	if isLeader {
+		// Leader collaboration is rendered once from the composed rule set below.
+		// Keep the domain role prompt focused on the editable responsibility layer.
+		domainProfile.CollaborationNotes = nil
+	}
+	systemPrompt := buildGeneratedTeamRolePrompt(profileName, domainProfile)
+	collaborationRules := cleanUniqueTeamRoleValues(profile.CollaborationNotes)
+	outputContract := cleanUniqueTeamRoleValues(append(append([]string{}, profile.Deliverables...), profile.AcceptanceCriteria...))
+	baseProfileKey := ""
+	tags := []string{"custom-team-template"}
+	if isLeader {
+		baseProfileKey = customTeamLeaderBaseProfileKey
+		collaborationRules = cleanUniqueTeamRoleValues(append(append([]string{}, customTeamLeaderBaseCollaborationRules...), collaborationRules...))
+		outputContract = cleanUniqueTeamRoleValues(append(append([]string{}, customTeamLeaderBaseOutputContract...), outputContract...))
+		systemPrompt = buildGeneratedTeamLeaderSystemPrompt(member, profileName, summary, systemPrompt, collaborationRules, outputContract)
+		tags = append(tags, "agency-agents", "leader-base-inherited")
+	}
 	config := map[string]interface{}{
 		"profileKey":         profileKey,
+		"baseProfileKey":     baseProfileKey,
 		"sourceFile":         "custom-team-template",
 		"memberId":           strings.TrimSpace(member.MemberID),
 		"displayName":        profileName,
 		"role":               strings.TrimSpace(member.Role),
 		"runtimeType":        strings.TrimSpace(member.RuntimeType),
-		"isLeader":           member.IsLeader,
+		"isLeader":           isLeader,
 		"roleHint":           roleHint,
 		"summary":            summary,
 		"systemPrompt":       systemPrompt,
-		"collaborationRules": profile.CollaborationNotes,
-		"outputContract":     append(append([]string{}, profile.Deliverables...), profile.AcceptanceCriteria...),
+		"collaborationRules": collaborationRules,
+		"outputContract":     outputContract,
 		"capabilityTags":     profile.CapabilityTags,
 	}
 	agentsPayload := map[string]interface{}{
 		"schemaVersion": 1,
 		"items": []interface{}{map[string]interface{}{
 			"id": 0, "type": "agent", "key": profileKey, "name": profileName, "version": 1,
-			"tags": []string{"custom-team-template"},
+			"tags": tags,
 			"content": map[string]interface{}{
 				"schemaVersion": 1, "kind": "agent", "format": "agent/clawmanager-profile@v1",
 				"dependsOn": []interface{}{}, "config": config,
@@ -13582,9 +13601,10 @@ func compileTeamMemberRoleProfile(member CreateTeamMemberRequest) (CreateTeamMem
 	}
 	personaPayload := map[string]interface{}{
 		"schemaVersion": 1, "profileKey": profileKey, "name": profileName,
-		"displayName": profileName, "roleHint": roleHint, "summary": summary,
+		"baseProfileKey": baseProfileKey,
+		"displayName":    profileName, "roleHint": roleHint, "summary": summary,
 		"memberId": strings.TrimSpace(member.MemberID), "role": strings.TrimSpace(member.Role),
-		"runtimeType": strings.TrimSpace(member.RuntimeType), "isLeader": member.IsLeader,
+		"runtimeType": strings.TrimSpace(member.RuntimeType), "isLeader": isLeader,
 		"systemPrompt": systemPrompt,
 	}
 	agentsJSON, err := json.Marshal(agentsPayload)
@@ -13626,6 +13646,90 @@ func compileTeamMemberRoleProfile(member CreateTeamMemberRequest) (CreateTeamMem
 		member.Description = optionalString(summary)
 	}
 	return member, nil
+}
+
+const (
+	customTeamLeaderBaseProfileKey = "agency.agents-orchestrator"
+	customTeamLeaderBaseSummary    = "Coordinates the Team, decomposes goals, assigns work, enforces handoffs, and returns the final integrated answer."
+	customTeamLeaderBasePrompt     = "You are the Team Leader and orchestration controller. Break user goals into explicit subtasks, assign them to the right members via team_send, preserve context in /team, enforce evidence-based completion, and summarize the final outcome with decisions, outputs, risks, and next steps. Prefer coordination over doing all work yourself."
+)
+
+var customTeamLeaderBaseCollaborationRules = []string{
+	"Only handle tasks addressed to this team member inbox.",
+	"Use /team for shared context, durable notes, and handoff artifacts.",
+	"Browser is available to OpenClaw Team workers. When team_artifact_preview is exposed, use its managed URL for Team files; older Runtimes may require static file inspection. Never use file:// or a temporary server.",
+	"Report progress, blockers, verification evidence, and final results through the team event channel.",
+	"Ask the Leader to coordinate cross-member dependencies instead of silently taking over another role.",
+	"Default to leader-mediated collaboration: user tasks enter through the Leader, then fan out to members.",
+	"Do not mark work complete until member outputs have been reconciled and any QA/review role has reported its verdict.",
+}
+
+var customTeamLeaderBaseOutputContract = []string{
+	"task_breakdown",
+	"assignments",
+	"member_results",
+	"verification",
+	"final_answer",
+	"open_risks",
+}
+
+func buildGeneratedTeamLeaderSystemPrompt(
+	member CreateTeamMemberRequest,
+	profileName string,
+	summary string,
+	domainPrompt string,
+	collaborationRules []string,
+	outputContract []string,
+) string {
+	role := strings.TrimSpace(member.Role)
+	if role == "" {
+		role = "leader"
+	}
+	runtimeType := strings.TrimSpace(member.RuntimeType)
+	if runtimeType == "" {
+		runtimeType = "openclaw"
+	}
+	if summary == "" {
+		summary = customTeamLeaderBaseSummary
+	}
+	lines := []string{
+		customTeamLeaderBasePrompt,
+		"",
+		"Domain-specific Leader role overlay:",
+		strings.TrimSpace(domainPrompt),
+		"",
+		fmt.Sprintf(
+			"Team member context: member_id=%s; display_name=%s; role=%s; runtime=%s; is_leader=true.",
+			strings.TrimSpace(member.MemberID),
+			strings.TrimSpace(profileName),
+			role,
+			runtimeType,
+		),
+		"Role summary: " + summary,
+		"Collaboration rules:",
+	}
+	for _, rule := range collaborationRules {
+		lines = append(lines, "- "+rule)
+	}
+	lines = append(lines, "Expected output contract: "+strings.Join(outputContract, ", ")+".")
+	return strings.Join(lines, "\n")
+}
+
+func cleanUniqueTeamRoleValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func buildGeneratedTeamLeaderBriefing(displayName string, profile TeamMemberRoleProfileRequest) string {
