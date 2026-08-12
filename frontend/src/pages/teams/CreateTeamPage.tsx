@@ -613,6 +613,10 @@ const CreateTeamPage: React.FC = () => {
       members: members.map((member) => {
         const normalizedMemberId = normalizeMemberId(member.memberId);
         const memberDescription = effectiveMemberDescription(member);
+        // Runtime selection is intentionally fixed at submission time. Custom
+        // templates may carry historical runtime metadata, but creating a new
+        // Team must not allow that metadata to bypass the currently supported
+        // OpenClaw Lite-only contract.
         const runtimeType = member.isLeader
           ? LEADER_RUNTIME_TYPE
           : TEAM_WORKER_RUNTIME_TYPE;
