@@ -800,15 +800,19 @@ func applyTeamTaskEnvelopeContext(envelope map[string]interface{}, task *models.
 }
 
 func shouldRequestRootCoordinationRecovery(task *models.TeamTask, member *models.TeamMember, eventKind string, payload map[string]interface{}) bool {
-	if task == nil || member == nil || isTerminalTeamTaskStatus(task.Status) ||
-		member.ID != task.TargetMemberID {
+	if task == nil || member == nil || isTerminalTeamTaskStatus(task.Status) {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(eventKind), "turn_finished_without_completion") ||
 		!eventBool(payload, "activeTurnFinished", "active_turn_finished") ||
-		eventBool(payload, "hadOutboundAssignment", "had_outbound_assignment") ||
 		eventBool(payload, "explicitCompletion", "explicit_completion") ||
 		eventBool(payload, "rootTaskTerminal", "root_task_terminal") {
+		return false
+	}
+	// Worker recovery is scoped to an authenticated assignment identity.  A
+	// root owner may use its root identity, but no other member receives an
+	// immediate reminder from an unbound observation.
+	if member.ID != task.TargetMemberID && eventString(payload, "assignmentId", "assignment_id", "canonicalWorkId", "canonical_work_id", "workId", "work_id") == "" {
 		return false
 	}
 	// New Runtime observers publish an explicit, state-neutral classification.
@@ -823,6 +827,13 @@ func shouldRequestRootCoordinationRecovery(task *models.TeamTask, member *models
 		if outcome != "retryable_tool_gap" && outcome != "completion_receipt_gap" {
 			return false
 		}
+		if eventBool(payload, "downstreamAssignmentStarted", "downstream_assignment_started") {
+			return false
+		}
+	} else if eventBool(payload, "hadOutboundAssignment", "had_outbound_assignment") {
+		// Old observers did not distinguish a real downstream assignment from
+		// an ordinary Team message. Preserve their conservative behavior.
+		return false
 	}
 	// A recovery reminder receives one immediate model turn. If that turn still
 	// does not act, the normal Monitor remains the fallback; recursively creating
@@ -4314,17 +4325,76 @@ func leaderSynthesisResultFingerprint(task *models.TeamTask, resultItems []model
 	return hex.EncodeToString(digest[:])
 }
 
+func leaderSynthesisReminderDelay(previousGenerations int) time.Duration {
+	switch {
+	case previousGenerations <= 0:
+		return 0
+	case previousGenerations <= 2:
+		return teamAssignmentMonitorEvery
+	case previousGenerations == 3:
+		return 5 * time.Minute
+	default:
+		return 10 * time.Minute
+	}
+}
+
+func (s *teamService) nextLeaderSynthesisReminderGeneration(teamID, taskID int, resultFingerprint string, now time.Time) (int, bool, error) {
+	if s == nil || s.repo == nil {
+		return 0, false, nil
+	}
+	events, err := s.repo.ListEventsByTeamID(teamID, 1000)
+	if err != nil {
+		return 0, false, err
+	}
+	generation := 0
+	var latest time.Time
+	for idx := range events {
+		event := events[idx]
+		if event.TaskID == nil || *event.TaskID != taskID ||
+			(event.EventType != "leader_synthesis_reminder" && event.EventType != "leader_decision_reminder") {
+			continue
+		}
+		payload := teamEventPayloadMap(event)
+		if eventString(payload, "resultFingerprint", "result_fingerprint") != resultFingerprint {
+			continue
+		}
+		candidateGeneration := eventInt(payload, "reminderGeneration", "reminder_generation")
+		if candidateGeneration <= 0 {
+			candidateGeneration = 1
+		}
+		if candidateGeneration > generation {
+			generation = candidateGeneration
+		}
+		occurredAt := event.CreatedAt
+		if event.OccurredAt != nil {
+			occurredAt = *event.OccurredAt
+		}
+		if occurredAt.After(latest) {
+			latest = occurredAt
+		}
+	}
+	if !latest.IsZero() && now.Sub(latest) < leaderSynthesisReminderDelay(generation) {
+		return generation, false, nil
+	}
+	return generation + 1, true, nil
+}
+
 func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redisBus, task *models.TeamTask, leader *models.TeamMember, resultItems []models.TeamWorkItem, now time.Time) error {
 	if s == nil || s.repo == nil || team == nil || task == nil || leader == nil || len(resultItems) == 0 {
 		return nil
 	}
 	resultFingerprint := leaderSynthesisResultFingerprint(task, resultItems)
+	generation, due, err := s.nextLeaderSynthesisReminderGeneration(team.ID, task.ID, resultFingerprint, now)
+	if err != nil || !due {
+		return err
+	}
 	eventID := fmt.Sprintf(
-		"leader-workflow-reminder:%d:%d:%s:%s",
+		"leader-workflow-reminder:%d:%d:%s:%s:%d",
 		team.ID,
 		task.ID,
 		normalizeTeamRedisKeyPart(task.WorkflowState),
 		resultFingerprint,
+		generation,
 	)
 	exists, err := s.repo.EventExistsByEventID(team.ID, eventID)
 	if err != nil || exists {
@@ -4386,6 +4456,7 @@ func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redi
 		"planVersion":        task.PlanVersion,
 		"ledgerVersion":      task.LedgerVersion,
 		"resultFingerprint":  resultFingerprint,
+		"reminderGeneration": generation,
 		"expiresAt":          now.Add(2 * time.Minute).Format(time.RFC3339Nano),
 		"visibleToChat":      true,
 		"chatDigestEligible": true,
@@ -4861,7 +4932,7 @@ func (s *teamService) hasRecentUnansweredAssignmentMonitor(team *models.Team, ta
 		// Do not stack Monitor messages behind one serial Agent turn. If an old
 		// Runtime loses the check entirely, the bounded lease expires and a new
 		// attempt can still recover the assignment.
-		if requestedAt.IsZero() || now.Sub(requestedAt) < 2*teamAssignmentMonitorEvery {
+		if requestedAt.IsZero() || now.Sub(requestedAt) < teamAssignmentMonitorEvery {
 			return true, nil
 		}
 	}
@@ -6665,6 +6736,194 @@ func dependencyBlockedAssignmentsReadyAfter(items []models.TeamWorkItem, complet
 			}
 		}
 		if allSucceeded {
+			ready = append(ready, businessID)
+		}
+	}
+	sort.Strings(ready)
+	return uniqueTeamStrings(ready)
+}
+
+func (s *teamService) dispatchDependencyReadyReminder(team *models.Team, bus *redisBus, task *models.TeamTask, item *models.TeamWorkItem, owner *models.TeamMember, now time.Time) error {
+	if s == nil || s.repo == nil || team == nil || task == nil || item == nil || owner == nil {
+		return nil
+	}
+	dependencies := teamWorkItemDependencies(*item)
+	if len(dependencies) == 0 {
+		return nil
+	}
+	items, err := s.repo.ListWorkItemsByRootTaskID(task.ID)
+	if err != nil {
+		return err
+	}
+	latest := make(map[string]models.TeamWorkItem, len(items))
+	for idx := range items {
+		businessID := workItemBusinessID(items[idx])
+		if businessID == "" {
+			continue
+		}
+		if current, ok := latest[businessID]; !ok || teamMaxInt(items[idx].Revision, 1) >= teamMaxInt(current.Revision, 1) {
+			latest[businessID] = items[idx]
+		}
+	}
+	dependencyFacts := make([]string, 0, len(dependencies))
+	for _, dependency := range dependencies {
+		candidate, known := latest[dependency]
+		if !known || candidate.SupersededBy != nil || candidate.Status != models.TeamTaskStatusSucceeded {
+			// Ambiguous or unfinished dependency facts remain advisory. Never
+			// manufacture a readiness signal that could restart the wrong work.
+			return nil
+		}
+		dependencyFacts = append(dependencyFacts, fmt.Sprintf("%s:r%d", dependency, teamMaxInt(candidate.Revision, 1)))
+	}
+	sort.Strings(dependencyFacts)
+	assignmentID := workItemBusinessID(*item)
+	if assignmentID == "" {
+		assignmentID = item.WorkID
+	}
+	seed := strings.Join([]string{
+		strconv.Itoa(team.ID), strconv.Itoa(task.ID), assignmentID,
+		strconv.Itoa(teamMaxInt(item.Revision, 1)), strings.Join(dependencyFacts, ","),
+	}, "|")
+	digest := sha256.Sum256([]byte(seed))
+	eventID := fmt.Sprintf("dependency-ready:%d:%d:%x", team.ID, task.ID, digest[:12])
+	exists, err := s.repo.EventExistsByEventID(team.ID, eventID)
+	if err != nil || exists {
+		return err
+	}
+	rootTaskRef := fmt.Sprintf("team-%d-task-%d", task.TeamID, task.ID)
+	prompt := fmt.Sprintf(
+		"[DEPENDENCY_READY] ClawManager observed that the exact prerequisite assignments for your current work are now succeeded: %s. Re-check the current assignment %s revision %d and continue the same attempt from its existing evidence. This is a context reminder only: do not create a new revision or repeat work that is already progressing. If the deliverable is ready, submit its normal completion; if another real blocker remains, report that blocker to the Leader.",
+		strings.Join(dependencyFacts, ", "), assignmentID, teamMaxInt(item.Revision, 1),
+	)
+	payload := map[string]interface{}{
+		"event":            "dependency_ready_reminder",
+		"type":             "dependency_ready_reminder",
+		"eventKind":        "dependency_ready_reminder",
+		"source":           "clawmanager_monitor",
+		"nonAuthoritative": true,
+		"stateEffect":      "none",
+		"rootTaskTerminal": false,
+		"visibleToChat":    false,
+		"rootTaskId":       rootTaskRef,
+		"rootMessageId":    task.MessageID,
+		"assignmentId":     assignmentID,
+		"workId":           item.WorkID,
+		"workItemId":       item.ID,
+		"revision":         teamMaxInt(item.Revision, 1),
+		"memberId":         owner.MemberKey,
+		"dependencies":     dependencies,
+		"dependencyFacts":  dependencyFacts,
+		"messageId":        eventID,
+		"summary":          "Declared prerequisite assignments are ready; continue the same assignment attempt.",
+	}
+	payloadJSON, err := marshalOptionalJSON(payload)
+	if err != nil {
+		return err
+	}
+	envelope := map[string]interface{}{
+		"v":                  1,
+		"protocolVersion":    3,
+		"messageId":          eventID,
+		"teamId":             strconv.Itoa(team.ID),
+		"from":               "clawmanager-monitor",
+		"to":                 owner.MemberKey,
+		"replyTo":            teamTaskReplyTarget,
+		"requiresCompletion": false,
+		"completionTool":     teamTaskCompletionTool,
+		"intent":             "dependency_ready",
+		"taskId":             rootTaskRef,
+		"rootTaskId":         rootTaskRef,
+		"rootMessageId":      task.MessageID,
+		"workId":             item.WorkID,
+		"assignmentId":       assignmentID,
+		"revision":           teamMaxInt(item.Revision, 1),
+		"workItemId":         item.ID,
+		"title":              "Assignment dependencies ready",
+		"prompt":             prompt,
+		"rawPrompt":          prompt,
+		"metadata":           payload,
+		"createdAt":          now.Format(time.RFC3339Nano),
+	}
+	applyTeamTaskEnvelopeContext(envelope, task, owner.MemberKey)
+	envelopeJSON, err := marshalJSON(envelope)
+	if err != nil {
+		return err
+	}
+	event := &models.TeamEvent{
+		TeamID: team.ID, TaskID: &task.ID, MemberID: &owner.ID, MessageID: &eventID,
+		EventID: &eventID, EventType: "dependency_ready_reminder", PayloadJSON: payloadJSON,
+		OccurredAt: &now, CreatedAt: now,
+	}
+	outbox := &models.TeamEventOutbox{
+		TeamID: team.ID, SourceEventID: eventID, Destination: teamInboxKey(team.ID, owner.MemberKey),
+		MessageID: eventID, PayloadJSON: envelopeJSON, Status: "pending", AvailableAt: now,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.repo.CreateEventWithOutbox(event, outbox); err != nil {
+		if errors.Is(err, repository.ErrDuplicateTeamEvent) {
+			return nil
+		}
+		return err
+	}
+	if bus == nil || outbox.ID <= 0 {
+		return nil
+	}
+	if err := s.deliverTeamEventOutbox(team, bus, outbox); err != nil {
+		_ = s.repo.MarkEventOutboxFailed(outbox.ID, now.Add(teamOutboxRetryDelay(outbox.Attempts)), err.Error())
+		return nil
+	}
+	return s.repo.MarkEventOutboxDelivered(outbox.ID, time.Now().UTC())
+}
+
+// dependencyReadyAssignmentsAfter returns only current, non-terminal attempts
+// whose exact dependency identities all become succeeded after the supplied
+// assignment completes. It does not infer dependencies from titles or prose,
+// and it never changes the downstream attempt's state or revision.
+func dependencyReadyAssignmentsAfter(items []models.TeamWorkItem, completedAssignmentID string) []string {
+	completedAssignmentID = strings.TrimSpace(completedAssignmentID)
+	if completedAssignmentID == "" {
+		return nil
+	}
+	latest := make(map[string]models.TeamWorkItem, len(items))
+	for idx := range items {
+		item := items[idx]
+		businessID := workItemBusinessID(item)
+		if businessID == "" {
+			continue
+		}
+		if current, ok := latest[businessID]; !ok || teamMaxInt(item.Revision, 1) >= teamMaxInt(current.Revision, 1) {
+			latest[businessID] = item
+		}
+	}
+	completed, ok := latest[completedAssignmentID]
+	if !ok {
+		return nil
+	}
+	completed.Status = models.TeamTaskStatusSucceeded
+	completed.SupersededBy = nil
+	latest[completedAssignmentID] = completed
+	ready := make([]string, 0)
+	for businessID, item := range latest {
+		if item.SupersededBy != nil || (item.Status != models.TeamTaskStatusRunning && item.Status != models.TeamTaskStatusDispatched) {
+			continue
+		}
+		dependencies := teamWorkItemDependencies(item)
+		if len(dependencies) == 0 {
+			continue
+		}
+		containsCompleted := false
+		allSucceeded := true
+		for _, dependency := range dependencies {
+			if dependency == completedAssignmentID {
+				containsCompleted = true
+			}
+			prerequisite, known := latest[dependency]
+			if !known || prerequisite.SupersededBy != nil || prerequisite.Status != models.TeamTaskStatusSucceeded {
+				allSucceeded = false
+				break
+			}
+		}
+		if containsCompleted && allSucceeded {
 			ready = append(ready, businessID)
 		}
 	}
@@ -9672,7 +9931,10 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 		// failure without an unsafe automatic reissue.
 		blockedDependencies = nil
 	} else {
-		recoveryReadyAssignments = dependencyBlockedAssignmentsReadyAfter(items, workID)
+		recoveryReadyAssignments = uniqueTeamStrings(append(
+			dependencyBlockedAssignmentsReadyAfter(items, workID),
+			dependencyReadyAssignmentsAfter(items, workID)...,
+		))
 	}
 	resultStatus := models.TeamTaskStatusSucceeded
 	confirmationLabel := member.MemberKey + " assignment result confirmed"
@@ -9889,14 +10151,8 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 			if owner == nil || owner.TeamID != team.ID || !isActiveTeamMember(owner) {
 				continue
 			}
-			outstanding, outstandingErr := s.hasRecentUnansweredAssignmentMonitor(team, task, readyItem, now)
-			if outstandingErr != nil {
-				return outstandingErr
-			}
-			if !outstanding {
-				if dispatchErr := s.dispatchAssignmentStatusCheck(team, bus, task, readyItem, owner, nil, 0, now); dispatchErr != nil {
-					return dispatchErr
-				}
+			if dispatchErr := s.dispatchDependencyReadyReminder(team, bus, task, readyItem, owner, now); dispatchErr != nil {
+				return dispatchErr
 			}
 		}
 	}

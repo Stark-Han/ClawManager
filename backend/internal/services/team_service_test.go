@@ -6348,7 +6348,7 @@ func TestAssignmentMonitorDoesNotQueueBehindRecentUnansweredAttempt(t *testing.T
 	if err != nil || !outstanding {
 		t.Fatalf("a recent unanswered Monitor must suppress queue buildup: outstanding=%v err=%v", outstanding, err)
 	}
-	outstanding, err = service.hasRecentUnansweredAssignmentMonitor(team, task, item, now.Add(7*time.Minute))
+	outstanding, err = service.hasRecentUnansweredAssignmentMonitor(team, task, item, now.Add(4*time.Minute))
 	if err != nil || outstanding {
 		t.Fatalf("an expired unanswered Monitor lease must permit recovery: outstanding=%v err=%v", outstanding, err)
 	}
@@ -6995,13 +6995,23 @@ func TestLeaderSynthesisReminderCreatedWhenWorkersDone(t *testing.T) {
 	if len(repo.createdEvents) != 1 {
 		t.Fatalf("ledger-only projection changes must not create duplicate synthesis reminders, got %#v", repo.createdEvents)
 	}
+	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("next-generation createLeaderSynthesisReminder returned error: %v", err)
+	}
+	if len(repo.createdEvents) != 2 {
+		t.Fatalf("unchanged workflow facts must receive a later reminder generation, got %#v", repo.createdEvents)
+	}
+	secondPayload := teamEventPayloadMap(repo.createdEvents[1])
+	if eventInt(secondPayload, "reminderGeneration") != 2 {
+		t.Fatalf("expected reminder generation 2, got %#v", secondPayload)
+	}
 
 	changedResult := `{"summary":"PASS with updated evidence","resultMarkdown":"Reviewer verdict: PASS with updated evidence."}`
 	resultItems[1].ResultJSON = &changedResult
-	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(2*time.Minute)); err != nil {
+	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(5*time.Minute)); err != nil {
 		t.Fatalf("changed-result createLeaderSynthesisReminder returned error: %v", err)
 	}
-	if len(repo.createdEvents) != 2 {
+	if len(repo.createdEvents) != 3 {
 		t.Fatalf("a materially changed result must allow a fresh synthesis reminder, got %#v", repo.createdEvents)
 	}
 }
@@ -7596,6 +7606,58 @@ func TestUnresolvedDependenciesTriggerRecoveryOnlyForConfirmedBlocker(t *testing
 	items[1].ResultJSON = stringPtr(`{"status":"failed"}`)
 	if got := dependencyBlockedAssignmentsReadyAfter(items, "P1"); len(got) != 0 {
 		t.Fatalf("a real product failure must not be retried as a dependency recovery: %#v", got)
+	}
+}
+
+func TestDependencyReadyContextKeepsSameAttemptAndIgnoresUnknownDependencies(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	producerID := 11
+	consumerID := 12
+	dependencyJSON := `["collect-news"]`
+	producerAssignment := "collect-news"
+	consumerAssignment := "filter-news"
+	team := &models.Team{ID: 132, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 332, TeamID: team.ID, MessageID: "root-332", Status: models.TeamTaskStatusRunning}
+	consumer := &models.TeamMember{ID: consumerID, TeamID: team.ID, MemberKey: "content-filter", Role: "domain-specialist"}
+	items := []models.TeamWorkItem{
+		{ID: 1, TeamID: team.ID, RootTaskID: task.ID, WorkID: producerAssignment, AssignmentID: &producerAssignment, OwnerMemberID: &producerID, Revision: 1, Status: models.TeamTaskStatusRunning},
+		{ID: 2, TeamID: team.ID, RootTaskID: task.ID, WorkID: consumerAssignment, AssignmentID: &consumerAssignment, OwnerMemberID: &consumerID, Revision: 1, Status: models.TeamTaskStatusRunning, DependsOnJSON: &dependencyJSON},
+	}
+	if got := dependencyReadyAssignmentsAfter(items, producerAssignment); !slices.Equal(got, []string{consumerAssignment}) {
+		t.Fatalf("exact downstream dependency should become ready after producer success: %#v", got)
+	}
+	repo := &teamRepositoryStub{workItems: items, membersByID: map[int]*models.TeamMember{consumerID: consumer}}
+	service := &teamService{repo: repo}
+	if err := service.dispatchDependencyReadyReminder(team, nil, task, &items[1], consumer, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.createdEvents) != 0 || len(repo.outboxRows) != 0 {
+		t.Fatalf("dependency readiness must be verified against persisted succeeded facts: events=%#v outbox=%#v", repo.createdEvents, repo.outboxRows)
+	}
+	repo.workItems[0].Status = models.TeamTaskStatusSucceeded
+	if err := service.dispatchDependencyReadyReminder(team, nil, task, &items[1], consumer, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.createdEvents) != 1 || len(repo.outboxRows) != 1 {
+		t.Fatalf("expected one durable readiness context, events=%#v outbox=%#v", repo.createdEvents, repo.outboxRows)
+	}
+	var envelope map[string]interface{}
+	if err := json.Unmarshal([]byte(repo.outboxRows[0].PayloadJSON), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if eventString(envelope, "assignmentId") != consumerAssignment || eventInt(envelope, "revision") != 1 || eventBool(envelope, "requiresCompletion") {
+		t.Fatalf("readiness context changed attempt identity or business semantics: %#v", envelope)
+	}
+	if err := service.dispatchDependencyReadyReminder(team, nil, task, &items[1], consumer, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.createdEvents) != 1 || len(repo.outboxRows) != 1 {
+		t.Fatalf("same dependency generation must remain idempotent: events=%#v outbox=%#v", repo.createdEvents, repo.outboxRows)
+	}
+	unknownJSON := `["model-authored-label"]`
+	items[1].DependsOnJSON = &unknownJSON
+	if got := dependencyReadyAssignmentsAfter(items, producerAssignment); len(got) != 0 {
+		t.Fatalf("unknown dependency text must not create a hidden control-plane action: %#v", got)
 	}
 }
 
@@ -8326,6 +8388,20 @@ func TestRootCoordinationRecoveryUsesMachineTurnFactsOnly(t *testing.T) {
 	}
 	if shouldRequestRootCoordinationRecovery(task, worker, "turn_finished_without_completion", payload) {
 		t.Fatal("a non-owner Worker turn must not be converted into root recovery")
+	}
+	workerReceiptGap := map[string]interface{}{
+		"activeTurnFinished":          true,
+		"assignmentId":                "dev-page",
+		"turnObservationOutcome":      "completion_receipt_gap",
+		"immediateRecoveryEligible":   true,
+		"downstreamAssignmentStarted": false,
+	}
+	if !shouldRequestRootCoordinationRecovery(task, worker, "turn_finished_without_completion", workerReceiptGap) {
+		t.Fatal("an authenticated Worker return without a completion receipt should receive a state-neutral recovery turn")
+	}
+	workerReceiptGap["downstreamAssignmentStarted"] = true
+	if shouldRequestRootCoordinationRecovery(task, worker, "turn_finished_without_completion", workerReceiptGap) {
+		t.Fatal("a real downstream assignment must remain a legitimate wait")
 	}
 	directTask := &models.TeamTask{ID: 65, TeamID: team.ID, TargetMemberID: worker.ID, Status: models.TeamTaskStatusRunning}
 	if !shouldRequestRootCoordinationRecovery(directTask, worker, "turn_finished_without_completion", payload) {
