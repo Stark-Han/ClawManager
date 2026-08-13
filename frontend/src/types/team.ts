@@ -122,7 +122,7 @@ export interface TeamWorkItem {
   validated_revision?: number;
   owner_member_id?: number;
   title: string;
-  status: "pending" | "dispatched" | "running" | "succeeded" | "failed" | "stale";
+  status: "pending" | "dispatched" | "running" | "waiting" | "succeeded" | "failed" | "stale";
   depends_on?: string[];
   result?: Record<string, unknown>;
   artifact_refs?: string[];

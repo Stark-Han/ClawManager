@@ -840,17 +840,16 @@ const isFailedCollaborationItem = (item: CollaborationItem) => {
   }
   const eventType = item.eventType;
   if (eventType !== "task_failed" && eventType !== "message_failed") {
-    return status === "failed" || status === "failure" || status === "error" || status === "blocked";
+    return status === "failed" || status === "failure" || status === "error";
   }
   const content = item.content.toLowerCase();
   if (content.includes("dispatch finished without reply/completion") || content.includes("without reply/completion")) {
     return false;
   }
-  return /error|failed|failure|exception|timeout|forbidden|失败|错误|异常|超时|blocked/.test(content) ||
+  return /error|failed|failure|exception|timeout|forbidden|失败|错误|异常|超时/.test(content) ||
     status === "failed" ||
     status === "failure" ||
-    status === "error" ||
-    status === "blocked";
+    status === "error";
 };
 
 const buildCollaborationGroups = (
@@ -3449,8 +3448,11 @@ function isTerminalEventType(eventType: string) {
 }
 
 function kanbanColumnForStep(step: ProcessStep, visualStatus: string, steps: ProcessStep[] = []): KanbanColumnKey {
-  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok", "failed", "failure", "error", "blocked", "stale"].includes((step.status || "").toLowerCase())) {
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "ok", "failed", "failure", "error", "stale"].includes((step.status || "").toLowerCase())) {
     return "done";
+  }
+  if (["waiting", "blocked", "waiting_dependency", "waiting_dependencies"].includes((step.status || "").toLowerCase())) {
+    return "doing";
   }
   if (isCompletionEvidenceStep(step, steps) || isFailureEvidenceStep(step)) {
     return "done";
@@ -3490,7 +3492,7 @@ function buildWorkItemKanbanColumns(
     const column: KanbanColumnKey =
       item.status === "succeeded" || item.status === "failed" || item.status === "stale"
         ? "done"
-        : item.status === "running"
+        : item.status === "running" || item.status === "waiting"
           ? "doing"
           : "todo";
     const owner = item.owner_member_id
@@ -3522,11 +3524,11 @@ function buildWorkItemKanbanColumns(
           ? "task_completed"
           : item.status === "failed" || item.status === "stale"
             ? "task_failed"
-            : item.status === "running"
+            : item.status === "running" || item.status === "waiting"
               ? "task_progress"
               : "task_assigned",
       time: new Date(item.updated_at).getTime(),
-      progress: item.status === "succeeded" ? 100 : item.status === "running" ? 50 : undefined,
+      progress: item.status === "succeeded" ? 100 : item.status === "running" ? 50 : item.status === "waiting" ? 35 : undefined,
       statusLabel:
         item.status === "succeeded"
           ? "已完成"
@@ -3534,7 +3536,9 @@ function buildWorkItemKanbanColumns(
             ? "失败"
             : item.status === "stale"
               ? "超时"
-              : item.status === "running"
+              : item.status === "waiting"
+                ? "等待中"
+                : item.status === "running"
                 ? "执行中"
                 : item.status === "dispatched"
                   ? "已分派"
@@ -3860,6 +3864,13 @@ function buildPeerCollaborationModel(
         actorLane.waitingOn = displayMemberName(targetKey, memberByKey, leaderMemberId);
         setLaneCard(actorLane, step, "working", "等待协作", `${actorLane.label} 等待 ${actorLane.waitingOn}`);
       }
+      continue;
+    }
+
+    const stepStatus = (step.status || "").toLowerCase();
+    if (["waiting", "blocked", "waiting_dependency", "waiting_dependencies"].includes(stepStatus) && !isFailureEvidenceStep(step)) {
+      const lane = ensureLane(actorKey);
+      setLaneCard(lane, step, "waiting", "等待中", `${lane.label} 正在等待条件满足`);
       continue;
     }
 

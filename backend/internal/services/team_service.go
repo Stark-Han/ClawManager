@@ -3714,6 +3714,32 @@ func workItemHasAcceptedResultReceipt(item models.TeamWorkItem) bool {
 	)
 }
 
+func workItemHasAcceptedFailureReceipt(item models.TeamWorkItem) bool {
+	if item.Status != models.TeamTaskStatusFailed || item.ResultJSON == nil || strings.TrimSpace(*item.ResultJSON) == "" {
+		return false
+	}
+	payload := workItemResultPayload(item)
+	if isStateNeutralTeamObservation(payload) || !eventBool(payload, "resultFailed", "result_failed") {
+		return false
+	}
+	eventType := strings.ToLower(strings.TrimSpace(eventString(payload, "originalEvent", "original_event", "event", "type")))
+	return isAuthoritativeAssignmentFailure(eventType, payload)
+}
+
+func workItemIsMisprojectedWaitingObservation(item models.TeamWorkItem) bool {
+	if item.Status != models.TeamTaskStatusFailed || item.ResultJSON == nil || strings.TrimSpace(*item.ResultJSON) == "" {
+		return false
+	}
+	payload := workItemResultPayload(item)
+	if workItemHasAcceptedFailureReceipt(item) {
+		return false
+	}
+	status := normalizedTeamTaskEventStatus(payload)
+	return isWaitingTeamTaskEventStatus(status) ||
+		isStateNeutralTeamObservation(payload) ||
+		eventBool(payload, "dependencyBlocked", "dependency_blocked", "provisionalAssignmentResult", "provisional_assignment_result")
+}
+
 func (s *teamService) sweepAssignmentStatusChecks() error {
 	if s == nil || s.repo == nil {
 		return nil
@@ -3757,6 +3783,18 @@ func (s *teamService) sweepAssignmentStatusChecks() error {
 			if owner == nil || owner.TeamID != team.ID || isLeaderTeamMember(owner) || !isActiveTeamMember(owner) {
 				continue
 			}
+			if workItemIsMisprojectedWaitingObservation(item) {
+				item.Status = models.TeamTaskStatusWaiting
+				item.FinishedAt = nil
+				item.UpdatedAt = now
+				if repairErr := s.repo.UpsertWorkItem(&item); repairErr != nil {
+					errs = append(errs, repairErr)
+					continue
+				}
+				if _, ledgerErr := s.reconcileTeamWorkflowLedger(task, false, now); ledgerErr != nil {
+					errs = append(errs, ledgerErr)
+				}
+			}
 			if bus == nil {
 				bus, err = s.redisBusForTeam(context.Background(), &team)
 				if err != nil {
@@ -3782,7 +3820,7 @@ func (s *teamService) sweepAssignmentStatusChecks() error {
 				}
 				continue
 			}
-			if item.Status != models.TeamTaskStatusDispatched && item.Status != models.TeamTaskStatusRunning {
+			if !isActiveTeamWorkItemStatus(item.Status) {
 				continue
 			}
 			if activitySupported && activity != nil && activity.activeTurn() && activity.fresh(now) {
@@ -4757,9 +4795,7 @@ func shouldMonitorTeamWorkItem(item models.TeamWorkItem, cutoff time.Time) bool 
 	if item.OwnerMemberID == nil || strings.TrimSpace(item.WorkID) == "" {
 		return false
 	}
-	switch item.Status {
-	case models.TeamTaskStatusDispatched, models.TeamTaskStatusRunning:
-	default:
+	if !isActiveTeamWorkItemStatus(item.Status) {
 		return false
 	}
 	return item.UpdatedAt.IsZero() || item.UpdatedAt.Before(cutoff)
@@ -5393,7 +5429,7 @@ func (s *teamService) taskHasRecentActivity(team *models.Team, task *models.Team
 	}
 	for idx := range workItems {
 		item := workItems[idx]
-		if item.Status != models.TeamTaskStatusDispatched && item.Status != models.TeamTaskStatusRunning {
+		if !isActiveTeamWorkItemStatus(item.Status) {
 			continue
 		}
 		if item.UpdatedAt.After(cutoff) {
@@ -5674,6 +5710,27 @@ func isTeamTaskFailureSignal(eventType, status string, payload map[string]interf
 	}
 }
 
+// isAuthoritativeAssignmentFailure is the single assignment-level terminal
+// failure gate. It relies on the authenticated event kind and active assignment
+// identity, never on a free-form progress status such as "blocked". Legacy
+// runtimes remain compatible because an authenticated task_failed event bound
+// to an assignment is sufficient even when newer receipt fields are absent.
+func isAuthoritativeAssignmentFailure(eventType string, payload map[string]interface{}) bool {
+	if payload == nil || isStateNeutralTeamObservation(payload) || isNonAuthoritativeDispatchFailure(eventType, payload) {
+		return false
+	}
+	status := normalizedTeamTaskEventStatus(payload)
+	if isTeamTaskFailureSignal(eventType, status, payload) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(eventType), "task_failed") {
+		return false
+	}
+	return eventString(payload,
+		"assignmentId", "assignment_id", "canonicalWorkId", "canonical_work_id", "workId", "work_id",
+	) != ""
+}
+
 func hasStrictTeamFailureEnvelope(payload map[string]interface{}) bool {
 	if payload == nil {
 		return false
@@ -5822,7 +5879,40 @@ func isSuccessfulTeamTaskEventStatus(status string) bool {
 
 func isFailedTeamTaskEventStatus(status string) bool {
 	switch status {
-	case "failed", "failure", "error", "errored", "blocked":
+	case "failed", "failure", "error", "errored":
+		return true
+	default:
+		return false
+	}
+}
+
+// isWaitingTeamTaskEventStatus classifies execution states that keep the same
+// assignment open. A Worker may use "blocked" for a dependency/input wait; the
+// status alone is therefore never authority for a failed business result.
+func isWaitingTeamTaskEventStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "blocked", "waiting", "waiting_dependency", "waiting_dependencies",
+		"waiting_input", "waiting_review", "waiting_completion", "paused":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStateNeutralTeamObservation(payload map[string]interface{}) bool {
+	if payload == nil {
+		return false
+	}
+	if eventBool(payload, "nonAuthoritative", "non_authoritative") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(eventString(payload, "stateEffect", "state_effect"))) {
+	case "none", "observe", "observation", "advisory":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(eventString(payload, "eventKind", "event_kind", "kind"))) {
+	case "worker_progress", "assignment_heartbeat", "assignment_check_requested",
+		"assignment_check_result", "dependency_wait", "dependency_ready_reminder":
 		return true
 	default:
 		return false
@@ -5889,6 +5979,9 @@ func isTeamTaskRunningSignal(eventType, status string, payload map[string]interf
 	case "running", "in_progress", "processing", "busy", "working":
 		return true
 	}
+	if isWaitingTeamTaskEventStatus(status) {
+		return true
+	}
 	progress := eventInt(payload, "progress")
 	return progress > 0 && progress < 100
 }
@@ -5897,6 +5990,15 @@ func isTerminalTeamTaskStatus(status string) bool {
 	return status == models.TeamTaskStatusSucceeded ||
 		status == models.TeamTaskStatusFailed ||
 		status == models.TeamTaskStatusStale
+}
+
+func isActiveTeamWorkItemStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case models.TeamTaskStatusDispatched, models.TeamTaskStatusRunning, models.TeamTaskStatusWaiting:
+		return true
+	default:
+		return false
+	}
 }
 
 func isImmutableRootTaskStatus(status string) bool {
@@ -6904,7 +7006,7 @@ func dependencyReadyAssignmentsAfter(items []models.TeamWorkItem, completedAssig
 	latest[completedAssignmentID] = completed
 	ready := make([]string, 0)
 	for businessID, item := range latest {
-		if item.SupersededBy != nil || (item.Status != models.TeamTaskStatusRunning && item.Status != models.TeamTaskStatusDispatched) {
+		if item.SupersededBy != nil || !isActiveTeamWorkItemStatus(item.Status) {
 			continue
 		}
 		dependencies := teamWorkItemDependencies(item)
@@ -7900,7 +8002,10 @@ func teamAssignmentRevisionRecoveryAllowed(items []models.TeamWorkItem, business
 		return false
 	}
 	currentRevision := teamMaxInt(currentTarget.Revision, 1)
-	if currentTarget.Status == models.TeamTaskStatusFailed || currentTarget.Status == models.TeamTaskStatusStale {
+	if currentTarget.Status == models.TeamTaskStatusStale {
+		return true
+	}
+	if currentTarget.Status == models.TeamTaskStatusFailed && workItemHasAcceptedFailureReceipt(*currentTarget) {
 		return true
 	}
 	if currentTarget.ValidatedRevision != nil && *currentTarget.ValidatedRevision >= currentRevision {
@@ -8358,6 +8463,17 @@ func markLeaderMediatedMonitorBlockerCandidate(eventType string, payload map[str
 	return "message_warning"
 }
 
+func normalizeWaitingAssignmentObservation(payload map[string]interface{}) {
+	if payload == nil || !isWaitingTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) {
+		return
+	}
+	payload["status"] = models.TeamTaskStatusWaiting
+	payload["runtimeStatus"] = models.TeamTaskStatusWaiting
+	payload["availability"] = models.TeamMemberAvailabilityBusy
+	payload["rootTaskTerminal"] = false
+	payload["assignmentWaiting"] = true
+}
+
 func isLeaderMediatedWorkerToLeaderResult(team *models.Team, eventType string, payload map[string]interface{}, member *models.TeamMember, task *models.TeamTask) bool {
 	if !isLeaderMediatedTeam(team) || payload == nil || member == nil || task == nil || isLeaderTeamMember(member) {
 		return false
@@ -8368,9 +8484,7 @@ func isLeaderMediatedWorkerToLeaderResult(team *models.Team, eventType string, p
 	if isNonAuthoritativeDispatchFailure(eventType, payload) || isNonAuthoritativeDispatchWarning(eventType, payload) {
 		return false
 	}
-	if isFailedTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) ||
-		strings.EqualFold(eventType, "task_failed") ||
-		strings.EqualFold(eventType, "message_failed") {
+	if isAuthoritativeAssignmentFailure(eventType, payload) {
 		// A non-Leader failure belongs to its authenticated assignment, not to
 		// the root task. New runtimes say this explicitly; older runtimes are
 		// accepted when the current envelope still carries the assignment id.
@@ -8426,9 +8540,7 @@ func isLeaderMediatedWorkerToLeaderResult(team *models.Team, eventType string, p
 }
 
 func markLeaderMediatedAssignmentResult(eventType string, payload map[string]interface{}, member *models.TeamMember) {
-	resultFailed := isFailedTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) ||
-		strings.EqualFold(eventType, "task_failed") ||
-		strings.EqualFold(eventType, "message_failed")
+	resultFailed := isAuthoritativeAssignmentFailure(eventType, payload)
 	payload["assignmentResultOnly"] = true
 	payload["memberResultConfirmed"] = true
 	payload["rootTaskTerminal"] = false
@@ -8893,6 +9005,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	if leaderMediatedRouteViolation {
 		eventType = markLeaderMediatedRouteViolation(eventType, payload, member)
 	}
+	if !isAuthoritativeAssignmentFailure(eventType, payload) {
+		normalizeWaitingAssignmentObservation(payload)
+	}
 	assignmentResultOnly := isLeaderMediatedWorkerToLeaderResult(team, eventType, payload, member, task)
 	if assignmentResultOnly {
 		markLeaderMediatedAssignmentResult(eventType, payload, member)
@@ -9331,7 +9446,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 		}
 	}
 	workflowChanged := reviewInvalidated
-	if !stateNeutralAssignmentEvent {
+	waitingAssignmentObservation := isWaitingTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) &&
+		!isAuthoritativeAssignmentFailure(eventType, payload)
+	if !stateNeutralAssignmentEvent || waitingAssignmentObservation {
 		if err := s.projectTeamWorkItem(team, task, member, eventType, payload, event); err != nil {
 			return err
 		}
@@ -9507,7 +9624,7 @@ func reconcileTeamMemberOperationalState(member *models.TeamMember, items []mode
 		}
 		owned = append(owned, item)
 		switch strings.ToLower(strings.TrimSpace(item.Status)) {
-		case models.TeamTaskStatusDispatched, models.TeamTaskStatusRunning:
+		case models.TeamTaskStatusDispatched, models.TeamTaskStatusRunning, models.TeamTaskStatusWaiting:
 			active = append(active, item)
 		}
 	}
@@ -9919,9 +10036,7 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 	}
 	delete(sourcePayload, "provisionalAssignmentResult")
 	delete(sourcePayload, "dependencyBlocked")
-	resultEventStatus := normalizedTeamTaskEventStatus(sourcePayload)
-	resultFailed := isFailedTeamTaskEventStatus(resultEventStatus) ||
-		isTeamTaskFailureSignal(sourceEvent.EventType, resultEventStatus, sourcePayload)
+	resultFailed := isAuthoritativeAssignmentFailure(sourceEvent.EventType, sourcePayload)
 	recoveryReadyAssignments := []string(nil)
 	if resultFailed {
 		// A failed result is not automatically a dependency blocker merely
@@ -10133,7 +10248,7 @@ func (s *teamService) createLeaderMediatedResultNotification(team *models.Team, 
 			for idx := range currentItems {
 				candidate := currentItems[idx]
 				if workItemBusinessID(candidate) != readyAssignmentID || candidate.SupersededBy != nil ||
-					(candidate.Status != models.TeamTaskStatusRunning && candidate.Status != models.TeamTaskStatusDispatched) {
+					!isActiveTeamWorkItemStatus(candidate.Status) {
 					continue
 				}
 				if readyItem == nil || teamMaxInt(candidate.Revision, 1) > teamMaxInt(readyItem.Revision, 1) {
@@ -10254,7 +10369,8 @@ func (s *teamService) buildLeaderMediatedResultNotificationEnvelope(team *models
 		}
 	}
 	resultMarkdown := eventString(notificationPayload, "resultMarkdown", "summary")
-	resultFailed := isFailedTeamTaskEventStatus(normalizedTeamTaskEventStatus(notificationPayload)) || eventBool(notificationPayload, "resultFailed", "result_failed")
+	resultFailed := eventBool(notificationPayload, "resultFailed", "result_failed") &&
+		!isStateNeutralTeamObservation(notificationPayload)
 	prompt := ""
 	if resultFailed {
 		blockedDependencies := normalizeContextRefs(firstTeamValue(notificationPayload, "blockedDependencies", "blocked_dependencies"))
@@ -11018,10 +11134,14 @@ func (s *teamService) projectTeamWorkItem(
 		}
 	}
 	var immutableContract *models.TeamWorkItem
-	if !authoritativeAssignment && assignmentID != "" {
+	inheritsPriorRevisionContract := authoritativeAssignment && revision > 1
+	if (!authoritativeAssignment || inheritsPriorRevisionContract) && assignmentID != "" {
 		for idx := range existingAssignmentItems {
 			candidate := existingAssignmentItems[idx]
 			if candidate.SupersededBy != nil || workItemBusinessID(candidate) != assignmentID {
+				continue
+			}
+			if inheritsPriorRevisionContract && teamMaxInt(candidate.Revision, 1) >= revision {
 				continue
 			}
 			if owner != nil && candidate.OwnerMemberID != nil && *candidate.OwnerMemberID != owner.ID {
@@ -11034,14 +11154,20 @@ func (s *teamService) projectTeamWorkItem(
 		}
 		if immutableContract != nil {
 			// Execution events update outcome fields only. All routing and gate
-			// fields come from the issued assignment contract for every role.
-			workID = immutableContract.WorkID
-			assignmentID = workItemBusinessID(*immutableContract)
+			// fields come from the issued assignment contract for every role. A
+			// real successor revision keeps its new identity but inherits the same
+			// durable business contract; omitted Agent fields cannot erase it.
+			if !inheritsPriorRevisionContract {
+				workID = immutableContract.WorkID
+				assignmentID = workItemBusinessID(*immutableContract)
+			}
 			canonicalWorkID = derefTeamString(immutableContract.CanonicalWorkID)
 			if canonicalWorkID == "" {
 				canonicalWorkID = assignmentID
 			}
-			revision = teamMaxInt(immutableContract.Revision, 1)
+			if !inheritsPriorRevisionContract {
+				revision = teamMaxInt(immutableContract.Revision, 1)
+			}
 		}
 	}
 	reviewRequired := eventBool(payload, "reviewRequired", "review_required", "validationRequired", "validation_required")
@@ -11061,11 +11187,17 @@ func (s *teamService) projectTeamWorkItem(
 		}
 	}
 	status := models.TeamTaskStatusRunning
+	if isWaitingTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) &&
+		!isAuthoritativeAssignmentFailure(eventType, payload) {
+		status = models.TeamTaskStatusWaiting
+	}
 	switch stepType {
 	case "assignment":
 		status = models.TeamTaskStatusDispatched
 	case "ack", "progress", "peer_request", "peer_reply":
-		status = models.TeamTaskStatusRunning
+		if status != models.TeamTaskStatusWaiting {
+			status = models.TeamTaskStatusRunning
+		}
 	case "result", "final_synthesis":
 		if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
 			status = models.TeamTaskStatusRunning
@@ -11073,10 +11205,10 @@ func (s *teamService) projectTeamWorkItem(
 			status = models.TeamTaskStatusSucceeded
 		}
 	case "blocker":
-		if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
-			status = models.TeamTaskStatusRunning
-		} else {
+		if isAuthoritativeAssignmentFailure(eventType, payload) {
 			status = models.TeamTaskStatusFailed
+		} else {
+			status = models.TeamTaskStatusWaiting
 		}
 	}
 	now := event.CreatedAt
@@ -11130,7 +11262,7 @@ func (s *teamService) projectTeamWorkItem(
 		if supersededBy := eventString(payload, "supersededBy", "superseded_by"); supersededBy != "" {
 			item.SupersededBy = &supersededBy
 		}
-	} else if immutableContract != nil {
+	} else if immutableContract != nil && !inheritsPriorRevisionContract {
 		item.SupersededBy = immutableContract.SupersededBy
 	}
 	if immutableContract != nil {
@@ -11145,7 +11277,7 @@ func (s *teamService) projectTeamWorkItem(
 	if immutableContract != nil {
 		item.OwnerMemberID = immutableContract.OwnerMemberID
 	}
-	if status == models.TeamTaskStatusRunning {
+	if status == models.TeamTaskStatusRunning || status == models.TeamTaskStatusWaiting {
 		item.StartedAt = &now
 	}
 	if status == models.TeamTaskStatusSucceeded || status == models.TeamTaskStatusFailed {
@@ -11528,12 +11660,14 @@ func normalizeExistingCollaborationStep(step map[string]interface{}, team *model
 	}
 	if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
 		step["type"] = "result"
-		status := normalizedTeamTaskEventStatus(payload)
-		if isFailedTeamTaskEventStatus(status) || isTeamTaskFailureSignal(eventType, status, payload) {
+		if isAuthoritativeAssignmentFailure(eventType, payload) {
 			step["status"] = models.TeamTaskStatusFailed
 		} else {
 			step["status"] = models.TeamTaskStatusSucceeded
 		}
+	} else if isWaitingTeamTaskEventStatus(normalizedTeamTaskEventStatus(payload)) {
+		step["type"] = "progress"
+		step["status"] = models.TeamTaskStatusWaiting
 	}
 	if eventString(step, "type") == "" {
 		step["type"] = collaborationStepTypeForEvent(eventType, payload)
@@ -11967,6 +12101,9 @@ func collaborationStepStatusForEvent(eventType string, payload map[string]interf
 		return "warning"
 	}
 	if eventBool(payload, "assignmentResultOnly", "assignment_result_only") {
+		if isAuthoritativeAssignmentFailure(eventType, payload) {
+			return models.TeamTaskStatusFailed
+		}
 		return models.TeamTaskStatusSucceeded
 	}
 	if eventBool(payload, "leaderDispatchOnly", "leader_dispatch_only") {
@@ -11983,11 +12120,14 @@ func collaborationStepStatusForEvent(eventType string, payload map[string]interf
 			return models.TeamTaskStatusSucceeded
 		}
 	}
-	if isFailedTeamTaskEventStatus(status) || eventType == "task_failed" || eventType == "message_failed" {
+	if isAuthoritativeAssignmentFailure(eventType, payload) {
 		if isNonAuthoritativeDispatchFailure(eventType, payload) {
 			return "warning"
 		}
 		return models.TeamTaskStatusFailed
+	}
+	if isWaitingTeamTaskEventStatus(status) {
+		return models.TeamTaskStatusWaiting
 	}
 	switch eventType {
 	case "assignment_check_requested", "assignment_check_result", "assignment_heartbeat", "leader_synthesis_reminder", "assignment_recovery_started", "assignment_reissued":

@@ -3388,11 +3388,14 @@ func TestDeliverySemanticsRevisionRequiresLedgerAuthorization(t *testing.T) {
 	task := &models.TeamTask{ID: 297, TeamID: team.ID, TargetMemberID: 400, Status: models.TeamTaskStatusRunning}
 	worker := &models.TeamMember{ID: 401, TeamID: team.ID, MemberKey: "worker-1", Role: "specialist"}
 	assignmentID := "stage-one"
+	phaseID := "phase-one"
+	dependencyJSON := `["source-stage"]`
 	repo := &teamRepositoryStub{
 		membersByKey: map[string]*models.TeamMember{"worker-1": worker},
 		workItems: []models.TeamWorkItem{{
 			ID: 501, TeamID: team.ID, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
-			OwnerMemberID: &worker.ID, Revision: 1, RequiredForRoot: true, Status: models.TeamTaskStatusSucceeded,
+			OwnerMemberID: &worker.ID, PhaseID: &phaseID, Revision: 1, RequiredForRoot: true, ReviewRequired: true,
+			Title: "Issued stage contract", Status: models.TeamTaskStatusSucceeded, DependsOnJSON: &dependencyJSON,
 		}},
 	}
 	base := map[string]interface{}{
@@ -3414,6 +3417,7 @@ func TestDeliverySemanticsRevisionRequiresLedgerAuthorization(t *testing.T) {
 		authorized[key] = value
 	}
 	repo.workItems[0].Status = models.TeamTaskStatusFailed
+	repo.workItems[0].ResultJSON = stringPtr(`{"originalEvent":"task_failed","event":"task_failed","assignmentId":"stage-one","status":"failed","resultFailed":true}`)
 	// Runtime may omit or mis-state revisionAuthorized. Persisted failure facts,
 	// not an Agent/Runtime boolean, are the authority for an exact successor.
 	authorized["revisionAuthorized"] = false
@@ -3424,6 +3428,11 @@ func TestDeliverySemanticsRevisionRequiresLedgerAuthorization(t *testing.T) {
 	}
 	if len(repo.workItems) != 2 || repo.workItems[1].Revision != 2 {
 		t.Fatalf("a ledger-authorized successor should create exactly one revision: %#v", repo.workItems)
+	}
+	got := repo.workItems[1]
+	if derefTeamString(got.PhaseID) != phaseID || derefTeamString(got.DependsOnJSON) != dependencyJSON ||
+		!got.RequiredForRoot || !got.ReviewRequired || got.Title != "Issued stage contract" {
+		t.Fatalf("a real successor revision must inherit the durable assignment contract: %#v", got)
 	}
 }
 
@@ -6075,6 +6084,70 @@ func TestLeaderMediatedWorkerProgressIsNotConfirmedAsResult(t *testing.T) {
 	}
 }
 
+func TestLeaderMediatedDependencyWaitStaysOnSameAssignment(t *testing.T) {
+	teamID := 131
+	taskID := 274
+	leaderID := 1001
+	workerID := 1002
+	assignmentID := "digest-filter"
+	dependencyJSON := `["digest-collect"]`
+	task := &models.TeamTask{ID: taskID, TeamID: teamID, TargetMemberID: leaderID, MessageID: "team-131-task-274", Status: models.TeamTaskStatusRunning}
+	worker := &models.TeamMember{ID: workerID, TeamID: teamID, MemberKey: "content-filter", Role: "domain-specialist"}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{task.MessageID: task},
+		membersByID:      map[int]*models.TeamMember{workerID: worker},
+		membersByKey:     map[string]*models.TeamMember{"content-filter": worker},
+		workItems: []models.TeamWorkItem{{
+			ID: 1, TeamID: teamID, RootTaskID: taskID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			OwnerMemberID: &workerID, Revision: 1, RequiredForRoot: true, Status: models.TeamTaskStatusRunning,
+			DependsOnJSON: &dependencyJSON,
+		}},
+	}
+	payload := map[string]interface{}{
+		"event": "task_progress", "memberId": "content-filter", "rootTaskId": fmt.Sprintf("team-%d-task-%d", teamID, taskID),
+		"rootMessageId": task.MessageID, "messageId": "wait-turn-1",
+		"protocolVersion": 4, "eventKind": "worker_progress", "nonAuthoritative": true, "stateEffect": "none",
+		"assignmentId": assignmentID, "workId": assignmentID, "revision": 1,
+		"status": "blocked", "availability": "blocked", "summary": "Waiting for digest-collect.",
+		"collaborationStep": map[string]interface{}{"type": "progress", "actor": "content-filter", "workId": assignmentID},
+	}
+	if isLeaderMediatedWorkerToLeaderResult(&models.Team{ID: teamID, CommunicationMode: teamCommunicationModeLeaderMediated}, "task_progress", payload, worker, task) {
+		t.Fatalf("dependency wait progress must not become a terminal member result: %#v", payload)
+	}
+	service := &teamService{repo: repo}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.projectTeamEvent(&models.Team{ID: teamID, UserID: 1, SharedMountPath: "/team", CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID: "wait-stream-1", Fields: map[string]string{"payload": string(payloadJSON)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 1 || repo.workItems[0].Status != models.TeamTaskStatusWaiting || repo.workItems[0].FinishedAt != nil {
+		t.Fatalf("dependency wait must preserve one non-terminal assignment: %#v", repo.workItems)
+	}
+	if got := teamWorkItemDependencies(repo.workItems[0]); !slices.Equal(got, []string{"digest-collect"}) {
+		t.Fatalf("dependency wait rewrote the issued contract: %#v", repo.workItems[0])
+	}
+	if teamAssignmentRevisionRecoveryAllowed(repo.workItems, assignmentID) {
+		t.Fatal("a waiting assignment must not authorize a recovery revision")
+	}
+}
+
+func TestFalseFailedWaitingObservationDoesNotAuthorizeRevision(t *testing.T) {
+	assignmentID := "digest-filter"
+	resultJSON := `{"eventKind":"worker_progress","nonAuthoritative":true,"stateEffect":"none","status":"blocked","assignmentId":"digest-filter"}`
+	items := []models.TeamWorkItem{{WorkID: assignmentID, AssignmentID: &assignmentID, Revision: 1, Status: models.TeamTaskStatusFailed, ResultJSON: &resultJSON}}
+	if teamAssignmentRevisionRecoveryAllowed(items, assignmentID) {
+		t.Fatal("a misprojected waiting observation must not authorize r2")
+	}
+	if !workItemIsMisprojectedWaitingObservation(items[0]) {
+		t.Fatal("the reconciler must recognize the old false-failure shape")
+	}
+}
+
 func TestLeaderMediatedStructuredMonitorFailureDoesNotCloseRootTask(t *testing.T) {
 	teamID := 46
 	taskID := 79
@@ -7526,12 +7599,15 @@ func TestRuntimeTurnResultKeepsDirectTargetAsRootResult(t *testing.T) {
 func TestAssignmentFailureNeverNormalizesToSucceededResult(t *testing.T) {
 	payload := map[string]interface{}{
 		"assignmentResultOnly": true,
+		"assignmentId":         "review-assignment",
+		"originalEvent":        "task_failed",
+		"resultFailed":         true,
 		"status":               models.TeamTaskStatusFailed,
 		"runtimeStatus":        models.TeamTaskStatusFailed,
 		"summary":              "Required artifact is unavailable.",
 	}
 	step := map[string]interface{}{"type": "result"}
-	normalizeExistingCollaborationStep(step, &models.Team{ID: 123}, "completion_proposed", payload, &models.TeamMember{MemberKey: "reviewer"}, nil)
+	normalizeExistingCollaborationStep(step, &models.Team{ID: 123}, "task_failed", payload, &models.TeamMember{MemberKey: "reviewer"}, nil)
 	if eventString(step, "status") != models.TeamTaskStatusFailed {
 		t.Fatalf("failed assignment receipt was converted to success: step=%#v payload=%#v", step, payload)
 	}
