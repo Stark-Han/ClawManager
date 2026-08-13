@@ -172,11 +172,6 @@ const normalizedPreset = (
 ): Exclude<ResourcePresetKey, "custom"> =>
   preset && preset !== "custom" ? preset : "small";
 
-// Hermes Lite Team workers are temporarily unavailable in the creation UI.
-// Keep the runtime union for existing Teams, but ensure every new Team draft
-// and request uses the supported OpenClaw Lite worker runtime.
-const TEAM_WORKER_RUNTIME_TYPE: RuntimeType = "openclaw";
-
 const draftFromTemplateMember = (
   templateMember: TeamMemberTemplateMember,
   usedIds: Set<string>,
@@ -193,7 +188,9 @@ const draftFromTemplateMember = (
 
   const runtimeType: RuntimeType = isLeader
     ? LEADER_RUNTIME_TYPE
-    : TEAM_WORKER_RUNTIME_TYPE;
+    : templateMember.runtimeType === "hermes"
+      ? "hermes"
+      : "openclaw";
 
   return defaultMember({
     ...templateMember,
@@ -340,12 +337,22 @@ const CreateTeamPage: React.FC = () => {
   );
   const selectedImage = defaultOpenClawMemberImages[0];
   const openClawLiteImage = selectedImage?.image || "";
+  const defaultHermesMemberImages = useMemo(
+    () =>
+      images.filter(
+        (item) =>
+          item.instance_type === "hermes" &&
+          item.is_enabled !== false &&
+          normalizedImageRuntimeType(item) === imageRuntimeTypeForMode("lite"),
+      ),
+    [images],
+  );
+  const selectedHermesImage = defaultHermesMemberImages[0];
+  const hermesLiteImage = selectedHermesImage?.image || "";
   const imageForRuntime = useCallback(
-    (runtimeType: RuntimeType) => {
-      void runtimeType;
-      return openClawLiteImage;
-    },
-    [openClawLiteImage],
+    (runtimeType: RuntimeType) =>
+      runtimeType === "hermes" ? hermesLiteImage : openClawLiteImage,
+    [hermesLiteImage, openClawLiteImage],
   );
 
   useEffect(() => {
@@ -392,6 +399,23 @@ const CreateTeamPage: React.FC = () => {
     setSelectedTemplateId(template.id);
     setName(template.teamName || "");
     setMembers(buildTemplateMembers(template, imageForRuntime));
+    setError(null);
+  };
+
+  const updateWorkerRuntime = (memberDraftId: string, runtimeType: RuntimeType) => {
+    setMembers((current) =>
+      current.map((member) => {
+        if (member.id !== memberDraftId || member.isLeader) {
+          return member;
+        }
+        return {
+          ...member,
+          runtimeType,
+          instanceMode: FIXED_INSTANCE_MODE,
+          image: imageForRuntime(runtimeType),
+        };
+      }),
+    );
     setError(null);
   };
 
@@ -553,8 +577,10 @@ const CreateTeamPage: React.FC = () => {
       if (member.isLeader && member.runtimeType !== LEADER_RUNTIME_TYPE) {
         return "Leader 必须使用 OpenClaw Lite";
       }
-      if (!imageForRuntime(TEAM_WORKER_RUNTIME_TYPE)) {
-        return "没有可用的 OpenClaw Lite 镜像";
+      if (!imageForRuntime(member.runtimeType)) {
+        return member.runtimeType === "hermes"
+          ? "没有可用的 Hermes Lite 镜像"
+          : "没有可用的 OpenClaw Lite 镜像";
       }
       if (member.cpuCores <= 0 || member.memoryGb <= 0 || member.diskGb <= 0) {
         return `成员 ${memberId} 的资源规格无效`;
@@ -613,13 +639,7 @@ const CreateTeamPage: React.FC = () => {
       members: members.map((member) => {
         const normalizedMemberId = normalizeMemberId(member.memberId);
         const memberDescription = effectiveMemberDescription(member);
-        // Runtime selection is intentionally fixed at submission time. Custom
-        // templates may carry historical runtime metadata, but creating a new
-        // Team must not allow that metadata to bypass the currently supported
-        // OpenClaw Lite-only contract.
-        const runtimeType = member.isLeader
-          ? LEADER_RUNTIME_TYPE
-          : TEAM_WORKER_RUNTIME_TYPE;
+        const runtimeType = member.isLeader ? LEADER_RUNTIME_TYPE : member.runtimeType;
         return {
           member_id: normalizedMemberId,
           name: displayNameForMember(member),
@@ -816,7 +836,7 @@ const CreateTeamPage: React.FC = () => {
                     + 自定义 Team
                   </Link>
                   <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                    仅 OpenClaw Lite
+                    OpenClaw Leader · Lite Worker 可选
                   </span>
                 </div>
               </div>
@@ -928,9 +948,51 @@ const CreateTeamPage: React.FC = () => {
                         <div className="text-xs font-medium text-gray-500 lg:hidden">
                           运行时
                         </div>
-                        <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
-                          OpenClaw Lite
-                        </div>
+                        {member.isLeader ? (
+                          <div className="inline-flex rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
+                            OpenClaw Lite
+                          </div>
+                        ) : (
+                          <div
+                            className="inline-flex rounded-lg border border-[#eadfd8] bg-gray-50 p-0.5"
+                            role="group"
+                            aria-label={`${member.memberId} 运行时`}
+                          >
+                            {(["openclaw", "hermes"] as RuntimeType[]).map(
+                              (runtimeType) => {
+                                const selected = member.runtimeType === runtimeType;
+                                const unavailable =
+                                  runtimeType === "hermes" && !hermesLiteImage;
+                                return (
+                                  <button
+                                    key={runtimeType}
+                                    type="button"
+                                    disabled={unavailable}
+                                    title={
+                                      unavailable
+                                        ? "未配置可用的 Hermes Lite 镜像"
+                                        : undefined
+                                    }
+                                    onClick={() =>
+                                      updateWorkerRuntime(member.id, runtimeType)
+                                    }
+                                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
+                                      selected
+                                        ? runtimeType === "hermes"
+                                          ? "bg-violet-600 text-white shadow-sm"
+                                          : "bg-emerald-600 text-white shadow-sm"
+                                        : "text-gray-600 hover:bg-white"
+                                    } disabled:cursor-not-allowed disabled:opacity-40`}
+                                  >
+                                    {runtimeType === "hermes"
+                                      ? "Hermes Lite"
+                                      : "OpenClaw Lite"}
+                                  </button>
+                                );
+                              },
+                            )}
+                          </div>
+                        )}
                       </div>
                       <div>
                         <div className="text-xs font-medium text-gray-500 lg:hidden">
@@ -978,7 +1040,16 @@ const CreateTeamPage: React.FC = () => {
                       : "未选择"
                   }
                 />
-                <SummaryRow label="运行方式" value="OpenClaw Lite" />
+                <SummaryRow
+                  label="运行方式"
+                  value={
+                    members.some(
+                      (member) => !member.isLeader && member.runtimeType === "hermes",
+                    )
+                      ? "OpenClaw Leader + 混合 Lite Worker"
+                      : "OpenClaw Lite"
+                  }
+                />
                 <SummaryRow
                   label="协作模式"
                   value={communicationModeOption.label}
@@ -991,6 +1062,18 @@ const CreateTeamPage: React.FC = () => {
                   label="默认镜像"
                   value={selectedImage?.display_name || selectedImage?.image || "无"}
                 />
+                {members.some(
+                  (member) => !member.isLeader && member.runtimeType === "hermes",
+                ) && (
+                  <SummaryRow
+                    label="Hermes Lite 镜像"
+                    value={
+                      selectedHermesImage?.display_name ||
+                      selectedHermesImage?.image ||
+                      "无"
+                    }
+                  />
+                )}
                 <SummaryRow
                   label="环境变量"
                   value={
