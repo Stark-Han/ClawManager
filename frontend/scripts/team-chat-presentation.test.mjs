@@ -121,5 +121,20 @@ assert.match(
   /const dispatchedTask = await teamService\.dispatchTask[\s\S]*setLoadedTasks\(\(current\) => mergeTasksByLatestState\(current, \[dispatchedTask\]\)\);[\s\S]*setSelectedGroupKey\(canonicalTaskKey\(dispatchedTask\.id\)\);/,
   "a successful local dispatch must immediately select the newly created task",
 );
+assert.doesNotMatch(
+  source,
+  /server-smoke/,
+  "the Kanban must not retain the old fixed smoke-test title",
+);
+assert.match(
+  source,
+  /payload:\s*\{\s*title:\s*taskPrompt\.trim\(\),\s*prompt:\s*taskPrompt\.trim\(\)/,
+  "new tasks must use the submitted query instead of a fixed title",
+);
+assert.match(
+  source,
+  /title=\{queryText \|\| undefined\}[\s\S]*\{queryText \|\| "用户提交 query 后，这里会展示拆解、执行和汇总。"\}/,
+  "the Kanban header must present the current query as its primary text",
+);
 
 process.stdout.write("Team chat presentation contract test passed\n");

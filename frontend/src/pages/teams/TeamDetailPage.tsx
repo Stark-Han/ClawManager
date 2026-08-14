@@ -1001,7 +1001,6 @@ const TeamDetailPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [targetMember] = useState("");
-  const [taskTitle] = useState("server-smoke");
   const [taskPrompt, setTaskPrompt] = useState("");
   const [dispatching, setDispatching] = useState(false);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
@@ -1175,7 +1174,7 @@ const TeamDetailPage: React.FC = () => {
       const dispatchedTask = await teamService.dispatchTask(teamId, {
         target_member_id: targetMember.trim(),
         payload: {
-          title: taskTitle.trim() || "Team task",
+          title: taskPrompt.trim(),
           prompt: taskPrompt.trim(),
           responseLocale: "zh-CN",
         },
@@ -2600,7 +2599,6 @@ function InteractionProcessPanel({
     : latestRuntimeStatus === "waiting_completion"
       ? "等待显式完成确认"
       : workflowStatusText(group?.task?.workflow_state) || processStatusText(visualStatus);
-  const title = group?.task ? taskTitleText(group.task) : group?.title || "等待任务";
   const queryText = group?.task
     ? taskPromptText(group.task) || group.title
     : group?.items.find((item) => item.content)?.content || "";
@@ -2686,8 +2684,10 @@ function InteractionProcessPanel({
                 {statusText}
               </span>
             </div>
-            <div className="mt-2 text-sm font-semibold leading-5">{title}</div>
-            <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-600">
+            <div
+              className="mt-2 line-clamp-2 text-sm font-semibold leading-5 text-slate-800"
+              title={queryText || undefined}
+            >
               {queryText || "用户提交 query 后，这里会展示拆解、执行和汇总。"}
             </div>
             <div className="mt-1.5 flex max-w-full flex-nowrap items-center gap-1 overflow-hidden text-[10px] leading-4 text-slate-500">
