@@ -138,8 +138,8 @@ assert.match(
 );
 assert.match(
   source,
-  /case "long":\s*return 1060;[\s\S]*case "medium":\s*return 900;[\s\S]*default:\s*return 700;/,
-  "the shared chat and Kanban height must avoid the empty lower workspace",
+  /case "long":\s*return 1140;[\s\S]*case "medium":\s*return 970;[\s\S]*default:\s*return 760;/,
+  "the shared chat and Kanban height must reduce empty space without clipping the detail panel",
 );
 
 process.stdout.write("Team chat presentation contract test passed\n");
