@@ -1172,8 +1172,7 @@ const TeamDetailPage: React.FC = () => {
     try {
       setDispatching(true);
       setDispatchError(null);
-      setSelectedGroupKey(null);
-      await teamService.dispatchTask(teamId, {
+      const dispatchedTask = await teamService.dispatchTask(teamId, {
         target_member_id: targetMember.trim(),
         payload: {
           title: taskTitle.trim() || "Team task",
@@ -1181,6 +1180,8 @@ const TeamDetailPage: React.FC = () => {
           responseLocale: "zh-CN",
         },
       });
+      setLoadedTasks((current) => mergeTasksByLatestState(current, [dispatchedTask]));
+      setSelectedGroupKey(canonicalTaskKey(dispatchedTask.id));
       setTaskPrompt("");
       await loadTeam({ background: true });
     } catch (err: any) {
@@ -2484,7 +2485,7 @@ function CollaborationPanel({
         )}
       </div>
 
-      {queryAnchors.length >= 3 && (
+      {queryAnchors.length >= 2 && (
         <QuestionAnchorRail
           groups={queryAnchors}
           activeGroupKey={activeGroupKey}
