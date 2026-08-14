@@ -138,7 +138,7 @@ assert.match(
 );
 assert.match(
   source,
-  /case "long":\s*return 1140;[\s\S]*case "medium":\s*return 970;[\s\S]*default:\s*return 760;/,
+  /case "long":\s*return 1110;[\s\S]*case "medium":\s*return 945;[\s\S]*default:\s*return 740;/,
   "the shared chat and Kanban height must reduce empty space without clipping the detail panel",
 );
 
