@@ -454,11 +454,11 @@ const teamWorkspaceHeight = (
   }
   switch (detailSize) {
     case "long":
-      return 1220;
+      return 1060;
     case "medium":
-      return 1040;
+      return 900;
     default:
-      return 820;
+      return 700;
   }
 };
 

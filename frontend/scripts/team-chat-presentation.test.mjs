@@ -136,5 +136,10 @@ assert.match(
   /title=\{queryText \|\| undefined\}[\s\S]*\{queryText \|\| "用户提交 query 后，这里会展示拆解、执行和汇总。"\}/,
   "the Kanban header must present the current query as its primary text",
 );
+assert.match(
+  source,
+  /case "long":\s*return 1060;[\s\S]*case "medium":\s*return 900;[\s\S]*default:\s*return 700;/,
+  "the shared chat and Kanban height must avoid the empty lower workspace",
+);
 
 process.stdout.write("Team chat presentation contract test passed\n");
