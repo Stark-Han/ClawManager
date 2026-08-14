@@ -3,6 +3,7 @@ package teamtemplate
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,85 @@ func TestGenerateAndAdjustWorkerPreserveTemplateInvariants(t *testing.T) {
 	}
 	if worker.Role != "literature-researcher" || updated.Revision != 2 {
 		t.Fatalf("adjusted worker/revision = %#v / %d", worker, updated.Revision)
+	}
+}
+
+func TestAdjustLeaderOnlyChangesDomainOverlayAndPreservesRoster(t *testing.T) {
+	generated := `{
+  "schemaVersion": 1,
+  "name": "Briefing Team",
+  "summary": "Research and publish a daily briefing",
+  "resolvedMemberCount": 3,
+  "members": [
+    {"memberId":"leader","displayName":"Chief Editor","role":"leader","isLeader":true,"summary":"Coordinates the briefing","mission":"Coordinate research and publication","responsibilities":["Delegate research","Reconcile findings"],"boundaries":["Do not replace specialist research"],"expectedInputs":["Research results"],"deliverables":["Final briefing"],"acceptanceCriteria":["All findings reconciled"],"collaborationNotes":["Coordinate researcher and reviewer"],"capabilityTags":["orchestration"]},
+    {"memberId":"researcher","displayName":"Researcher","role":"researcher","isLeader":false,"summary":"Finds primary sources","mission":"Research","responsibilities":["Find sources"],"boundaries":[],"expectedInputs":["Research question"],"deliverables":["Evidence notes"],"acceptanceCriteria":["Sources cited"],"collaborationNotes":["Report to Leader"],"capabilityTags":["research"]},
+    {"memberId":"reviewer","displayName":"Reviewer","role":"reviewer","isLeader":false,"summary":"Reviews claims","mission":"Review","responsibilities":["Check evidence"],"boundaries":[],"expectedInputs":["Evidence notes"],"deliverables":["Review verdict"],"acceptanceCriteria":["Claims traceable"],"collaborationNotes":["Report to Leader"],"capabilityTags":["review"]}
+  ]
+}`
+	// Deliberately violate every immutable Leader identity field. The service
+	// must treat this as a domain overlay only and restore the canonical Leader.
+	adjusted := `{"memberId":"independent-writer","displayName":"Independent Writer","role":"writer","isLeader":false,"summary":"Focuses on executive readers","mission":"Shape the final briefing for executives","responsibilities":["Prioritize executive insights"],"boundaries":["Do not perform specialist research"],"expectedInputs":["Research and review results"],"deliverables":["Executive briefing"],"acceptanceCriteria":["Recommendations are actionable"],"collaborationNotes":["Use researcher and reviewer outputs"],"capabilityTags":["editorial"]}`
+	repo := &fakeRepository{}
+	gateway := &fakeGateway{contents: []string{generated, adjusted}}
+	service := NewService(repo, gateway)
+	count := 3
+	created, err := service.Generate(context.Background(), 5, GenerateRequest{
+		Intent: "制作每日行业简报", MemberCount: &count,
+	})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	workersBefore := append([]MemberSpec(nil), created.Spec.Members[1:]...)
+
+	updated, err := service.AdjustMember(context.Background(), 5, created.ID, "leader", AdjustMemberRequest{
+		Instruction: "更关注高管决策信息", ExpectedRevision: created.Revision,
+	})
+	if err != nil {
+		t.Fatalf("AdjustMember Leader returned error: %v", err)
+	}
+	leader := updated.Spec.Members[0]
+	if leader.MemberID != "leader" || leader.Role != "leader" || !leader.IsLeader {
+		t.Fatalf("Leader identity invariant not preserved: %#v", leader)
+	}
+	if leader.DisplayName != "Chief Editor" {
+		t.Fatalf("Leader display name = %q, want the existing identity", leader.DisplayName)
+	}
+	if leader.Mission != "Shape the final briefing for executives" || updated.Revision != 2 {
+		t.Fatalf("Leader domain overlay/revision = %#v / %d", leader, updated.Revision)
+	}
+	if got, want := updated.Spec.Members[1:], workersBefore; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Leader adjustment changed Worker roster:\n got %#v\nwant %#v", got, want)
+	}
+	requestText := flattenContent(gateway.lastRequest.Messages[0].Content) + "\n" + flattenContent(gateway.lastRequest.Messages[1].Content)
+	for _, expected := range []string{
+		"固定 Leader 主模板会由系统在创建 Team 时独立继承",
+		`"memberId":"researcher"`,
+		`"memberId":"reviewer"`,
+		"只调整 Leader 的领域延展职责",
+	} {
+		if !strings.Contains(requestText, expected) {
+			t.Fatalf("Leader adjustment prompt missing %q:\n%s", expected, requestText)
+		}
+	}
+}
+
+func TestRegenerateLeaderRemainsUnsupported(t *testing.T) {
+	repo := &fakeRepository{}
+	gateway := &fakeGateway{contents: []string{generatedTeamJSON(t, "Team", 2)}}
+	service := NewService(repo, gateway)
+	count := 2
+	created, err := service.Generate(context.Background(), 6, GenerateRequest{Intent: "test", MemberCount: &count})
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	_, err = service.RegenerateMember(context.Background(), 6, created.ID, "leader", RegenerateMemberRequest{
+		ExpectedRevision: created.Revision,
+	})
+	if err == nil || !strings.Contains(err.Error(), "only supports responsibility adjustment") {
+		t.Fatalf("RegenerateMember Leader error = %v", err)
+	}
+	if gateway.calls != 1 {
+		t.Fatalf("Leader regenerate made %d model calls, want only initial generation", gateway.calls)
 	}
 }
 

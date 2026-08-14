@@ -50,6 +50,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
   const [intentDraft, setIntentDraft] = useState("");
   const [memberCountDraft, setMemberCountDraft] = useState("");
   const [adjustments, setAdjustments] = useState<Record<string, string>>({});
+  const [adjustmentErrors, setAdjustmentErrors] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -99,6 +100,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
     setSelectedId(template.id);
     syncDrafts(template);
     setAdjustments({});
+    setAdjustmentErrors({});
     setExpanded({});
     setError(null);
   };
@@ -119,6 +121,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
       setSelectedId(created.id);
       syncDrafts(created);
       setAdjustments({});
+      setAdjustmentErrors({});
       setExpanded({});
       setIntent("");
       setMemberCount("");
@@ -171,6 +174,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
         ),
       );
       setAdjustments({});
+      setAdjustmentErrors({});
       setExpanded({});
     } catch (err) {
       setError(errorMessage(err));
@@ -183,12 +187,23 @@ const CustomTeamTemplatesPage: React.FC = () => {
     if (!selected) return;
     const instruction = adjustments[member.memberId]?.trim();
     if (!instruction) {
-      setError("请先输入希望如何调整这个 Worker");
+      setError(null);
+      setAdjustmentErrors((current) => ({
+        ...current,
+        [member.memberId]: member.isLeader
+          ? "请先输入希望如何调整 Leader 的延展职责"
+          : "请先输入希望如何调整这个 Worker",
+      }));
       return;
     }
     try {
       setBusy(`adjust:${member.memberId}`);
       setError(null);
+      setAdjustmentErrors((current) => {
+        const next = { ...current };
+        delete next[member.memberId];
+        return next;
+      });
       applyUpdated(
         await customTeamTemplateService.adjustMember(
           selected.id,
@@ -199,27 +214,6 @@ const CustomTeamTemplatesPage: React.FC = () => {
         { syncEditor: false },
       );
       setAdjustments((current) => ({ ...current, [member.memberId]: "" }));
-      setExpanded((current) => ({ ...current, [member.memberId]: true }));
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const regenerateMember = async (member: CustomTeamMemberSpec) => {
-    if (!selected) return;
-    try {
-      setBusy(`regenerate:${member.memberId}`);
-      setError(null);
-      applyUpdated(
-        await customTeamTemplateService.regenerateMember(
-          selected.id,
-          member.memberId,
-          selected.revision,
-        ),
-        { syncEditor: false },
-      );
       setExpanded((current) => ({ ...current, [member.memberId]: true }));
     } catch (err) {
       setError(errorMessage(err));
@@ -240,6 +234,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
         ),
       );
       setAdjustments({});
+      setAdjustmentErrors({});
       setExpanded({});
     } catch (err) {
       setError(errorMessage(err));
@@ -259,6 +254,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
       setSelectedId(remaining[0]?.id ?? null);
       syncDrafts(remaining[0] || null);
       setAdjustments({});
+      setAdjustmentErrors({});
       setExpanded({});
     } catch (err) {
       setError(errorMessage(err));
@@ -477,10 +473,10 @@ const CustomTeamTemplatesPage: React.FC = () => {
                         title={editorChanged ? "请先应用整体修改" : undefined}
                       >
                         <RefreshCw size={15} />
-                        {busy === "regenerate-all" ? "重新生成中..." : "按当前设置重新生成"}
+                        {busy === "regenerate-all" ? "重新生成中..." : "重新生成整个 Team"}
                       </button>
                       <p className="text-xs text-gray-500">
-                        整体更新会重建全部成员；单个 Worker 的微调请在下方进行。
+                        使用已保存的意图和人数重建全部成员；单个成员的职责调整请在下方进行。
                       </p>
                     </div>
                   </div>
@@ -491,7 +487,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
                     <div>
                       <h2 className="text-lg font-semibold text-gray-900">成员职责</h2>
                       <p className="mt-1 text-sm text-gray-500">
-                        默认收起便于浏览；展开 Worker 后可用自然语言单独细化。
+                        默认收起便于浏览；展开成员后可用自然语言单独细化延展职责。
                       </p>
                     </div>
                     <span className="text-sm text-gray-500">共 {selected.spec.members.length} 人</span>
@@ -551,51 +547,66 @@ const CustomTeamTemplatesPage: React.FC = () => {
                               />
                             </div>
 
-                            {!member.isLeader && (
-                              <div className="mt-5 rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
-                                <div className="text-sm font-semibold text-gray-900">
-                                  用自然语言细化这个 Worker
-                                </div>
-                                <textarea
-                                  value={adjustments[member.memberId] || ""}
-                                  onChange={(event) =>
-                                    setAdjustments((current) => ({
-                                      ...current,
-                                      [member.memberId]: event.target.value,
-                                    }))
-                                  }
-                                  rows={3}
-                                  placeholder="例如：更强调用户访谈和竞品分析，不负责撰写代码；输出必须附带证据来源。"
-                                  className="mt-3 block w-full rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm"
-                                />
-                                <div className="mt-3 flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={Boolean(busy)}
-                                    onClick={() => void adjustMember(member)}
-                                    className="app-button-primary disabled:opacity-50"
-                                  >
-                                    {busy === `adjust:${member.memberId}` ? "调整中..." : "应用调整"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={Boolean(busy)}
-                                    onClick={() => void regenerateMember(member)}
-                                    className="app-button-secondary inline-flex items-center gap-2 disabled:opacity-50"
-                                  >
-                                    <RefreshCw size={15} />
-                                    {busy === `regenerate:${member.memberId}`
-                                      ? "生成中..."
-                                      : "重新生成 Worker"}
-                                  </button>
-                                </div>
-                                {memberBusy && (
-                                  <p className="mt-2 text-xs text-indigo-600">
-                                    模型正在结合全队职责重新设计，请稍候。
-                                  </p>
-                                )}
+                            <div className="mt-5 rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
+                              <div className="text-sm font-semibold text-gray-900">
+                                {member.isLeader
+                                  ? "用自然语言调整 Leader 的延展职责"
+                                  : "用自然语言细化这个 Worker"}
                               </div>
-                            )}
+                              {member.isLeader && (
+                                <p className="mt-1.5 text-xs leading-5 text-indigo-700">
+                                  固定 Leader 基座、成员协调关系和创建后的全员介绍流程不会被修改。
+                                </p>
+                              )}
+                              <textarea
+                                value={adjustments[member.memberId] || ""}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setAdjustments((current) => ({
+                                    ...current,
+                                    [member.memberId]: value,
+                                  }));
+                                  if (value.trim()) {
+                                    setAdjustmentErrors((current) => {
+                                      const next = { ...current };
+                                      delete next[member.memberId];
+                                      return next;
+                                    });
+                                  }
+                                }}
+                                rows={3}
+                                placeholder={
+                                  member.isLeader
+                                    ? "例如：更关注高管决策信息；汇总时优先展示风险和可执行建议。"
+                                    : "例如：更强调用户访谈和竞品分析，不负责撰写代码；输出必须附带证据来源。"
+                                }
+                                className="mt-3 block w-full rounded-xl border border-indigo-200 bg-white px-3 py-2 text-sm"
+                              />
+                              {adjustmentErrors[member.memberId] && (
+                                <p className="mt-2 text-sm text-red-600" role="alert">
+                                  {adjustmentErrors[member.memberId]}
+                                </p>
+                              )}
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={Boolean(busy)}
+                                  onClick={() => void adjustMember(member)}
+                                  className="app-button-primary disabled:opacity-50"
+                                >
+                                  {busy === `adjust:${member.memberId}`
+                                    ? "调整中..."
+                                    : member.isLeader
+                                      ? "应用 Leader 职责调整"
+                                      : "应用调整"}
+                                </button>
+                              </div>
+                              {memberBusy && (
+                                <p className="mt-2 text-xs text-indigo-600">
+                                  模型正在结合全队职责调整，请稍候。
+                                </p>
+                              )}
+                            </div>
                           </div>
                         )}
                       </article>

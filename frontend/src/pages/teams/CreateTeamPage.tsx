@@ -828,17 +828,12 @@ const CreateTeamPage: React.FC = () => {
                     当前 {members.length} 个成员，{members.filter((member) => member.isLeader).length} 个 Leader
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Link
-                    to="/teams/custom-templates"
-                    className="app-button-primary inline-flex items-center justify-center px-4 py-2 text-sm"
-                  >
-                    + 自定义 Team
-                  </Link>
-                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-                    OpenClaw Leader · Lite Worker 可选
-                  </span>
-                </div>
+                <Link
+                  to="/teams/custom-templates"
+                  className="app-button-primary inline-flex items-center justify-center px-4 py-2 text-sm"
+                >
+                  + 自定义 Team
+                </Link>
               </div>
 
               <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">

@@ -387,11 +387,11 @@ func (s *service) AdjustMember(ctx context.Context, userID, id int, memberID str
 	if len([]rune(instruction)) > 2000 {
 		return nil, errors.New("custom team member adjustment instruction is too long")
 	}
-	return s.replaceWorker(ctx, userID, id, memberID, req.ExpectedRevision, instruction, false)
+	return s.replaceMember(ctx, userID, id, memberID, req.ExpectedRevision, instruction, false)
 }
 
 func (s *service) RegenerateMember(ctx context.Context, userID, id int, memberID string, req RegenerateMemberRequest) (*Payload, error) {
-	return s.replaceWorker(ctx, userID, id, memberID, req.ExpectedRevision, "重新设计该 Worker，使其更好地覆盖团队目标，同时避免与其他成员职责重叠。", true)
+	return s.replaceMember(ctx, userID, id, memberID, req.ExpectedRevision, "重新设计该 Worker，使其更好地覆盖团队目标，同时避免与其他成员职责重叠。", true)
 }
 
 func (s *service) Regenerate(ctx context.Context, userID, id int, req RegenerateRequest) (*Payload, error) {
@@ -420,7 +420,7 @@ func (s *service) Delete(userID, id int) error {
 	return s.repo.Delete(userID, id)
 }
 
-func (s *service) replaceWorker(ctx context.Context, userID, id int, memberID string, expectedRevision int, instruction string, regenerate bool) (*Payload, error) {
+func (s *service) replaceMember(ctx context.Context, userID, id int, memberID string, expectedRevision int, instruction string, regenerate bool) (*Payload, error) {
 	item, err := s.getModel(userID, id)
 	if err != nil {
 		return nil, err
@@ -442,16 +442,31 @@ func (s *service) replaceWorker(ctx context.Context, userID, id int, memberID st
 	if targetIndex < 0 {
 		return nil, errors.New("custom team template member not found")
 	}
-	if spec.Members[targetIndex].IsLeader {
-		return nil, errors.New("custom team template leader is fixed")
+	current := spec.Members[targetIndex]
+	if current.IsLeader && regenerate {
+		return nil, errors.New("custom team template leader only supports responsibility adjustment")
 	}
 
-	member, traceID, err := s.generateWorker(ctx, userID, item.Intent, spec, spec.Members[targetIndex], instruction, regenerate)
+	var member MemberSpec
+	var traceID string
+	if current.IsLeader {
+		member, traceID, err = s.adjustLeader(ctx, userID, item.Intent, spec, current, instruction)
+	} else {
+		member, traceID, err = s.generateWorker(ctx, userID, item.Intent, spec, current, instruction, regenerate)
+	}
 	if err != nil {
 		return nil, err
 	}
-	member.MemberID = spec.Members[targetIndex].MemberID
-	member.IsLeader = false
+	member.MemberID = current.MemberID
+	if current.IsLeader {
+		// The model only edits the domain overlay. Identity and the immutable
+		// orchestrator base are selected later from these canonical fields.
+		member.DisplayName = current.DisplayName
+		member.Role = "leader"
+		member.IsLeader = true
+	} else {
+		member.IsLeader = false
+	}
 	member = normalizeMember(member, targetIndex)
 	spec.Members[targetIndex] = member
 	if err := validateAndNormalizeSpec(&spec, item.RequestedMemberCount); err != nil {
@@ -461,6 +476,39 @@ func (s *service) replaceWorker(ctx context.Context, userID, id int, memberID st
 		return nil, err
 	}
 	return payloadFromModel(item)
+}
+
+func (s *service) adjustLeader(ctx context.Context, userID int, intent string, spec TemplateSpec, current MemberSpec, instruction string) (MemberSpec, string, error) {
+	roster := make([]map[string]string, 0, len(spec.Members))
+	for _, member := range spec.Members {
+		roster = append(roster, map[string]string{
+			"memberId": member.MemberID, "displayName": member.DisplayName, "role": member.Role, "summary": member.Summary,
+		})
+	}
+	rosterJSON, _ := json.Marshal(roster)
+	currentJSON, _ := json.Marshal(current)
+	systemPrompt := `你是 ClawManager 的 Leader 领域职责调整器。请输出且只输出一个 Leader JSON 对象，不要输出 Markdown。
+固定 Leader 主模板会由系统在创建 Team 时独立继承，包含任务理解、拆解、成员派发、进度跟踪、异常恢复、成员验收、结果整合和最终答复。你只能调整它上面的领域延展职责，不能删除、替换或削弱这些固定职责。
+必须保持 memberId=leader、role=leader、isLeader=true，不能改变团队人数、成员身份或 Leader 与现有 Worker 的协作关系。不得虚构团队成员。
+字段必须严格包含：memberId、displayName、role、isLeader、summary、mission、responsibilities、boundaries、expectedInputs、deliverables、acceptanceCriteria、collaborationNotes、capabilityTags。
+不得生成环境变量、Runtime、镜像、密钥、工具调用或平台协议。
+类型要求：isLeader 必须是 JSON 布尔值 true；responsibilities、boundaries、expectedInputs、deliverables、acceptanceCriteria、collaborationNotes、capabilityTags 必须始终是字符串数组，即使只有一项也不能返回单个字符串。`
+	userPrompt := fmt.Sprintf(
+		"团队意图：%s\n当前团队成员摘要：%s\n当前 Leader 领域职责：%s\n用户调整要求：%s\n请在保留固定 Leader 主职责和现有团队关系的前提下，只调整 Leader 的领域延展职责。",
+		intent,
+		rosterJSON,
+		currentJSON,
+		instruction,
+	)
+	content, traceID, err := s.complete(ctx, userID, systemPrompt, userPrompt, "team-template-leader-adjust")
+	if err != nil {
+		return MemberSpec{}, traceID, err
+	}
+	var member MemberSpec
+	if err := decodeModelJSON(content, &member); err != nil {
+		return MemberSpec{}, traceID, fmt.Errorf("failed to parse adjusted custom team leader: %w", err)
+	}
+	return member, traceID, nil
 }
 
 func (s *service) generateTemplate(ctx context.Context, userID int, intent string, requestedCount *int) (TemplateSpec, string, error) {
