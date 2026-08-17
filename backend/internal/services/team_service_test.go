@@ -1677,6 +1677,72 @@ func TestProjectTeamEventDowngradesLiteDispatchWrapperFailure(t *testing.T) {
 	}
 }
 
+func TestProjectTeamEventKeepsTargetResolutionWarningOnCurrentAttempt(t *testing.T) {
+	taskID := 72
+	teamID := 31
+	leaderID := 120
+	workerID := 121
+	messageID := "team-31-task-72"
+	assignmentID := "phase-1"
+	task := &models.TeamTask{
+		ID: taskID, TeamID: teamID, TargetMemberID: leaderID, MessageID: messageID,
+		Status: models.TeamTaskStatusRunning, UpdatedAt: time.Now().UTC(),
+	}
+	worker := &models.TeamMember{
+		ID: workerID, TeamID: teamID, MemberKey: "worker", Role: "developer",
+		Status: models.TeamMemberStatusBusy, CurrentTaskID: &taskID, Availability: models.TeamMemberAvailabilityBusy,
+	}
+	repo := &teamRepositoryStub{
+		tasksByID:        map[int]*models.TeamTask{taskID: task},
+		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
+		membersByKey:     map[string]*models.TeamMember{"worker": worker},
+		workItems: []models.TeamWorkItem{{
+			TeamID: teamID, RootTaskID: taskID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			Revision: 1, OwnerMemberID: &workerID, Status: models.TeamTaskStatusRunning,
+		}},
+	}
+	service := &teamService{repo: repo}
+	payload := map[string]interface{}{
+		"event":                 "message_warning",
+		"eventKind":             "target_resolution_warning",
+		"memberId":              "worker",
+		"messageId":             "outbound-72",
+		"rootMessageId":         messageID,
+		"rootTaskId":            "team-31-task-72",
+		"assignmentId":          assignmentID,
+		"workId":                assignmentID,
+		"revision":              1,
+		"failureDomain":         "transport",
+		"failureKind":           "target_resolution",
+		"nonAuthoritative":      true,
+		"stateEffect":           "none",
+		"rootTaskTerminal":      false,
+		"clarificationRequired": true,
+		"targetSuggestions":     []interface{}{"leader"},
+		"runtimeStatus":         "running",
+		"availability":          "busy",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = service.projectTeamEvent(&models.Team{ID: teamID, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, redisStreamMessage{
+		ID: "1781171178660-0", Fields: map[string]string{"payload": string(payloadJSON)},
+	})
+	if err != nil {
+		t.Fatalf("project target-resolution warning: %v", err)
+	}
+	if len(repo.workItems) != 1 || repo.workItems[0].Status != models.TeamTaskStatusRunning || repo.workItems[0].FinishedAt != nil {
+		t.Fatalf("target-resolution warning must leave the current attempt active: %#v", repo.workItems)
+	}
+	if len(repo.createdEvents) != 1 || repo.createdEvents[0].EventType != "message_warning" {
+		t.Fatalf("expected one state-neutral warning audit event, got %#v", repo.createdEvents)
+	}
+	if repo.updatedTask != nil && isTerminalTeamTaskStatus(repo.updatedTask.Status) {
+		t.Fatalf("transport warning must not terminate the root task: %#v", repo.updatedTask)
+	}
+}
+
 func TestProjectTeamEventDoesNotTreatSuccessfulFailedWrapperAsCompletion(t *testing.T) {
 	taskID := 74
 	messageID := "team-31-task-74"
@@ -3130,6 +3196,137 @@ func TestProjectTeamWorkItemRevisionInheritsEstablishedReviewGate(t *testing.T) 
 	}
 	if repo.workItems[0].SupersededBy == nil {
 		t.Fatalf("the old revision should still be superseded by the reviewed successor: %#v", repo.workItems)
+	}
+}
+
+func TestDeliverySemanticsCreatesNewSequentialStageForDifferentMember(t *testing.T) {
+	team := &models.Team{ID: 194, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 295, TeamID: team.ID, TargetMemberID: 400, Status: models.TeamTaskStatusRunning}
+	worker1ID := 401
+	worker2 := &models.TeamMember{ID: 402, TeamID: team.ID, MemberKey: "worker-2", Role: "specialist"}
+	firstAssignment := "stage-one"
+	repo := &teamRepositoryStub{
+		membersByKey: map[string]*models.TeamMember{"worker-2": worker2},
+		workItems: []models.TeamWorkItem{{
+			ID: 501, TeamID: team.ID, RootTaskID: task.ID, WorkID: firstAssignment, AssignmentID: &firstAssignment,
+			OwnerMemberID: &worker1ID, Revision: 1, RequiredForRoot: true, Status: models.TeamTaskStatusSucceeded,
+		}},
+	}
+	payload := map[string]interface{}{
+		"deliverySemanticsVersion": 1, "businessDeliveryKind": "assignment", "businessMutation": true,
+		"requiresCompletion": true, "revisionAuthorized": true,
+		"assignmentId": "stage-two", "workId": "stage-two", "revision": 7, "required": true,
+		"collaborationStep": map[string]interface{}{
+			"type": "assignment", "status": "dispatched", "actor": "leader", "target": "worker-2", "workId": "stage-two",
+		},
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamWorkItem(team, task, worker2, "outbound", payload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 2 {
+		t.Fatalf("a new member stage must create one independent Work Item: %#v", repo.workItems)
+	}
+	created := repo.workItems[1]
+	if workItemBusinessID(created) != "stage-two" || created.Revision != 1 || created.OwnerMemberID == nil || *created.OwnerMemberID != worker2.ID {
+		t.Fatalf("new stage identity must be server-normalized to revision 1: %#v", created)
+	}
+}
+
+func TestDeliverySemanticsContextNeverCreatesWorkItem(t *testing.T) {
+	team := &models.Team{ID: 194, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 296, TeamID: team.ID, TargetMemberID: 400, Status: models.TeamTaskStatusRunning}
+	worker := &models.TeamMember{ID: 401, TeamID: team.ID, MemberKey: "worker-1", Role: "specialist"}
+	repo := &teamRepositoryStub{membersByKey: map[string]*models.TeamMember{"worker-1": worker}}
+	payload := map[string]interface{}{
+		"deliverySemanticsVersion": 1, "businessDeliveryKind": "peer_request", "businessMutation": false,
+		"requiresCompletion": false, "nonAuthoritative": true, "assignmentId": "stage-one", "revision": 2,
+		"collaborationStep": map[string]interface{}{
+			"type": "peer_request", "status": "running", "actor": "leader", "target": "worker-1", "workId": "stage-one",
+		},
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamWorkItem(team, task, worker, "peer_request", payload, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 0 {
+		t.Fatalf("context or peer traffic must not materialize business work: %#v", repo.workItems)
+	}
+}
+
+func TestDeliverySemanticsRevisionRequiresLedgerAuthorization(t *testing.T) {
+	team := &models.Team{ID: 194, CommunicationMode: teamCommunicationModeLeaderMediated}
+	task := &models.TeamTask{ID: 297, TeamID: team.ID, TargetMemberID: 400, Status: models.TeamTaskStatusRunning}
+	worker := &models.TeamMember{ID: 401, TeamID: team.ID, MemberKey: "worker-1", Role: "specialist"}
+	assignmentID := "stage-one"
+	phaseID := "phase-one"
+	dependencyJSON := `["source-stage"]`
+	repo := &teamRepositoryStub{
+		membersByKey: map[string]*models.TeamMember{"worker-1": worker},
+		workItems: []models.TeamWorkItem{{
+			ID: 501, TeamID: team.ID, RootTaskID: task.ID, WorkID: assignmentID, AssignmentID: &assignmentID,
+			OwnerMemberID: &worker.ID, PhaseID: &phaseID, Revision: 1, RequiredForRoot: true, ReviewRequired: true,
+			Title: "Issued stage contract", Status: models.TeamTaskStatusSucceeded, DependsOnJSON: &dependencyJSON,
+		}},
+	}
+	base := map[string]interface{}{
+		"deliverySemanticsVersion": 1, "businessDeliveryKind": "assignment", "businessMutation": true,
+		"requiresCompletion": true, "assignmentId": assignmentID, "workId": assignmentID, "revision": 2,
+		"collaborationStep": map[string]interface{}{
+			"type": "assignment", "status": "dispatched", "actor": "leader", "target": "worker-1", "workId": assignmentID,
+		},
+	}
+	service := &teamService{repo: repo}
+	if err := service.projectTeamWorkItem(team, task, worker, "outbound", base, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 1 || base["workflowConcern"] != "revision_authority_missing" {
+		t.Fatalf("an Agent-authored revision alone must remain non-blocking: items=%#v payload=%#v", repo.workItems, base)
+	}
+	authorized := make(map[string]interface{}, len(base))
+	for key, value := range base {
+		authorized[key] = value
+	}
+	repo.workItems[0].Status = models.TeamTaskStatusFailed
+	repo.workItems[0].ResultJSON = stringPtr(`{"originalEvent":"task_failed","event":"task_failed","assignmentId":"stage-one","status":"failed","resultFailed":true}`)
+	// Runtime may omit or mis-state revisionAuthorized. Persisted failure facts,
+	// not an Agent/Runtime boolean, are the authority for an exact successor.
+	authorized["revisionAuthorized"] = false
+	delete(authorized, "workflowConcern")
+	delete(authorized, "projectionSuppressed")
+	if err := service.projectTeamWorkItem(team, task, worker, "outbound", authorized, &models.TeamEvent{CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.workItems) != 2 || repo.workItems[1].Revision != 2 {
+		t.Fatalf("a ledger-authorized successor should create exactly one revision: %#v", repo.workItems)
+	}
+	got := repo.workItems[1]
+	if derefTeamString(got.PhaseID) != phaseID || derefTeamString(got.DependsOnJSON) != dependencyJSON ||
+		!got.RequiredForRoot || !got.ReviewRequired || got.Title != "Issued stage contract" {
+		t.Fatalf("a real successor revision must inherit the durable assignment contract: %#v", got)
+	}
+}
+
+func TestRevisionRecoveryUsesLatestValidationForCurrentTargetRevision(t *testing.T) {
+	now := time.Now().UTC()
+	targetID := "stage-one"
+	targetRevision := 2
+	failedReview := `{"reviewVerdict":"FAIL"}`
+	passedReview := `{"reviewVerdict":"PASS"}`
+	items := []models.TeamWorkItem{
+		{ID: 1, WorkID: targetID, AssignmentID: &targetID, Revision: targetRevision, Status: models.TeamTaskStatusSucceeded, UpdatedAt: now.Add(-3 * time.Minute)},
+		{ID: 2, WorkID: "review-old", ReviewTargetAssignmentID: &targetID, ReviewTargetRevision: &targetRevision, Status: models.TeamTaskStatusSucceeded, ResultJSON: &failedReview, UpdatedAt: now.Add(-2 * time.Minute)},
+		{ID: 3, WorkID: "review-new", ReviewTargetAssignmentID: &targetID, ReviewTargetRevision: &targetRevision, Status: models.TeamTaskStatusSucceeded, ResultJSON: &passedReview, UpdatedAt: now.Add(-time.Minute)},
+	}
+	if teamAssignmentRevisionRecoveryAllowed(items, targetID) {
+		t.Fatal("an older FAIL must not keep authorizing rework after the current revision passed a newer validation")
+	}
+	if !teamAssignmentRevisionRecoveryAllowed(items[:2], targetID) {
+		t.Fatal("the latest explicit FAIL for the current target revision should authorize one recoverable successor")
+	}
+	items[0].ValidatedRevision = &targetRevision
+	if teamAssignmentRevisionRecoveryAllowed(items[:2], targetID) {
+		t.Fatal("a durable validation receipt on the current target revision must outrank stale failure evidence")
 	}
 }
 
@@ -5702,6 +5899,24 @@ func TestLeaderMediatedRecoverableWarningClassification(t *testing.T) {
 	team := &models.Team{ID: 47, CommunicationMode: teamCommunicationModeLeaderMediated}
 	task := &models.TeamTask{ID: 82, TeamID: 47, Status: models.TeamTaskStatusRunning}
 	member := &models.TeamMember{ID: 12, TeamID: 47, MemberKey: "developer", Role: "developer"}
+	targetResolution := map[string]interface{}{
+		"eventKind":             "target_resolution_warning",
+		"failureDomain":         "transport",
+		"failureKind":           "target_resolution",
+		"nonAuthoritative":      true,
+		"stateEffect":           "none",
+		"rootTaskTerminal":      false,
+		"clarificationRequired": true,
+	}
+	if !isNonAuthoritativeDispatchFailure("message_failed", targetResolution) {
+		t.Fatal("an outbound message failure must never become an assignment result")
+	}
+	if isLeaderMediatedWorkerToLeaderResult(team, "message_failed", targetResolution, member, task) {
+		t.Fatal("transport failure must not confirm a failed Worker result")
+	}
+	if !isLeaderMediatedRecoverableWarning(team, "message_warning", targetResolution, member, task) {
+		t.Fatal("target ambiguity should ask the same Worker and Leader to review without closing the attempt")
+	}
 	if !isLeaderMediatedRecoverableWarning(team, "message_warning", map[string]interface{}{
 		"artifactValidationFailed": true,
 		"rootTaskTerminal":         false,
@@ -6219,13 +6434,23 @@ func TestLeaderSynthesisReminderCreatedWhenWorkersDone(t *testing.T) {
 	if len(repo.createdEvents) != 1 {
 		t.Fatalf("ledger-only projection changes must not create duplicate synthesis reminders, got %#v", repo.createdEvents)
 	}
+	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("next-generation createLeaderSynthesisReminder returned error: %v", err)
+	}
+	if len(repo.createdEvents) != 2 {
+		t.Fatalf("unchanged workflow facts must receive a later reminder generation, got %#v", repo.createdEvents)
+	}
+	secondPayload := teamEventPayloadMap(repo.createdEvents[1])
+	if eventInt(secondPayload, "reminderGeneration") != 2 {
+		t.Fatalf("expected reminder generation 2, got %#v", secondPayload)
+	}
 
 	changedResult := `{"summary":"PASS with updated evidence","resultMarkdown":"Reviewer verdict: PASS with updated evidence."}`
 	resultItems[1].ResultJSON = &changedResult
-	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(2*time.Minute)); err != nil {
+	if err := service.createLeaderSynthesisReminder(&models.Team{ID: 51, CommunicationMode: teamCommunicationModeLeaderMediated}, nil, task, leader, resultItems, now.Add(5*time.Minute)); err != nil {
 		t.Fatalf("changed-result createLeaderSynthesisReminder returned error: %v", err)
 	}
-	if len(repo.createdEvents) != 2 {
+	if len(repo.createdEvents) != 3 {
 		t.Fatalf("a materially changed result must allow a fresh synthesis reminder, got %#v", repo.createdEvents)
 	}
 }
@@ -7091,7 +7316,7 @@ func TestTimeoutScannerNeverPromotesHistoricalReplyToSuccess(t *testing.T) {
 	}
 }
 
-func TestOldRuntimeDispatchWrapperNeverStartsRecovery(t *testing.T) {
+func TestOldRuntimeDispatchWrapperStartsStateNeutralRecovery(t *testing.T) {
 	team := &models.Team{ID: 100, CommunicationMode: teamCommunicationModeLeaderMediated}
 	task := &models.TeamTask{ID: 264, TeamID: 100, Status: models.TeamTaskStatusRunning}
 	member := &models.TeamMember{ID: 1001, TeamID: 100, MemberKey: "reviewer", Role: "reviewer"}
@@ -7099,8 +7324,8 @@ func TestOldRuntimeDispatchWrapperNeverStartsRecovery(t *testing.T) {
 		"originalEvent": "task_failed", "nonAuthoritative": true,
 		"error": "dispatch finished without reply/completion", "rootTaskTerminal": false,
 	}
-	if isLeaderMediatedRecoverableWarning(team, "message_warning", payload, member, task) {
-		t.Fatal("old Runtime wrapper diagnostics must not trigger a recovery storm")
+	if !isLeaderMediatedRecoverableWarning(team, "message_warning", payload, member, task) {
+		t.Fatal("old Runtime transport diagnostics must wake an idempotent recovery observer without failing the assignment")
 	}
 }
 
@@ -7301,6 +7526,15 @@ func (s *teamRepositoryStub) CreateEvent(event *models.TeamEvent) error {
 	clone := *event
 	s.createdEvents = append(s.createdEvents, clone)
 	return nil
+}
+func (s *teamRepositoryStub) CreateEventWithOutbox(event *models.TeamEvent, outbox *models.TeamEventOutbox) error {
+	if event == nil || outbox == nil {
+		return nil
+	}
+	if err := s.CreateEvent(event); err != nil {
+		return err
+	}
+	return s.CreateEventOutbox(outbox)
 }
 func (s *teamRepositoryStub) EventExistsByStreamID(teamID int, streamID string) (bool, error) {
 	return false, nil

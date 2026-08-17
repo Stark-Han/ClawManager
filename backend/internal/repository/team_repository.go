@@ -38,6 +38,7 @@ type TeamRepository interface {
 	ListStaleCandidateTasks(cutoff time.Time, limit int) ([]models.TeamTask, error)
 
 	CreateEvent(event *models.TeamEvent) error
+	CreateEventWithOutbox(event *models.TeamEvent, outbox *models.TeamEventOutbox) error
 	EventExistsByStreamID(teamID int, streamID string) (bool, error)
 	EventExistsByEventID(teamID int, eventID string) (bool, error)
 	EventExistsByCompletionID(teamID int, completionID string) (bool, error)
@@ -531,6 +532,19 @@ func (r *teamRepository) CreateEventOutbox(outbox *models.TeamEventOutbox) error
 		outbox.ID = int(id)
 	}
 	return nil
+}
+
+func (r *teamRepository) CreateEventWithOutbox(event *models.TeamEvent, outbox *models.TeamEventOutbox) error {
+	if event == nil || outbox == nil {
+		return fmt.Errorf("event and outbox are required")
+	}
+	return r.sess.Tx(func(sess db.Session) error {
+		txRepo := &teamRepository{sess: sess}
+		if err := txRepo.CreateEvent(event); err != nil && !errors.Is(err, ErrDuplicateTeamEvent) {
+			return err
+		}
+		return txRepo.CreateEventOutbox(outbox)
+	})
 }
 
 func (r *teamRepository) MarkEventOutboxDelivered(id int, deliveredAt time.Time) error {

@@ -112,6 +112,41 @@ func TestBuildProviderRequestPreservesToolConfiguration(t *testing.T) {
 	}
 }
 
+func TestBuildProviderRequestFromStructuredInternalCallPreservesMessagesAndParameters(t *testing.T) {
+	t.Parallel()
+	temperature := 0.2
+	maxTokens := 6000
+	req := ChatCompletionRequest{
+		Model: "auto",
+		Messages: []ChatMessage{
+			{Role: "system", Content: "Return JSON."},
+			{Role: "user", Content: "Create a team."},
+		},
+		Temperature: &temperature,
+		MaxTokens:   &maxTokens,
+	}
+	model := &models.LLMModel{
+		ProviderType:      models.ProviderTypeOpenAICompatible,
+		ProtocolType:      models.ProtocolTypeOpenAICompatible,
+		BaseURL:           "https://gateway.example.com/v1",
+		ProviderModelName: "custom-model",
+	}
+	body, err := buildProviderRequestBody(req, model)
+	if err != nil {
+		t.Fatalf("buildProviderRequestBody returned error: %v", err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode provider request: %v", err)
+	}
+	var messages []ChatMessage
+	if err := json.Unmarshal(payload["messages"], &messages); err != nil || len(messages) != 2 {
+		t.Fatalf("messages = %#v, err=%v, want 2 messages", messages, err)
+	}
+	if string(payload["max_tokens"]) != "6000" || string(payload["temperature"]) != "0.2" {
+		t.Fatalf("generation parameters missing: %s", body)
+	}
+}
 func TestBuildProviderRequestUsesAnthropicProtocolForLocalModel(t *testing.T) {
 	req := ChatCompletionRequest{
 		Model: "gateway-model",
