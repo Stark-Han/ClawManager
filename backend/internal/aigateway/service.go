@@ -53,34 +53,34 @@ type ChatMessage struct {
 
 // ChatCompletionRequest is the platform gateway request shape.
 type ChatCompletionRequest struct {
-	RawBody           []byte          `json:"-"`
-	Model             string          `json:"model"`
-	Messages          []ChatMessage   `json:"messages"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	TopP              *float64        `json:"top_p,omitempty"`
-	MaxTokens         *int            `json:"max_tokens,omitempty"`
-	Stream            bool            `json:"stream"`
-	Tools             json.RawMessage `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-	ResponseFormat    json.RawMessage `json:"response_format,omitempty"`
-	Stop              json.RawMessage `json:"stop,omitempty"`
-	N                 *int            `json:"n,omitempty"`
-	FrequencyPenalty  *float64        `json:"frequency_penalty,omitempty"`
-	PresencePenalty   *float64        `json:"presence_penalty,omitempty"`
-	ReasoningEffort   *string         `json:"reasoning_effort,omitempty"`
-	StreamOptions     json.RawMessage `json:"stream_options,omitempty"`
-	User              *string         `json:"user,omitempty"`
-	SessionID         *string         `json:"session_id,omitempty"`
-	OpenClawSessionKey *string        `json:"-"`
+	RawBody            []byte          `json:"-"`
+	Model              string          `json:"model"`
+	Messages           []ChatMessage   `json:"messages"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"top_p,omitempty"`
+	MaxTokens          *int            `json:"max_tokens,omitempty"`
+	Stream             bool            `json:"stream"`
+	Tools              json.RawMessage `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool           `json:"parallel_tool_calls,omitempty"`
+	ResponseFormat     json.RawMessage `json:"response_format,omitempty"`
+	Stop               json.RawMessage `json:"stop,omitempty"`
+	N                  *int            `json:"n,omitempty"`
+	FrequencyPenalty   *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty    *float64        `json:"presence_penalty,omitempty"`
+	ReasoningEffort    *string         `json:"reasoning_effort,omitempty"`
+	StreamOptions      json.RawMessage `json:"stream_options,omitempty"`
+	User               *string         `json:"user,omitempty"`
+	SessionID          *string         `json:"session_id,omitempty"`
+	OpenClawSessionKey *string         `json:"-"`
 	ManagedAgentType   *string         `json:"-"`
-	InstanceID        *int            `json:"instance_id,omitempty"`
-	InstanceMode      *string         `json:"instance_mode,omitempty"`
-	RuntimeType       *string         `json:"runtime_type,omitempty"`
-	GatewayID         *string         `json:"gateway_id,omitempty"`
-	RuntimePodID      *int64          `json:"runtime_pod_id,omitempty"`
-	TraceID           *string         `json:"trace_id,omitempty"`
-	RequestID         *string         `json:"request_id,omitempty"`
+	InstanceID         *int            `json:"instance_id,omitempty"`
+	InstanceMode       *string         `json:"instance_mode,omitempty"`
+	RuntimeType        *string         `json:"runtime_type,omitempty"`
+	GatewayID          *string         `json:"gateway_id,omitempty"`
+	RuntimePodID       *int64          `json:"runtime_pod_id,omitempty"`
+	TraceID            *string         `json:"trace_id,omitempty"`
+	RequestID          *string         `json:"request_id,omitempty"`
 }
 
 // ChatCompletionResponse is used for audit parsing only.
@@ -1387,6 +1387,18 @@ func buildOpenAICompatibleRequestBody(req ChatCompletionRequest, model *models.L
 	if len(req.RawBody) > 0 {
 		if err := json.Unmarshal(req.RawBody, &payload); err != nil {
 			return nil, fmt.Errorf("failed to decode provider request: %w", err)
+		}
+	} else {
+		// HTTP proxy calls retain RawBody so unknown provider extensions survive.
+		// Internal callers construct ChatCompletionRequest directly, so synthesize
+		// the equivalent wire payload instead of silently dropping messages and
+		// generation parameters.
+		structuredBody, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode structured provider request: %w", err)
+		}
+		if err := json.Unmarshal(structuredBody, &payload); err != nil {
+			return nil, fmt.Errorf("failed to decode structured provider request: %w", err)
 		}
 	}
 	if payload == nil {
