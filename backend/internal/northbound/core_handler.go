@@ -98,12 +98,21 @@ func (h *CoreHandler) ListInstances(c *gin.Context) {
 	principal := currentPrincipal(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	items, total, err := h.service.ListInstances(principal.UserID, page, limit)
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	owner := strings.TrimSpace(c.Query("owner"))
+	items, total, err := h.service.ListInstances(principal.UserID, owner, page, limit)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"instances": items, "total": total, "page": page, "limit": limit})
+	c.JSON(http.StatusOK, gin.H{"instances": items, "owner": owner, "total": total, "page": page, "limit": limit})
 }
 
 func (h *CoreHandler) EnableShareLinkPassword(c *gin.Context) {

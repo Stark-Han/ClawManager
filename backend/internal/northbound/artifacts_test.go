@@ -60,4 +60,13 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 	if !strings.Contains(content, ScopeShareLinkManage) {
 		t.Fatalf("northbound OpenAPI is missing scope %s", ScopeShareLinkManage)
 	}
+	for _, required := range []string{
+		"required: [name, owner, type]",
+		"required: [id, name, owner, type, status, created_at, updated_at]",
+		"Exact, case-sensitive owner identifier",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("northbound OpenAPI is missing owner contract %q", required)
+		}
+	}
 }

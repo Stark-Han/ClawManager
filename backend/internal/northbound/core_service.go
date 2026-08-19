@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"strings"
@@ -86,6 +87,11 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	owner, ownerErr := services.NormalizeInstanceOwner(req.Owner)
+	if ownerErr != nil {
+		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
+	}
+	req.Owner = owner
 	if len(req.Name) < 3 || len(req.Name) > 50 || (req.Type != services.RuntimeTypeOpenClaw && req.Type != services.RuntimeTypeHermes) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", nil)
 	}
@@ -287,7 +293,11 @@ func shareLinkResetResponse(access *models.InstanceExternalAccess, shareURL, pas
 	}
 }
 
-func (s *CoreService) ListInstances(userID, page, limit int) ([]LiteInstanceResponse, int, error) {
+func (s *CoreService) ListInstances(userID int, owner string, page, limit int) ([]LiteInstanceResponse, int, error) {
+	normalizedOwner, err := services.NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, apiError(400, "INVALID_REQUEST", err.Error(), err)
+	}
 	if page <= 0 {
 		page = 1
 	}
@@ -297,26 +307,19 @@ func (s *CoreService) ListInstances(userID, page, limit int) ([]LiteInstanceResp
 	if limit > 100 {
 		limit = 100
 	}
-	items, _, err := s.instances.GetByUserID(userID, 0, 1000)
+	ownerService, ok := s.instances.(services.InstanceOwnerService)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance service does not support owner filtering")
+	}
+	items, total, err := ownerService.GetLiteByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
 	if err != nil {
 		return nil, 0, err
 	}
 	filtered := make([]LiteInstanceResponse, 0, len(items))
 	for idx := range items {
-		if isLite(&items[idx]) {
-			filtered = append(filtered, liteInstanceResponse(&items[idx]))
-		}
+		filtered = append(filtered, liteInstanceResponse(&items[idx]))
 	}
-	total := len(filtered)
-	start := (page - 1) * limit
-	if start >= total {
-		return []LiteInstanceResponse{}, total, nil
-	}
-	end := start + limit
-	if end > total {
-		end = total
-	}
-	return filtered[start:end], total, nil
+	return filtered, total, nil
 }
 
 func isLite(item *models.Instance) bool {
@@ -406,22 +409,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
 		return
 	}
-	createRequest := services.CreateInstanceRequest{
-		Name:                    request.Name,
-		Description:             request.Description,
-		Type:                    request.Type,
-		Mode:                    services.InstanceModeLite,
-		InstanceMode:            services.InstanceModeLite,
-		RuntimeType:             services.RuntimeBackendGateway,
-		CPUCores:                2,
-		MemoryGB:                4,
-		DiskGB:                  20,
-		GPUEnabled:              false,
-		GPUCount:                0,
-		OSType:                  request.Type,
-		OSVersion:               "latest",
-		ProvisioningOperationID: item.OperationID,
-	}
+	createRequest := liteCreateRequest(item, request)
 	instance, createErr := w.service.instances.Create(item.UserID, createRequest)
 	if createErr == nil {
 		if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, instance.ID, time.Now().UTC()); err != nil {
@@ -452,6 +440,26 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, code, message, requeueAt.Add(delay), requeueAt)
 	item.Status = "queued"
 	w.service.auditOperation(item, "northbound.lite.create.retry", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "retry scheduled"), nil, code)
+}
+
+func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInstanceRequest) services.CreateInstanceRequest {
+	return services.CreateInstanceRequest{
+		Name:                    request.Name,
+		Owner:                   &request.Owner,
+		Description:             request.Description,
+		Type:                    request.Type,
+		Mode:                    services.InstanceModeLite,
+		InstanceMode:            services.InstanceModeLite,
+		RuntimeType:             services.RuntimeBackendGateway,
+		CPUCores:                2,
+		MemoryGB:                4,
+		DiskGB:                  20,
+		GPUEnabled:              false,
+		GPUCount:                0,
+		OSType:                  request.Type,
+		OSVersion:               "latest",
+		ProvisioningOperationID: item.OperationID,
+	}
 }
 
 func classifyCreateError(err error) (string, string, bool) {

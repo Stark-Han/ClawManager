@@ -2,6 +2,8 @@
 
 本文档面向需要通过程序调用 ClawManager 的系统集成方，适用于 Northbound API `v1.2`。完整机器可读定义见 [northbound-openapi.yaml](./northbound-openapi.yaml)，可运行的 Python Demo 见 [northbound_client.py](../examples/northbound_client.py)。
 
+已有 ClawManager 环境启用本接口前，请先按[北向接口版本升级说明](./northbound-upgrade-guide.md)完成数据库迁移、Core mTLS 和独立 Gateway 部署。
+
 ## 1. 接入约定
 
 | 项目 | 说明 |
@@ -43,7 +45,7 @@
 | POST | `/auth/logout` | 已登录 | 注销当前北向会话 |
 | GET | `/auth/me` | 已登录 | 查询当前身份和 Scope |
 | POST | `/lite-instances` | `lite-instances:create` | 异步创建 Lite 实例 |
-| GET | `/lite-instances` | `lite-instances:read` | 查询当前用户的 Lite 实例列表 |
+| GET | `/lite-instances?owner=...` | `lite-instances:read` | 按 owner 查询当前用户的 Lite 实例列表 |
 | GET | `/lite-instances/{id}` | `lite-instances:read` | 查询一个 Lite 实例 |
 | GET | `/operations/{id}` | create 或 read | 查询异步操作状态 |
 | POST | `/lite-instances/{id}/external-access/password` | `lite-instances:share-link:manage` | 启用密码模式 ShareLink 并生成 URL/密码 |
@@ -57,7 +59,7 @@ Scope 含义：
 | Scope | 允许的操作 |
 | --- | --- |
 | `lite-instances:create` | 提交 Lite 创建 Operation，并可读取自己提交的 Operation。 |
-| `lite-instances:read` | 列出和查询当前用户自己的 Lite 实例，并可读取 Operation。 |
+| `lite-instances:read` | 按 owner 列出当前用户自己的 Lite 实例、查询单个实例，并可读取 Operation。 |
 | `lite-instances:share-link:manage` | 为当前用户自己的 Lite 实例显式启用密码模式 ShareLink；会生成并返回敏感凭据。 |
 | `lite-instances:share-link:reset` | 重置已经启用的 ShareLink URL 或密码；不能首次启用，也不能修改有效期或 Workspace 权限。 |
 
@@ -76,7 +78,7 @@ Scope 含义：
 | 1 | `POST /auth/challenge` | 空对象 `{}` | 保存 `challenge_id`、`nonce`、`encryption` 和 HTTPS `Date` 响应头。挑战默认 60 秒有效且只能使用一次。 | 在挑战过期前执行第 2、3 步。 |
 | 2 | 客户端本地生成 Compact JWE | 现有用户名和密码，以及第 1 步返回的挑战参数 | JWE Protected Header 固定使用挑战的 `kid`、`RSA-OAEP-256`、`A256GCM`；明文载荷包含新的 `client_nonce` 和 `issued_at`。 | 不发送明文用户名和密码，只发送 JWE。 |
 | 3 | `POST /auth/login` | `challenge_id`、`credential_jwe` | 保存 `access_token`、`refresh_token`、`expires_in`、`refresh_expires_in` 和 `scopes`。确认 Scope 包含 `lite-instances:create` 与 `lite-instances:read`；需要第 7 步时还必须包含 `lite-instances:share-link:manage`。 | 使用 Access Token 调用创建接口。 |
-| 4 | `POST /lite-instances` | `Authorization`、稳定的 `Idempotency-Key`；请求体中 `type` 固定为 `openclaw` | 接口返回 `202`。保存 `operation_id` 和 `Location`；不要把 `202` 当成实例已经可用。 | 按第 5 步轮询 Operation。 |
+| 4 | `POST /lite-instances` | `Authorization`、稳定的 `Idempotency-Key`；请求体中提供 `owner`，`type` 固定为 `openclaw` | 接口返回 `202`。保存 `operation_id` 和 `Location`；不要把 `202` 当成实例已经可用。 | 按第 5 步轮询 Operation。 |
 | 5 | `GET /operations/{operation_id}` | 第 4 步的 Operation ID | `queued` 或 `processing`：继续轮询；`failed`：记录 `error_code`、`error_message` 并停止；`succeeded`：保存正整数 `instance_id`。 | 仅 `succeeded` 时进入第 6 步。 |
 | 6 | `GET /lite-instances/{instance_id}` | 第 5 步的实例 ID | `status=creating`：继续轮询；`status=running` 且 `availability=available`：实例可用；其他状态按不可用处理并结合状态排查。 | 实例可直接由用户使用，或进入可选的第 7 步。 |
 | 7（可选） | `POST /lite-instances/{instance_id}/external-access/password` | 先确定 `expires_mode`、有效期参数和 `workspace_access` | 保存 `share_url`、`password`、`expires_at` 和实际生效的 `workspace_access`。该调用会替换同一实例已有的外部访问凭据。 | 立即把凭据写入安全存储。 |
@@ -94,6 +96,7 @@ Idempotency-Key: order-20260811-openclaw-001
 
 {
   "name": "customer-openclaw-01",
+  "owner": "customer-a",
   "type": "openclaw",
   "description": "Created by northbound integration"
 }
@@ -286,6 +289,7 @@ Idempotency-Key: create-alice-openclaw-001
 
 {
   "name": "alice-openclaw",
+  "owner": "alice",
   "type": "openclaw",
   "description": "Created by northbound API"
 }
@@ -296,6 +300,7 @@ Idempotency-Key: create-alice-openclaw-001
 | 字段 | 必填 | 约束 |
 | --- | --- | --- |
 | `name` | 是 | 实例显示名称；去除首尾空白后需同时满足 3～50 个 Unicode 字符和 3～50 个 UTF-8 字节，同一用户下不能重名。不会作为 Kubernetes 参数或镜像名使用。 |
+| `owner` | 是 | 创建者或业务归属标识；去除首尾空白后为 1～128 个 UTF-8 字节，不能包含控制字符。保存和列表查询采用区分大小写的精确匹配。 |
 | `type` | 是 | `openclaw`：创建 OpenClaw Lite；`hermes`：创建 Hermes Lite。大小写会被规范为小写，其他类型不允许。 |
 | `description` | 否 | 实例备注，最多 2000 个 UTF-8 字节；只作为元数据，不会注入 Runtime。可省略或传 `null`。 |
 
@@ -345,14 +350,15 @@ Operation 字段：
 ### 4.3 查询实例
 
 ```http
-GET /api/northbound/v1/lite-instances?page=1&limit=20
+GET /api/northbound/v1/lite-instances?owner=alice&page=1&limit=20
 Authorization: Bearer <access-token>
 ```
 
-`page` 最小为 1；`limit` 为 1～100，默认 20。接口只返回当前用户拥有的 Lite 实例。
+`owner` 必填，采用区分大小写的精确匹配。接口先按当前登录用户隔离，再按 owner 和 Lite 模式过滤，不会返回同一用户下其他 owner 的实例。`page` 最小为 1；`limit` 为 1～100，默认 20。
 
 | Query 参数 | 必填 | 类型、范围和默认值 |
 | --- | --- | --- |
+| `owner` | 是 | 与创建时保存的 owner 精确一致，区分大小写。 |
 | `page` | 否 | 十进制整数，最小 1，默认 1。 |
 | `limit` | 否 | 十进制整数，范围 1～100，默认 20；超过 100 会按 100 处理。 |
 
@@ -364,6 +370,43 @@ Authorization: Bearer <access-token>
 ```
 
 实例响应中的 `status` 是 Runtime 生命周期状态；`availability` 是便于调用方展示的派生值：`running` 对应 `available`，`creating` 对应 `starting`，其他状态对应 `unavailable`。创建 Operation 成功只说明实例记录和调度请求已创建，调用方仍应查询实例直到 `status=running`。
+
+### 4.4 IEI owner 实例页面与单点登录
+
+智慧协作平台使用单点登录 token 打开固定入口：
+
+```text
+https://<ip>:<port>/ieisystem/list-instances?token=<URL 编码后的标准 Base64 token>
+```
+
+token 按《智慧协作平台单点登录文档》的“方式二”生成：明文为 `邮箱+yyyy-MM-dd HH:mm:ss`，采用 AES-128-CBC、PKCS5Padding（与 16 字节分组上的 PKCS7Padding 等价）加密，然后输出标准 Base64。密钥使用双方约定的 16 字节系统密钥；业务系统 IV 固定为 16 字节标识 `CLAWMANAGETOKENS`，配置后需与智慧协作平台保持一致。Base64 中的 `+`、`/`、`=` 必须进行 URL 编码。
+
+本仓库提供了测试 URL 生成器。先在 `examples/.env` 中填写 `NORTHBOUND_OWNER`，然后执行：
+
+```powershell
+python examples/generate_iei_url.py
+```
+
+脚本默认通过 `IEISYSTEM_KUBECONFIG` 从指定 Kubernetes Secret 读取 AES 密钥，只向标准输出写入拼接完成的 URL，不打印共享密钥。生成后需在 30 秒内打开。
+
+服务端按 `Asia/Shanghai` 解析时间，默认只接受 30 秒内的 token，并允许最多 5 秒的未来时钟偏差。验证成功后，原始 AES token 只用于换取独立的 HttpOnly IEI 会话，并立即从浏览器地址栏移除。后续列表、详情和实例代理请求均验证该会话；实例代理能力令牌与当前 IEI 会话绑定，会话退出或过期后不可继续访问。
+
+owner 取解密后的邮箱并按邮箱语义进行不区分大小写的匹配。列表只返回该 owner 的 Lite 实例；访问详情或生成实例入口时会再次校验 owner 和 Lite 模式。不存在、非 Lite、owner 不匹配三种情况统一返回 `404`，防止枚举其他实例。
+
+该入口不复用 ClawManager 门户登录态，也不读取或创建 ShareLink 的短码、密码、会话或外部访问记录。
+
+主服务配置：
+
+| 环境变量 | 要求与默认值 |
+| --- | --- |
+| `IEISYSTEM_SSO_ENABLED` | 设置为 `true` 才启用；默认 `false`。 |
+| `IEISYSTEM_SSO_KEY` | 必填，严格 16 个 UTF-8 字节；通过 Kubernetes Secret 注入。 |
+| `IEISYSTEM_SSO_IV` | 必填，严格 16 个 UTF-8 字节；当前约定为 `CLAWMANAGETOKENS`。 |
+| `IEISYSTEM_SSO_TOKEN_TTL` | 默认 `30s`，必须大于 0 且不超过 `30s`。 |
+| `IEISYSTEM_SESSION_SECRET` | 必填，至少 32 个 UTF-8 字节，且不得与北向 JWT 密钥复用。 |
+| `IEISYSTEM_SESSION_TTL` | 默认 `30m`，必须大于 0 且不超过 `24h`。 |
+| `IEISYSTEM_SSO_TIMEZONE` | 默认 `Asia/Shanghai`。 |
+| `IEISYSTEM_COOKIE_SECURE` | HTTPS 环境必须为 `true`，默认 `true`。仅本地 HTTP 调试可设为 `false`。 |
 
 ## 5. 启用和重置 ShareLink
 
@@ -572,13 +615,14 @@ absolute_share_url = CLAWMANAGER_PUBLIC_BASE_URL + share_url
 python -m pip install -r examples/requirements-northbound.txt
 ```
 
-Demo 会自动读取仓库根目录的 `.env`。测试集群可使用以下配置：
+Demo 会自动读取 `examples/.env`。测试集群可使用以下配置：
 
 ```dotenv
-NORTHBOUND_BASE_URL=https://172.16.0.77:38443
-NORTHBOUND_CA_FILE=D:/clawmanager-northbound.crt
+NORTHBOUND_BASE_URL=https://<northbound-host>:<northbound-port>
+NORTHBOUND_CA_FILE=northbound-ca.crt
 NORTHBOUND_USERNAME=alice
 NORTHBOUND_PASSWORD=your-password
+NORTHBOUND_OWNER=customer-a
 NORTHBOUND_INSTANCE_TYPE=openclaw
 NORTHBOUND_INSTANCE_NAME=
 NORTHBOUND_WAIT_CREATE=true
@@ -586,11 +630,11 @@ NORTHBOUND_ENABLE_SHARELINK=false
 NORTHBOUND_SHARELINK_EXPIRES_MODE=preset
 NORTHBOUND_SHARELINK_EXPIRES_PRESET=24h
 NORTHBOUND_SHARELINK_WORKSPACE_ACCESS=none
-CLAWMANAGER_PUBLIC_BASE_URL=https://172.16.1.12:39443
+CLAWMANAGER_PUBLIC_BASE_URL=https://<portal-host>:<portal-port>
 NORTHBOUND_SHOW_SECRETS=false
 ```
 
-`.env` 已被 Git 忽略，不得提交或分享。使用内部 CA 或自签名测试证书时必须设置 `NORTHBOUND_CA_FILE`，不要通过关闭 TLS 校验绕过证书验证。调用进程中已经存在的环境变量优先于 `.env`，可用于临时覆盖配置。
+`examples/.env` 已被 Git 忽略，不得提交或分享。相对证书路径以 `examples/` 为基准解析。使用内部 CA 或自签名测试证书时必须设置 `NORTHBOUND_CA_FILE`，不要通过关闭 TLS 校验绕过证书验证。调用进程中已经存在的环境变量优先于 `.env`，可用于临时覆盖配置。
 
 Demo 环境变量说明：
 
@@ -600,6 +644,7 @@ Demo 环境变量说明：
 | `NORTHBOUND_CA_FILE` | 全部 | 使用私有 CA 时必填 | 用于验证北向 Gateway 服务端证书的 CA 文件路径。不要用关闭 TLS 校验代替。 |
 | `NORTHBOUND_USERNAME` | 全部 | 必填 | 现有 ClawManager 用户名。只在本地构造 JWE，不以明文发送。 |
 | `NORTHBOUND_PASSWORD` | 全部 | 必填 | 现有用户密码。只在本地构造 JWE；不得提交到版本库。 |
+| `NORTHBOUND_OWNER` | `create`、`list` | 必填 | 创建者或业务归属标识；列表只返回与它精确匹配的 Lite 实例。 |
 | `NORTHBOUND_HTTP_TIMEOUT_SECONDS` | 全部 | 默认 `30` | 单次 HTTPS 请求超时，正整数秒；空值、非整数或非正数回退到默认值。 |
 | `NORTHBOUND_INSTANCE_TYPE` | `create` | 默认 `openclaw` | `openclaw` 或 `hermes`。 |
 | `NORTHBOUND_INSTANCE_NAME` | `create` | 默认自动生成 | 实例名称；空值时生成 `api-lite-<毫秒时间戳>`，非空时必须同时满足创建接口的 3～50 Unicode 字符和 3～50 UTF-8 字节限制。 |

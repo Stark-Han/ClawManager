@@ -93,6 +93,7 @@ func (p Principal) HasScope(required string) bool {
 
 type CreateLiteInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
+	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
 	Type        string  `json:"type" binding:"required,oneof=openclaw hermes"`
 	Description *string `json:"description,omitempty"`
 }
@@ -135,6 +136,7 @@ func operationResponse(item *models.NorthboundOperation) OperationResponse {
 type LiteInstanceResponse struct {
 	ID           int        `json:"id"`
 	Name         string     `json:"name"`
+	Owner        string     `json:"owner"`
 	Description  *string    `json:"description,omitempty"`
 	Type         string     `json:"type"`
 	Status       string     `json:"status"`
@@ -165,6 +167,7 @@ func liteInstanceResponse(item *models.Instance) LiteInstanceResponse {
 	return LiteInstanceResponse{
 		ID:           item.ID,
 		Name:         item.Name,
+		Owner:        instanceOwner(item),
 		Description:  item.Description,
 		Type:         item.Type,
 		Status:       item.Status,
@@ -173,4 +176,11 @@ func liteInstanceResponse(item *models.Instance) LiteInstanceResponse {
 		UpdatedAt:    item.UpdatedAt,
 		StartedAt:    item.StartedAt,
 	}
+}
+
+func instanceOwner(item *models.Instance) string {
+	if item == nil || item.Owner == nil {
+		return ""
+	}
+	return *item.Owner
 }

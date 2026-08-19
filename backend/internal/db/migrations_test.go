@@ -223,6 +223,28 @@ func TestMigration045AddsNorthboundSecurityState(t *testing.T) {
 	}
 }
 
+func TestMigration047AddsInstanceOwner(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/047_add_instance_owner.sql")
+	if err != nil {
+		t.Fatalf("read migration 047: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"ADD COLUMN owner VARCHAR(128)",
+		"COLLATE utf8mb4_bin",
+		"owner_normalized",
+		"GENERATED ALWAYS AS (LOWER(TRIM(owner))) STORED",
+		"idx_instances_user_owner_mode_created",
+		"user_id, owner, instance_mode, created_at, id",
+		"idx_instances_owner_normalized_mode_created",
+		"owner_normalized, instance_mode, created_at, id",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 047 must contain %s", required)
+		}
+	}
+}
+
 func TestMigration042AddsImmutableReviewContractTarget(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/042_add_team_review_contract.sql")
 	if err != nil {

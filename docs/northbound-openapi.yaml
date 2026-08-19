@@ -150,6 +150,11 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - name: owner
+          in: query
+          required: true
+          description: Exact, case-sensitive owner identifier used when the instances were created.
+          schema: { type: string, minLength: 1, maxLength: 128 }
         - name: page
           in: query
           description: One-based page number.
@@ -165,12 +170,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [instances, total, page, limit]
+                required: [instances, owner, total, page, limit]
                 properties:
                   instances:
                     type: array
                     items:
                       $ref: "#/components/schemas/LiteInstance"
+                  owner: { type: string, description: Exact owner filter applied to this result. }
                   total: { type: integer }
                   page: { type: integer }
                   limit: { type: integer }
@@ -178,6 +184,8 @@ paths:
           $ref: "#/components/responses/AuthInvalid"
         "403":
           $ref: "#/components/responses/ScopeDenied"
+        "400":
+          $ref: "#/components/responses/ValidationError"
   /api/northbound/v1/lite-instances/{id}:
     get:
       summary: Get one Lite instance owned by the current user
@@ -392,13 +400,18 @@ components:
     CreateLiteInstance:
       type: object
       additionalProperties: false
-      required: [name, type]
+      required: [name, owner, type]
       properties:
         name:
           type: string
           minLength: 3
           maxLength: 50
           description: Display name, trimmed by the server and unique per user. It must satisfy both the OpenAPI 3-50-character constraint and the server's 3-50-UTF-8-byte check.
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Creator or business owner identifier. The server trims it, stores at most 128 UTF-8 bytes, rejects control characters, and uses case-sensitive exact matching for list queries.
         type:
           type: string
           enum: [openclaw, hermes]
@@ -436,10 +449,11 @@ components:
           description: Controls only shared Workspace files. none hides files and denies all file APIs; read permits list, preview, and download; write additionally permits upload, mkdir, rename, and delete. Chat and the shared instance page remain accessible in every mode. Reset operations preserve this value; call the enable endpoint again to change it.
     LiteInstance:
       type: object
-      required: [id, name, type, status, created_at, updated_at]
+      required: [id, name, owner, type, status, created_at, updated_at]
       properties:
         id: { type: integer, minimum: 1, description: Lite instance ID used by subsequent instance and ShareLink calls. }
         name: { type: string, description: Instance display name. }
+        owner: { type: string, description: Creator or business owner identifier stored on this instance. }
         description: { type: [string, "null"], description: Optional instance metadata. }
         type: { type: string, enum: [openclaw, hermes], description: Lite runtime family. }
         status: { type: string, description: Runtime lifecycle status; callers should wait for running before treating the instance as ready. }
