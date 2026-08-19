@@ -141,6 +141,7 @@ type InstanceHandler struct {
 	openClawConfigService         services.OpenClawConfigService
 	skillService                  services.SkillService
 	externalAccessService         services.InstanceExternalAccessService
+	ieiSSOService                 *services.IEISSOService
 	aiObservabilityService        services.AIObservabilityService
 }
 
@@ -178,6 +179,13 @@ func (h *InstanceHandler) InstanceAccessService() *services.InstanceAccessServic
 	return h.accessService
 }
 
+// SetIEISSOService enables validation of IEI-bound instance proxy tokens.
+func (h *InstanceHandler) SetIEISSOService(service *services.IEISSOService) {
+	if h != nil {
+		h.ieiSSOService = service
+	}
+}
+
 type InstanceRuntimeDetailsResponse struct {
 	Runtime       *services.InstanceRuntimeStatusPayload `json:"runtime,omitempty"`
 	Agent         *services.InstanceAgentPayload         `json:"agent,omitempty"`
@@ -203,6 +211,7 @@ type ExternalAccessRequest struct {
 // CreateInstanceRequest represents a create instance request
 type CreateInstanceRequest struct {
 	Name                 string                       `json:"name" binding:"required,min=3,max=50"`
+	Owner                *string                      `json:"owner,omitempty" binding:"omitempty,max=128"`
 	Description          *string                      `json:"description,omitempty"`
 	Type                 string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
 	Mode                 string                       `json:"mode" binding:"omitempty,oneof=lite pro"`
@@ -402,6 +411,7 @@ func (h *InstanceHandler) CreateInstance(c *gin.Context) {
 func instanceCreateRequestToService(req CreateInstanceRequest) services.CreateInstanceRequest {
 	return services.CreateInstanceRequest{
 		Name:                 req.Name,
+		Owner:                req.Owner,
 		Description:          req.Description,
 		Type:                 req.Type,
 		Mode:                 req.Mode,
@@ -1665,6 +1675,17 @@ func (h *InstanceHandler) validCurrentExternalSession(c *gin.Context, accessToke
 	}
 	if strings.TrimSpace(accessToken.SessionBinding) == "" {
 		return true
+	}
+	if strings.HasPrefix(accessToken.SessionBinding, ieiSystemSessionBindingPrefix) {
+		if h.ieiSSOService == nil {
+			return false
+		}
+		rawSession, err := c.Cookie(ieiSystemSessionCookie)
+		if err != nil {
+			return false
+		}
+		session, err := h.ieiSSOService.ValidateSession(rawSession)
+		return err == nil && accessToken.SessionBinding == ieiSystemSessionBinding(session.SessionID)
 	}
 	if h.externalAccessService == nil {
 		return false

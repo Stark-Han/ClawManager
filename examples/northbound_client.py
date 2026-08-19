@@ -2,7 +2,7 @@
 """ClawManager Northbound API demo.
 
 Requires Python 3.10+, ``cryptography``, and ``python-dotenv``. Configuration is
-loaded from the repository-root ``.env`` file. Credentials are encrypted
+loaded from ``examples/.env``. Credentials are encrypted
 locally as a compact JWE; only the ciphertext is sent to the login endpoint.
 """
 
@@ -40,7 +40,7 @@ except ImportError:  # Allow ``help`` to work before dependencies are installed.
     AESGCM = None
 
 
-ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+ENV_FILE = Path(__file__).resolve().parent / ".env"
 if load_dotenv is not None:
     load_dotenv(dotenv_path=ENV_FILE, override=False)
 
@@ -124,6 +124,11 @@ class NorthboundClient:
         self.public_base_url = public_base_url.rstrip("/")
         self.timeout = env_positive_int("NORTHBOUND_HTTP_TIMEOUT_SECONDS", 30)
         ca_file = os.getenv("NORTHBOUND_CA_FILE", "").strip()
+        if ca_file:
+            ca_path = Path(ca_file).expanduser()
+            if not ca_path.is_absolute():
+                ca_path = ENV_FILE.parent / ca_path
+            ca_file = str(ca_path.resolve())
         self.ssl_context = ssl.create_default_context(cafile=ca_file or None)
         self.tokens: dict[str, Any] | None = None
 
@@ -449,12 +454,14 @@ def run(command: str) -> None:
         return
 
     if command == "create":
+        owner = required_env("NORTHBOUND_OWNER")
         instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", "openclaw").lower()
         if instance_type not in {"openclaw", "hermes"}:
             raise ValueError("NORTHBOUND_INSTANCE_TYPE must be openclaw or hermes")
         instance_name = os.getenv("NORTHBOUND_INSTANCE_NAME", "").strip()
         payload: dict[str, Any] = {
             "name": instance_name or f"api-lite-{int(time.time() * 1000)}",
+            "owner": owner,
             "type": instance_type,
         }
         if os.getenv("NORTHBOUND_DESCRIPTION"):
@@ -486,8 +493,10 @@ def run(command: str) -> None:
         return
 
     if command == "list":
+        owner = required_env("NORTHBOUND_OWNER")
         query = urllib.parse.urlencode(
             {
+                "owner": owner,
                 "page": env_positive_int("NORTHBOUND_PAGE", 1),
                 "limit": env_positive_int("NORTHBOUND_LIMIT", 20),
             }

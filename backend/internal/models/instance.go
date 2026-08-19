@@ -8,6 +8,7 @@ import (
 type Instance struct {
 	ID                       int        `db:"id,primarykey,autoincrement" json:"id"`
 	UserID                   int        `db:"user_id" json:"user_id"`
+	Owner                    *string    `db:"owner" json:"owner,omitempty"`
 	Name                     string     `db:"name" json:"name"`
 	Description              *string    `db:"description" json:"description,omitempty"`
 	Type                     string     `db:"type" json:"type"`

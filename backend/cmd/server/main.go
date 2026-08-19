@@ -208,6 +208,12 @@ func main() {
 		aiObservabilityService,
 		services.WithInstanceProxyRuntimeRepositories(instanceRepo, runtimePodRepo, bindingRepo),
 	)
+	ieiSSOService, err := services.NewIEISSOService(cfg.IEISystem)
+	if err != nil {
+		log.Fatalf("Failed to initialize IEI system SSO: %v", err)
+	}
+	instanceHandler.SetIEISSOService(ieiSSOService)
+	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
 	systemSettingsHandler := handlers.NewSystemSettingsHandler(systemImageSettingService)
 	llmModelHandler := handlers.NewLLMModelHandler(llmModelService)
 	aiGatewayHandler := handlers.NewAIGatewayHandler(aiGatewayService)
@@ -244,6 +250,7 @@ func main() {
 	workspaceFileHandler := handlers.NewWorkspaceFileHandler(instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	workspaceFileHandler.SetSkillRepository(skillRepo)
 	workspaceFileHandler.SetExternalAccessServices(externalAccessService, instanceHandler.InstanceAccessService())
+	ieiSystemHandler.SetWorkspaceFileHandler(workspaceFileHandler)
 	runtimeAgentHandler := handlers.NewRuntimeAgentHandler(cfg.Runtime, runtimePodRepo, bindingRepo, instanceRepo, runtimeEvents, skillService)
 
 	// Initialize WebSocket hub and handler
@@ -374,6 +381,23 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
+		ieiSystem := api.Group("/ieisystem")
+		{
+			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
+			ieiSystem.GET("/session", ieiSystemHandler.GetSession)
+			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
+			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
+			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
+			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
+			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
+			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)
+			ieiSystem.GET("/instances/:id/workspace/download", ieiSystemHandler.DownloadWorkspace)
+			ieiSystem.POST("/instances/:id/workspace/upload", ieiSystemHandler.UploadWorkspace)
+			ieiSystem.POST("/instances/:id/workspace/folders", ieiSystemHandler.CreateWorkspaceFolder)
+			ieiSystem.PATCH("/instances/:id/workspace/entries", ieiSystemHandler.RenameWorkspaceEntry)
+			ieiSystem.DELETE("/instances/:id/workspace/entries", ieiSystemHandler.DeleteWorkspaceEntry)
+		}
+
 		sharedInstances := api.Group("/shared-instances")
 		{
 			sharedInstances.GET("/:code/session", instanceHandler.GetSharedInstanceSession)

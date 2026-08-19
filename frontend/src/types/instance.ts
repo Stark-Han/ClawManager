@@ -4,6 +4,7 @@ import type { InstanceSkill } from "./skill";
 export interface Instance {
   id: number;
   user_id: number;
+  owner?: string;
   name: string;
   description?: string;
   type:
@@ -171,6 +172,7 @@ export interface InstanceConfigRevision {
 
 export interface CreateInstanceRequest {
   name: string;
+  owner?: string;
   description?: string;
   type:
     | "openclaw"

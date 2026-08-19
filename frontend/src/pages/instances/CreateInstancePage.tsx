@@ -477,6 +477,7 @@ const CreateInstancePage: React.FC = () => {
 
   const [formData, setFormData] = useState<CreateInstanceRequest>({
     name: "",
+    owner: "",
     type: "openclaw",
     mode: "lite",
     cpu_cores: 2,
@@ -840,6 +841,7 @@ const CreateInstancePage: React.FC = () => {
       setError(null);
       const createPayload: CreateInstanceRequest = {
         ...formData,
+        owner: formData.owner?.trim(),
         mode: selectedMode,
         instance_mode: selectedMode,
         runtime_type: selectedRuntimeType,
@@ -906,7 +908,8 @@ const CreateInstancePage: React.FC = () => {
   };
 
   const canProceed = () => {
-    if (step === 1) return formData.name.length >= 3;
+    if (step === 1)
+      return formData.name.length >= 3 && Boolean(formData.owner?.trim());
     if (step === 2) return availableTypes.length > 0;
     return true;
   };
@@ -1267,6 +1270,30 @@ const CreateInstancePage: React.FC = () => {
                     className="app-input mt-1 block w-full"
                     placeholder={t("instances.descriptionPlaceholder")}
                   />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="owner"
+                    className="block text-sm font-medium text-gray-700"
+                  >
+                    {t("instances.owner")}
+                  </label>
+                  <input
+                    type="text"
+                    id="owner"
+                    value={formData.owner || ""}
+                    onChange={(e) =>
+                      setFormData({ ...formData, owner: e.target.value })
+                    }
+                    className="app-input mt-1 block w-full"
+                    placeholder={t("instances.ownerPlaceholder")}
+                    maxLength={128}
+                    required
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    {t("instances.ownerHelp")}
+                  </p>
                 </div>
 
                 {renderInstanceModeSelector()}
@@ -2253,6 +2280,14 @@ const CreateInstancePage: React.FC = () => {
                       </dt>
                       <dd className="mt-1 text-sm text-gray-900">
                         {formData.name}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-sm font-medium text-gray-500">
+                        {t("instances.owner")}
+                      </dt>
+                      <dd className="mt-1 text-sm text-gray-900">
+                        {formData.owner}
                       </dd>
                     </div>
                     <div>

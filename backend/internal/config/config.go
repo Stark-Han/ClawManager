@@ -16,6 +16,7 @@ type Config struct {
 	Database         DatabaseConfig         `yaml:"database"`
 	JWT              JWTConfig              `yaml:"jwt"`
 	Northbound       NorthboundConfig       `yaml:"northbound"`
+	IEISystem        IEISystemConfig        `yaml:"ieiSystem"`
 	Kubernetes       KubernetesConfig       `yaml:"kubernetes"`
 	Storage          StorageConfig          `yaml:"storage"`
 	Runtime          RuntimePoolConfig      `yaml:"runtime"`
@@ -97,6 +98,20 @@ type NorthboundConfig struct {
 	OperationTick         time.Duration `yaml:"operationTick"`
 	OperationLease        time.Duration `yaml:"operationLease"`
 	OperationMaxAttempts  int           `yaml:"operationMaxAttempts"`
+}
+
+// IEISystemConfig controls the IEI single-sign-on entry used by the
+// northbound Lite-instance portal. The AES key, IV and session signing secret
+// are deployment secrets and intentionally have no source-code defaults.
+type IEISystemConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	AESKey        string        `yaml:"aesKey"`
+	AESIV         string        `yaml:"aesIv"`
+	TokenTTL      time.Duration `yaml:"tokenTtl"`
+	SessionTTL    time.Duration `yaml:"sessionTtl"`
+	SessionSecret string        `yaml:"sessionSecret"`
+	Timezone      string        `yaml:"timezone"`
+	CookieSecure  bool          `yaml:"cookieSecure"`
 }
 
 // KubernetesConfig holds Kubernetes-related configuration
@@ -274,6 +289,13 @@ func Load() (*Config, error) {
 			OperationTick:        getEnvDuration("NORTHBOUND_OPERATION_TICK", time.Second),
 			OperationLease:       getEnvDuration("NORTHBOUND_OPERATION_LEASE", 30*time.Second),
 			OperationMaxAttempts: getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", 5),
+		},
+		IEISystem: IEISystemConfig{
+			Enabled:      getEnvBool("IEISYSTEM_SSO_ENABLED", false),
+			TokenTTL:     getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", 30*time.Second),
+			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 30*time.Minute),
+			Timezone:     getEnv("IEISYSTEM_SSO_TIMEZONE", "Asia/Shanghai"),
+			CookieSecure: getEnvBool("IEISYSTEM_COOKIE_SECURE", true),
 		},
 		Kubernetes: KubernetesConfig{
 			Mode: getEnv("K8S_MODE", "auto"),
@@ -475,6 +497,15 @@ func applyEnvOverrides(config *Config) {
 	config.Northbound.OperationTick = getEnvDuration("NORTHBOUND_OPERATION_TICK", config.Northbound.OperationTick)
 	config.Northbound.OperationLease = getEnvDuration("NORTHBOUND_OPERATION_LEASE", config.Northbound.OperationLease)
 	config.Northbound.OperationMaxAttempts = getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", config.Northbound.OperationMaxAttempts)
+
+	config.IEISystem.Enabled = getEnvBool("IEISYSTEM_SSO_ENABLED", config.IEISystem.Enabled)
+	config.IEISystem.AESKey = getEnv("IEISYSTEM_SSO_KEY", config.IEISystem.AESKey)
+	config.IEISystem.AESIV = getEnv("IEISYSTEM_SSO_IV", config.IEISystem.AESIV)
+	config.IEISystem.TokenTTL = getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", config.IEISystem.TokenTTL)
+	config.IEISystem.SessionTTL = getEnvDuration("IEISYSTEM_SESSION_TTL", config.IEISystem.SessionTTL)
+	config.IEISystem.SessionSecret = getEnv("IEISYSTEM_SESSION_SECRET", config.IEISystem.SessionSecret)
+	config.IEISystem.Timezone = getEnv("IEISYSTEM_SSO_TIMEZONE", config.IEISystem.Timezone)
+	config.IEISystem.CookieSecure = getEnvBool("IEISYSTEM_COOKIE_SECURE", config.IEISystem.CookieSecure)
 
 	// Kubernetes config
 	if mode := os.Getenv("K8S_MODE"); mode != "" {

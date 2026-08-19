@@ -55,6 +55,8 @@ import CreateInstancePage from '../pages/instances/CreateInstancePage';
 import InstanceDetailPage from '../pages/instances/InstanceDetailPage';
 import InstancePortalPage from '../pages/instances/InstancePortalPage';
 import SharedInstancePage from '../pages/instances/SharedInstancePage';
+import IEISystemListInstancesPage from '../pages/instances/IEISystemListInstancesPage';
+import IEISystemInstancePage from '../pages/instances/IEISystemInstancePage';
 import TeamListPage from '../pages/teams/TeamListPage';
 import CreateTeamPage from '../pages/teams/CreateTeamPage';
 import CustomTeamTemplatesPage from '../pages/teams/CustomTeamTemplatesPage';
@@ -169,6 +171,8 @@ function AppRoutes() {
         }
       />
       <Route path="/share/:code" element={<SharedInstancePage />} />
+      <Route path="/ieisystem/list-instances" element={<IEISystemListInstancesPage />} />
+      <Route path="/ieisystem/instances/:id" element={<IEISystemInstancePage />} />
 
       {/* User Routes */}
       <Route
