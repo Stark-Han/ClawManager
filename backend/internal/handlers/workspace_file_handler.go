@@ -34,6 +34,7 @@ type WorkspaceFileHandler struct {
 const (
 	sharedWorkspaceContextKey = "shared-instance-workspace"
 	sharedWorkspaceCSRFHeader = "X-ClawManager-Share-CSRF"
+	ieiWorkspaceContextKey    = "iei-instance-workspace"
 )
 
 type createWorkspaceFolderRequest struct {
@@ -266,6 +267,14 @@ func (h *WorkspaceFileHandler) syncSkillDeletionFromWorkspacePath(instanceID int
 func (h *WorkspaceFileHandler) workspaceScope(c *gin.Context) (*models.Instance, services.WorkspaceFileService, services.WorkspaceFileScope, bool) {
 	if shared, _ := c.Get(sharedWorkspaceContextKey); shared == true {
 		return h.sharedWorkspaceScope(c)
+	}
+	if rawInstance, exists := c.Get(ieiWorkspaceContextKey); exists {
+		instance, ok := rawInstance.(*models.Instance)
+		if !ok || instance == nil {
+			utils.Error(c, http.StatusUnauthorized, "IEI workspace session is invalid")
+			return nil, nil, services.WorkspaceFileScope{}, false
+		}
+		return h.instanceWorkspaceScope(c, instance, "iei_")
 	}
 
 	id, err := strconv.Atoi(c.Param("id"))

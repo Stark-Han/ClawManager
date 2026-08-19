@@ -1,5 +1,9 @@
 # Northbound API deployment add-on
 
+For an in-place upgrade of an existing Kubernetes or K3s installation, follow
+the [Chinese upgrade guide](../../../docs/northbound-upgrade-guide.md) before
+applying this add-on.
+
 This add-on keeps the existing ClawManager HTTP service private and adds a
 separately deployed northbound gateway. The supplied Service publishes only the
 gateway through NodePort `38443`; restrict that port with the partner IP
@@ -14,7 +18,8 @@ default and causes application rate limits to use the direct peer address.
 1. Deploy a ClawManager image that contains both
    `/usr/local/bin/clawreef-server` and
    `/usr/local/bin/clawreef-northbound-gateway`.
-2. Roll out Core first so migration `045_add_northbound_api.sql` is applied.
+2. Roll out Core first so migrations `045_add_northbound_api.sql` and
+   `047_add_instance_owner.sql` are applied.
 3. Issue separate certificates for:
    - the public gateway server;
    - the gateway's Core client identity;
@@ -40,12 +45,19 @@ clawmanager-northbound-core-tls            tls.crt, tls.key (Core server)
 clawmanager-northbound-core-ca             ca.crt (verifies Core)
 clawmanager-northbound-gateway-client-ca   ca.crt (verifies Gateway client)
 clawmanager-northbound-jwe                 private.pem (RSA 3072+)
+clawmanager-iei-sso                        aes-key, aes-iv, session-secret
 ```
 
 Use independent, cryptographically random values of at least 32 bytes for the
 northbound JWT secret, refresh-token pepper, and internal JWT secret. Do not
 reuse the existing web JWT secret. `secrets.example.yaml` documents the key
 names but must not be applied with its placeholder values.
+
+For the IEI page, `aes-key` is the exact 16-byte key agreed with the unified
+platform, `aes-iv` is the exact 16-byte business-system identifier (the example
+uses `CLAWMANAGETOKENS`), and `session-secret` is an independent random value of
+at least 32 bytes. The AES key from the integration document must be injected
+as a Secret and must not be committed to this repository.
 
 The gateway deliberately connects without running migrations. Give it a
 dedicated database account with only the permissions it needs after Core has
@@ -77,6 +89,10 @@ kubectl rollout status deployment/clawmanager-northbound-gateway -n clawmanager-
 The northbound endpoint is available at
 `https://<approved-node-address>:38443`. Do not expose ports `9001`, `9002`, or
 the existing management backend as part of this change.
+
+The IEI user-facing entry remains on the existing ClawManager HTTPS endpoint:
+`https://<management-ip>:<management-port>/ieisystem/list-instances?token=...`.
+It is not served from northbound gateway port `38443`.
 
 The Core patch intentionally creates no public Service. Port 9002 is available
 only through `clawmanager-northbound-core` (`ClusterIP`), and the NetworkPolicy

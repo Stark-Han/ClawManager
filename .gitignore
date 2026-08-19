@@ -59,6 +59,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+*.bkp
 /test_*
 /deploy/
 /test.tar
@@ -72,6 +73,7 @@ Thumbs.db
 /_pr*.md
 .clawmanager-last-image
 /pr138.patch
+/examples/northbound-ca.crt
 
 # Team runtime config snapshots
 /team-*.json

@@ -21,6 +21,31 @@ spec:
                 secretKeyRef:
                   name: clawmanager-northbound-secrets
                   key: internal-jwt-secret
+            - name: IEISYSTEM_SSO_ENABLED
+              value: "true"
+            - name: IEISYSTEM_SSO_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-iei-sso
+                  key: aes-key
+            - name: IEISYSTEM_SSO_IV
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-iei-sso
+                  key: aes-iv
+            - name: IEISYSTEM_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clawmanager-iei-sso
+                  key: session-secret
+            - name: IEISYSTEM_SSO_TOKEN_TTL
+              value: "30s"
+            - name: IEISYSTEM_SESSION_TTL
+              value: "30m"
+            - name: IEISYSTEM_SSO_TIMEZONE
+              value: Asia/Shanghai
+            - name: IEISYSTEM_COOKIE_SECURE
+              value: "true"
             - name: NORTHBOUND_CORE_TLS_CERT_FILE
               value: /etc/clawmanager/northbound/core/tls.crt
             - name: NORTHBOUND_CORE_TLS_KEY_FILE

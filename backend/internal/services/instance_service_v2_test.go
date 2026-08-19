@@ -70,6 +70,31 @@ func TestInstanceServiceCreateV2CreatesWorkspaceOnly(t *testing.T) {
 	}
 }
 
+func TestInstanceServiceCreateV2PersistsNormalizedOwner(t *testing.T) {
+	workspaceRoot := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	instanceRepo := newV2LifecycleInstanceRepo()
+	service := &instanceService{
+		instanceRepo:  instanceRepo,
+		quotaRepo:     v2LifecycleQuotaRepo{},
+		llmModelRepo:  &stubLLMModelRepository{active: []models.LLMModel{{DisplayName: "auto"}}},
+		workspaceRoot: workspaceRoot,
+	}
+	owner := " tenant-a "
+	instance, err := service.Create(45, CreateInstanceRequest{
+		Name: "Owned Lite", Owner: &owner, Type: "openclaw", CPUCores: 2,
+		MemoryGB: 4, DiskGB: 20, OSType: "openclaw", OSVersion: "latest",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if instance.Owner == nil || *instance.Owner != "tenant-a" {
+		t.Fatalf("owner = %v, want tenant-a", instance.Owner)
+	}
+	if persisted := instanceRepo.byID[instance.ID]; persisted == nil || persisted.Owner == nil || *persisted.Owner != "tenant-a" {
+		t.Fatalf("persisted owner = %v, want tenant-a", persisted)
+	}
+}
+
 func TestInstanceServiceCreateV2RequiresActiveModels(t *testing.T) {
 	workspaceRoot := strings.ReplaceAll(t.TempDir(), "\\", "/")
 	instanceRepo := newV2LifecycleInstanceRepo()

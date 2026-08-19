@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
@@ -38,6 +40,18 @@ type InstanceService interface {
 	Update(instanceID int, req UpdateInstanceRequest) error
 	GetInstanceStatus(instanceID int) (*InstanceStatus, error)
 	ForceSyncInstance(instanceID int) error
+}
+
+// InstanceOwnerService is the owner-scoped listing capability used by the
+// northbound API and its authenticated portal page.
+type InstanceOwnerService interface {
+	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
+}
+
+// IEISystemInstanceService provides the email-owner scoped Lite-instance view
+// after an IEI SSO session has been validated.
+type IEISystemInstanceService interface {
+	GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error)
 }
 
 func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error {
@@ -167,6 +181,7 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 // CreateInstanceRequest holds data for creating an instance
 type CreateInstanceRequest struct {
 	Name                    string              `json:"name" validate:"required,min=3,max=50"`
+	Owner                   *string             `json:"owner,omitempty"`
 	Description             *string             `json:"description,omitempty"`
 	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes"`
 	Mode                    string              `json:"mode" validate:"omitempty,oneof=lite pro"`
@@ -319,6 +334,13 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	ctx := context.Background()
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	if req.Owner != nil {
+		owner, err := NormalizeInstanceOwner(*req.Owner)
+		if err != nil {
+			return nil, err
+		}
+		req.Owner = &owner
+	}
 	req.ProvisioningOperationID = strings.TrimSpace(req.ProvisioningOperationID)
 	if req.ProvisioningOperationID != "" {
 		if repo, ok := s.instanceRepo.(interface {
@@ -472,6 +494,7 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	now := time.Now()
 	instance := &models.Instance{
 		UserID:                   userID,
+		Owner:                    req.Owner,
 		Name:                     req.Name,
 		Description:              req.Description,
 		Type:                     req.Type,
@@ -778,6 +801,7 @@ func (s *instanceService) createV2Instance(ctx context.Context, userID int, req 
 	workspaceRoot := s.runtimeWorkspaceRoot()
 	instance := &models.Instance{
 		UserID:                   userID,
+		Owner:                    req.Owner,
 		Name:                     strings.TrimSpace(req.Name),
 		Description:              trimOptionalString(req.Description),
 		Type:                     runtimeType,
@@ -871,6 +895,50 @@ func (s *instanceService) GetByUserID(userID int, offset, limit int) ([]models.I
 		return nil, 0, err
 	}
 
+	return instances, total, nil
+}
+
+// GetLiteByUserIDAndOwner returns only the caller's Lite instances whose owner
+// matches exactly. Owner is normalized before it reaches the repository.
+func (s *instanceService) GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	normalized, err := NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, err
+	}
+	repo, ok := s.instanceRepo.(repository.InstanceOwnerRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support owner filtering")
+	}
+	instances, err := repo.GetLiteByUserIDAndOwner(userID, normalized, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountLiteByUserIDAndOwner(userID, normalized)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+func (s *instanceService) GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
+	normalized := strings.ToLower(strings.TrimSpace(owner))
+	if normalized == "" {
+		return nil, 0, fmt.Errorf("owner is required")
+	}
+	repo, ok := s.instanceRepo.(repository.IEISystemInstanceRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support IEI owner filtering")
+	}
+	instances, err := repo.GetLiteByOwnerEmail(normalized, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountLiteByOwnerEmail(normalized)
+	if err != nil {
+		return nil, 0, err
+	}
 	return instances, total, nil
 }
 
@@ -2441,4 +2509,22 @@ func trimOptionalString(value *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+// NormalizeInstanceOwner applies the canonical storage and lookup rules for
+// northbound owner identifiers.
+func NormalizeInstanceOwner(value string) (string, error) {
+	owner := strings.TrimSpace(value)
+	if owner == "" {
+		return "", fmt.Errorf("owner is required")
+	}
+	if !utf8.ValidString(owner) || len(owner) > 128 {
+		return "", fmt.Errorf("owner must contain at most 128 UTF-8 bytes")
+	}
+	for _, character := range owner {
+		if unicode.IsControl(character) {
+			return "", fmt.Errorf("owner must not contain control characters")
+		}
+	}
+	return owner, nil
 }

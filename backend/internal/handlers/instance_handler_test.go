@@ -34,6 +34,16 @@ type restartRecordingInstanceService struct {
 	environmentNamesErr error
 }
 
+func TestInstanceCreateRequestToServiceIncludesOwner(t *testing.T) {
+	owner := "owner@example.com"
+	req := CreateInstanceRequest{Name: "owned-lite", Owner: &owner}
+
+	got := instanceCreateRequestToService(req)
+	if got.Owner == nil || *got.Owner != owner {
+		t.Fatalf("owner = %v, want %q", got.Owner, owner)
+	}
+}
+
 func (s *restartRecordingInstanceService) GetEnvironmentOverrideNames(instanceID int) ([]string, error) {
 	return s.environmentNames, s.environmentNamesErr
 }

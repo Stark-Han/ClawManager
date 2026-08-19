@@ -36,6 +36,24 @@ func (s *northboundInstanceStub) GetByUserID(userID, offset, limit int) ([]model
 	return items, len(items), nil
 }
 
+func (s *northboundInstanceStub) GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	items := make([]models.Instance, 0)
+	for _, item := range s.items {
+		if item.UserID == userID && item.Owner != nil && *item.Owner == owner && isLite(item) {
+			items = append(items, *item)
+		}
+	}
+	total := len(items)
+	if offset >= total {
+		return []models.Instance{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
+}
+
 type shareLinkResetStub struct {
 	passwordCreateResult *services.PasswordExternalAccessResult
 	urlResult            *services.EnableShareLinkResult

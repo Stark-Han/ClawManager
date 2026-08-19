@@ -39,6 +39,22 @@ type InstanceRepository interface {
 	Delete(id int) error
 }
 
+// InstanceOwnerRepository is an optional repository capability for the
+// owner-scoped northbound Lite instance view. Keeping it separate avoids
+// widening unrelated repository test doubles.
+type InstanceOwnerRepository interface {
+	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
+	CountLiteByUserIDAndOwner(userID int, owner string) (int, error)
+}
+
+// IEISystemInstanceRepository is the case-insensitive owner lookup used after
+// the unified platform has authenticated an email address. It intentionally
+// does not depend on a ClawManager user session.
+type IEISystemInstanceRepository interface {
+	GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error)
+	CountLiteByOwnerEmail(owner string) (int, error)
+}
+
 // instanceRepository implements InstanceRepository
 type instanceRepository struct {
 	sess db.Session
@@ -236,6 +252,60 @@ func (r *instanceRepository) CountByUserID(userID int) (int, error) {
 	count, err := r.sess.Collection("instances").Find(db.Cond{"user_id": userID}).Count()
 	if err != nil {
 		return 0, fmt.Errorf("failed to count instances: %w", err)
+	}
+	return int(count), nil
+}
+
+// GetLiteByUserIDAndOwner gets Lite instances for an authenticated user and
+// exact owner. The owner column uses a binary collation so comparisons are
+// case-sensitive and deterministic.
+func (r *instanceRepository) GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(db.Cond{
+		"user_id":       userID,
+		"owner":         owner,
+		"instance_mode": "lite",
+	}).OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get owner Lite instances: %w", err)
+	}
+	return instances, nil
+}
+
+// CountLiteByUserIDAndOwner counts Lite instances for an authenticated user
+// and exact owner.
+func (r *instanceRepository) CountLiteByUserIDAndOwner(userID int, owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(db.Cond{
+		"user_id":       userID,
+		"owner":         owner,
+		"instance_mode": "lite",
+	}).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count owner Lite instances: %w", err)
+	}
+	return int(count), nil
+}
+
+func (r *instanceRepository) GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(db.Cond{
+		"instance_mode":    "lite",
+		"owner_normalized": strings.ToLower(strings.TrimSpace(owner)),
+	}).
+		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get IEI owner Lite instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountLiteByOwnerEmail(owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(db.Cond{
+		"instance_mode":    "lite",
+		"owner_normalized": strings.ToLower(strings.TrimSpace(owner)),
+	}).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count IEI owner Lite instances: %w", err)
 	}
 	return int(count), nil
 }
