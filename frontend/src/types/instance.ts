@@ -14,8 +14,13 @@ export interface Instance {
     | "centos"
     | "custom"
     | "webtop"
-    | "hermes";
+    | "hermes"
+    | "workbuddy"
+    | "opencode"
+    | "codex"
+    | "claude-code";
   runtime_type: "desktop" | "shell" | "gateway";
+  runtime_variant?: "linux" | "windows";
   instance_mode: "lite" | "pro";
   status: "creating" | "running" | "stopped" | "error" | "deleting";
   cpu_cores: number;
@@ -45,7 +50,7 @@ export interface Instance {
   stopped_at?: string;
 }
 
-export type V2InstanceType = "openclaw" | "hermes";
+export type V2InstanceType = "openclaw" | "hermes" | "opencode" | "codex" | "claude-code";
 export type InstanceMode = "lite" | "pro";
 export type InstanceAvailability = "available" | "starting" | "unavailable";
 
@@ -181,7 +186,12 @@ export interface CreateInstanceRequest {
     | "centos"
     | "custom"
     | "webtop"
-    | "hermes";
+    | "hermes"
+    | "workbuddy"
+    | "opencode"
+    | "codex"
+    | "claude-code";
+  runtime_variant?: "linux" | "windows";
   mode?: InstanceMode;
   instance_mode?: InstanceMode;
   runtime_type?: "desktop" | "shell" | "gateway";
@@ -319,6 +329,38 @@ export const INSTANCE_TYPES: InstanceType[] = [
     description: "Hermes runtime built on the webtop desktop base",
     icon: "hermes",
     defaultOs: "hermes",
+    defaultVersion: "latest",
+  },
+  {
+    id: "workbuddy",
+    name: "Workbuddy",
+    description: "Managed Workbuddy runtime on a persistent Windows desktop",
+    icon: "workbuddy",
+    defaultOs: "workbuddy",
+    defaultVersion: "latest",
+  },
+  {
+    id: "opencode",
+    name: "OpenCode Runtime",
+    description: "OpenCode coding agent runtime",
+    icon: "opencode",
+    defaultOs: "opencode",
+    defaultVersion: "latest",
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    description: "OpenAI Codex coding agent runtime",
+    icon: "codex",
+    defaultOs: "codex",
+    defaultVersion: "latest",
+  },
+  {
+    id: "claude-code",
+    name: "Claude Code",
+    description: "Anthropic Claude Code agent runtime",
+    icon: "claude-code",
+    defaultOs: "claude-code",
     defaultVersion: "latest",
   },
   {

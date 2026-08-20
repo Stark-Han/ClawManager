@@ -5,6 +5,10 @@
 // flipping a flag never trips TS's "always-false condition" narrowing.
 
 export interface FeatureFlags {
+  // Create instance — Claude Code Pro desktop type card.
+  // Keep runtime/backend compatibility while the Pro image offering is unavailable.
+  claudeCodeProCreation: boolean;
+
   // Output Surface scenario — "存量凭据巡检 / 本地存储明文凭据告警" panel.
   // Currently mock UI (CRED_ALERTS + 立即扫描 + 标记为已处理); no backend.
   credentialInventory: boolean;
@@ -31,6 +35,7 @@ export interface FeatureFlags {
 }
 
 export const FEATURES: FeatureFlags = {
+  claudeCodeProCreation: false,
   credentialInventory: false,
   assetDriftMonitor: false,
   memoryDriftAlerts: false,

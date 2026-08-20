@@ -402,6 +402,9 @@ func isDesktopWorkspaceInstance(instance *models.Instance) bool {
 	if instance == nil {
 		return false
 	}
+	if services.IsWindowsVMRuntimeInstance(instance) {
+		return false
+	}
 	return strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModePro) ||
 		strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendDesktop)
 }

@@ -26,9 +26,18 @@ interface PreparedPortalFrame {
 }
 
 function supportsWorkspace(instance: Instance) {
+  if (instance.type === "workbuddy" || instance.type === "codex") {
+    const image = instance.image_registry?.trim().toLowerCase() ?? "";
+    const inferredLinux = instance.type === "workbuddy"
+      ? image.includes("workbuddy-linux")
+      : image.includes("agentsruntime/codex");
+    return instance.runtime_variant === "linux" || (!instance.runtime_variant && inferredLinux);
+  }
   return (
     instance.type === "openclaw" ||
     instance.type === "hermes" ||
+    instance.type === "opencode" ||
+    instance.type === "claude-code" ||
     Boolean(instance.workspace_path)
   );
 }
@@ -38,6 +47,12 @@ function workspaceInitialPath(instance: Instance, isPro: boolean) {
   if (type === "hermes") {
     return isPro ? ".hermes" : "home/.hermes";
   }
+  if (type === "opencode") {
+    return isPro ? ".opencode" : "home/.opencode";
+  }
+  if (type === "codex") return ".codex";
+  if (type === "workbuddy") return "/config";
+  if (type === "claude-code") return ".claude";
   if (type === "openclaw" && !isPro) {
     return "home/.openclaw";
   }
@@ -45,7 +60,17 @@ function workspaceInitialPath(instance: Instance, isPro: boolean) {
 }
 
 function typeLabel(type: Instance["type"]) {
-  return type === "hermes" ? "Hermes" : type === "openclaw" ? "OpenClaw" : type;
+  return type === "hermes"
+    ? "Hermes"
+    : type === "openclaw"
+      ? "OpenClaw"
+      : type === "opencode"
+        ? "OpenCode"
+        : type === "codex"
+          ? "Codex"
+          : type === "claude-code"
+            ? "Claude Code"
+        : type;
 }
 
 function modeLabel(mode: Instance["instance_mode"]) {

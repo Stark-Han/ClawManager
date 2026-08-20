@@ -415,7 +415,7 @@ func buildV2SchedulerInstanceQuery(statuses []string, limit int) (string, []any)
 	for _, status := range statuses {
 		args = append(args, status)
 	}
-	args = append(args, "gateway", "lite", "openclaw", "hermes", limit)
+	args = append(args, "gateway", "lite", "openclaw", "hermes", "opencode", limit)
 	return fmt.Sprintf(`
 		SELECT *
 		FROM instances
@@ -424,7 +424,7 @@ func buildV2SchedulerInstanceQuery(statuses []string, limit int) (string, []any)
 			AND instance_mode = ?
 			AND workspace_path IS NOT NULL
 			AND TRIM(workspace_path) <> ''
-			AND type IN (?, ?)
+			AND type IN (?, ?, ?)
 		ORDER BY id
 		LIMIT ?
 	`, statusPlaceholders), args

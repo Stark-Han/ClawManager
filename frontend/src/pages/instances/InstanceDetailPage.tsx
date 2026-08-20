@@ -110,7 +110,17 @@ function availabilityClass(availability: InstanceAvailability) {
 }
 
 function typeLabel(type: string) {
-  return type === "hermes" ? "Hermes" : type === "openclaw" ? "OpenClaw" : type;
+  return type === "hermes"
+    ? "Hermes"
+    : type === "openclaw"
+      ? "OpenClaw"
+      : type === "opencode"
+        ? "OpenCode"
+        : type === "codex"
+          ? "Codex"
+          : type === "claude-code"
+            ? "Claude Code"
+        : type;
 }
 
 function formatBytes(value?: number) {
@@ -128,7 +138,20 @@ function formatBytes(value?: number) {
 }
 
 function supportsWorkspace(instance: Instance) {
-  return instance.type === "openclaw" || instance.type === "hermes" || Boolean(instance.workspace_path);
+  if (instance.type === "workbuddy" || instance.type === "codex") {
+    const image = instance.image_registry?.trim().toLowerCase() ?? "";
+    const inferredLinux = instance.type === "workbuddy"
+      ? image.includes("workbuddy-linux")
+      : image.includes("agentsruntime/codex");
+    return instance.runtime_variant === "linux" || (!instance.runtime_variant && inferredLinux);
+  }
+  return (
+    instance.type === "openclaw" ||
+    instance.type === "hermes" ||
+    instance.type === "opencode" ||
+    instance.type === "claude-code" ||
+    Boolean(instance.workspace_path)
+  );
 }
 
 function getErrorMessage(err: unknown, fallback: string) {
@@ -359,6 +382,7 @@ const InstanceDetailPage: React.FC = () => {
     readPanelExpanded("session-usage", instanceId),
   );
   const [workspaceHeightPx, setWorkspaceHeightPx] = useState<number | null>(null);
+  const [workspaceVisible, setWorkspaceVisible] = useState(true);
   const [collapsedBottomHeightPx, setCollapsedBottomHeightPx] = useState<number | null>(null);
   const workspaceSectionRef = useRef<HTMLElement>(null);
   const liteRootRef = useRef<HTMLDivElement>(null);
@@ -1334,7 +1358,9 @@ const InstanceDetailPage: React.FC = () => {
             ? { height: pinnedWorkspaceHeight, minHeight: pinnedWorkspaceHeight, flexShrink: 0 }
             : { minHeight: 420, flex: 1 }
         }
-        className="grid shrink-0 grid-cols-1 grid-rows-[minmax(0,1fr)] gap-4 overflow-hidden min-h-[420px] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]"
+        className={`grid shrink-0 grid-cols-1 grid-rows-[minmax(0,1fr)] gap-4 overflow-hidden min-h-[420px] ${
+          workspaceVisible ? "xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]" : "xl:grid-cols-1"
+        }`}
       >
         <div className="h-full min-h-0 min-w-0">
           <InstanceServiceFrame
@@ -1342,9 +1368,11 @@ const InstanceDetailPage: React.FC = () => {
             instanceName={instance.name}
             instanceType={instance.type}
             availability={availability}
+            workspaceVisible={supportsWorkspace(instance) ? workspaceVisible : undefined}
+            onWorkspaceVisibilityChange={supportsWorkspace(instance) ? setWorkspaceVisible : undefined}
           />
         </div>
-        {supportsWorkspace(instance) ? (
+        {workspaceVisible && (supportsWorkspace(instance) ? (
           <div className="h-full min-h-0 min-w-0">
             <WorkspaceFileManager instanceId={instance.id} />
           </div>
@@ -1352,7 +1380,7 @@ const InstanceDetailPage: React.FC = () => {
           <div className="cm-surface flex h-full min-h-[420px] items-center justify-center text-sm text-slate-500">
             No workspace
           </div>
-        )}
+        ))}
       </section>
       <div ref={liteBottomRef} className="flex shrink-0 flex-col gap-2">
         <InstanceSkillHubPanel
@@ -1406,26 +1434,30 @@ const InstanceDetailPage: React.FC = () => {
       {renderActionMessage()}
       <section
         data-layout="pro-desktop-workspace"
-        className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]"
+        className={`grid items-start gap-4 ${
+          workspaceVisible ? "xl:grid-cols-[minmax(0,7fr)_minmax(380px,3fr)]" : "xl:grid-cols-1"
+        }`}
       >
-        <div className="aspect-video min-h-[420px] min-w-0 overflow-hidden xl:min-h-0">
+        <div className="h-[clamp(520px,calc(100vh-10rem),760px)] min-w-0 overflow-hidden">
           <InstanceServiceFrame
             instanceId={instance.id}
             instanceName={instance.name}
             instanceType={instance.type}
             availability={availability}
+            workspaceVisible={supportsWorkspace(instance) ? workspaceVisible : undefined}
+            onWorkspaceVisibilityChange={supportsWorkspace(instance) ? setWorkspaceVisible : undefined}
           />
         </div>
 
-        {supportsWorkspace(instance) ? (
-          <div className="min-h-[420px] min-w-0 xl:h-full xl:min-h-0">
+        {workspaceVisible && (supportsWorkspace(instance) ? (
+          <div className="h-[clamp(520px,calc(100vh-10rem),760px)] min-w-0 overflow-hidden">
             <WorkspaceFileManager instanceId={instance.id} initialPath="/config" />
           </div>
         ) : (
-          <div className="cm-surface flex min-h-[420px] items-center justify-center text-sm text-slate-500 xl:min-h-0">
+          <div className="cm-surface flex h-[clamp(520px,calc(100vh-10rem),760px)] min-w-0 items-center justify-center text-sm text-slate-500">
             No workspace
           </div>
-        )}
+        ))}
       </section>
 
       {(instance.runtime_type || "desktop") === "desktop" && (
@@ -1491,7 +1523,7 @@ const InstanceDetailPage: React.FC = () => {
             {desktopStreamMessage || t("instances.restartRequiredAfterChange")}
           </p>
         </section>
-      )}
+        )}
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,22rem)]">
         <InstanceSkillHubPanel

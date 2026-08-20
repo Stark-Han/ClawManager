@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +71,12 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 						{DisplayName: "GPT-4.1"},
 						{DisplayName: "Claude 3.7 Sonnet"},
 						{DisplayName: "auto"},
-						{ProviderModelName: "deepseek-r1"},
+						{
+							ProviderType:      models.ProviderTypeOpenAICompatible,
+							ProtocolType:      models.ProtocolTypeOpenAICompatible,
+							BaseURL:           "https://api.deepseek.com",
+							ProviderModelName: "deepseek-r1",
+						},
 					},
 				},
 			}
@@ -88,6 +94,12 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 			}
 			if env["CLAWMANAGER_LLM_MODEL"] != `["auto","GPT-4.1","Claude 3.7 Sonnet","deepseek-r1"]` {
 				t.Fatalf("expected CLAWMANAGER_LLM_MODEL to contain injected model catalog JSON, got %q", env["CLAWMANAGER_LLM_MODEL"])
+			}
+			if env["CLAWMANAGER_LLM_REASONING"] != `{"Claude 3.7 Sonnet":false,"GPT-4.1":false,"auto":false,"deepseek-r1":false}` {
+				t.Fatalf("expected authoritative reasoning settings, got %q", env["CLAWMANAGER_LLM_REASONING"])
+			}
+			if env["CLAWMANAGER_LLM_REASONING_CONTROL"] != `{"Claude 3.7 Sonnet":"none","GPT-4.1":"none","auto":"none","deepseek-r1":"none"}` {
+				t.Fatalf("expected authoritative reasoning controls, got %q", env["CLAWMANAGER_LLM_REASONING_CONTROL"])
 			}
 			if env["OPENAI_MODEL"] != "auto" {
 				t.Fatalf("expected OPENAI_MODEL to remain the default gateway alias, got %q", env["OPENAI_MODEL"])
@@ -305,6 +317,14 @@ func TestPersistentVolumeMountPathNormalizesManagedDesktopRuntimes(t *testing.T)
 			}
 		})
 	}
+	got := persistentVolumeMountPath(&models.Instance{Type: "workbuddy", MountPath: "/storage"})
+	if got != "/storage" {
+		t.Fatalf("expected Workbuddy PVC mount path /storage, got %q", got)
+	}
+	got = persistentVolumeMountPath(&models.Instance{Type: RuntimeTypeCodex, MountPath: "/storage"})
+	if got != "/storage" {
+		t.Fatalf("expected Codex PVC mount path /storage, got %q", got)
+	}
 }
 
 func TestManagedRuntimePersistentDirKeepsHermesSubdirectory(t *testing.T) {
@@ -314,6 +334,94 @@ func TestManagedRuntimePersistentDirKeepsHermesSubdirectory(t *testing.T) {
 	})
 	if got != "/config/.hermes" {
 		t.Fatalf("expected Hermes persistent dir /config/.hermes, got %q", got)
+	}
+}
+
+func TestWindowsWorkbuddySkipsGuestOnlyManagedIntegration(t *testing.T) {
+	if supportsManagedRuntimeIntegration("workbuddy") {
+		t.Fatal("Windows Workbuddy must not receive Linux runtime integration")
+	}
+	if supportsRuntimeConfigInjection("workbuddy") {
+		t.Fatal("Windows Workbuddy must not receive Linux runtime config injection")
+	}
+
+	t.Setenv("CLAWMANAGER_AGENT_CONTROL_BASE_URL", "http://agent-control.example")
+	token := "agt_boot_workbuddy"
+	env, err := (&instanceService{}).buildAgentEnv(&models.Instance{
+		ID:                  923,
+		Type:                "workbuddy",
+		RuntimeVariant:      WorkbuddyRuntimeWindows,
+		DiskGB:              20,
+		MountPath:           "/storage",
+		AgentBootstrapToken: &token,
+	})
+	if err != nil {
+		t.Fatalf("buildAgentEnv returned error: %v", err)
+	}
+	if len(env) != 0 {
+		t.Fatalf("expected no guest agent environment for Windows MVP, got %#v", env)
+	}
+}
+
+func TestValidateWindowsWorkbuddyRequest(t *testing.T) {
+	valid := CreateInstanceRequest{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 80}
+	if err := validateWindowsWorkbuddyRequest(valid); err != nil {
+		t.Fatalf("valid Workbuddy request rejected: %v", err)
+	}
+
+	cases := []CreateInstanceRequest{
+		{Type: "workbuddy", Mode: InstanceModeLite, CPUCores: 6, MemoryGB: 12, DiskGB: 80},
+		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 4, MemoryGB: 12, DiskGB: 80},
+		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 8, DiskGB: 80},
+		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 64},
+	}
+	for _, request := range cases {
+		if err := validateWindowsWorkbuddyRequest(request); err == nil {
+			t.Fatalf("expected invalid Workbuddy request to be rejected: %#v", request)
+		}
+	}
+}
+
+func TestValidateWindowsCodexRequest(t *testing.T) {
+	valid := CreateInstanceRequest{Type: RuntimeTypeCodex, Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 80}
+	if err := validateWindowsWorkbuddyRequest(valid); err != nil {
+		t.Fatalf("valid Windows Codex request rejected: %v", err)
+	}
+
+	invalid := valid
+	invalid.DiskGB = 64
+	if err := validateWindowsWorkbuddyRequest(invalid); err == nil {
+		t.Fatal("expected Windows Codex request with a non-golden disk size to be rejected")
+	}
+}
+
+func TestWindowsWorkbuddyInstanceEnvReservesHostMemory(t *testing.T) {
+	env := windowsWorkbuddyInstanceEnv(map[string]string{"DISK_SIZE": "64G"}, &models.Instance{
+		Type:     "workbuddy",
+		CPUCores: 6,
+		MemoryGB: 10,
+	})
+	if env["RAM_SIZE"] != "8G" || env["CPU_CORES"] != "6" || env["DISK_SIZE"] != "64G" {
+		t.Fatalf("unexpected Windows Workbuddy environment: %#v", env)
+	}
+}
+
+func TestRuntimeNodeSelectorPinsWindowsWorkbuddyNodes(t *testing.T) {
+	existing := map[string]string{"storage-node": "node-a"}
+	selector := runtimeNodeSelector("workbuddy", existing)
+	if selector[workbuddyWindowsNodeLabel] != "true" || selector["storage-node"] != "node-a" {
+		t.Fatalf("unexpected Windows Workbuddy node selector: %#v", selector)
+	}
+	if _, ok := existing[workbuddyWindowsNodeLabel]; ok {
+		t.Fatalf("runtimeNodeSelector mutated the existing selector: %#v", existing)
+	}
+	if selector := runtimeNodeSelector(RuntimeTypeCodex, nil); selector[workbuddyWindowsNodeLabel] != "true" {
+		t.Fatalf("Windows Codex did not receive the Windows node label: %#v", selector)
+	}
+
+	linuxSelector := runtimeNodeSelector("openclaw", existing)
+	if _, ok := linuxSelector[workbuddyWindowsNodeLabel]; ok {
+		t.Fatalf("non-Windows runtime received Windows node label: %#v", linuxSelector)
 	}
 }
 
@@ -341,6 +449,62 @@ func TestResolveGatewayModelInjectionRequiresActiveModels(t *testing.T) {
 	}
 }
 
+func TestRenderWindowsCodexBootstrapFiles(t *testing.T) {
+	files, err := renderWindowsCodexBootstrapFiles(
+		"http://clawmanager-gateway.system.svc:9001/api/v1/gateway/llm",
+		"gpt-5.4",
+		"igt_instance_token",
+	)
+	if err != nil {
+		t.Fatalf("renderWindowsCodexBootstrapFiles returned error: %v", err)
+	}
+	config := files[windowsCodexConfigKey]
+	for _, expected := range []string{
+		`model_provider = "clawmanager"`,
+		`model = "gpt-5.4"`,
+		`review_model = "gpt-5.4"`,
+		`base_url = "http://clawmanager-gateway.system.svc:9001/api/v1/gateway/llm/v1"`,
+		`wire_api = "responses"`,
+		`requires_openai_auth = true`,
+		`sandbox_mode = "danger-full-access"`,
+		`approval_policy = "never"`,
+	} {
+		if !strings.Contains(config, expected) {
+			t.Fatalf("config missing %q:\n%s", expected, config)
+		}
+	}
+	if strings.Contains(config, "igt_instance_token") {
+		t.Fatal("config.toml must not contain the instance token")
+	}
+	if strings.Contains(config, "default_permissions") || strings.Contains(config, "[sandbox_workspace_write]") {
+		t.Fatal("full-access sandbox config must not include a permission profile or workspace-write settings")
+	}
+
+	var auth map[string]string
+	if err := json.Unmarshal([]byte(files[windowsCodexAuthKey]), &auth); err != nil {
+		t.Fatalf("auth.json is invalid JSON: %v", err)
+	}
+	if got := auth["OPENAI_API_KEY"]; got != "igt_instance_token" {
+		t.Fatalf("auth OPENAI_API_KEY = %q", got)
+	}
+}
+
+func TestRenderWindowsCodexBootstrapFilesDoesNotDuplicateVersionPath(t *testing.T) {
+	files, err := renderWindowsCodexBootstrapFiles(
+		"http://clawmanager-gateway.system.svc:9001/api/v1/gateway/llm/v1/",
+		"gpt-5.4",
+		"igt_instance_token",
+	)
+	if err != nil {
+		t.Fatalf("renderWindowsCodexBootstrapFiles returned error: %v", err)
+	}
+
+	config := files[windowsCodexConfigKey]
+	if !strings.Contains(config, `base_url = "http://clawmanager-gateway.system.svc:9001/api/v1/gateway/llm/v1"`) {
+		t.Fatalf("config has unexpected base URL:\n%s", config)
+	}
+}
+
 func TestSecurityModeForInstance(t *testing.T) {
 	service := &instanceService{}
 
@@ -349,6 +513,12 @@ func TestSecurityModeForInstance(t *testing.T) {
 	}
 	if got := service.securityModeForInstance("ubuntu"); got != "default" {
 		t.Fatalf("expected ubuntu to use default security mode, got %q", got)
+	}
+	if got := service.securityModeForInstance("workbuddy"); got != "privileged" {
+		t.Fatalf("expected Workbuddy to use privileged mode for KVM, got %q", got)
+	}
+	if got := service.securityModeForInstance(RuntimeTypeCodex); got != "privileged" {
+		t.Fatalf("expected Codex to use privileged mode for KVM, got %q", got)
 	}
 
 	service.allowPrivilegedPods = true
