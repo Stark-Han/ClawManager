@@ -78,8 +78,9 @@ var defaultEnabledGatewaySystemImageTypes = map[string]bool{
 
 // RuntimeImageConfig is the runtime card selected for an instance type.
 type RuntimeImageConfig struct {
-	Image       string
-	RuntimeType string
+	Image          string
+	RuntimeType    string
+	RuntimeVariant string
 }
 
 // RuntimeImageSettingsProvider exposes runtime image lookup for instance types.
@@ -124,6 +125,7 @@ func (s *systemImageSettingService) List() ([]models.SystemImageSetting, error) 
 		normalizedType := strings.TrimSpace(strings.ToLower(item.InstanceType))
 		item.InstanceType = normalizedType
 		item.RuntimeType = normalizeSystemImageRuntimeType(item.RuntimeType)
+		item.RuntimeVariant = normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, item.Image)
 		if strings.TrimSpace(item.DisplayName) == "" {
 			item.DisplayName = displayNameForSystemImageType(normalizedType)
 		}
@@ -167,6 +169,7 @@ func (s *systemImageSettingService) Save(setting *models.SystemImageSetting) (*m
 
 	setting.InstanceType = normalizedType
 	setting.RuntimeType = runtimeType
+	setting.RuntimeVariant = normalizeSystemImageRuntimeVariant(normalizedType, setting.RuntimeVariant, image)
 	setting.Image = image
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	if setting.DisplayName == "" {
@@ -224,11 +227,12 @@ func (s *systemImageSettingService) disableTypeWithFallback(instanceType string)
 	}
 
 	return s.repo.Save(&models.SystemImageSetting{
-		InstanceType: instanceType,
-		RuntimeType:  "desktop",
-		DisplayName:  displayNameForSystemImagePreset(instanceType, "desktop"),
-		Image:        defaultSystemImageSettings[instanceType],
-		IsEnabled:    false,
+		InstanceType:   instanceType,
+		RuntimeType:    "desktop",
+		RuntimeVariant: defaultSystemImageRuntimeVariants[instanceType],
+		DisplayName:    displayNameForSystemImagePreset(instanceType, "desktop"),
+		Image:          defaultSystemImageSettings[instanceType],
+		IsEnabled:      false,
 	})
 }
 
@@ -243,7 +247,7 @@ func (s *systemImageSettingService) GetRuntimeImage(instanceType string) (Runtim
 		for _, item := range defaultSystemImagePresetsForType(normalizedType) {
 			image := strings.TrimSpace(item.Image)
 			if item.IsEnabled && image != "" {
-				return RuntimeImageConfig{Image: image, RuntimeType: item.RuntimeType}, true
+				return runtimeImageConfigForSetting(normalizedType, item), true
 			}
 		}
 		return RuntimeImageConfig{}, false
@@ -253,8 +257,9 @@ func (s *systemImageSettingService) GetRuntimeImage(instanceType string) (Runtim
 		image := strings.TrimSpace(item.Image)
 		if image != "" {
 			return RuntimeImageConfig{
-				Image:       image,
-				RuntimeType: normalizeSystemImageRuntimeType(item.RuntimeType),
+				Image:          image,
+				RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+				RuntimeVariant: normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, image),
 			}, true
 		}
 	}
@@ -278,7 +283,7 @@ func (s *systemImageSettingService) GetRuntimeImageForImage(instanceType, image 
 		for _, item := range defaultSystemImagePresetsForType(normalizedType) {
 			defaultImage := strings.TrimSpace(item.Image)
 			if item.IsEnabled && defaultImage == normalizedImage {
-				return RuntimeImageConfig{Image: defaultImage, RuntimeType: item.RuntimeType}, true
+				return runtimeImageConfigForSetting(normalizedType, item), true
 			}
 		}
 		return RuntimeImageConfig{}, false
@@ -287,8 +292,9 @@ func (s *systemImageSettingService) GetRuntimeImageForImage(instanceType, image 
 	for _, item := range enabledSystemImageSettingsForType(normalizedType, items) {
 		if strings.TrimSpace(item.Image) == normalizedImage {
 			return RuntimeImageConfig{
-				Image:       normalizedImage,
-				RuntimeType: normalizeSystemImageRuntimeType(item.RuntimeType),
+				Image:          normalizedImage,
+				RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+				RuntimeVariant: normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, normalizedImage),
 			}, true
 		}
 	}
@@ -351,11 +357,12 @@ func displayNameForSystemImagePreset(instanceType, runtimeType string) string {
 
 func defaultSystemImagePresetsForType(instanceType string) []models.SystemImageSetting {
 	settings := []models.SystemImageSetting{{
-		InstanceType: instanceType,
-		RuntimeType:  "desktop",
-		DisplayName:  displayNameForSystemImagePreset(instanceType, "desktop"),
-		Image:        defaultSystemImageSettings[instanceType],
-		IsEnabled:    defaultEnabledSystemImageTypes[instanceType],
+		InstanceType:   instanceType,
+		RuntimeType:    "desktop",
+		RuntimeVariant: defaultSystemImageRuntimeVariants[instanceType],
+		DisplayName:    displayNameForSystemImagePreset(instanceType, "desktop"),
+		Image:          defaultSystemImageSettings[instanceType],
+		IsEnabled:      defaultEnabledSystemImageTypes[instanceType],
 	}}
 
 	if image := strings.TrimSpace(defaultGatewaySystemImageSettings[instanceType]); image != "" {
@@ -383,6 +390,7 @@ func enabledSystemImageSettingsForType(instanceType string, stored []models.Syst
 	result := make([]models.SystemImageSetting, 0, len(stored)+2)
 	for _, item := range stored {
 		item.RuntimeType = normalizeSystemImageRuntimeType(item.RuntimeType)
+		item.RuntimeVariant = normalizeSystemImageRuntimeVariant(instanceType, item.RuntimeVariant, item.Image)
 		runtimeTypesWithRows[item.RuntimeType] = true
 		if strings.TrimSpace(item.DisplayName) == "" {
 			item.DisplayName = displayNameForSystemImagePreset(instanceType, item.RuntimeType)
@@ -404,6 +412,33 @@ func enabledSystemImageSettingsForType(instanceType string, stored []models.Syst
 		result = append(result, preset)
 	}
 	return result
+}
+
+func runtimeImageConfigForSetting(instanceType string, item models.SystemImageSetting) RuntimeImageConfig {
+	image := strings.TrimSpace(item.Image)
+	return RuntimeImageConfig{
+		Image:          image,
+		RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+		RuntimeVariant: normalizeSystemImageRuntimeVariant(instanceType, item.RuntimeVariant, image),
+	}
+}
+
+func normalizeSystemImageRuntimeVariant(instanceType, variant, image string) string {
+	normalizedType := strings.TrimSpace(strings.ToLower(instanceType))
+	if normalizedType != "workbuddy" && normalizedType != RuntimeTypeCodex {
+		return ""
+	}
+	if normalized := normalizeWorkbuddyRuntimeVariant(variant); normalized != "" {
+		return normalized
+	}
+	if normalizedType == "workbuddy" {
+		if inferred := inferWorkbuddyVariantFromImage(image); inferred != "" {
+			return inferred
+		}
+	} else if inferred := inferCodexVariantFromImage(image); inferred != "" {
+		return inferred
+	}
+	return defaultSystemImageRuntimeVariants[normalizedType]
 }
 
 func isSupportedSystemImageType(instanceType string) bool {

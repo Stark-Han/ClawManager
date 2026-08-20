@@ -8,6 +8,10 @@ const sourcePath = path.resolve(
   "../src/pages/instances/CreateInstancePage.tsx",
 );
 const source = readFileSync(sourcePath, "utf8");
+const featureSource = readFileSync(
+  path.resolve(scriptDir, "../src/config/features.ts"),
+  "utf8",
+);
 
 function sectionBetween(startMarker, endMarker) {
   const start = source.indexOf(startMarker);

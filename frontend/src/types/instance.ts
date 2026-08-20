@@ -19,6 +19,7 @@ export interface Instance {
     | "workbuddy"
     | "deepseek-harness";
   runtime_type: "desktop" | "shell" | "gateway";
+  runtime_variant?: "linux" | "windows";
   instance_mode: "lite" | "pro";
   status: "creating" | "running" | "stopped" | "error" | "deleting";
   cpu_cores: number;

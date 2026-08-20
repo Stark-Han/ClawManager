@@ -12,12 +12,14 @@ import type { RuntimePod, RuntimeType } from '../../types/runtimePool';
 
 type ImageRuntimeType = 'desktop' | 'gateway';
 type RuntimeGroup = 'lite' | 'pro';
+type RuntimeVariant = 'linux' | 'windows';
 
 interface RuntimeCardDefinition {
   instance_type: string;
   runtime_type: ImageRuntimeType;
   display_name: string;
   image: string;
+  runtime_variant?: RuntimeVariant;
 }
 
 const LITE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
@@ -120,6 +122,32 @@ function groupForRuntimeType(runtimeType: ImageRuntimeType): RuntimeGroup {
   return runtimeType === 'gateway' ? 'lite' : 'pro';
 }
 
+function supportsRuntimeVariant(instanceType: string): instanceType is 'workbuddy' | 'codex' {
+  return instanceType === 'workbuddy' || instanceType === 'codex';
+}
+
+function inferRuntimeVariant(instanceType: string, image?: string): RuntimeVariant {
+  const normalizedImage = image?.trim().toLowerCase() ?? '';
+  if (instanceType === 'workbuddy' && normalizedImage.includes('workbuddy-linux')) {
+    return 'linux';
+  }
+  if (instanceType === 'codex' && normalizedImage.includes('agentsruntime/codex')) {
+    return 'linux';
+  }
+  return 'windows';
+}
+
+function runtimeVariantForCard(item: SystemImageSetting, definition?: RuntimeCardDefinition): RuntimeVariant | undefined {
+  if (!supportsRuntimeVariant(item.instance_type)) return undefined;
+  return item.runtime_variant ?? definition?.runtime_variant ?? inferRuntimeVariant(item.instance_type, item.image);
+}
+
+function defaultImageForVariant(instanceType: string, variant?: RuntimeVariant) {
+  return supportsRuntimeVariant(instanceType) && variant
+    ? RUNTIME_VARIANT_IMAGES[instanceType][variant]
+    : undefined;
+}
+
 function runtimePodSeenAt(pod: RuntimePod) {
   const parsed = Date.parse(pod.last_seen_at || pod.updated_at || '');
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -145,12 +173,15 @@ function toEditableCard(
 ): EditableImageCard {
   const runtimeType = normalizeImageRuntimeType(item.runtime_type);
   const definition = fallback ?? defaultForCard({ ...item, runtime_type: runtimeType });
+  const runtimeVariant = runtimeVariantForCard(item, definition);
+  const variantDefaultImage = defaultImageForVariant(item.instance_type, runtimeVariant);
   return {
     ...item,
     runtime_type: runtimeType,
+    runtime_variant: runtimeVariant,
     display_name: item.display_name || definition?.display_name || 'Custom Pro',
     image: item.image || definition?.image || PRO_CUSTOM_DEFAULT_IMAGE,
-    default_image: definition?.image,
+    default_image: variantDefaultImage ?? definition?.image,
     group: groupForRuntimeType(runtimeType),
     isBase: Boolean(definition),
     isNew: !item.id,
@@ -175,7 +206,7 @@ function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
       return {
         ...existing,
         display_name: definition.display_name,
-        default_image: definition.image,
+        default_image: defaultImageForVariant(existing.instance_type, existing.runtime_variant) ?? definition.image,
         group: groupForRuntimeType(definition.runtime_type),
         isBase: true,
       };
@@ -185,6 +216,7 @@ function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
       {
         instance_type: definition.instance_type,
         runtime_type: definition.runtime_type,
+        runtime_variant: definition.runtime_variant,
         display_name: definition.display_name,
         image: definition.image,
         is_enabled: true,
@@ -354,6 +386,7 @@ const SystemSettingsPage: React.FC = () => {
         id: card.id,
         instance_type: card.instance_type,
         runtime_type: card.runtime_type,
+        runtime_variant: card.runtime_variant,
         display_name: card.display_name.trim() || (card.isBase ? card.display_name : 'Custom Pro'),
         image: card.image.trim(),
       });
@@ -384,6 +417,16 @@ const SystemSettingsPage: React.FC = () => {
         error: getErrorMessage(error, t('systemSettingsPage.saveFailed')),
       });
     }
+  };
+
+  const updateRuntimeVariant = (card: EditableImageCard, runtimeVariant: RuntimeVariant) => {
+    const previousDefault = card.default_image;
+    const nextDefault = defaultImageForVariant(card.instance_type, runtimeVariant);
+    updateCard(card.local_id, {
+      runtime_variant: runtimeVariant,
+      default_image: nextDefault,
+      image: !card.image.trim() || card.image.trim() === previousDefault ? nextDefault ?? card.image : card.image,
+    });
   };
 
   const deleteCard = async (card: EditableImageCard) => {
@@ -468,6 +511,20 @@ const SystemSettingsPage: React.FC = () => {
             onChange={(event) => updateCard(card.local_id, { display_name: event.target.value })}
             className="app-input mt-1 block w-full"
           />
+        </div>
+      )}
+
+      {card.runtime_type === 'desktop' && supportsRuntimeVariant(card.instance_type) && (
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.runtimeVariant')}</label>
+          <select
+            value={card.runtime_variant ?? 'windows'}
+            onChange={(event) => updateRuntimeVariant(card, event.target.value as RuntimeVariant)}
+            className="app-input mt-1 block w-full"
+          >
+            <option value="linux">{t('systemSettingsPage.linuxVariant')}</option>
+            <option value="windows">{t('systemSettingsPage.windowsVariant')}</option>
+          </select>
         </div>
       )}
 

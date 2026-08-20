@@ -144,7 +144,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	dedicatedRuntimeOrigin := isDedicatedRuntimeOriginRequest(r, accessToken.InstanceType)
 
 	// Extract the actual path from the request (remove the proxy prefix)
-	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType) && !dedicatedRuntimeOrigin
 
@@ -388,7 +388,7 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	dedicatedRuntimeOrigin := isDedicatedRuntimeOriginRequest(r, accessToken.InstanceType)
 
 	// Extract the actual path from the request
-	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 
 	targetURL, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
@@ -1094,7 +1094,7 @@ func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, acces
 		return nil, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, false),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, false),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
 	}, nil
@@ -1109,7 +1109,7 @@ func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, 
 		return nil, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, true),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, true),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
 	}, nil
@@ -1226,9 +1226,9 @@ func (s *InstanceProxyService) getOrCreateService(ctx context.Context, userID, i
 // extractTargetPath extracts the target path from the proxy URL
 // Input: /api/v1/instances/24/proxy/vnc.html
 // Output: /vnc.html
-func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string) string {
+func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string, targetPort int32) string {
 	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, targetPort) {
 		if strings.HasPrefix(requestPath, prefix) {
 			path := requestPath
 			if path == "" {
@@ -1366,7 +1366,7 @@ func (s *InstanceProxyService) GetTargetPortForInstance(instance *models.Instanc
 		return 3001
 	}
 
-	return buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag).Port
+	return buildRuntimeConfigForInstance(instance).Port
 }
 
 // ResolveUpstreamHostPort ensures the instance Service exists and returns its
@@ -1382,7 +1382,7 @@ func (s *InstanceProxyService) ResolveUpstreamHostPort(ctx context.Context, user
 }
 
 func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPort int32, targetPath string) int32 {
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, defaultPort) {
 		if defaultPort == 0 {
 			return 3001
 		}
@@ -1405,6 +1405,9 @@ func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPor
 }
 
 func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
+	if targetPort == 8006 {
+		return []int32{3389}
+	}
 	if targetPort == 3000 || targetPort == 8082 {
 		return []int32{3000, 8082}
 	}
@@ -1412,8 +1415,8 @@ func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
 	return nil
 }
 
-func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocket bool) string {
-	if usesHTTPSUpstream(instanceType) {
+func (s *InstanceProxyService) resolveTargetScheme(instanceType string, targetPort int32, websocket bool) string {
+	if usesHTTPSUpstream(instanceType, targetPort) {
 		if websocket {
 			return "wss"
 		}
@@ -1427,7 +1430,10 @@ func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocke
 	return "http"
 }
 
-func usesHTTPSUpstream(instanceType string) bool {
+func usesHTTPSUpstream(instanceType string, targetPort int32) bool {
+	if usesWebtopRuntime(instanceType, targetPort) {
+		return true
+	}
 	switch instanceType {
 	case "ubuntu", "webtop", "hermes", "openclaw", "workbuddy", RuntimeTypeDeepSeekHarness:
 		return true
@@ -1440,11 +1446,11 @@ func (s *InstanceProxyService) resolveProxyHost(ctx context.Context, userID, ins
 	return fmt.Sprintf("%s:%d", serviceInfo.ClusterIP, serviceInfo.TargetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTML(instanceType string) bool {
-	return !usesWebtopImage(instanceType)
+func (s *InstanceProxyService) shouldRewriteHTML(instanceType string, targetPort int32) bool {
+	return !usesWebtopRuntime(instanceType, targetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string) bool {
+func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string, targetPort int32) bool {
 	if s != nil && s.instanceRepo != nil && strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeHermes) {
 		instance, err := s.instanceRepo.GetByID(instanceID)
 		if err == nil && instance != nil {
@@ -1464,6 +1470,18 @@ func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanc
 // proxying via SUBFOLDER-prefixed paths).
 func (s *InstanceProxyService) IsWebtopInstanceType(instanceType string) bool {
 	return usesWebtopImage(instanceType)
+}
+
+// IsWebtopInstance includes legacy Linux Workbuddy instances without treating
+// Windows Workbuddy/noVNC as Webtop.
+func (s *InstanceProxyService) IsWebtopInstance(instance *models.Instance) bool {
+	return isWebtopRuntimeInstance(instance)
+}
+
+func usesWebtopRuntime(instanceType string, targetPort int32) bool {
+	return usesWebtopImage(instanceType) ||
+		((strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") ||
+			strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex)) && targetPort == 3001)
 }
 
 func (s *InstanceProxyService) getCachedService(key serviceCacheKey) *k8s.ServiceInfo {

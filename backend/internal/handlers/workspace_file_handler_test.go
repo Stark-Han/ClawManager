@@ -413,6 +413,43 @@ func TestSharedWorkspaceFileHandlerDoesNotExposeLegacyNoneScope(t *testing.T) {
 	}
 }
 
+func TestDesktopWorkspaceEligibilityFollowsManagedRuntimeVariant(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance *models.Instance
+		want     bool
+	}{
+		{
+			name:     "linux workbuddy",
+			instance: &models.Instance{Type: "workbuddy", RuntimeVariant: "linux", InstanceMode: services.InstanceModePro},
+			want:     true,
+		},
+		{
+			name:     "windows workbuddy",
+			instance: &models.Instance{Type: "workbuddy", RuntimeVariant: "windows", InstanceMode: services.InstanceModePro},
+			want:     false,
+		},
+		{
+			name:     "linux codex",
+			instance: &models.Instance{Type: services.RuntimeTypeCodex, RuntimeVariant: "linux", InstanceMode: services.InstanceModePro},
+			want:     true,
+		},
+		{
+			name:     "windows codex",
+			instance: &models.Instance{Type: services.RuntimeTypeCodex, RuntimeVariant: "windows", InstanceMode: services.InstanceModePro},
+			want:     false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDesktopWorkspaceInstance(test.instance); got != test.want {
+				t.Fatalf("isDesktopWorkspaceInstance() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func workspaceFileTestRouter(userID int, role string) *gin.Engine {
 	router := gin.New()
 	router.Use(func(c *gin.Context) {

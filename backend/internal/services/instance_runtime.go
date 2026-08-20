@@ -115,6 +115,8 @@ func defaultMountPathForInstanceType(instanceType string) string {
 	switch instanceType {
 	case "ubuntu", "webtop", "openclaw", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness:
 		return "/config"
+	case "workbuddy", "codex":
+		return "/storage"
 	default:
 		return "/home/user/data"
 	}
@@ -124,6 +126,10 @@ func defaultEnvForInstanceType(instanceType string) map[string]string {
 	switch instanceType {
 	case "ubuntu", "webtop", "openclaw":
 		return defaultWebtopDesktopEnv("ClawManager Desktop")
+	case "workbuddy":
+		return defaultWindowsWorkbuddyEnv()
+	case "codex":
+		return defaultWindowsCodexEnv()
 	case "hermes":
 		env := defaultWebtopDesktopEnv("Hermes Runtime")
 		env["HERMES_HOME"] = "/config/.hermes"
@@ -142,6 +148,29 @@ func defaultEnvForInstanceType(instanceType string) map[string]string {
 		return defaultWebtopDesktopEnv("Workbuddy")
 	default:
 		return map[string]string{}
+	}
+}
+
+func defaultWindowsWorkbuddyEnv() map[string]string {
+	return map[string]string{
+		"VERSION":      "10l",
+		"DISK_SIZE":    "64G",
+		"DISK_FMT":     "qcow2",
+		"SHUTDOWN":     "Y",
+		"QEMU_TIMEOUT": "120",
+	}
+}
+
+func defaultWindowsCodexEnv() map[string]string {
+	return map[string]string{
+		"VERSION":      "11",
+		"LANGUAGE":     "Chinese",
+		"REGION":       "zh-CN",
+		"KEYBOARD":     "zh-CN",
+		"DISK_SIZE":    "80G",
+		"DISK_FMT":     "qcow2",
+		"SHUTDOWN":     "Y",
+		"QEMU_TIMEOUT": "120",
 	}
 }
 

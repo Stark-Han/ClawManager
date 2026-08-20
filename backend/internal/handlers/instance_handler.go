@@ -70,7 +70,7 @@ func (h *InstanceHandler) desktopAccessUpstream(c *gin.Context, instance *models
 	if usesRuntimeGateway(instance) {
 		return "", false
 	}
-	if !h.proxyService.IsWebtopInstanceType(instance.Type) {
+	if !h.proxyService.IsWebtopInstance(instance) {
 		fmt.Printf("Desktop direct proxy fallback: unsupported desktop instance type instance=%d user=%d type=%s target_port=%d\n",
 			instance.ID, instance.UserID, instance.Type, targetPort)
 		return "", true
@@ -414,6 +414,7 @@ func instanceCreateRequestToService(req CreateInstanceRequest) services.CreateIn
 		Owner:                req.Owner,
 		Description:          req.Description,
 		Type:                 req.Type,
+		RuntimeVariant:       req.RuntimeVariant,
 		Mode:                 req.Mode,
 		InstanceMode:         req.InstanceMode,
 		RuntimeType:          req.RuntimeType,
