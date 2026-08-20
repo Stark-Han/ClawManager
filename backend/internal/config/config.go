@@ -217,6 +217,7 @@ type RuntimePoolConfig struct {
 	SchedulerTick             time.Duration `yaml:"schedulerTick"`
 	OpenClawImage             string        `yaml:"openClawImage"`
 	HermesImage               string        `yaml:"hermesImage"`
+	OpenCodeImage             string        `yaml:"openCodeImage"`
 	MaxGatewaysPerPod         int           `yaml:"maxGatewaysPerPod"`
 	GatewayStartInFlightLimit int           `yaml:"gatewayStartInFlightLimit"`
 	GatewayPortStart          int           `yaml:"gatewayPortStart"`
@@ -360,6 +361,7 @@ func Load() (*Config, error) {
 			SchedulerTick:             getEnvDuration("RUNTIME_SCHEDULER_TICK", 2*time.Second),
 			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"),
 			HermesImage:               getEnv("HERMES_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
+			OpenCodeImage:             getEnv("OPENCODE_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
 			MaxGatewaysPerPod:         getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),
 			GatewayStartInFlightLimit: getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", 32),
 			GatewayPortStart:          getEnvInt("RUNTIME_GATEWAY_PORT_START", 20000),
@@ -567,6 +569,7 @@ func applyEnvOverrides(config *Config) {
 	config.Runtime.SchedulerTick = getEnvDuration("RUNTIME_SCHEDULER_TICK", config.Runtime.SchedulerTick)
 	config.Runtime.OpenClawImage = getEnv("OPENCLAW_RUNTIME_IMAGE", config.Runtime.OpenClawImage)
 	config.Runtime.HermesImage = getEnv("HERMES_RUNTIME_IMAGE", config.Runtime.HermesImage)
+	config.Runtime.OpenCodeImage = getEnv("OPENCODE_RUNTIME_IMAGE", config.Runtime.OpenCodeImage)
 	config.Runtime.MaxGatewaysPerPod = getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", config.Runtime.MaxGatewaysPerPod)
 	config.Runtime.GatewayStartInFlightLimit = getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", config.Runtime.GatewayStartInFlightLimit)
 	config.Runtime.GatewayPortStart = getEnvInt("RUNTIME_GATEWAY_PORT_START", config.Runtime.GatewayPortStart)

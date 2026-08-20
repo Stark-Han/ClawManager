@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -388,6 +389,62 @@ func TestCreatePVCUsesInstanceStorageClassDefault(t *testing.T) {
 	}
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "longhorn" {
 		t.Fatalf("PVC storage class = %#v, want longhorn", pvc.Spec.StorageClassName)
+	}
+}
+
+func TestCreatePVCFromSourceCreatesCSIClone(t *testing.T) {
+	ctx := context.Background()
+	storageClass := "longhorn"
+	namespace := "clawmanager-user-1"
+	source := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "workbuddy-golden-v1", Namespace: namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &storageClass,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("80Gi"),
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	client := &Client{
+		Clientset:            fake.NewSimpleClientset(source),
+		Namespace:            "clawmanager",
+		InstanceStorageClass: storageClass,
+	}
+	service := &PVCService{client: client, namespaceService: &NamespaceService{client: client}}
+
+	pvc, err := service.CreatePVCFromSource(ctx, 1, 372, 80, "", source.Name)
+	if err != nil {
+		t.Fatalf("CreatePVCFromSource returned error: %v", err)
+	}
+	if pvc.Spec.DataSource == nil || pvc.Spec.DataSource.Kind != "PersistentVolumeClaim" || pvc.Spec.DataSource.Name != source.Name {
+		t.Fatalf("unexpected clone data source: %#v", pvc.Spec.DataSource)
+	}
+	if pvc.Labels["clawmanager.io/golden-pvc"] != source.Name {
+		t.Fatalf("golden PVC label = %q, want %q", pvc.Labels["clawmanager.io/golden-pvc"], source.Name)
+	}
+}
+
+func TestCreatePVCFromSourceRejectsSizeMismatch(t *testing.T) {
+	ctx := context.Background()
+	storageClass := "longhorn"
+	namespace := "clawmanager-user-1"
+	source := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "workbuddy-golden-v1", Namespace: namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &storageClass,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("80Gi"),
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	client := &Client{Clientset: fake.NewSimpleClientset(source), Namespace: "clawmanager", InstanceStorageClass: storageClass}
+	service := &PVCService{client: client, namespaceService: &NamespaceService{client: client}}
+
+	_, err := service.CreatePVCFromSource(ctx, 1, 373, 64, "", source.Name)
+	if err == nil || !strings.Contains(err.Error(), "size must equal") {
+		t.Fatalf("expected clone size mismatch error, got %v", err)
 	}
 }
 

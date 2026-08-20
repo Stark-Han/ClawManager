@@ -65,6 +65,30 @@ func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *s
 		config.MountPath = "/config"
 		config.Env = defaultWebtopDesktopEnv("Hermes Runtime")
 		config.Env["HERMES_HOME"] = "/config/.hermes"
+	case "workbuddy":
+		config.Image = defaultSystemImageSettings["workbuddy"]
+		config.Port = 8006
+		config.MountPath = "/storage"
+		config.Env = defaultWindowsWorkbuddyEnv()
+	case "opencode":
+		config.Image = defaultSystemImageSettings["opencode"]
+		config.Port = 3001
+		config.MountPath = "/config"
+		config.Env = defaultWebtopDesktopEnv("OpenCode Runtime")
+		config.Env["OPENCODE_CONFIG_DIR"] = "/config/.opencode"
+		config.Env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
+	case "codex":
+		config.Image = defaultSystemImageSettings["codex"]
+		config.Port = 8006
+		config.MountPath = "/storage"
+		config.Env = defaultWindowsCodexEnv()
+	case "claude-code":
+		config.Image = defaultSystemImageSettings["claude-code"]
+		config.Port = 3001
+		config.MountPath = "/config"
+		config.Env = defaultWebtopDesktopEnv("Claude Code")
+		config.Env["CLAUDE_CONFIG_DIR"] = "/config/.claude"
+		config.Env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
 	case "openclaw":
 		config.MountPath = "/config"
 		if (registry == nil || strings.TrimSpace(*registry) == "") && (tag == nil || strings.TrimSpace(*tag) == "") {
@@ -85,7 +109,9 @@ func buildRuntimeConfig(instanceType, osType, osVersion string, registry, tag *s
 
 func defaultPortForInstanceType(instanceType string) int32 {
 	switch instanceType {
-	case "ubuntu", "webtop", "hermes":
+	case "workbuddy", "codex":
+		return 8006
+	case "ubuntu", "webtop", "hermes", "opencode", "claude-code":
 		return 3001
 	default:
 		return 3001
@@ -94,10 +120,10 @@ func defaultPortForInstanceType(instanceType string) int32 {
 
 func defaultMountPathForInstanceType(instanceType string) string {
 	switch instanceType {
-	case "ubuntu", "webtop", "openclaw":
+	case "ubuntu", "webtop", "openclaw", "hermes", "opencode", "claude-code":
 		return "/config"
-	case "hermes":
-		return "/config"
+	case "workbuddy", "codex":
+		return "/storage"
 	default:
 		return "/home/user/data"
 	}
@@ -107,12 +133,49 @@ func defaultEnvForInstanceType(instanceType string) map[string]string {
 	switch instanceType {
 	case "ubuntu", "webtop", "openclaw":
 		return defaultWebtopDesktopEnv("ClawManager Desktop")
+	case "workbuddy":
+		return defaultWindowsWorkbuddyEnv()
+	case "codex":
+		return defaultWindowsCodexEnv()
 	case "hermes":
 		env := defaultWebtopDesktopEnv("Hermes Runtime")
 		env["HERMES_HOME"] = "/config/.hermes"
 		return env
+	case "opencode":
+		env := defaultWebtopDesktopEnv("OpenCode Runtime")
+		env["OPENCODE_CONFIG_DIR"] = "/config/.opencode"
+		env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
+		return env
+	case "claude-code":
+		env := defaultWebtopDesktopEnv("Claude Code")
+		env["CLAUDE_CONFIG_DIR"] = "/config/.claude"
+		env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
+		return env
 	default:
 		return map[string]string{}
+	}
+}
+
+func defaultWindowsWorkbuddyEnv() map[string]string {
+	return map[string]string{
+		"VERSION":      "10l",
+		"DISK_SIZE":    "64G",
+		"DISK_FMT":     "qcow2",
+		"SHUTDOWN":     "Y",
+		"QEMU_TIMEOUT": "120",
+	}
+}
+
+func defaultWindowsCodexEnv() map[string]string {
+	return map[string]string{
+		"VERSION":      "11",
+		"LANGUAGE":     "Chinese",
+		"REGION":       "zh-CN",
+		"KEYBOARD":     "zh-CN",
+		"DISK_SIZE":    "80G",
+		"DISK_FMT":     "qcow2",
+		"SHUTDOWN":     "Y",
+		"QEMU_TIMEOUT": "120",
 	}
 }
 
@@ -154,7 +217,7 @@ func withInstanceProxyEnv(instanceType string, instanceID int, env map[string]st
 
 func usesWebtopImage(instanceType string) bool {
 	switch instanceType {
-	case "ubuntu", "webtop", "hermes", "openclaw":
+	case "ubuntu", "webtop", "hermes", "openclaw", "opencode", "claude-code":
 		return true
 	default:
 		return false

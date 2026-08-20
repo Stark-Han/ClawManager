@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,9 +137,9 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	effectiveRequestPath := canonicalProxyEntryRequestPath(r.URL.Path, accessToken, instanceID)
 
 	// Extract the actual path from the request (remove the proxy prefix)
-	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
-	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType)
+	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType, targetPort)
 
 	// Build target URL
 	targetURL, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
@@ -148,6 +150,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	managedGatewayToken := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType)
 	proxyPrefix := hermesProxyPrefix(instanceID)
 	hermesLite := s.isHermesLiteProxyInstance(instanceID, accessToken.InstanceType)
+	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
 	bootstrapPath := stripInstanceProxyPrefix(targetPath, instanceID)
 
 	// Copy query parameters, excluding ClawManager-owned proxy/gateway tokens.
@@ -204,7 +207,9 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", requestScheme(r))
 	proxyReq.Header.Set("X-Forwarded-Prefix", proxyPrefix)
-	if !isHermesDashboardPublicAuthPath(bootstrapPath) {
+	if opencodeLite {
+		setOpenCodeServerBasicAuthHeaders(proxyReq.Header, managedGatewayToken)
+	} else if !isHermesDashboardPublicAuthPath(bootstrapPath) {
 		setManagedRuntimeGatewayAuthHeaders(proxyReq.Header, managedGatewayToken)
 	}
 	if shouldRewriteHTML {
@@ -241,6 +246,10 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		modifiedBody := injectProxyBase(string(body), proxyBaseForRequestPath(effectiveRequestPath, instanceID))
 		if hermesLite {
 			modifiedBody = injectHermesAbsolutePathPatch(modifiedBody, proxyPrefix)
+		}
+		if opencodeLite {
+			modifiedBody = rewriteOpenCodeHTMLRootAssets(modifiedBody, proxyPrefix)
+			modifiedBody = injectOpenCodeAbsolutePathPatch(modifiedBody, proxyPrefix)
 		}
 		resp.Body = io.NopCloser(bytes.NewReader([]byte(modifiedBody)))
 		resp.ContentLength = int64(len(modifiedBody))
@@ -303,7 +312,7 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	}
 
 	// Extract the actual path from the request
-	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 
 	targetURL, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
@@ -314,6 +323,7 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	managedGatewayToken := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType)
 	upstreamPath := stripInstanceProxyPrefix(targetPath, instanceID)
 	hermesLite := s.isHermesLiteProxyInstance(instanceID, accessToken.InstanceType)
+	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
 	skipManagedWSAuth := hermesLite && isHermesDashboardTicketWebSocket(upstreamPath, r.URL.Query())
 
 	// Copy query parameters, excluding ClawManager-owned proxy/gateway tokens.
@@ -348,6 +358,8 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 		upstreamHeader.Del("OpenAI-Api-Key")
 		upstreamHeader.Del("X-ClawManager-Instance-Token")
 		upstreamHeader.Del("X-ClawManager-LLM-API-Key")
+	} else if opencodeLite {
+		setOpenCodeServerBasicAuthHeaders(upstreamHeader, managedGatewayToken)
 	} else {
 		setManagedRuntimeGatewayAuthHeaders(upstreamHeader, managedGatewayToken)
 		if managedGatewayToken != "" {
@@ -472,8 +484,36 @@ func setManagedRuntimeGatewayAuthHeaders(header http.Header, token string) {
 	header.Set("X-ClawManager-LLM-API-Key", token)
 }
 
+func setOpenCodeServerBasicAuthHeaders(header http.Header, token string) {
+	token = strings.TrimSpace(token)
+	if header == nil || token == "" {
+		return
+	}
+	username := strings.TrimSpace(os.Getenv("OPENCODE_SERVER_USERNAME"))
+	if username == "" {
+		username = "opencode"
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + token))
+	header.Set("Authorization", "Basic "+encoded)
+	header.Del("X-Api-Key")
+	header.Del("X-OpenAI-Api-Key")
+	header.Del("OpenAI-Api-Key")
+}
+
 func hermesProxyPrefix(instanceID int) string {
 	return fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+}
+
+func (s *InstanceProxyService) isOpenCodeLiteProxyInstance(instanceID int, instanceType string) bool {
+	if s == nil || s.instanceRepo == nil || !strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeOpenCode) {
+		return false
+	}
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil || instance == nil {
+		return false
+	}
+	runtimeType, ok := v2RuntimeTypeForInstance(instance)
+	return ok && runtimeType == RuntimeTypeOpenCode
 }
 
 func (s *InstanceProxyService) isHermesLiteProxyInstance(instanceID int, instanceType string) bool {
@@ -735,6 +775,49 @@ func injectHermesAbsolutePathPatch(html, proxyPrefix string) string {
 	return script + html
 }
 
+var openCodeHTMLRootAssetPattern = regexp.MustCompile(`(?i)(\b(?:href|src)\s*=\s*["'])(/[^"']*)`)
+
+func rewriteOpenCodeHTMLRootAssets(html, proxyPrefix string) string {
+	prefix := strings.TrimRight(strings.TrimSpace(proxyPrefix), "/")
+	if prefix == "" || html == "" {
+		return html
+	}
+	return openCodeHTMLRootAssetPattern.ReplaceAllStringFunc(html, func(match string) string {
+		sub := openCodeHTMLRootAssetPattern.FindStringSubmatch(match)
+		if len(sub) != 3 {
+			return match
+		}
+		attr, path := sub[1], sub[2]
+		if strings.HasPrefix(path, "//") {
+			return match
+		}
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return match
+		}
+		return attr + prefix + path
+	})
+}
+
+func injectOpenCodeAbsolutePathPatch(html, proxyPrefix string) string {
+	prefix := strings.TrimRight(strings.TrimSpace(proxyPrefix), "/")
+	if prefix == "" || html == "" {
+		return html
+	}
+	prefixJSON, err := json.Marshal(prefix)
+	if err != nil {
+		return html
+	}
+	script := `<script>(function(p){if(!p)return;function fix(u){if(u&&typeof u.url==="string")u=u.url;if(typeof URL!=="undefined"&&u instanceof URL)u=u.toString();if(typeof u!=="string"||!u)return u;if(u.charAt(0)==="/"){if(u.indexOf("//")===0||u===p||u.indexOf(p+"/")===0)return u;return p+u;}try{var a=new URL(u,window.location.href);if(a.host===window.location.host&&a.pathname.charAt(0)==="/"&&a.pathname!==p&&a.pathname.indexOf(p+"/")!==0)return p+a.pathname+a.search+a.hash;}catch(e){}return u;}if(window.history){["pushState","replaceState"].forEach(function(n){var oh=window.history[n];if(typeof oh==="function"){window.history[n]=function(a,b,u){return oh.call(window.history,a,b,fix(u));};}});}var of=window.fetch;if(typeof of==="function"){window.fetch=function(input,init){if(typeof input==="string"||(typeof URL!=="undefined"&&input instanceof URL)){input=fix(input);}else if(input&&typeof input.url==="string"){try{input=new Request(fix(input.url),input);}catch(e){}}return of.call(this,input,init);};}if(window.XMLHttpRequest&&XMLHttpRequest.prototype){var oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(method,url){arguments[1]=fix(url);return oo.apply(this,arguments);};}if(typeof window.EventSource==="function"){var OE=window.EventSource;window.EventSource=function(url,config){return new OE(fix(url),config);};window.EventSource.prototype=OE.prototype;try{Object.setPrototypeOf(window.EventSource,OE);}catch(e){}}if(typeof window.WebSocket==="function"){var OW=window.WebSocket;window.WebSocket=function(url,protocols){url=fix(url);return protocols===undefined?new OW(url):new OW(url,protocols);};window.WebSocket.prototype=OW.prototype;try{Object.setPrototypeOf(window.WebSocket,OW);}catch(e){}}function wrap(fn){return function(url){return fn.call(this,fix(url));};}try{var la=window.location.assign.bind(window.location);window.location.assign=wrap(la);}catch(e){}try{var lr=window.location.replace.bind(window.location);window.location.replace=wrap(lr);}catch(e){}})(` + string(prefixJSON) + `);</script>`
+
+	for _, tag := range []string{"<head>", "<Head>", "<HEAD>"} {
+		if idx := strings.Index(html, tag); idx != -1 {
+			insertAt := idx + len(tag)
+			return html[:insertAt] + script + html[insertAt:]
+		}
+	}
+	return script + html
+}
+
 func (s *InstanceProxyService) managedRuntimeGatewayBearerToken(ctx context.Context, instanceID int, instanceType string) string {
 	if s == nil || s.instanceRepo == nil {
 		return ""
@@ -767,7 +850,7 @@ func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, acces
 		return nil, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, false),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, false),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
 	}, nil
@@ -782,7 +865,7 @@ func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, 
 		return nil, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, true),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, true),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
 	}, nil
@@ -899,9 +982,9 @@ func (s *InstanceProxyService) getOrCreateService(ctx context.Context, userID, i
 // extractTargetPath extracts the target path from the proxy URL
 // Input: /api/v1/instances/24/proxy/vnc.html
 // Output: /vnc.html
-func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string) string {
+func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string, targetPort int32) string {
 	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, targetPort) {
 		if strings.HasPrefix(requestPath, prefix) {
 			path := requestPath
 			if path == "" {
@@ -1002,7 +1085,7 @@ func (s *InstanceProxyService) GetTargetPortForInstance(instance *models.Instanc
 		return 3001
 	}
 
-	return buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag).Port
+	return buildRuntimeConfigForInstance(instance).Port
 }
 
 // ResolveUpstreamHostPort ensures the instance Service exists and returns its
@@ -1018,7 +1101,7 @@ func (s *InstanceProxyService) ResolveUpstreamHostPort(ctx context.Context, user
 }
 
 func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPort int32, targetPath string) int32 {
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, defaultPort) {
 		if defaultPort == 0 {
 			return 3001
 		}
@@ -1041,6 +1124,9 @@ func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPor
 }
 
 func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
+	if targetPort == 8006 {
+		return []int32{3389}
+	}
 	if targetPort == 3000 || targetPort == 8082 {
 		return []int32{3000, 8082}
 	}
@@ -1048,8 +1134,8 @@ func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
 	return nil
 }
 
-func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocket bool) string {
-	if usesHTTPSUpstream(instanceType) {
+func (s *InstanceProxyService) resolveTargetScheme(instanceType string, targetPort int32, websocket bool) string {
+	if usesHTTPSUpstream(instanceType, targetPort) {
 		if websocket {
 			return "wss"
 		}
@@ -1063,7 +1149,10 @@ func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocke
 	return "http"
 }
 
-func usesHTTPSUpstream(instanceType string) bool {
+func usesHTTPSUpstream(instanceType string, targetPort int32) bool {
+	if usesWebtopRuntime(instanceType, targetPort) {
+		return true
+	}
 	switch instanceType {
 	case "ubuntu", "webtop", "hermes", "openclaw":
 		return true
@@ -1076,11 +1165,11 @@ func (s *InstanceProxyService) resolveProxyHost(ctx context.Context, userID, ins
 	return fmt.Sprintf("%s:%d", serviceInfo.ClusterIP, serviceInfo.TargetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTML(instanceType string) bool {
-	return !usesWebtopImage(instanceType)
+func (s *InstanceProxyService) shouldRewriteHTML(instanceType string, targetPort int32) bool {
+	return !usesWebtopRuntime(instanceType, targetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string) bool {
+func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string, targetPort int32) bool {
 	if s != nil && s.instanceRepo != nil && strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeHermes) {
 		instance, err := s.instanceRepo.GetByID(instanceID)
 		if err == nil && instance != nil {
@@ -1089,7 +1178,10 @@ func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanc
 			}
 		}
 	}
-	return s.shouldRewriteHTML(instanceType)
+	if s.isOpenCodeLiteProxyInstance(instanceID, instanceType) {
+		return true
+	}
+	return s.shouldRewriteHTML(instanceType, targetPort)
 }
 
 // IsWebtopInstanceType reports whether the instance type is served by a
@@ -1097,6 +1189,18 @@ func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanc
 // proxying via SUBFOLDER-prefixed paths).
 func (s *InstanceProxyService) IsWebtopInstanceType(instanceType string) bool {
 	return usesWebtopImage(instanceType)
+}
+
+// IsWebtopInstance includes legacy Linux Workbuddy instances without treating
+// Windows Workbuddy/noVNC as Webtop.
+func (s *InstanceProxyService) IsWebtopInstance(instance *models.Instance) bool {
+	return isWebtopRuntimeInstance(instance)
+}
+
+func usesWebtopRuntime(instanceType string, targetPort int32) bool {
+	return usesWebtopImage(instanceType) ||
+		((strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") ||
+			strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex)) && targetPort == 3001)
 }
 
 func (s *InstanceProxyService) getCachedService(key serviceCacheKey) *k8s.ServiceInfo {

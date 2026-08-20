@@ -14,29 +14,46 @@ var orderedSystemImageTypes = []string{
 	"ubuntu",
 	"webtop",
 	"hermes",
+	"workbuddy",
+	"opencode",
+	"codex",
+	"claude-code",
 	"debian",
 	"centos",
 	"custom",
 }
 
 var supportedSystemImageTypes = map[string]string{
-	"openclaw": "OpenClaw Pro",
-	"ubuntu":   "Ubuntu Desktop",
-	"webtop":   "Webtop Desktop",
-	"hermes":   "Hermes Pro",
-	"debian":   "Debian Desktop",
-	"centos":   "CentOS Desktop",
-	"custom":   "Custom Image",
+	"openclaw":    "OpenClaw Pro",
+	"ubuntu":      "Ubuntu Desktop",
+	"webtop":      "Webtop Desktop",
+	"hermes":      "Hermes Pro",
+	"workbuddy":   "Workbuddy Pro",
+	"opencode":    "OpenCode Pro",
+	"codex":       "Codex Pro",
+	"claude-code": "Claude Code Pro",
+	"debian":      "Debian Desktop",
+	"centos":      "CentOS Desktop",
+	"custom":      "Custom Image",
 }
 
 var defaultSystemImageSettings = map[string]string{
-	"openclaw": "ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest",
-	"ubuntu":   "lscr.io/linuxserver/webtop:ubuntu-xfce",
-	"webtop":   "lscr.io/linuxserver/webtop:ubuntu-xfce",
-	"hermes":   "ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest",
-	"debian":   "docker.io/clawreef/debian-desktop:12",
-	"centos":   "docker.io/clawreef/centos-desktop:9",
-	"custom":   "registry.example.com/your-custom-image:latest",
+	"openclaw":    "ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest",
+	"ubuntu":      "lscr.io/linuxserver/webtop:ubuntu-xfce",
+	"webtop":      "lscr.io/linuxserver/webtop:ubuntu-xfce",
+	"hermes":      "ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest",
+	"workbuddy":   "ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-workbuddy:latest",
+	"opencode":    "ghcr.io/yuan-lab-llm/agentsruntime/opencode:latest",
+	"codex":       "ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest",
+	"claude-code": "ghcr.io/yuan-lab-llm/agentsruntime/claude-code:latest",
+	"debian":      "docker.io/clawreef/debian-desktop:12",
+	"centos":      "docker.io/clawreef/centos-desktop:9",
+	"custom":      "registry.example.com/your-custom-image:latest",
+}
+
+var defaultSystemImageRuntimeVariants = map[string]string{
+	"workbuddy": WorkbuddyRuntimeWindows,
+	"codex":     WorkbuddyRuntimeWindows,
 }
 
 var defaultGatewaySystemImageSettings = map[string]string{
@@ -44,26 +61,33 @@ var defaultGatewaySystemImageSettings = map[string]string{
 	"ubuntu":   "ubuntu:22.04",
 	"webtop":   "ubuntu:22.04",
 	"hermes":   "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest",
+	"opencode": "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest",
 	"debian":   "debian:12",
 	"centos":   "quay.io/centos/centos:stream9",
 	"custom":   "registry.example.com/your-custom-shell-image:latest",
 }
 
 var defaultEnabledSystemImageTypes = map[string]bool{
-	"openclaw": true,
-	"ubuntu":   true,
-	"hermes":   true,
+	"openclaw":    true,
+	"ubuntu":      true,
+	"hermes":      true,
+	"workbuddy":   true,
+	"opencode":    true,
+	"codex":       true,
+	"claude-code": true,
 }
 
 var defaultEnabledGatewaySystemImageTypes = map[string]bool{
 	"openclaw": true,
 	"hermes":   true,
+	"opencode": true,
 }
 
 // RuntimeImageConfig is the runtime card selected for an instance type.
 type RuntimeImageConfig struct {
-	Image       string
-	RuntimeType string
+	Image          string
+	RuntimeType    string
+	RuntimeVariant string
 }
 
 // RuntimeImageSettingsProvider exposes runtime image lookup for instance types.
@@ -108,6 +132,7 @@ func (s *systemImageSettingService) List() ([]models.SystemImageSetting, error) 
 		normalizedType := strings.TrimSpace(strings.ToLower(item.InstanceType))
 		item.InstanceType = normalizedType
 		item.RuntimeType = normalizeSystemImageRuntimeType(item.RuntimeType)
+		item.RuntimeVariant = normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, item.Image)
 		if strings.TrimSpace(item.DisplayName) == "" {
 			item.DisplayName = displayNameForSystemImageType(normalizedType)
 		}
@@ -151,6 +176,7 @@ func (s *systemImageSettingService) Save(setting *models.SystemImageSetting) (*m
 
 	setting.InstanceType = normalizedType
 	setting.RuntimeType = runtimeType
+	setting.RuntimeVariant = normalizeSystemImageRuntimeVariant(normalizedType, setting.RuntimeVariant, image)
 	setting.Image = image
 	setting.DisplayName = strings.TrimSpace(setting.DisplayName)
 	if setting.DisplayName == "" {
@@ -208,11 +234,12 @@ func (s *systemImageSettingService) disableTypeWithFallback(instanceType string)
 	}
 
 	return s.repo.Save(&models.SystemImageSetting{
-		InstanceType: instanceType,
-		RuntimeType:  "desktop",
-		DisplayName:  displayNameForSystemImagePreset(instanceType, "desktop"),
-		Image:        defaultSystemImageSettings[instanceType],
-		IsEnabled:    false,
+		InstanceType:   instanceType,
+		RuntimeType:    "desktop",
+		RuntimeVariant: defaultSystemImageRuntimeVariants[instanceType],
+		DisplayName:    displayNameForSystemImagePreset(instanceType, "desktop"),
+		Image:          defaultSystemImageSettings[instanceType],
+		IsEnabled:      false,
 	})
 }
 
@@ -227,7 +254,7 @@ func (s *systemImageSettingService) GetRuntimeImage(instanceType string) (Runtim
 		for _, item := range defaultSystemImagePresetsForType(normalizedType) {
 			image := strings.TrimSpace(item.Image)
 			if item.IsEnabled && image != "" {
-				return RuntimeImageConfig{Image: image, RuntimeType: item.RuntimeType}, true
+				return runtimeImageConfigForSetting(normalizedType, item), true
 			}
 		}
 		return RuntimeImageConfig{}, false
@@ -237,8 +264,9 @@ func (s *systemImageSettingService) GetRuntimeImage(instanceType string) (Runtim
 		image := strings.TrimSpace(item.Image)
 		if image != "" {
 			return RuntimeImageConfig{
-				Image:       image,
-				RuntimeType: normalizeSystemImageRuntimeType(item.RuntimeType),
+				Image:          image,
+				RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+				RuntimeVariant: normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, image),
 			}, true
 		}
 	}
@@ -262,7 +290,7 @@ func (s *systemImageSettingService) GetRuntimeImageForImage(instanceType, image 
 		for _, item := range defaultSystemImagePresetsForType(normalizedType) {
 			defaultImage := strings.TrimSpace(item.Image)
 			if item.IsEnabled && defaultImage == normalizedImage {
-				return RuntimeImageConfig{Image: defaultImage, RuntimeType: item.RuntimeType}, true
+				return runtimeImageConfigForSetting(normalizedType, item), true
 			}
 		}
 		return RuntimeImageConfig{}, false
@@ -271,8 +299,9 @@ func (s *systemImageSettingService) GetRuntimeImageForImage(instanceType, image 
 	for _, item := range enabledSystemImageSettingsForType(normalizedType, items) {
 		if strings.TrimSpace(item.Image) == normalizedImage {
 			return RuntimeImageConfig{
-				Image:       normalizedImage,
-				RuntimeType: normalizeSystemImageRuntimeType(item.RuntimeType),
+				Image:          normalizedImage,
+				RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+				RuntimeVariant: normalizeSystemImageRuntimeVariant(normalizedType, item.RuntimeVariant, normalizedImage),
 			}, true
 		}
 	}
@@ -315,16 +344,23 @@ func displayNameForSystemImagePreset(instanceType, runtimeType string) string {
 		}
 		return "Hermes Pro"
 	}
+	if instanceType == "opencode" {
+		if normalizedRuntimeType == "gateway" {
+			return "OpenCode Lite"
+		}
+		return "OpenCode Pro"
+	}
 	return displayNameForSystemImageType(instanceType)
 }
 
 func defaultSystemImagePresetsForType(instanceType string) []models.SystemImageSetting {
 	settings := []models.SystemImageSetting{{
-		InstanceType: instanceType,
-		RuntimeType:  "desktop",
-		DisplayName:  displayNameForSystemImagePreset(instanceType, "desktop"),
-		Image:        defaultSystemImageSettings[instanceType],
-		IsEnabled:    defaultEnabledSystemImageTypes[instanceType],
+		InstanceType:   instanceType,
+		RuntimeType:    "desktop",
+		RuntimeVariant: defaultSystemImageRuntimeVariants[instanceType],
+		DisplayName:    displayNameForSystemImagePreset(instanceType, "desktop"),
+		Image:          defaultSystemImageSettings[instanceType],
+		IsEnabled:      defaultEnabledSystemImageTypes[instanceType],
 	}}
 
 	if image := strings.TrimSpace(defaultGatewaySystemImageSettings[instanceType]); image != "" {
@@ -352,6 +388,7 @@ func enabledSystemImageSettingsForType(instanceType string, stored []models.Syst
 	result := make([]models.SystemImageSetting, 0, len(stored)+2)
 	for _, item := range stored {
 		item.RuntimeType = normalizeSystemImageRuntimeType(item.RuntimeType)
+		item.RuntimeVariant = normalizeSystemImageRuntimeVariant(instanceType, item.RuntimeVariant, item.Image)
 		runtimeTypesWithRows[item.RuntimeType] = true
 		if strings.TrimSpace(item.DisplayName) == "" {
 			item.DisplayName = displayNameForSystemImagePreset(instanceType, item.RuntimeType)
@@ -373,6 +410,33 @@ func enabledSystemImageSettingsForType(instanceType string, stored []models.Syst
 		result = append(result, preset)
 	}
 	return result
+}
+
+func runtimeImageConfigForSetting(instanceType string, item models.SystemImageSetting) RuntimeImageConfig {
+	image := strings.TrimSpace(item.Image)
+	return RuntimeImageConfig{
+		Image:          image,
+		RuntimeType:    normalizeSystemImageRuntimeType(item.RuntimeType),
+		RuntimeVariant: normalizeSystemImageRuntimeVariant(instanceType, item.RuntimeVariant, image),
+	}
+}
+
+func normalizeSystemImageRuntimeVariant(instanceType, variant, image string) string {
+	normalizedType := strings.TrimSpace(strings.ToLower(instanceType))
+	if normalizedType != "workbuddy" && normalizedType != RuntimeTypeCodex {
+		return ""
+	}
+	if normalized := normalizeWorkbuddyRuntimeVariant(variant); normalized != "" {
+		return normalized
+	}
+	if normalizedType == "workbuddy" {
+		if inferred := inferWorkbuddyVariantFromImage(image); inferred != "" {
+			return inferred
+		}
+	} else if inferred := inferCodexVariantFromImage(image); inferred != "" {
+		return inferred
+	}
+	return defaultSystemImageRuntimeVariants[normalizedType]
 }
 
 func isSupportedSystemImageType(instanceType string) bool {

@@ -216,7 +216,7 @@ func main() {
 	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
 	systemSettingsHandler := handlers.NewSystemSettingsHandler(systemImageSettingService)
 	llmModelHandler := handlers.NewLLMModelHandler(llmModelService)
-	aiGatewayHandler := handlers.NewAIGatewayHandler(aiGatewayService)
+	aiGatewayHandler := handlers.NewAIGatewayHandler(aiGatewayService, instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	customTeamTemplateHandler := handlers.NewCustomTeamTemplateHandler(customTeamTemplateService)
 	aiObservabilityHandler := handlers.NewAIObservabilityHandler(aiObservabilityService)
 	riskRuleHandler := handlers.NewRiskRuleHandler(riskRuleService)
@@ -310,6 +310,7 @@ func main() {
 		log.Printf("runtime scheduler disabled by configuration")
 	}
 	runtimePoolHandler := handlers.NewRuntimePoolHandler(runtimePodRepo, bindingRepo, rolloutRepo, runtimeScheduler, runtimeEvents)
+	workbuddyPrewarmController := k8s.NewWorkbuddyPrewarmController()
 
 	leaderCtx, leaderCancel := context.WithCancel(context.Background())
 	defer leaderCancel()
@@ -322,6 +323,7 @@ func main() {
 		if northboundOperationWorker != nil {
 			northboundOperationWorker.Start(ctx)
 		}
+		go workbuddyPrewarmController.Run(ctx)
 		if runtimeScheduler != nil {
 			runtimeSchedulerMu.Lock()
 			if runtimeSchedulerCancel == nil {
@@ -752,6 +754,8 @@ func main() {
 		{
 			gatewayLLM.GET("/models", aiGatewayHandler.ListModels)
 			gatewayLLM.POST("/chat/completions", aiGatewayHandler.ChatCompletions)
+			gatewayLLM.POST("/v1/responses", aiGatewayHandler.Responses)
+			gatewayLLM.POST("/v1/messages", aiGatewayHandler.AnthropicMessages)
 		}
 
 		agent := api.Group("/agent")

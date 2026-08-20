@@ -13,6 +13,9 @@ const FILTERS: Array<{ value: RuntimeFilter; labelKey?: string; label?: string }
   { value: "all", labelKey: "common.all" },
   { value: "openclaw", label: "OpenClaw" },
   { value: "hermes", label: "Hermes" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "codex", label: "Codex" },
+  { value: "claude-code", label: "Claude Code" },
 ];
 
 function formatBytes(value: number) {
@@ -30,7 +33,11 @@ function formatBytes(value: number) {
 }
 
 function formatRuntimeType(value: string) {
-  return value === "hermes" ? "Hermes" : "OpenClaw";
+  if (value === "hermes") return "Hermes";
+  if (value === "opencode") return "OpenCode";
+  if (value === "codex") return "Codex";
+  if (value === "claude-code") return "Claude Code";
+  return "OpenClaw";
 }
 
 function stateClass(pod: RuntimePod) {

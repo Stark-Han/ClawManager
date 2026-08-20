@@ -201,6 +201,57 @@ func TestMigration041AddsSessionUsageIndexes(t *testing.T) {
 	}
 }
 
+func TestMigration042AddsImmutableReviewContractTarget(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/042_add_team_review_contract.sql")
+	if err != nil {
+		t.Fatalf("read migration 042: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"review_target_assignment_id",
+		"review_target_revision",
+		"idx_team_work_items_review_target",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 042 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration048AddsWorkbuddyRuntime(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/048_add_workbuddy_instance_type.sql")
+	if err != nil {
+		t.Fatalf("read migration 048: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"'workbuddy'",
+		"instance_type = 'workbuddy'",
+		"LOWER(TRIM(display_name)) = 'workbuddy'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 048 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration050UpdatesWorkbuddyWindowsRuntime(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/050_update_workbuddy_windows_runtime.sql")
+	if err != nil {
+		t.Fatalf("read migration 050: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"windows-vm-workbuddy:latest",
+		"runtime_type = 'desktop'",
+		"instance_type = 'workbuddy'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 050 must contain %s", required)
+		}
+	}
+}
+
 func TestMigration045AddsNorthboundSecurityState(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/045_add_northbound_api.sql")
 	if err != nil {
@@ -245,19 +296,94 @@ func TestMigration047AddsInstanceOwner(t *testing.T) {
 	}
 }
 
-func TestMigration042AddsImmutableReviewContractTarget(t *testing.T) {
-	raw, err := embeddedMigrations.ReadFile("migrations/042_add_team_review_contract.sql")
+func TestMigration049AddsOpenCodeInstanceType(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/049_add_opencode_instance_type.sql")
 	if err != nil {
-		t.Fatalf("read migration 042: %v", err)
+		t.Fatalf("read migration 049: %v", err)
 	}
 	sql := string(raw)
 	for _, required := range []string{
-		"review_target_assignment_id",
-		"review_target_revision",
-		"idx_team_work_items_review_target",
+		"MODIFY COLUMN type ENUM",
+		"'workbuddy'",
+		"'opencode'",
+		"'gateway'",
+		"'desktop'",
+		"OpenCode Lite",
+		"OpenCode Pro",
+		"agentsruntime/opencode-lite:latest",
+		"agentsruntime/opencode:latest",
 	} {
 		if !strings.Contains(sql, required) {
-			t.Fatalf("migration 042 must contain %s", required)
+			t.Fatalf("migration 049 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration052AddsInstancePVCName(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/052_add_instance_pvc_name.sql")
+	if err != nil {
+		t.Fatalf("read migration 052: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{"ALTER TABLE instances", "pvc_name", "VARCHAR(253)", "information_schema.COLUMNS", "PREPARE instance_pvc_name_column_stmt"} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 052 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration051AddsCodexAndClaudeCodeInstanceTypes(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/051_add_codex_and_claude_code_instance_types.sql")
+	if err != nil {
+		t.Fatalf("read migration 051: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"MODIFY COLUMN type ENUM",
+		"'workbuddy'",
+		"'codex'",
+		"'claude-code'",
+		"Codex Pro",
+		"Claude Code Pro",
+		"agentsruntime/codex:latest",
+		"agentsruntime/claude-code:latest",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 051 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration053AddsAndBackfillsInstanceRuntimeVariant(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/053_add_instance_runtime_variant.sql")
+	if err != nil {
+		t.Fatalf("read migration 053: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{"runtime_variant", "'linux'", "'windows'", "workbuddy-linux", "windows-vm-workbuddy", "information_schema.COLUMNS", "PREPARE instance_runtime_variant_column_stmt"} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 053 must contain %s", required)
+		}
+	}
+}
+
+func TestMigration054AddsAndBackfillsSystemImageRuntimeVariant(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/054_add_system_image_runtime_variant.sql")
+	if err != nil {
+		t.Fatalf("read migration 054: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"system_image_settings",
+		"runtime_variant",
+		"workbuddy-linux",
+		"windows-vm-workbuddy",
+		"windows-vm-codex",
+		"agentsruntime/codex",
+		"WHERE type = 'codex'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 054 must contain %s", required)
 		}
 	}
 }

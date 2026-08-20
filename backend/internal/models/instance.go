@@ -13,6 +13,7 @@ type Instance struct {
 	Description              *string    `db:"description" json:"description,omitempty"`
 	Type                     string     `db:"type" json:"type"`
 	RuntimeType              string     `db:"runtime_type" json:"runtime_type"`
+	RuntimeVariant           string     `db:"runtime_variant" json:"runtime_variant,omitempty"`
 	InstanceMode             string     `db:"instance_mode" json:"instance_mode"`
 	Status                   string     `db:"status" json:"status"`
 	CPUCores                 float64    `db:"cpu_cores" json:"cpu_cores"`
@@ -28,6 +29,7 @@ type Instance struct {
 	EnvironmentOverridesJSON *string    `db:"environment_overrides_json" json:"-"`
 	DesktopStreamProfile     string     `db:"-" json:"desktop_stream_profile,omitempty"`
 	StorageClass             string     `db:"storage_class" json:"storage_class"`
+	PVCName                  *string    `db:"pvc_name" json:"-"`
 	MountPath                string     `db:"mount_path" json:"mount_path"`
 	WorkspacePath            *string    `db:"workspace_path" json:"workspace_path,omitempty"`
 	WorkspaceUsageBytes      int64      `db:"workspace_usage_bytes" json:"workspace_usage_bytes"`

@@ -51,6 +51,21 @@ assert(
   "System settings page must keep custom Pro runtime card creation.",
 );
 assert(
+  pageSource.includes("instance_type: 'workbuddy'") &&
+    pageSource.includes("display_name: 'Workbuddy Pro'") &&
+    pageSource.includes("agentsruntime/windows-vm-workbuddy:latest"),
+  "System settings page must expose Workbuddy as a fixed Pro runtime card.",
+);
+assert(
+  serviceSource.includes('runtime_variant?: "linux" | "windows"') &&
+    pageSource.includes("RUNTIME_VARIANT_IMAGES") &&
+    pageSource.includes("systemSettingsPage.runtimeVariant") &&
+    pageSource.includes("instance_type: 'codex'") &&
+    pageSource.includes("agentsruntime/codex:latest") &&
+    pageSource.includes("agentsruntime/windows-vm-codex:latest"),
+  "Workbuddy and Codex must use one fixed card with an explicit Linux/Windows runtime variant.",
+);
+assert(
   pageSource.includes("systemSettingsPage.liteRolloutTitle") &&
     pageSource.includes("systemSettingsPage.proRuntimeTitle") &&
     i18nSource.includes("Lite runtime rolling upgrade") &&

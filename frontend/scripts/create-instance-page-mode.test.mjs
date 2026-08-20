@@ -8,6 +8,10 @@ const sourcePath = path.resolve(
   "../src/pages/instances/CreateInstancePage.tsx",
 );
 const source = readFileSync(sourcePath, "utf8");
+const featureSource = readFileSync(
+  path.resolve(scriptDir, "../src/config/features.ts"),
+  "utf8",
+);
 
 function sectionBetween(startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -69,6 +73,47 @@ assert(
 assert(
   source.includes("...(usesDedicatedResources"),
   "Quota validation must include CPU/memory/storage/GPU only for Pro mode.",
+);
+assert(
+  source.includes('type === "workbuddy"') &&
+    source.includes('type === "custom" || type === "workbuddy"'),
+  "Create page must expose Workbuddy as a managed Pro-only runtime.",
+);
+assert(
+  source.includes('src="/workbuddy.png"') && source.includes('alt="Workbuddy"'),
+  "Create page must render the Workbuddy runtime icon.",
+);
+assert(
+  source.includes('src="/opencode.png"') &&
+    source.includes('src="/codex.png"') &&
+    source.includes('src="/claude-code.png"'),
+  "Create page must render distinct icons for OpenCode, Codex, and Claude Code.",
+);
+assert(
+  /\["openclaw", "hermes", "workbuddy", "opencode", "codex", "claude-code"/.test(
+    source,
+  ),
+  "Create page must keep OpenCode, Codex, and Claude Code in that order.",
+);
+assert(
+  featureSource.includes("claudeCodeProCreation: false") &&
+    source.includes('FEATURES.claudeCodeProCreation || typeId !== "claude-code"') &&
+    source.includes("isCreateInstanceTypeVisible(type.id)"),
+  "Claude Code Pro creation must stay hidden behind the disabled feature flag.",
+);
+assert(
+  source.includes("resolveManagedRuntimeVariant") &&
+    source.includes("setting?.runtime_variant") &&
+    source.includes("runtime_variant: selectedRuntimeVariant") &&
+    source.includes('type === "codex"'),
+  "Create page must send the configured Linux/Windows variant for Workbuddy and Codex.",
+);
+assert(
+  !source.includes("? PRESET_CONFIGS.medium") &&
+    source.includes("cpu_cores: PRESET_CONFIGS.medium.cpu_cores") &&
+    source.includes("memory_gb: PRESET_CONFIGS.medium.memory_gb") &&
+    source.includes("disk_gb: PRESET_CONFIGS.medium.disk_gb"),
+  "Selecting a managed Linux runtime must copy only resource fields and never overwrite the instance name or description.",
 );
 
 console.log("Create instance mode selector placement is valid.");

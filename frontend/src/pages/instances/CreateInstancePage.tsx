@@ -21,6 +21,7 @@ import {
   type SystemImageSetting,
 } from "../../services/systemSettingsService";
 import type { DesktopStreamProfile } from "../../types/instance";
+import { FEATURES } from "../../config/features";
 
 type BuiltInEnvTemplate = {
   key: string;
@@ -45,8 +46,37 @@ const BYTES_PER_GIB = 1024 * 1024 * 1024;
 const AGENT_PROTOCOL_VERSION = "v1";
 const CUSTOM_RESOURCE_PRESET = "custom";
 const SKILLS_PER_PAGE = 6;
-const supportsRuntimeInjection = (type: string) =>
-  type === "openclaw" || type === "hermes";
+type ManagedRuntimeVariant = "linux" | "windows";
+const inferManagedRuntimeVariant = (
+  type: string,
+  image?: string,
+): ManagedRuntimeVariant => {
+  const normalizedImage = image?.trim().toLowerCase() ?? "";
+  if (type === "workbuddy" && normalizedImage.includes("workbuddy-linux")) {
+    return "linux";
+  }
+  if (type === "codex" && normalizedImage.includes("agentsruntime/codex")) {
+    return "linux";
+  }
+  return "windows";
+};
+const resolveManagedRuntimeVariant = (
+  type: string,
+  setting?: SystemImageSetting | null,
+): ManagedRuntimeVariant | undefined =>
+  type === "workbuddy" || type === "codex"
+    ? setting?.runtime_variant ?? inferManagedRuntimeVariant(type, setting?.image)
+    : undefined;
+const supportsRuntimeInjection = (
+  type: string,
+  image?: string,
+  runtimeVariant?: ManagedRuntimeVariant,
+) =>
+  type === "openclaw" ||
+  type === "hermes" ||
+  (type === "workbuddy" && (runtimeVariant ?? inferManagedRuntimeVariant(type, image)) === "linux");
+const isProOnlyInstanceType = (type: string) =>
+  type === "custom" || type === "workbuddy";
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
   labelKey: string;
@@ -73,11 +103,21 @@ const DESKTOP_STREAM_PROFILES: Array<{
   },
 ];
 
-const runtimeWorkspaceDirectory = (type: string) =>
-  type === "hermes" ? ".hermes" : ".openclaw";
+const runtimeWorkspaceDirectory = (type: string) => {
+  if (type === "hermes") return ".hermes";
+  if (type === "opencode") return ".opencode";
+  if (type === "codex") return ".codex";
+  if (type === "claude-code") return ".claude";
+  return ".openclaw";
+};
 
-const runtimeProductName = (type: string) =>
-  type === "hermes" ? "Hermes" : "OpenClaw";
+const runtimeProductName = (type: string) => {
+  if (type === "hermes") return "Hermes";
+  if (type === "opencode") return "OpenCode";
+  if (type === "codex") return "Codex";
+  if (type === "claude-code") return "Claude Code";
+  return "OpenClaw";
+};
 
 const INSTANCE_TYPE_I18N_KEYS: Record<
   string,
@@ -107,14 +147,40 @@ const INSTANCE_TYPE_I18N_KEYS: Record<
     label: "instances.typeOptions.hermes.label",
     description: "instances.typeOptions.hermes.description",
   },
+  workbuddy: {
+    label: "instances.typeOptions.workbuddy.label",
+    description: "instances.typeOptions.workbuddy.description",
+  },
+  opencode: {
+    label: "instances.typeOptions.opencode.label",
+    description: "instances.typeOptions.opencode.description",
+  },
+  codex: {
+    label: "instances.typeOptions.codex.label",
+    description: "instances.typeOptions.codex.description",
+  },
+  "claude-code": {
+    label: "instances.typeOptions.claudeCode.label",
+    description: "instances.typeOptions.claudeCode.description",
+  },
   custom: {
     label: "instances.typeOptions.custom.label",
     description: "instances.typeOptions.custom.description",
   },
 };
 
-const CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter((type) =>
-  ["openclaw", "hermes"].includes(type.id),
+const isCreateInstanceTypeVisible = (typeId: string) =>
+  FEATURES.claudeCodeProCreation || typeId !== "claude-code";
+
+const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
+  (type) =>
+    ["openclaw", "hermes", "workbuddy", "opencode", "codex", "claude-code"].includes(type.id) &&
+    isCreateInstanceTypeVisible(type.id),
+);
+const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
+  (type) =>
+    ["openclaw", "hermes", "workbuddy", "opencode", "codex", "claude-code", "custom"].includes(type.id) &&
+    isCreateInstanceTypeVisible(type.id),
 );
 
 const INSTANCE_MODE_OPTIONS: {
@@ -133,6 +199,8 @@ const INSTANCE_MODE_OPTIONS: {
     descriptionKey: "instances.instanceModeProDescription",
   },
 ];
+
+const requiresProMode = (type: string) => type === "codex" || type === "claude-code";
 
 const PRESET_I18N_KEYS: Record<string, { label: string; description: string }> =
   {
@@ -156,7 +224,16 @@ const getBuiltInEnvTemplates = (
   diskGb: number,
 ): BuiltInEnvTemplate[] => {
   const templates: BuiltInEnvTemplate[] = [];
-  const persistentDir = type === "hermes" ? "/config/.hermes" : "/config";
+  const persistentDir =
+    type === "hermes"
+      ? "/config/.hermes"
+      : type === "opencode"
+        ? "/config/.opencode"
+        : type === "codex"
+          ? "/config/.codex"
+          : type === "claude-code"
+            ? "/config/.claude"
+            : "/config";
 
   if (type === "ubuntu") {
     templates.push(
@@ -283,12 +360,13 @@ const getBuiltInEnvTemplates = (
     );
   }
 
-  if (type === "openclaw") {
+  if (type === "openclaw" || type === "workbuddy") {
     templates.push(
       {
         key: "TITLE",
         description: t("instances.envDescDesktopTitleOpenClaw"),
-        defaultValue: "ClawManager Desktop",
+        defaultValue:
+          type === "workbuddy" ? "Workbuddy" : "ClawManager Desktop",
       },
       {
         key: "SUBFOLDER",
@@ -435,7 +513,9 @@ const CreateInstancePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState(1);
   const [submitArmed, setSubmitArmed] = useState(false);
-  const [availableTypes, setAvailableTypes] = useState(CREATE_INSTANCE_TYPES);
+  const [availableTypes, setAvailableTypes] = useState(
+    FALLBACK_CREATE_INSTANCE_TYPES,
+  );
   const [runtimeImageSettings, setRuntimeImageSettings] = useState<
     SystemImageSetting[]
   >([]);
@@ -501,10 +581,15 @@ const CreateInstancePage: React.FC = () => {
     (template) =>
       !Object.prototype.hasOwnProperty.call(builtinEnvOverrides, template.key),
   );
-  const selectedType = availableTypes.find((item) => item.id === formData.type);
   const selectedMode = formData.mode ?? "lite";
   const selectedRuntimeType =
     selectedMode === "lite" ? "gateway" : "desktop";
+  const availableTypesForMode = availableTypes.filter(
+    (item) => selectedMode === "pro" || !isProOnlyInstanceType(item.id),
+  );
+  const selectedType = availableTypesForMode.find(
+    (item) => item.id === formData.type,
+  );
   const runtimeImageOptions = runtimeImageSettings.filter(
     (item) =>
       item.is_enabled !== false &&
@@ -515,6 +600,18 @@ const CreateInstancePage: React.FC = () => {
     runtimeImageOptions.find(
       (item) => getRuntimeImageOptionKey(item) === selectedRuntimeImageKey,
     ) ?? runtimeImageOptions[0] ?? null;
+  const selectedRuntimeVariant = resolveManagedRuntimeVariant(
+    formData.type,
+    selectedRuntimeImage,
+  );
+  const isWindowsVM = selectedRuntimeVariant === "windows";
+  const primaryCustomProRuntimeImage =
+    runtimeImageSettings.find(
+      (item) =>
+        item.is_enabled !== false &&
+        item.instance_type === "custom" &&
+        normalizeRuntimeImageType(item.runtime_type) === "desktop",
+    ) ?? null;
   const usesDedicatedResources = selectedMode === "pro";
   const showRuntimeImageSelector = selectedMode === "pro";
   const instanceUsesDedicatedResources = (instance: Instance) => {
@@ -530,18 +627,36 @@ const CreateInstancePage: React.FC = () => {
         {t("instances.instanceMode")}
       </h3>
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {INSTANCE_MODE_OPTIONS.map((mode) => {
+        {INSTANCE_MODE_OPTIONS.filter((mode) => !requiresProMode(formData.type) || mode.id === "pro").map((mode) => {
           const selected = selectedMode === mode.id;
           return (
             <button
               key={mode.id}
               type="button"
               onClick={() =>
-                setFormData((current) => ({
-                  ...current,
-                  mode: mode.id,
-                  instance_mode: mode.id,
-                }))
+                setFormData((current) => {
+                  const fallbackType =
+                    mode.id === "lite" && isProOnlyInstanceType(current.type)
+                      ? availableTypes.find(
+                          (type) => !isProOnlyInstanceType(type.id),
+                        )
+                      : undefined;
+
+                  return {
+                    ...current,
+                    mode: mode.id,
+                    instance_mode: mode.id,
+                    ...(fallbackType
+                      ? {
+                          type:
+                            fallbackType.id as CreateInstanceRequest["type"],
+                          os_type: fallbackType.defaultOs,
+                          os_version: fallbackType.defaultVersion,
+                          storage_class: "",
+                        }
+                      : {}),
+                  };
+                })
               }
               className={`rounded-[20px] border p-4 text-left transition-all ${
                 selected
@@ -579,7 +694,7 @@ const CreateInstancePage: React.FC = () => {
           enabledItems.map((item) => item.instance_type),
         );
 
-        const filtered = CREATE_INSTANCE_TYPES.filter((type) =>
+        const filtered = CONFIGURED_CREATE_INSTANCE_TYPES.filter((type) =>
           enabledTypes.has(type.id),
         );
         if (filtered.length > 0) {
@@ -602,7 +717,7 @@ const CreateInstancePage: React.FC = () => {
         }
       } catch {
         setRuntimeImageSettings([]);
-        setAvailableTypes(CREATE_INSTANCE_TYPES);
+        setAvailableTypes(FALLBACK_CREATE_INSTANCE_TYPES);
       }
     };
 
@@ -686,9 +801,16 @@ const CreateInstancePage: React.FC = () => {
   }, [user]);
 
   const handleTypeSelect = (typeId: string) => {
-    const instanceType = availableTypes.find((t) => t.id === typeId);
+    const instanceType = availableTypesForMode.find((t) => t.id === typeId);
     if (instanceType) {
-      if (!supportsRuntimeInjection(typeId)) {
+      const configuredRuntimeImage = runtimeImageSettings.find(
+        (item) =>
+          item.is_enabled !== false &&
+          item.instance_type === typeId &&
+          normalizeRuntimeImageType(item.runtime_type) === "desktop",
+      );
+      const runtimeVariant = resolveManagedRuntimeVariant(typeId, configuredRuntimeImage);
+      if (!supportsRuntimeInjection(typeId, configuredRuntimeImage?.image, runtimeVariant)) {
         setOpenClawImportFile(null);
         setOpenClawInjectionMode("none");
         setOpenClawBundleId(undefined);
@@ -697,13 +819,29 @@ const CreateInstancePage: React.FC = () => {
         setOpenClawPreviewError(null);
         setSelectedSkillIds([]);
       }
+      const windowsVMResources = runtimeVariant === "windows"
+        ? { cpu_cores: 6, memory_gb: 12, disk_gb: 80 }
+        : typeId === "workbuddy" || typeId === "codex"
+          ? {
+              cpu_cores: PRESET_CONFIGS.medium.cpu_cores,
+              memory_gb: PRESET_CONFIGS.medium.memory_gb,
+              disk_gb: PRESET_CONFIGS.medium.disk_gb,
+            }
+          : {};
       setFormData({
         ...formData,
         type: typeId as CreateInstanceRequest["type"],
+        runtime_variant: runtimeVariant,
+        mode: requiresProMode(typeId) ? "pro" : formData.mode,
+        instance_mode: requiresProMode(typeId) ? "pro" : formData.instance_mode,
         os_type: instanceType.defaultOs,
         os_version: instanceType.defaultVersion,
         storage_class: "",
+        ...windowsVMResources,
       });
+      if (runtimeVariant) {
+        setResourcePresetMode(runtimeVariant === "windows" ? CUSTOM_RESOURCE_PRESET : "medium");
+      }
     }
   };
 
@@ -716,7 +854,7 @@ const CreateInstancePage: React.FC = () => {
         ...current,
         cpu_cores: PRESET_CONFIGS.medium.cpu_cores,
         memory_gb: PRESET_CONFIGS.medium.memory_gb,
-        disk_gb: PRESET_CONFIGS.medium.disk_gb,
+        disk_gb: isWindowsVM ? 80 : PRESET_CONFIGS.medium.disk_gb,
       }));
       return;
     }
@@ -725,9 +863,9 @@ const CreateInstancePage: React.FC = () => {
     setResourcePresetMode(preset);
     setFormData((current) => ({
       ...current,
-      cpu_cores: config.cpu_cores,
-      memory_gb: config.memory_gb,
-      disk_gb: config.disk_gb,
+      cpu_cores: isWindowsVM ? Math.max(6, config.cpu_cores) : config.cpu_cores,
+      memory_gb: isWindowsVM ? Math.max(12, config.memory_gb) : config.memory_gb,
+      disk_gb: isWindowsVM ? 80 : config.disk_gb,
     }));
   };
 
@@ -842,6 +980,7 @@ const CreateInstancePage: React.FC = () => {
       const createPayload: CreateInstanceRequest = {
         ...formData,
         owner: formData.owner?.trim(),
+        runtime_variant: selectedRuntimeVariant,
         mode: selectedMode,
         instance_mode: selectedMode,
         runtime_type: selectedRuntimeType,
@@ -861,15 +1000,15 @@ const CreateInstancePage: React.FC = () => {
         image_registry: selectedRuntimeImage?.image,
         image_tag: selectedRuntimeImage ? undefined : formData.image_tag,
         environment_overrides: overrides,
-        skill_ids: supportsRuntimeInjection(formData.type)
+        skill_ids: supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant)
           ? selectedSkillIds
           : undefined,
         openclaw_config_plan:
-          supportsRuntimeInjection(formData.type) &&
+          supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) &&
           openClawInjectionMode === "bundle" &&
           openClawBundleId
             ? { mode: "bundle", bundle_id: openClawBundleId }
-            : supportsRuntimeInjection(formData.type) &&
+            : supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) &&
                 openClawInjectionMode === "manual" &&
                 openClawResourceIds.length > 0
               ? { mode: "manual", resource_ids: openClawResourceIds }
@@ -880,7 +1019,7 @@ const CreateInstancePage: React.FC = () => {
         await instanceService.createInstance(createPayload);
 
       if (
-        supportsRuntimeInjection(formData.type) &&
+        supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) &&
         openClawInjectionMode === "archive" &&
         openClawImportFile
       ) {
@@ -910,7 +1049,7 @@ const CreateInstancePage: React.FC = () => {
   const canProceed = () => {
     if (step === 1)
       return formData.name.length >= 3 && Boolean(formData.owner?.trim());
-    if (step === 2) return availableTypes.length > 0;
+    if (step === 2) return availableTypesForMode.length > 0;
     return true;
   };
 
@@ -1028,7 +1167,7 @@ const CreateInstancePage: React.FC = () => {
   const exceededQuotaItems = quotaChecks.filter((item) => item.exceeded);
   const quotaExceeded = exceededQuotaItems.length > 0;
   const openClawPlanInvalid =
-    supportsRuntimeInjection(formData.type) &&
+    supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) &&
     ((openClawInjectionMode === "bundle" &&
       (!openClawBundleId ||
         !!openClawPreviewError ||
@@ -1102,6 +1241,45 @@ const CreateInstancePage: React.FC = () => {
       );
     }
 
+    if (typeId === "workbuddy") {
+      return (
+        <img
+          src="/workbuddy.png"
+          alt="Workbuddy"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
+
+    if (typeId === "opencode") {
+      return (
+        <img
+          src="/opencode.png"
+          alt="OpenCode"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
+
+    if (typeId === "codex") {
+      return (
+        <img
+          src="/codex.png"
+          alt="Codex"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
+
+    if (typeId === "claude-code") {
+      return (
+        <img
+          src="/claude-code.png"
+          alt="Claude Code"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
     return (
       <svg
         className="h-6 w-6 text-indigo-600"
@@ -1117,6 +1295,24 @@ const CreateInstancePage: React.FC = () => {
         />
       </svg>
     );
+  };
+
+  const getCreateTypeLabel = (
+    type: (typeof CONFIGURED_CREATE_INSTANCE_TYPES)[number],
+  ) => {
+    if (type.id === "custom" && primaryCustomProRuntimeImage?.display_name) {
+      return primaryCustomProRuntimeImage.display_name;
+    }
+    return getInstanceTypeLabel(t, type.id, type.name);
+  };
+
+  const getCreateTypeDescription = (
+    type: (typeof CONFIGURED_CREATE_INSTANCE_TYPES)[number],
+  ) => {
+    if (type.id === "custom") {
+      return t("systemSettingsPage.customProBadge");
+    }
+    return getInstanceTypeDescription(t, type.id, type.description);
   };
 
   const renderSummaryTagList = (
@@ -1308,7 +1504,7 @@ const CreateInstancePage: React.FC = () => {
                 {t("instances.selectInstanceType")}
               </h2>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {availableTypes.map((type) => (
+                {availableTypesForMode.map((type) => (
                   <div
                     key={type.id}
                     onClick={() => handleTypeSelect(type.id)}
@@ -1326,14 +1522,10 @@ const CreateInstancePage: React.FC = () => {
                       </div>
                       <div className="ml-4">
                         <h3 className="text-sm font-medium text-gray-900">
-                          {getInstanceTypeLabel(t, type.id, type.name)}
+                          {getCreateTypeLabel(type)}
                         </h3>
                         <p className="mt-1 text-xs text-gray-500">
-                          {getInstanceTypeDescription(
-                            t,
-                            type.id,
-                            type.description,
-                          )}
+                          {getCreateTypeDescription(type)}
                         </p>
                       </div>
                     </div>
@@ -1614,13 +1806,16 @@ const CreateInstancePage: React.FC = () => {
                               <input
                                 type="number"
                                 id="custom_disk"
-                                min={10}
-                                max={1000}
+                                min={isWindowsVM ? 80 : 10}
+                                max={isWindowsVM ? 80 : 1000}
                                 value={formData.disk_gb}
                                 onChange={(e) =>
                                   setFormData((current) => ({
                                     ...current,
-                                    disk_gb: parseInt(e.target.value) || 10,
+                                    disk_gb:
+                                      isWindowsVM
+                                        ? 80
+                                        : parseInt(e.target.value) || 10,
                                   }))
                                 }
                                 className="mt-1 h-9 w-full rounded-xl border border-gray-200 bg-white px-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
@@ -1965,7 +2160,7 @@ const CreateInstancePage: React.FC = () => {
                       {quotaLoading
                         ? t("instances.checkingQuota")
                         : loading
-                          ? supportsRuntimeInjection(formData.type) &&
+                          ? supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) &&
                             openClawInjectionMode === "archive" &&
                             openClawImportFile
                             ? t("instances.creatingAndImporting")
@@ -1975,7 +2170,7 @@ const CreateInstancePage: React.FC = () => {
                   </div>
                 </div>
 
-                {supportsRuntimeInjection(formData.type) && (
+                {supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) && (
                   <div className="app-panel order-2 p-6">
                     <div className="flex items-start justify-between gap-4">
                       <div>
@@ -2296,11 +2491,7 @@ const CreateInstancePage: React.FC = () => {
                       </dt>
                       <dd className="mt-1 text-sm text-gray-900">
                         {selectedType
-                          ? getInstanceTypeLabel(
-                              t,
-                              selectedType.id,
-                              selectedType.name,
-                            )
+                          ? getCreateTypeLabel(selectedType)
                           : formData.type}
                       </dd>
                     </div>
@@ -2397,7 +2588,7 @@ const CreateInstancePage: React.FC = () => {
                         )
                       )}
                     </div>
-                    {supportsRuntimeInjection(formData.type) && (
+                    {supportsRuntimeInjection(formData.type, selectedRuntimeImage?.image, selectedRuntimeVariant) && (
                       <>
                         <div className="sm:col-span-2">
                           <dt className="text-sm font-medium text-gray-500">

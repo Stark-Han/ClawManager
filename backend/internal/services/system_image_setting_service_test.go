@@ -215,6 +215,74 @@ func TestSystemImageSettingServiceListIncludesHermesLiteDefault(t *testing.T) {
 	}
 }
 
+func TestSystemImageSettingServiceListIncludesWorkbuddyProDefault(t *testing.T) {
+	service := NewSystemImageSettingService(&stubSystemImageSettingRepository{})
+
+	items, err := service.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+
+	for _, item := range items {
+		if item.InstanceType != "workbuddy" || item.RuntimeType != "desktop" {
+			continue
+		}
+		if item.DisplayName != "Workbuddy Pro" {
+			t.Fatalf("expected Workbuddy Pro display name, got %q", item.DisplayName)
+		}
+		if item.Image != defaultSystemImageSettings["workbuddy"] {
+			t.Fatalf("expected Workbuddy image %q, got %q", defaultSystemImageSettings["workbuddy"], item.Image)
+		}
+		if !item.IsEnabled {
+			t.Fatalf("expected Workbuddy Pro default to be enabled")
+		}
+		if item.RuntimeVariant != WorkbuddyRuntimeWindows {
+			t.Fatalf("expected Workbuddy default runtime variant windows, got %q", item.RuntimeVariant)
+		}
+		return
+	}
+
+	t.Fatalf("expected Workbuddy Pro runtime image")
+}
+
+func TestSystemImageSettingServicePersistsExplicitLinuxRuntimeVariant(t *testing.T) {
+	repo := &stubSystemImageSettingRepository{}
+	service := NewSystemImageSettingService(repo)
+	setting, err := service.Save(&models.SystemImageSetting{
+		InstanceType:   RuntimeTypeCodex,
+		RuntimeType:    "desktop",
+		RuntimeVariant: WorkbuddyRuntimeLinux,
+		DisplayName:    "Codex Pro",
+		Image:          "registry.example/custom-codex:latest",
+	})
+	if err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if setting.RuntimeVariant != WorkbuddyRuntimeLinux {
+		t.Fatalf("expected explicit Linux runtime variant, got %q", setting.RuntimeVariant)
+	}
+
+	selection, ok := service.GetRuntimeImage(RuntimeTypeCodex)
+	if !ok || selection.RuntimeVariant != WorkbuddyRuntimeLinux {
+		t.Fatalf("expected Linux variant runtime selection, got %#v, %v", selection, ok)
+	}
+}
+
+func TestSystemImageSettingServiceInfersLegacyRuntimeVariantsFromImages(t *testing.T) {
+	repo := &stubSystemImageSettingRepository{items: []models.SystemImageSetting{
+		{ID: 1, InstanceType: "workbuddy", RuntimeType: "desktop", Image: "registry/workbuddy-linux:latest", IsEnabled: true},
+		{ID: 2, InstanceType: RuntimeTypeCodex, RuntimeType: "desktop", Image: defaultLinuxCodexImage, IsEnabled: true},
+	}}
+	service := NewSystemImageSettingService(repo)
+
+	for _, instanceType := range []string{"workbuddy", RuntimeTypeCodex} {
+		selection, ok := service.GetRuntimeImage(instanceType)
+		if !ok || selection.RuntimeVariant != WorkbuddyRuntimeLinux {
+			t.Fatalf("expected %s image to infer Linux variant, got %#v, %v", instanceType, selection, ok)
+		}
+	}
+}
+
 func TestSystemImageSettingServiceListBackfillsHermesProDefaultWhenLiteStored(t *testing.T) {
 	repo := &stubSystemImageSettingRepository{
 		items: []models.SystemImageSetting{
