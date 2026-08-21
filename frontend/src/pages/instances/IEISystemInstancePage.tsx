@@ -189,6 +189,7 @@ export default function IEISystemInstancePage() {
               service={ieiSystemWorkspaceService}
               workspaceKey={`iei:${instance.owner}:${instance.id}`}
               canWrite
+              localeOverride="zh"
             />
           </div>
         ) : (

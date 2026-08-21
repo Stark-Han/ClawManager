@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Download,
@@ -14,6 +14,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { useI18n } from "../contexts/I18nContext";
+import { interpolate, translate, type Locale } from "../lib/i18n";
 import { workspaceService } from "../services/workspaceService";
 import type { WorkspaceEntry, WorkspacePreview } from "../types/workspace";
 
@@ -25,6 +27,7 @@ interface WorkspaceFileManagerProps {
   service?: WorkspaceFileOperations;
   workspaceKey?: string | number;
   canWrite?: boolean;
+  localeOverride?: Locale;
 }
 
 export interface WorkspaceFileOperations {
@@ -70,10 +73,10 @@ function normalizeWorkspacePath(path: string | undefined) {
     .join("/");
 }
 
-function rootBreadcrumbLabel(initialPath: string | undefined) {
+function rootBreadcrumbLabel(initialPath: string | undefined, workspaceLabel: string) {
   const raw = initialPath?.trim() ?? "";
   if (!raw.startsWith("/")) {
-    return "Workspace";
+    return workspaceLabel;
   }
   return raw.replace(/\/+$/, "") || "/";
 }
@@ -228,7 +231,17 @@ export function WorkspaceFileManager({
   service = workspaceService,
   workspaceKey,
   canWrite = true,
+  localeOverride,
 }: WorkspaceFileManagerProps) {
+  const { locale, t } = useI18n();
+  const effectiveLocale = localeOverride ?? locale;
+  const translateLabel = useCallback(
+    (key: string, variables?: Record<string, string | number>) => {
+      const overridden = localeOverride ? translate(localeOverride, key) : undefined;
+      return overridden ? interpolate(overridden, variables) : t(key, variables);
+    },
+    [localeOverride, t],
+  );
   const queryClient = useQueryClient();
   const cacheKey = workspaceKey ?? instanceId;
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -242,7 +255,10 @@ export function WorkspaceFileManager({
   const [error, setError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
-  const rootLabel = rootBreadcrumbLabel(initialPath);
+  const rootLabel = rootBreadcrumbLabel(
+    initialPath,
+    translateLabel("workspaceFileManager.workspace"),
+  );
 
   useEffect(() => {
     setCurrentPath(normalizeWorkspacePath(initialPath));
@@ -307,14 +323,14 @@ export function WorkspaceFileManager({
       })
       .catch((err: unknown) => {
         if (!disposed) {
-          setError(getErrorMessage(err, "Failed to load preview"));
+          setError(getErrorMessage(err, translateLabel("workspaceFileManager.failedPreview")));
         }
       });
 
     return () => {
       disposed = true;
     };
-  }, [instanceId, previewPath, previewQuery.data, service]);
+  }, [instanceId, previewPath, previewQuery.data, service, translateLabel]);
 
   useEffect(() => {
     return () => {
@@ -350,7 +366,7 @@ export function WorkspaceFileManager({
       setError(null);
       await action();
     } catch (err: unknown) {
-      setError(getErrorMessage(err, "Workspace action failed"));
+      setError(getErrorMessage(err, translateLabel("workspaceFileManager.actionFailed")));
     } finally {
       setBusyAction(null);
       setUploadStatus(null);
@@ -373,7 +389,12 @@ export function WorkspaceFileManager({
     }
     void runAction("upload", async () => {
       for (const [index, file] of files.entries()) {
-        setUploadStatus(`Uploading ${index + 1}/${files.length}`);
+        setUploadStatus(
+          translateLabel("workspaceFileManager.uploading", {
+            current: index + 1,
+            total: files.length,
+          }),
+        );
         await service.upload(instanceId, currentPath, file);
       }
       await invalidateCurrentPath();
@@ -390,7 +411,12 @@ export function WorkspaceFileManager({
     void runAction("upload-folder", async () => {
       const directories = collectFolderUploadDirectories(files);
       for (const [index, directory] of directories.entries()) {
-        setUploadStatus(`Creating folders ${index + 1}/${directories.length}`);
+        setUploadStatus(
+          translateLabel("workspaceFileManager.creatingFolders", {
+            current: index + 1,
+            total: directories.length,
+          }),
+        );
         try {
           await service.mkdir(instanceId, joinPath(currentPath, directory));
         } catch (err: unknown) {
@@ -405,7 +431,12 @@ export function WorkspaceFileManager({
         if (!relativePath) {
           continue;
         }
-        setUploadStatus(`Uploading ${index + 1}/${files.length}`);
+        setUploadStatus(
+          translateLabel("workspaceFileManager.uploading", {
+            current: index + 1,
+            total: files.length,
+          }),
+        );
         await service.upload(
           instanceId,
           joinPath(currentPath, parentPath(relativePath)),
@@ -429,7 +460,9 @@ export function WorkspaceFileManager({
   };
 
   const handleMkdir = () => {
-    const name = assertEntryName(window.prompt("Folder name") || "");
+    const name = assertEntryName(
+      window.prompt(translateLabel("workspaceFileManager.folderNamePrompt")) || "",
+    );
     if (!name) {
       return;
     }
@@ -441,7 +474,9 @@ export function WorkspaceFileManager({
   };
 
   const handleRename = (entry: WorkspaceEntry) => {
-    const name = assertEntryName(window.prompt("Rename", entry.name) || "");
+    const name = assertEntryName(
+      window.prompt(translateLabel("workspaceFileManager.renamePrompt"), entry.name) || "",
+    );
     if (!name || name === entry.name) {
       return;
     }
@@ -456,7 +491,11 @@ export function WorkspaceFileManager({
   };
 
   const handleDelete = (entry: WorkspaceEntry) => {
-    if (!window.confirm(`Delete ${entry.name}?`)) {
+    if (
+      !window.confirm(
+        translateLabel("workspaceFileManager.deleteConfirm", { name: entry.name }),
+      )
+    ) {
       return;
     }
     void runAction(`delete:${entry.path}`, async () => {
@@ -521,21 +560,26 @@ export function WorkspaceFileManager({
           <button
             type="button"
             className="cm-icon-button"
-            title="Refresh"
+            title={translateLabel("workspaceFileManager.refresh")}
             onClick={() => void invalidateCurrentPath()}
           >
             <RefreshCw className={`h-4 w-4 ${entriesQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
           {canWrite && (
             <>
-              <button type="button" className="cm-icon-button" title="New folder" onClick={handleMkdir}>
+              <button
+                type="button"
+                className="cm-icon-button"
+                title={translateLabel("workspaceFileManager.newFolder")}
+                onClick={handleMkdir}
+              >
                 <FolderPlus className="h-4 w-4" />
               </button>
               <div ref={uploadMenuRef} className="relative">
                 <button
                   type="button"
                   className="cm-icon-button"
-                  title="Upload"
+                  title={translateLabel("workspaceFileManager.upload")}
                   aria-haspopup="menu"
                   aria-expanded={uploadMenuOpen}
                   disabled={busyAction === "upload" || busyAction === "upload-folder"}
@@ -555,7 +599,7 @@ export function WorkspaceFileManager({
                       onClick={openFileUploadPicker}
                     >
                       <Upload className="h-4 w-4 text-slate-500" />
-                      <span>上传文件</span>
+                      <span>{translateLabel("workspaceFileManager.uploadFiles")}</span>
                     </button>
                     <button
                       type="button"
@@ -564,7 +608,7 @@ export function WorkspaceFileManager({
                       onClick={openFolderUploadPicker}
                     >
                       <FolderUp className="h-4 w-4 text-slate-500" />
-                      <span>上传文件夹</span>
+                      <span>{translateLabel("workspaceFileManager.uploadFolder")}</span>
                     </button>
                   </div>
                 )}
@@ -590,20 +634,26 @@ export function WorkspaceFileManager({
         <div className={`${previewPath ? "hidden" : "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"}`}>
           {entriesQuery.isLoading ? (
             <div className="flex h-48 items-center justify-center text-sm text-slate-500">
-              Loading
+              {translateLabel("workspaceFileManager.loading")}
             </div>
           ) : entries.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-sm text-slate-500">
-              No files
+              {translateLabel("workspaceFileManager.noFiles")}
             </div>
           ) : (
             <table className="w-full table-fixed divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-50 text-left text-xs font-medium uppercase tracking-normal text-slate-500">
                 <tr>
-                  <th className="px-3 py-2">Name</th>
-                  <th className="w-14 px-2 py-2">Size</th>
-                  <th className="w-28 px-2 py-2">Modified</th>
-                  <th className="w-40 px-2 py-2 text-right">Actions</th>
+                  <th className="px-3 py-2">{translateLabel("workspaceFileManager.name")}</th>
+                  <th className="w-14 px-2 py-2">
+                    {translateLabel("workspaceFileManager.size")}
+                  </th>
+                  <th className="w-28 px-2 py-2">
+                    {translateLabel("workspaceFileManager.modified")}
+                  </th>
+                  <th className="w-40 px-2 py-2 text-right">
+                    {translateLabel("workspaceFileManager.actions")}
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
@@ -627,7 +677,9 @@ export function WorkspaceFileManager({
                       {entry.is_dir ? "-" : formatBytes(entry.size)}
                     </td>
                     <td className="truncate px-2 py-2 text-slate-500">
-                      {entry.modified_at ? new Date(entry.modified_at).toLocaleString() : "-"}
+                      {entry.modified_at
+                        ? new Date(entry.modified_at).toLocaleString(effectiveLocale)
+                        : "-"}
                     </td>
                     <td className="px-2 py-2">
                       <div className="flex justify-end gap-1">
@@ -635,7 +687,7 @@ export function WorkspaceFileManager({
                           <button
                             type="button"
                             className="cm-icon-button h-8 w-8"
-                            title="Preview"
+                            title={translateLabel("workspaceFileManager.preview")}
                             onClick={() => setPreviewPath(entry.path)}
                           >
                             <Eye className="h-4 w-4" />
@@ -645,7 +697,7 @@ export function WorkspaceFileManager({
                           <button
                             type="button"
                             className="cm-icon-button h-8 w-8"
-                            title="Download"
+                            title={translateLabel("workspaceFileManager.download")}
                             onClick={() => handleDownload(entry)}
                             disabled={busyAction === `download:${entry.path}`}
                           >
@@ -657,7 +709,7 @@ export function WorkspaceFileManager({
                             <button
                               type="button"
                               className="cm-icon-button h-8 w-8"
-                              title="Rename"
+                              title={translateLabel("workspaceFileManager.rename")}
                               onClick={() => handleRename(entry)}
                               disabled={busyAction === `rename:${entry.path}`}
                             >
@@ -666,7 +718,7 @@ export function WorkspaceFileManager({
                             <button
                               type="button"
                               className="cm-icon-button h-8 w-8 border-red-200 text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700"
-                              title="Delete"
+                              title={translateLabel("workspaceFileManager.delete")}
                               onClick={() => handleDelete(entry)}
                               disabled={busyAction === `delete:${entry.path}`}
                             >
@@ -689,6 +741,7 @@ export function WorkspaceFileManager({
           loading={previewQuery.isLoading}
           objectUrl={previewObjectUrl}
           onClose={() => setPreviewPath(null)}
+          translateLabel={translateLabel}
         />
       </div>
     </section>
@@ -701,17 +754,22 @@ function PreviewPane({
   loading,
   objectUrl,
   onClose,
+  translateLabel,
 }: {
   path: string | null;
   preview?: WorkspacePreview;
   loading: boolean;
   objectUrl: string | null;
   onClose: () => void;
+  translateLabel: (
+    key: string,
+    variables?: Record<string, string | number>,
+  ) => string;
 }) {
   if (!path) {
     return (
       <aside className="hidden border-t border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-        Preview
+        {translateLabel("workspaceFileManager.preview")}
       </aside>
     );
   }
@@ -720,14 +778,19 @@ function PreviewPane({
     <aside className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 bg-slate-50">
       <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-3">
         <div className="min-w-0 truncate text-sm font-medium text-slate-900">{fileName(path)}</div>
-        <button type="button" className="cm-icon-button h-8 w-8" title="Close" onClick={onClose}>
+        <button
+          type="button"
+          className="cm-icon-button h-8 w-8"
+          title={translateLabel("workspaceFileManager.close")}
+          onClick={onClose}
+        >
           <X className="h-4 w-4" />
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {loading ? (
           <div className="flex h-full items-center justify-center text-sm text-slate-500">
-            Loading
+            {translateLabel("workspaceFileManager.loading")}
           </div>
         ) : preview?.kind === "text" ? (
           <pre className="min-w-0 max-w-full whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 text-slate-800">
@@ -747,7 +810,7 @@ function PreviewPane({
           />
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-slate-500">
-            Download only
+            {translateLabel("workspaceFileManager.downloadOnly")}
           </div>
         )}
       </div>
