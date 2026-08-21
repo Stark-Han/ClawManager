@@ -211,30 +211,27 @@ export default function IEISystemListInstancesPage() {
     <main className="flex min-h-screen flex-col bg-[#f4f7fb] text-slate-900">
       <header className="shrink-0 border-b border-slate-200 bg-white/95 shadow-[0_1px_16px_rgba(15,23,42,0.025)] backdrop-blur">
         <div className="flex min-h-[92px] items-center justify-between gap-6 px-7 py-4 lg:px-9">
-          <div className="flex min-w-0 items-center gap-7">
-            <div className="flex shrink-0 items-center gap-4">
-              <img
-                src="/inspur-information.png"
-                alt="浪潮信息"
-                className="h-auto w-[180px] object-contain object-left"
-              />
-              <div className="hidden h-8 items-center whitespace-nowrap rounded-lg border border-blue-100 bg-blue-50/80 px-3 text-sm font-semibold tracking-[0.04em] text-blue-700 sm:inline-flex">
-                智慧协作门户
-              </div>
+          <div className="flex min-w-0 shrink-0 items-center gap-4">
+            <img
+              src="/inspur-information.png"
+              alt="浪潮信息"
+              className="h-auto w-[180px] object-contain object-left"
+            />
+            <div className="hidden h-8 w-px bg-slate-200 sm:block" />
+            <div className="hidden whitespace-nowrap text-sm font-medium tracking-[0.08em] text-slate-400 sm:block">
+              智慧协作门户
             </div>
-            <div className="hidden h-10 w-px bg-slate-200 sm:block" />
-            {session ? (
-              <div className="hidden min-w-0 sm:block">
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+          </div>
+          {session ? (
+            <div className="flex items-center gap-4">
+              <div className="hidden min-w-0 text-right lg:block">
+                <div className="flex items-center justify-end gap-2 text-sm font-semibold text-slate-800">
                   <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                   已验证所有者
                 </div>
-                <p className="mt-1 truncate text-sm text-slate-500">{session.owner}</p>
+                <p className="mt-1 max-w-64 truncate text-sm text-slate-500">{session.owner}</p>
               </div>
-            ) : null}
-          </div>
-          {session ? (
-            <div className="flex items-center gap-3">
+              <div className="hidden h-8 w-px bg-slate-200 lg:block" />
               <button
                 type="button"
                 className="inline-flex h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-60"
