@@ -7,7 +7,6 @@ import {
   LogOut,
   RefreshCw,
   Search,
-  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
@@ -213,15 +212,14 @@ export default function IEISystemListInstancesPage() {
       <header className="shrink-0 border-b border-slate-200 bg-white/95 shadow-[0_1px_16px_rgba(15,23,42,0.025)] backdrop-blur">
         <div className="flex min-h-[92px] items-center justify-between gap-6 px-7 py-4 lg:px-9">
           <div className="flex min-w-0 items-center gap-7">
-            <div className="flex shrink-0 items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-[0_8px_22px_rgba(37,99,235,0.22)]">
-                <ShieldCheck className="h-7 w-7" strokeWidth={2.2} />
-              </div>
-              <div>
-                <div className="text-[25px] font-bold leading-6 tracking-tight text-[#12203a]">IEI</div>
-                <div className="mt-1 text-[10px] font-semibold tracking-[0.14em] text-slate-400">
-                  OWNER PORTAL
-                </div>
+            <div className="flex shrink-0 flex-col items-start">
+              <img
+                src="/inspur-information.png"
+                alt="浪潮信息"
+                className="h-auto w-[180px] object-contain object-left"
+              />
+              <div className="mt-0.5 pl-0.5 text-[11px] font-medium tracking-[0.18em] text-slate-500">
+                智慧协作门户
               </div>
             </div>
             <div className="hidden h-10 w-px bg-slate-200 sm:block" />

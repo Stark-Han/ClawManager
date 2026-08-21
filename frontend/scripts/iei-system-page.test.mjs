@@ -55,6 +55,10 @@ assert(
   listPage.includes("我的实例") &&
     listPage.includes("实例详情") &&
     listPage.includes("运行时说明") &&
+    listPage.includes('src="/inspur-information.png"') &&
+    listPage.includes('alt="浪潮信息"') &&
+    listPage.includes("智慧协作门户") &&
+    !listPage.includes("OWNER PORTAL") &&
     !listPage.includes("实例模式") &&
     !listPage.includes("Lite") &&
     !listPage.includes("Pro") &&
@@ -78,6 +82,7 @@ assert(
 assert(
   detailPage.includes("getInstance(instanceID)") &&
     detailPage.includes("generateAccess(instanceID)") &&
+    detailPage.includes("浪潮信息安全访问") &&
     detailPage.includes('referrerPolicy="no-referrer"') &&
     detailPage.includes("WorkspaceFileManager") &&
     detailPage.includes("ieiSystemWorkspaceService") &&
