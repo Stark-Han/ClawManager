@@ -55,11 +55,6 @@ assert(
   detailSource.includes('instance.type === "workbuddy"'),
   "Instance detail must expose the Workbuddy Pro /config workspace.",
 );
-assert(
-  detailSource.includes('instance.runtime_variant === "linux"') &&
-    detailSource.includes('instance.type === "codex"'),
-  "Instance detail workspace must be available only for Linux Workbuddy/Codex variants.",
-);
 
 function sliceBetween(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);

@@ -422,6 +422,8 @@ func defaultRuntimeDeploymentName(runtimeType string) string {
 		return "hermes-runtime"
 	case RuntimeTypeOpenCode:
 		return "opencode-runtime"
+	case RuntimeTypeDeepSeekHarness:
+		return "deepseek-harness-runtime"
 	default:
 		return ""
 	}
@@ -1063,6 +1065,11 @@ func (s *RuntimeScheduler) prepareGatewayStartExcludingPorts(
 		return nil, fmt.Errorf("build runtime gateway environment: %w", err)
 	}
 	uid, gid := runtimeGatewayLinuxIDs(instance.ID, environment)
+	if runtimeType == RuntimeTypeOpenClaw {
+		if err := ensureOpenClawPluginLayoutCompatibility(workspacePath, uid, gid); err != nil {
+			return nil, fmt.Errorf("prepare OpenClaw workspace compatibility: %w", err)
+		}
+	}
 	reservedBinding, err := s.reserveGatewayPortExcludingPorts(ctx, instance, runtimeType, pod, workspacePath, excludedPorts)
 	if err != nil {
 		return nil, err

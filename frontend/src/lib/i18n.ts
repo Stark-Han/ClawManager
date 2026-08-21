@@ -2456,21 +2456,13 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description: "Hermes runtime built on the webtop desktop base",
         },
+        deepseekHarness: {
+          label: "DeepSeek Harness",
+          description: "Managed DeepSeek Harness workspace, available in Lite and Pro modes",
+        },
         workbuddy: {
           label: "Workbuddy",
-          description: "Managed Workbuddy runtime on a persistent Windows desktop",
-        },
-        opencode: {
-          label: "OpenCode Runtime",
-          description: "Official OpenCode coding agent (Lite web / Pro desktop)",
-        },
-        codex: {
-          label: "Codex",
-          description: "OpenAI Codex coding agent (Pro desktop)",
-        },
-        claudeCode: {
-          label: "Claude Code",
-          description: "Anthropic Claude Code agent (Pro desktop)",
+          description: "Managed Workbuddy runtime on a webtop desktop base",
         },
         custom: {
           label: "Custom Image",
@@ -4005,21 +3997,13 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description: "基于 Webtop 桌面基础镜像构建的 Hermes 运行时",
         },
+        deepseekHarness: {
+          label: "DeepSeek Harness",
+          description: "由 ClawManager 管理的 DeepSeek Harness 工作空间，支持 Lite 和 Pro 模式",
+        },
         workbuddy: {
           label: "Workbuddy",
-          description: "运行在持久化 Windows 桌面中的托管 Workbuddy 运行时",
-        },
-        opencode: {
-          label: "OpenCode Runtime",
-          description: "官方 OpenCode 编码助手（Lite Web / Pro 桌面）",
-        },
-        codex: {
-          label: "Codex",
-          description: "OpenAI Codex 编码智能体（Pro 桌面）",
-        },
-        claudeCode: {
-          label: "Claude Code",
-          description: "Anthropic Claude Code 智能体（Pro 桌面）",
+          description: "基于 Webtop 桌面基础镜像构建的托管 Workbuddy 运行时",
         },
         custom: {
           label: "自定义镜像",
@@ -5495,15 +5479,15 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "Webtop デスクトップベースで構築された Hermes ランタイム",
         },
+        deepseekHarness: {
+          label: "DeepSeek Harness",
+          description:
+            "ClawManager が管理する Lite / Pro 対応の DeepSeek Harness ワークスペース",
+        },
         workbuddy: {
           label: "Workbuddy",
           description:
-            "永続 Windows デスクトップで動作する管理対象 Workbuddy ランタイム",
-        },
-        opencode: {
-          label: "OpenCode Runtime",
-          description:
-            "公式 OpenCode コーディングエージェント（Lite Web / Pro デスクトップ）",
+            "Webtop デスクトップベースで動作する管理対象 Workbuddy ランタイム",
         },
         custom: {
           label: "カスタムイメージ",
@@ -6943,13 +6927,13 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description: "Webtop 데스크톱 기반으로 빌드된 Hermes 런타임",
         },
+        deepseekHarness: {
+          label: "DeepSeek Harness",
+          description: "ClawManager가 관리하는 Lite 및 Pro 모드 DeepSeek Harness 작업 공간",
+        },
         workbuddy: {
           label: "Workbuddy",
-          description: "영구 Windows 데스크톱에서 실행되는 관리형 Workbuddy 런타임",
-        },
-        opencode: {
-          label: "OpenCode Runtime",
-          description: "공식 OpenCode 코딩 에이전트 (Lite Web / Pro 데스크톱)",
+          description: "Webtop 데스크톱 기반의 관리형 Workbuddy 런타임",
         },
         custom: {
           label: "사용자 지정 이미지",
@@ -8412,15 +8396,15 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "Hermes-Runtime auf Basis des Webtop-Desktop-Images",
         },
+        deepseekHarness: {
+          label: "DeepSeek Harness",
+          description:
+            "Von ClawManager verwalteter DeepSeek-Harness-Arbeitsbereich für Lite und Pro",
+        },
         workbuddy: {
           label: "Workbuddy",
           description:
-            "Verwaltete Workbuddy-Runtime auf einem persistenten Windows-Desktop",
-        },
-        opencode: {
-          label: "OpenCode Runtime",
-          description:
-            "Offizieller OpenCode-Coding-Agent (Lite Web / Pro Desktop)",
+            "Verwaltete Workbuddy-Runtime auf Basis des Webtop-Desktop-Images",
         },
         custom: {
           label: "Benutzerdefiniertes Image",

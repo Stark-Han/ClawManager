@@ -27,11 +27,6 @@ assert(
   portalSource.includes('instance.type === "workbuddy"'),
   "Portal must expose the Workbuddy Pro /config workspace.",
 );
-assert(
-  portalSource.includes('instance.runtime_variant === "linux"') &&
-    portalSource.includes('instance.type === "codex"'),
-  "Portal workspace must be available only for Linux Workbuddy/Codex variants.",
-);
 
 assert(
   portalSource.includes('selectedInstance.instance_mode === "pro"'),

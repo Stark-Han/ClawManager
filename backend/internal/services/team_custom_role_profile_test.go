@@ -76,7 +76,7 @@ func TestPlanTeamMembersCompilesCustomRoleProfileIntoExistingIdentityFlow(t *tes
 	leaderAgents := buildTeamMemberAgentsMarkdown(&models.Team{
 		ID: 7, CommunicationMode: teamCommunicationModeLeaderMediated,
 	}, plans[0])
-	for _, expected := range []string{"Use team_complete_task only", "Leader Team Context Preflight", "read ./team.json and ./team-introduction.md"} {
+	for _, expected := range []string{"team_complete_task once", "Leader Team Context Preflight", "read ./team.json and ./team-introduction.md"} {
 		if !strings.Contains(leaderAgents, expected) {
 			t.Fatalf("custom Leader AGENTS.md missing %q:\n%s", expected, leaderAgents)
 		}

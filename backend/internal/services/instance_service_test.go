@@ -63,7 +63,7 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 	t.Setenv("CLAWMANAGER_LLM_GATEWAY_BASE_URL", "http://gateway.example/api/v1/gateway/llm")
 
 	token := "igt_test_token"
-	for _, instanceType := range []string{"openclaw", "hermes"} {
+	for _, instanceType := range []string{"openclaw", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness} {
 		t.Run(instanceType, func(t *testing.T) {
 			service := &instanceService{
 				llmModelRepo: &stubLLMModelRepository{
@@ -98,7 +98,7 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 			if env["CLAWMANAGER_LLM_REASONING"] != `{"Claude 3.7 Sonnet":false,"GPT-4.1":false,"auto":false,"deepseek-r1":false}` {
 				t.Fatalf("expected authoritative reasoning settings, got %q", env["CLAWMANAGER_LLM_REASONING"])
 			}
-			if env["CLAWMANAGER_LLM_REASONING_CONTROL"] != `{"Claude 3.7 Sonnet":"none","GPT-4.1":"none","auto":"none","deepseek-r1":"none"}` {
+			if env["CLAWMANAGER_LLM_REASONING_CONTROL"] != `{"Claude 3.7 Sonnet":"","GPT-4.1":"","auto":"","deepseek-r1":"deepseek-thinking"}` {
 				t.Fatalf("expected authoritative reasoning controls, got %q", env["CLAWMANAGER_LLM_REASONING_CONTROL"])
 			}
 			if env["OPENAI_MODEL"] != "auto" {
@@ -107,7 +107,40 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 			if env["CLAWMANAGER_LLM_API_KEY"] != token || env["OPENAI_API_KEY"] != token {
 				t.Fatalf("expected gateway token aliases to be preserved")
 			}
+			if instanceType == "opencode" {
+				assertOpenCodeGatewayConfig(t, env["OPENCODE_CONFIG_CONTENT"])
+			}
 		})
+	}
+}
+
+func assertOpenCodeGatewayConfig(t *testing.T, raw string) {
+	t.Helper()
+	var config struct {
+		Model    string `json:"model"`
+		Provider map[string]struct {
+			NPM     string                       `json:"npm"`
+			Options map[string]string            `json:"options"`
+			Models  map[string]map[string]string `json:"models"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatalf("OPENCODE_CONFIG_CONTENT is not valid JSON: %v", err)
+	}
+	provider, ok := config.Provider["clawmanager"]
+	if !ok {
+		t.Fatalf("missing clawmanager provider in OpenCode config: %s", raw)
+	}
+	if config.Model != "clawmanager/auto" || provider.NPM != "@ai-sdk/openai-compatible" {
+		t.Fatalf("unexpected OpenCode provider config: %s", raw)
+	}
+	if provider.Options["baseURL"] != "{env:CLAWMANAGER_LLM_BASE_URL}" || provider.Options["apiKey"] != "{env:CLAWMANAGER_LLM_API_KEY}" {
+		t.Fatalf("OpenCode config must use governed gateway env references: %s", raw)
+	}
+	for _, model := range []string{"auto", "GPT-4.1", "Claude 3.7 Sonnet", "deepseek-r1"} {
+		if _, ok := provider.Models[model]; !ok {
+			t.Fatalf("OpenCode config is missing model %q: %s", model, raw)
+		}
 	}
 }
 
@@ -306,7 +339,7 @@ func TestBuildAgentEnvInjectsHermesAgentConfig(t *testing.T) {
 }
 
 func TestPersistentVolumeMountPathNormalizesManagedDesktopRuntimes(t *testing.T) {
-	for _, instanceType := range []string{"openclaw", "ubuntu", "webtop", "hermes"} {
+	for _, instanceType := range []string{"openclaw", "ubuntu", "webtop", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness} {
 		t.Run(instanceType, func(t *testing.T) {
 			got := persistentVolumeMountPath(&models.Instance{
 				Type:      instanceType,
@@ -337,12 +370,24 @@ func TestManagedRuntimePersistentDirKeepsHermesSubdirectory(t *testing.T) {
 	}
 }
 
-func TestWindowsWorkbuddySkipsGuestOnlyManagedIntegration(t *testing.T) {
-	if supportsManagedRuntimeIntegration("workbuddy") {
-		t.Fatal("Windows Workbuddy must not receive Linux runtime integration")
+func TestManagedRuntimePersistentDirKeepsDeepSeekHarnessSubdirectory(t *testing.T) {
+	if got := managedRuntimePersistentDir(&models.Instance{Type: RuntimeTypeDeepSeekHarness, MountPath: "/config"}); got != "/config/.dsh" {
+		t.Fatalf("DeepSeek Harness Pro persistent dir = %q", got)
 	}
-	if supportsRuntimeConfigInjection("workbuddy") {
-		t.Fatal("Windows Workbuddy must not receive Linux runtime config injection")
+	workspace := "/workspaces/deepseek-harness/user-7/instance-11"
+	if got := managedRuntimePersistentDir(&models.Instance{
+		Type: RuntimeTypeDeepSeekHarness, InstanceMode: InstanceModeLite, RuntimeType: RuntimeBackendGateway, WorkspacePath: &workspace,
+	}); got != workspace+"/home/.dsh" {
+		t.Fatalf("DeepSeek Harness Lite persistent dir = %q", got)
+	}
+}
+
+func TestWorkbuddySupportsManagedRuntimeInjection(t *testing.T) {
+	if !supportsManagedRuntimeIntegration("workbuddy") {
+		t.Fatal("expected Workbuddy to support managed runtime integration")
+	}
+	if !supportsRuntimeConfigInjection("workbuddy") {
+		t.Fatal("expected Workbuddy to support runtime config injection")
 	}
 
 	t.Setenv("CLAWMANAGER_AGENT_CONTROL_BASE_URL", "http://agent-control.example")
@@ -350,81 +395,20 @@ func TestWindowsWorkbuddySkipsGuestOnlyManagedIntegration(t *testing.T) {
 	env, err := (&instanceService{}).buildAgentEnv(&models.Instance{
 		ID:                  923,
 		Type:                "workbuddy",
-		RuntimeVariant:      WorkbuddyRuntimeWindows,
 		DiskGB:              20,
-		MountPath:           "/storage",
+		MountPath:           "/config",
 		AgentBootstrapToken: &token,
 	})
 	if err != nil {
 		t.Fatalf("buildAgentEnv returned error: %v", err)
 	}
-	if len(env) != 0 {
-		t.Fatalf("expected no guest agent environment for Windows MVP, got %#v", env)
+	if env["CLAWMANAGER_AGENT_RUNTIME_TYPE"] != "workbuddy" {
+		t.Fatalf("expected Workbuddy agent runtime type, got %q", env["CLAWMANAGER_AGENT_RUNTIME_TYPE"])
+	}
+	if env["CLAWMANAGER_AGENT_PERSISTENT_DIR"] != "/config" {
+		t.Fatalf("expected Workbuddy agent persistent dir /config, got %q", env["CLAWMANAGER_AGENT_PERSISTENT_DIR"])
 	}
 }
-
-func TestValidateWindowsWorkbuddyRequest(t *testing.T) {
-	valid := CreateInstanceRequest{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 80}
-	if err := validateWindowsWorkbuddyRequest(valid); err != nil {
-		t.Fatalf("valid Workbuddy request rejected: %v", err)
-	}
-
-	cases := []CreateInstanceRequest{
-		{Type: "workbuddy", Mode: InstanceModeLite, CPUCores: 6, MemoryGB: 12, DiskGB: 80},
-		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 4, MemoryGB: 12, DiskGB: 80},
-		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 8, DiskGB: 80},
-		{Type: "workbuddy", Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 64},
-	}
-	for _, request := range cases {
-		if err := validateWindowsWorkbuddyRequest(request); err == nil {
-			t.Fatalf("expected invalid Workbuddy request to be rejected: %#v", request)
-		}
-	}
-}
-
-func TestValidateWindowsCodexRequest(t *testing.T) {
-	valid := CreateInstanceRequest{Type: RuntimeTypeCodex, Mode: InstanceModePro, CPUCores: 6, MemoryGB: 12, DiskGB: 80}
-	if err := validateWindowsWorkbuddyRequest(valid); err != nil {
-		t.Fatalf("valid Windows Codex request rejected: %v", err)
-	}
-
-	invalid := valid
-	invalid.DiskGB = 64
-	if err := validateWindowsWorkbuddyRequest(invalid); err == nil {
-		t.Fatal("expected Windows Codex request with a non-golden disk size to be rejected")
-	}
-}
-
-func TestWindowsWorkbuddyInstanceEnvReservesHostMemory(t *testing.T) {
-	env := windowsWorkbuddyInstanceEnv(map[string]string{"DISK_SIZE": "64G"}, &models.Instance{
-		Type:     "workbuddy",
-		CPUCores: 6,
-		MemoryGB: 10,
-	})
-	if env["RAM_SIZE"] != "8G" || env["CPU_CORES"] != "6" || env["DISK_SIZE"] != "64G" {
-		t.Fatalf("unexpected Windows Workbuddy environment: %#v", env)
-	}
-}
-
-func TestRuntimeNodeSelectorPinsWindowsWorkbuddyNodes(t *testing.T) {
-	existing := map[string]string{"storage-node": "node-a"}
-	selector := runtimeNodeSelector("workbuddy", existing)
-	if selector[workbuddyWindowsNodeLabel] != "true" || selector["storage-node"] != "node-a" {
-		t.Fatalf("unexpected Windows Workbuddy node selector: %#v", selector)
-	}
-	if _, ok := existing[workbuddyWindowsNodeLabel]; ok {
-		t.Fatalf("runtimeNodeSelector mutated the existing selector: %#v", existing)
-	}
-	if selector := runtimeNodeSelector(RuntimeTypeCodex, nil); selector[workbuddyWindowsNodeLabel] != "true" {
-		t.Fatalf("Windows Codex did not receive the Windows node label: %#v", selector)
-	}
-
-	linuxSelector := runtimeNodeSelector("openclaw", existing)
-	if _, ok := linuxSelector[workbuddyWindowsNodeLabel]; ok {
-		t.Fatalf("non-Windows runtime received Windows node label: %#v", linuxSelector)
-	}
-}
-
 func TestRuntimeVolumeInitScriptsAddsHermesLayoutMigration(t *testing.T) {
 	scripts := runtimeVolumeInitScripts("hermes", "/config")
 	if len(scripts) != 1 {
@@ -435,6 +419,23 @@ func TestRuntimeVolumeInitScriptsAddsHermesLayoutMigration(t *testing.T) {
 	}
 	if !strings.Contains(scripts[0].Script, `target="$base/.hermes"`) {
 		t.Fatalf("expected Hermes init script to target /config/.hermes, got %s", scripts[0].Script)
+	}
+}
+
+func TestRuntimeVolumeInitScriptsConfiguresOpenCodeKonsoleShell(t *testing.T) {
+	scripts := runtimeVolumeInitScripts("opencode", "/config")
+	if len(scripts) != 1 {
+		t.Fatalf("expected one OpenCode volume init script, got %d", len(scripts))
+	}
+	for _, expected := range []string{
+		`.config/konsolerc`,
+		`.local/share/konsole/ClawManager.profile`,
+		`DefaultProfile=ClawManager.profile`,
+		`Command=/bin/bash`,
+	} {
+		if !strings.Contains(scripts[0].Script, expected) {
+			t.Fatalf("expected OpenCode init script to contain %q, got %s", expected, scripts[0].Script)
+		}
 	}
 }
 

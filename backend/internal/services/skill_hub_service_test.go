@@ -27,9 +27,14 @@ func TestIsHubPublishableBlob(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "medium risk blocked",
+			name: "medium risk allowed when scanned",
 			blob: &models.SkillBlob{ScanStatus: "completed", RiskLevel: skillRiskMedium, ObjectKey: "key"},
-			want: false,
+			want: true,
+		},
+		{
+			name: "high risk allowed when scanned",
+			blob: &models.SkillBlob{ScanStatus: "completed", RiskLevel: skillRiskHigh, ObjectKey: "key"},
+			want: true,
 		},
 		{
 			name: "pending scan blocked",
@@ -94,6 +99,14 @@ func TestCanAttachSkillRules(t *testing.T) {
 	}
 	if !svc.CanAttachSkill(99, "admin", privateSkill, otherInstance) {
 		t.Fatal("admin should attach any skill to any instance")
+	}
+	highRiskSkill := &models.Skill{UserID: 1, SourceType: skillSourceUploaded, Status: "active", Visibility: skillVisibilityPrivate, RiskLevel: skillRiskHigh}
+	if !svc.CanAttachSkill(1, "user", highRiskSkill, ownInstance) {
+		t.Fatal("owner should attach high-risk skill to own instance")
+	}
+	mediumRiskPublic := &models.Skill{UserID: 2, SourceType: skillSourceUploaded, Status: "active", Visibility: skillVisibilityPublic, RiskLevel: skillRiskMedium}
+	if !svc.CanAttachSkill(3, "user", mediumRiskPublic, otherInstance) {
+		t.Fatal("user should attach medium-risk public skill to own instance")
 	}
 }
 
@@ -242,11 +255,14 @@ func TestPublishToHubRejectsPendingScan(t *testing.T) {
 	}
 }
 
-func TestPublishToHubRejectsMediumRisk(t *testing.T) {
+func TestPublishToHubAllowsMediumRisk(t *testing.T) {
 	svc, _ := newPublishTestStub(&models.SkillBlob{ScanStatus: "completed", RiskLevel: skillRiskMedium, ObjectKey: "key.zip"})
-	_, err := svc.PublishToHub(1, "user", 1, []int{1})
-	if err == nil || err.Error() != "skill_risk_blocked" {
-		t.Fatalf("expected skill_risk_blocked, got %v", err)
+	item, err := svc.PublishToHub(1, "user", 1, []int{1})
+	if err != nil {
+		t.Fatalf("PublishToHub() error = %v", err)
+	}
+	if item == nil || !strings.EqualFold(item.Visibility, skillVisibilityPublic) {
+		t.Fatalf("expected medium-risk publish to succeed, got %#v", item)
 	}
 }
 
@@ -344,7 +360,9 @@ func (r *importTestInstanceRepo) GetByID(id int) (*models.Instance, error) {
 	return nil, nil
 }
 func (r *importTestInstanceRepo) FindByPodIP(string) (*models.Instance, error) { return nil, nil }
-func (r *importTestInstanceRepo) GetByAccessToken(string) (*models.Instance, error) { panic("not used") }
+func (r *importTestInstanceRepo) GetByAccessToken(string) (*models.Instance, error) {
+	panic("not used")
+}
 func (r *importTestInstanceRepo) GetByAgentBootstrapToken(string) (*models.Instance, error) {
 	panic("not used")
 }
@@ -355,7 +373,7 @@ func (r *importTestInstanceRepo) GetAll(int, int) ([]models.Instance, error) {
 	}
 	return items, nil
 }
-func (r *importTestInstanceRepo) CountAll() (int, error)                    { panic("not used") }
+func (r *importTestInstanceRepo) CountAll() (int, error) { panic("not used") }
 func (r *importTestInstanceRepo) GetByUserID(int, int, int) ([]models.Instance, error) {
 	panic("not used")
 }
@@ -382,8 +400,8 @@ func (r *importTestInstanceRepo) SetWorkspacePath(context.Context, int, string) 
 func (r *importTestInstanceRepo) UpdateWorkspaceUsage(context.Context, int, int64) error {
 	panic("not used")
 }
-func (r *importTestInstanceRepo) Update(*models.Instance) error             { panic("not used") }
-func (r *importTestInstanceRepo) Delete(int) error                          { panic("not used") }
+func (r *importTestInstanceRepo) Update(*models.Instance) error { panic("not used") }
+func (r *importTestInstanceRepo) Delete(int) error              { panic("not used") }
 
 type noopInstanceCommandService struct{}
 
@@ -413,8 +431,8 @@ func TestPublishFromInstanceRejectsDiscoveredSkill(t *testing.T) {
 				SourceType: skillSourceDiscovered, Visibility: skillVisibilityPrivate, CurrentVersionID: &versionID,
 			},
 		},
-		versions: map[int]*models.SkillVersion{versionID: {ID: versionID, SkillID: 1, BlobID: blobID}},
-		blobs:    map[int]*models.SkillBlob{blobID: {ID: blobID, ScanStatus: "completed", RiskLevel: skillRiskNone, ObjectKey: "key.zip"}},
+		versions:       map[int]*models.SkillVersion{versionID: {ID: versionID, SkillID: 1, BlobID: blobID}},
+		blobs:          map[int]*models.SkillBlob{blobID: {ID: blobID, ScanStatus: "completed", RiskLevel: skillRiskNone, ObjectKey: "key.zip"}},
 		instanceSkills: []models.InstanceSkill{{InstanceID: 1, SkillID: 1, Status: "active", SourceType: "discovered_in_instance"}},
 	}
 	instRepo := &importTestInstanceRepo{instances: map[int]*models.Instance{1: {ID: 1, UserID: 1}}}
@@ -435,8 +453,8 @@ func TestImportInstanceSkillToLibraryPendingPackage(t *testing.T) {
 				SourceType: skillSourceDiscovered, Visibility: skillVisibilityPrivate, CurrentVersionID: &versionID,
 			},
 		},
-		versions: map[int]*models.SkillVersion{versionID: {ID: versionID, SkillID: 1, BlobID: blobID}},
-		blobs:    map[int]*models.SkillBlob{blobID: {ID: blobID, ScanStatus: "pending", RiskLevel: skillRiskUnknown, ObjectKey: ""}},
+		versions:       map[int]*models.SkillVersion{versionID: {ID: versionID, SkillID: 1, BlobID: blobID}},
+		blobs:          map[int]*models.SkillBlob{blobID: {ID: blobID, ScanStatus: "pending", RiskLevel: skillRiskUnknown, ObjectKey: ""}},
 		instanceSkills: []models.InstanceSkill{{InstanceID: 1, SkillID: 1, Status: "active", SourceType: "discovered_in_instance"}},
 		tagAssignments: map[int][]int{},
 		tags: map[int]*models.SkillHubTag{

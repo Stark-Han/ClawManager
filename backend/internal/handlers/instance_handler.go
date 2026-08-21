@@ -146,7 +146,7 @@ type InstanceHandler struct {
 }
 
 // NewInstanceHandler creates a new instance handler
-func NewInstanceHandler(instanceService services.InstanceService, instanceAgentService services.InstanceAgentService, runtimeStatusService services.InstanceRuntimeStatusService, instanceCommandService services.InstanceCommandService, instanceConfigRevisionService services.InstanceConfigRevisionService, openClawConfigService services.OpenClawConfigService, skillService services.SkillService, externalAccessService services.InstanceExternalAccessService, aiObservabilityService services.AIObservabilityService, proxyOptions ...services.InstanceProxyServiceOption) *InstanceHandler {
+func NewInstanceHandler(instanceService services.InstanceService, instanceAgentService services.InstanceAgentService, runtimeStatusService services.InstanceRuntimeStatusService, instanceCommandService services.InstanceCommandService, instanceConfigRevisionService services.InstanceConfigRevisionService, openClawConfigService services.OpenClawConfigService, skillService services.SkillService, externalAccessService services.InstanceExternalAccessService, aiObservabilityService services.AIObservabilityService, shellService *services.InstanceShellService, proxyOptions ...services.InstanceProxyServiceOption) *InstanceHandler {
 	accessService := services.NewInstanceAccessService()
 	return &InstanceHandler{
 		instanceService:               instanceService,
@@ -156,7 +156,7 @@ func NewInstanceHandler(instanceService services.InstanceService, instanceAgentS
 		instanceConfigRevisionService: instanceConfigRevisionService,
 		accessService:                 accessService,
 		proxyService:                  services.NewInstanceProxyService(accessService, proxyOptions...),
-		shellService:                  services.NewInstanceShellService(),
+		shellService:                  shellService,
 		openClawTransferService:       services.NewOpenClawTransferService(),
 		openClawConfigService:         openClawConfigService,
 		skillService:                  skillService,
@@ -213,7 +213,7 @@ type CreateInstanceRequest struct {
 	Name                 string                       `json:"name" binding:"required,min=3,max=50"`
 	Owner                *string                      `json:"owner,omitempty" binding:"omitempty,max=128"`
 	Description          *string                      `json:"description,omitempty"`
-	Type                 string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop hermes workbuddy opencode codex claude-code"`
+	Type                 string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness codex claude-code"`
 	RuntimeVariant       string                       `json:"runtime_variant,omitempty" binding:"omitempty,oneof=linux windows"`
 	Mode                 string                       `json:"mode" binding:"omitempty,oneof=lite pro"`
 	InstanceMode         string                       `json:"instance_mode" binding:"omitempty,oneof=lite pro"`
@@ -593,8 +593,8 @@ func buildLiteBatchCreateRequests(req BatchCreateLiteInstancesRequest) ([]servic
 	if template.Type == "" {
 		template.Type = "openclaw"
 	}
-	if template.Type != "openclaw" && template.Type != "hermes" && template.Type != "opencode" {
-		return nil, nil, fmt.Errorf("lite batch create supports openclaw, hermes, or opencode instances")
+	if template.Type != "openclaw" && template.Type != "hermes" && template.Type != services.RuntimeTypeOpenCode && template.Type != services.RuntimeTypeDeepSeekHarness {
+		return nil, nil, fmt.Errorf("lite batch create supports openclaw, hermes, opencode, or deepseek-harness instances")
 	}
 	if template.CPUCores <= 0 {
 		template.CPUCores = 2
@@ -1145,7 +1145,7 @@ func (h *InstanceHandler) GetRuntimeDetails(c *gin.Context) {
 		Commands: commands,
 	}
 	if h.aiObservabilityService != nil && instance != nil &&
-		(instance.Type == "openclaw" || instance.Type == "hermes" || instance.Type == "opencode") {
+		(instance.Type == "openclaw" || instance.Type == "hermes" || instance.Type == services.RuntimeTypeOpenCode || instance.Type == services.RuntimeTypeDeepSeekHarness) {
 		var systemInfo map[string]interface{}
 		if runtime != nil {
 			systemInfo = runtime.SystemInfo
@@ -1509,17 +1509,36 @@ func (h *InstanceHandler) GenerateAccessToken(c *gin.Context) {
 		true,
 	)
 
-	// Return token and URLs
+	proxyURL := h.proxyService.GetProxyURLForInstance(instance, token.Token)
+
+	// Dedicated runtime origins cannot reuse the HttpOnly cookie set on the
+	// ClawManager origin. Their first navigation must carry the short-lived
+	// token so the dedicated origin can validate it and promote it to its own
+	// origin-scoped cookie. Same-origin proxy URLs continue to use the clean,
+	// token-free entry URL.
 	response := map[string]interface{}{
 		"token":                    token.Token,
-		"access_url":               accessURL,
-		"proxy_url":                h.proxyService.GetProxyURLForInstance(instance, token.Token),
+		"access_url":               browserAccessEntryURL(accessURL, proxyURL),
+		"proxy_url":                proxyURL,
 		"expires_at":               token.ExpiresAt,
 		"desktop_proxy_mode":       desktopProxyMode(directProxyEnabled, upstream),
 		"desktop_upstream_present": upstream != "",
 	}
 
 	utils.Success(c, http.StatusOK, "Access token generated successfully", response)
+}
+
+func browserAccessEntryURL(accessURL, proxyURL string) string {
+	accessURL = strings.TrimSpace(accessURL)
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return accessURL
+	}
+	parsed, err := url.Parse(accessURL)
+	if err == nil && parsed.IsAbs() {
+		return proxyURL
+	}
+	return accessURL
 }
 
 // AccessInstance handles instance access via token
@@ -1560,8 +1579,8 @@ func (h *InstanceHandler) StreamShell(c *gin.Context) {
 		return
 	}
 
-	if !strings.EqualFold(strings.TrimSpace(instance.RuntimeType), "shell") {
-		utils.Error(c, http.StatusBadRequest, "Shell access is only available for shell runtime instances")
+	if !strings.EqualFold(strings.TrimSpace(instance.RuntimeType), "shell") && !services.IsOpenCodeLiteTUIInstance(instance) {
+		utils.Error(c, http.StatusBadRequest, "Shell access is only available for shell or OpenCode Lite instances")
 		return
 	}
 
@@ -1570,7 +1589,7 @@ func (h *InstanceHandler) StreamShell(c *gin.Context) {
 		return
 	}
 
-	if err := h.shellService.Stream(c.Request.Context(), instance.UserID, instance.ID, c.Writer, c.Request); err != nil {
+	if err := h.shellService.Stream(c.Request.Context(), instance, c.Writer, c.Request); err != nil {
 		if !c.Writer.Written() {
 			utils.HandleError(c, err)
 			return
@@ -1657,13 +1676,24 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 
 	// Promote only a validated ClawManager access token. Runtime applications may
 	// also use a token query parameter for their own websocket/session protocol.
+	cookiePath := fmt.Sprintf("/api/v1/instances/%d/proxy", id)
+	cookieSecure := false
+	originRuntimeType, originManaged := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
+	instanceRuntimeType, instanceManaged := services.NormalizeV2RuntimeType(accessToken.InstanceType)
+	dedicatedOrigin := originManaged && instanceManaged && originRuntimeType == instanceRuntimeType &&
+		originRuntimeType == services.RuntimeTypeDeepSeekHarness
+	if dedicatedOrigin {
+		cookiePath = "/"
+		cookieSecure = true
+		c.SetSameSite(http.SameSiteNoneMode)
+	}
 	c.SetCookie(
 		cookieName,
 		queryToken,
 		int(time.Hour.Seconds()),
-		fmt.Sprintf("/api/v1/instances/%d/proxy", id),
+		cookiePath,
 		"",
-		false,
+		cookieSecure,
 		true,
 	)
 	return queryToken, true
@@ -1932,8 +1962,8 @@ func (h *InstanceHandler) RefreshInstanceSkills(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if instance.Type != "openclaw" && instance.Type != "hermes" {
-		utils.Error(c, http.StatusBadRequest, "skill inventory sync is only available for openclaw and hermes instances")
+	if instance.Type != "openclaw" && instance.Type != "hermes" && instance.Type != services.RuntimeTypeOpenCode && instance.Type != services.RuntimeTypeDeepSeekHarness {
+		utils.Error(c, http.StatusBadRequest, "skill inventory sync is only available for managed runtime instances")
 		return
 	}
 	userID, _ := c.Get("userID")
@@ -2401,6 +2431,7 @@ func (h *InstanceHandler) GetSharedInstanceSession(c *gin.Context) {
 	if !ok {
 		return
 	}
+	proxyURL := h.proxyService.GetProxyURLForInstance(instance, instanceToken.Token)
 	workspaceAccess, err := services.NormalizeExternalWorkspaceAccess(access.WorkspaceAccess)
 	if err != nil {
 		workspaceAccess = services.ExternalWorkspaceAccessNone
@@ -2421,7 +2452,7 @@ func (h *InstanceHandler) GetSharedInstanceSession(c *gin.Context) {
 			"instance_mode": instance.InstanceMode,
 			"runtime_type":  instance.RuntimeType,
 		},
-		"access_url":          instanceToken.AccessURL,
+		"access_url":          browserAccessEntryURL(instanceToken.AccessURL, proxyURL),
 		"session_expires_at":  instanceToken.ExpiresAt,
 		"share_expires_at":    access.ExpiresAt,
 		"workspace_access":    workspaceAccess,
@@ -2655,7 +2686,11 @@ func shortExternalAccessEntryRedirectTarget(method, requestPath, code, canonical
 	if err != nil || parsed.Path == "" {
 		return ""
 	}
-	if !strings.HasPrefix(parsed.Path, "/api/v1/instances/") {
+	isInternalProxyPath := strings.HasPrefix(parsed.Path, "/api/v1/instances/")
+	isDedicatedRuntimeURL := parsed.IsAbs() &&
+		(parsed.Scheme == "https" || parsed.Scheme == "http") &&
+		strings.TrimSpace(parsed.Host) != ""
+	if !isInternalProxyPath && !isDedicatedRuntimeURL {
 		return ""
 	}
 	return sharedExternalAccessPagePath(code)
