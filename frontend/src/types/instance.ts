@@ -17,7 +17,9 @@ export interface Instance {
     | "hermes"
     | "opencode"
     | "workbuddy"
-    | "deepseek-harness";
+    | "deepseek-harness"
+    | "codex"
+    | "claude-code";
   runtime_type: "desktop" | "shell" | "gateway";
   runtime_variant?: "linux" | "windows";
   instance_mode: "lite" | "pro";
@@ -54,7 +56,9 @@ export type V2InstanceType =
   | "hermes"
   | "opencode"
   | "workbuddy"
-  | "deepseek-harness";
+  | "deepseek-harness"
+  | "codex"
+  | "claude-code";
 
 export function formatInstanceType(type: string): string {
   switch (type) {
@@ -68,6 +72,10 @@ export function formatInstanceType(type: string): string {
       return "Workbuddy";
     case "deepseek-harness":
       return "DeepSeek Harness";
+    case "codex":
+      return "Codex";
+    case "claude-code":
+      return "Claude Code";
     default:
       return type;
   }
@@ -210,10 +218,13 @@ export interface CreateInstanceRequest {
     | "hermes"
     | "opencode"
     | "workbuddy"
-    | "deepseek-harness";
+    | "deepseek-harness"
+    | "codex"
+    | "claude-code";
   mode?: InstanceMode;
   instance_mode?: InstanceMode;
   runtime_type?: "desktop" | "shell" | "gateway";
+  runtime_variant?: "linux" | "windows";
   desktop_stream_profile?: DesktopStreamProfile;
   cpu_cores: number;
   memory_gb: number;

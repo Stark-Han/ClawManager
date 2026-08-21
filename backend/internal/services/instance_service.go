@@ -187,7 +187,8 @@ type CreateInstanceRequest struct {
 	Name                    string              `json:"name" validate:"required,min=3,max=50"`
 	Owner                   *string             `json:"owner,omitempty"`
 	Description             *string             `json:"description,omitempty"`
-	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness"`
+	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness codex claude-code"`
+	RuntimeVariant          string              `json:"runtime_variant,omitempty" validate:"omitempty,oneof=linux windows"`
 	Mode                    string              `json:"mode" validate:"omitempty,oneof=lite pro"`
 	InstanceMode            string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
 	RuntimeType             string              `json:"runtime_type" validate:"omitempty,oneof=gateway desktop shell"`
@@ -288,10 +289,11 @@ type gatewayTokenAliasRecorder interface {
 	UpsertGatewayTokenAlias(ctx context.Context, instanceID int, accessToken string, expiresAt time.Time) error
 }
 type gatewayModelInjection struct {
-	defaultModel         string
-	modelsJSON           string
-	reasoningJSON        string
-	reasoningControlJSON string
+	defaultModel            string
+	codingAgentDefaultModel string
+	modelsJSON              string
+	reasoningJSON           string
+	reasoningControlJSON    string
 }
 
 type InstanceServiceOption func(*instanceService)
@@ -1267,6 +1269,23 @@ func (s *instanceService) securityModeForInstance(instanceType string) k8s.PodSe
 	return k8s.PodSecurityDefault
 }
 
+func (s *instanceService) securityModeForRuntime(instance *models.Instance) k8s.PodSecurityMode {
+	if isWindowsVMInstance(instance) {
+		return k8s.PodSecurityPrivileged
+	}
+	if instance == nil {
+		return k8s.PodSecurityDefault
+	}
+	if s != nil && s.allowPrivilegedPods {
+		return k8s.PodSecurityPrivileged
+	}
+	switch strings.ToLower(strings.TrimSpace(instance.Type)) {
+	case "openclaw", "opencode", "workbuddy", RuntimeTypeCodex, RuntimeTypeClaudeCode:
+		return k8s.PodSecurityChromiumCompat
+	default:
+		return k8s.PodSecurityDefault
+	}
+}
 func (s *instanceService) ensureGatewayToken(instance *models.Instance) (string, error) {
 	if instance.AccessToken != nil && strings.TrimSpace(*instance.AccessToken) != "" {
 		token := strings.TrimSpace(*instance.AccessToken)
@@ -1439,6 +1458,9 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 		"OPENAI_API_BASE":                   baseURL,
 		"OPENAI_API_KEY":                    token,
 		"OPENAI_MODEL":                      modelInjection.defaultModel,
+	}
+	if (strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeCodex) || strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeClaudeCode)) && modelInjection.codingAgentDefaultModel != "" {
+		env["OPENAI_MODEL"] = modelInjection.codingAgentDefaultModel
 	}
 	if strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeOpenCode) {
 		env["OPENCODE_SERVER_PASSWORD"] = token
@@ -1805,6 +1827,7 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 		models.PopulateLLMReasoningCapability(&item)
 		reasoningForInjection[displayName] = item.SupportsReasoning && item.ReasoningEnabled
 		reasoningControlForInjection[displayName] = item.ReasoningControl
+
 	}
 
 	rawModels, err := json.Marshal(modelsForInjection)
@@ -1821,7 +1844,13 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 	}
 
 	return &gatewayModelInjection{
-		defaultModel:         "auto",
+		defaultModel: "auto",
+		codingAgentDefaultModel: func() string {
+			if len(modelsForInjection) > 1 {
+				return modelsForInjection[1]
+			}
+			return ""
+		}(),
 		modelsJSON:           string(rawModels),
 		reasoningJSON:        string(rawReasoning),
 		reasoningControlJSON: string(rawReasoningControl),

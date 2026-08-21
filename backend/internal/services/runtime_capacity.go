@@ -11,6 +11,8 @@ const (
 	RuntimeTypeHermes          = "hermes"
 	RuntimeTypeOpenCode        = "opencode"
 	RuntimeTypeDeepSeekHarness = "deepseek-harness"
+	RuntimeTypeCodex           = "codex"
+	RuntimeTypeClaudeCode      = "claude-code"
 
 	InstanceModeLite = "lite"
 	InstanceModePro  = "pro"

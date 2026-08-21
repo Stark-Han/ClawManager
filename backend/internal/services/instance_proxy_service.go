@@ -146,7 +146,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	// Extract the actual path from the request (remove the proxy prefix)
 	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
-	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType) && !dedicatedRuntimeOrigin
+	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType, targetPort) && !dedicatedRuntimeOrigin
 
 	// Build target URL
 	targetURL, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
@@ -1435,7 +1435,7 @@ func usesHTTPSUpstream(instanceType string, targetPort int32) bool {
 		return true
 	}
 	switch instanceType {
-	case "ubuntu", "webtop", "hermes", "openclaw", "workbuddy", RuntimeTypeDeepSeekHarness:
+	case "ubuntu", "webtop", "hermes", "openclaw", RuntimeTypeDeepSeekHarness:
 		return true
 	default:
 		return false
@@ -1462,7 +1462,7 @@ func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanc
 	if s.isOpenCodeLiteProxyInstance(instanceID, instanceType) {
 		return true
 	}
-	return s.shouldRewriteHTML(instanceType)
+	return s.shouldRewriteHTML(instanceType, targetPort)
 }
 
 // IsWebtopInstanceType reports whether the instance type is served by a
@@ -1479,9 +1479,11 @@ func (s *InstanceProxyService) IsWebtopInstance(instance *models.Instance) bool 
 }
 
 func usesWebtopRuntime(instanceType string, targetPort int32) bool {
-	return usesWebtopImage(instanceType) ||
-		((strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") ||
-			strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex)) && targetPort == 3001)
+	if strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") ||
+		strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex) {
+		return targetPort == 3001
+	}
+	return usesWebtopImage(instanceType)
 }
 
 func (s *InstanceProxyService) getCachedService(key serviceCacheKey) *k8s.ServiceInfo {

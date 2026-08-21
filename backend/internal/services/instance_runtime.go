@@ -113,9 +113,9 @@ func defaultPortForInstanceType(instanceType string) int32 {
 
 func defaultMountPathForInstanceType(instanceType string) string {
 	switch instanceType {
-	case "ubuntu", "webtop", "openclaw", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness:
+	case "ubuntu", "webtop", "openclaw", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness, RuntimeTypeClaudeCode:
 		return "/config"
-	case "workbuddy", "codex":
+	case "codex":
 		return "/storage"
 	default:
 		return "/home/user/data"
@@ -144,8 +144,11 @@ func defaultEnvForInstanceType(instanceType string) map[string]string {
 		env["CLAWMANAGER_SKILL_DIR"] = "/config/workspace/.opencode/skills"
 		env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
 		return env
-	case "workbuddy":
-		return defaultWebtopDesktopEnv("Workbuddy")
+	case RuntimeTypeClaudeCode:
+		env := defaultWebtopDesktopEnv("Claude Code")
+		env["CLAUDE_CONFIG_DIR"] = "/config/.claude"
+		env["CLAWMANAGER_PROJECT_PATH"] = "/config/workspace"
+		return env
 	default:
 		return map[string]string{}
 	}

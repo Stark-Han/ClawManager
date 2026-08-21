@@ -41,7 +41,6 @@ function supportsWorkspace(instance: Instance) {
     instance.type === "openclaw" ||
     instance.type === "hermes" ||
     instance.type === "opencode" ||
-    instance.type === "workbuddy" ||
     instance.type === "deepseek-harness" ||
     Boolean(instance.workspace_path)
   );

@@ -69,6 +69,19 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness:latest',
   },
   {
+    instance_type: 'codex',
+    runtime_type: 'desktop',
+    runtime_variant: 'windows',
+    display_name: 'Codex Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest',
+  },
+  {
+    instance_type: 'claude-code',
+    runtime_type: 'desktop',
+    display_name: 'Claude Code Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/claude-code:latest',
+  },
+  {
     instance_type: 'workbuddy',
     runtime_type: 'desktop',
     display_name: 'Workbuddy Pro',
@@ -84,6 +97,16 @@ const isRuntimeCardVisible = (card: Pick<RuntimeCardDefinition, 'instance_type'>
   !TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES.has(card.instance_type);
 const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(isRuntimeCardVisible);
 
+const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVariant, string>> = {
+  workbuddy: {
+    linux: 'ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest',
+    windows: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-workbuddy:latest',
+  },
+  codex: {
+    linux: 'ghcr.io/yuan-lab-llm/agentsruntime/codex:latest',
+    windows: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest',
+  },
+};
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
 const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...VISIBLE_PRO_BASE_RUNTIME_CARDS];
 

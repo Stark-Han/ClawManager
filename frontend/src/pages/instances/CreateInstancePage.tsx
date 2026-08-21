@@ -46,8 +46,36 @@ const BYTES_PER_GIB = 1024 * 1024 * 1024;
 const AGENT_PROTOCOL_VERSION = "v1";
 const CUSTOM_RESOURCE_PRESET = "custom";
 const SKILLS_PER_PAGE = 6;
-const supportsRuntimeInjection = (type: string) =>
-  type === "openclaw" || type === "hermes" || type === "workbuddy";
+type ManagedRuntimeVariant = "linux" | "windows";
+const inferManagedRuntimeVariant = (
+  type: string,
+  image?: string,
+): ManagedRuntimeVariant => {
+  const normalizedImage = image?.trim().toLowerCase() ?? "";
+  if (type === "workbuddy" && normalizedImage.includes("workbuddy-linux")) {
+    return "linux";
+  }
+  if (type === "codex" && normalizedImage.includes("agentsruntime/codex")) {
+    return "linux";
+  }
+  return "windows";
+};
+const resolveManagedRuntimeVariant = (
+  type: string,
+  setting?: SystemImageSetting | null,
+): ManagedRuntimeVariant | undefined =>
+  type === "workbuddy" || type === "codex"
+    ? setting?.runtime_variant ?? inferManagedRuntimeVariant(type, setting?.image)
+    : undefined;
+const supportsRuntimeInjection = (
+  type: string,
+  image?: string,
+  runtimeVariant?: ManagedRuntimeVariant,
+) =>
+  type === "openclaw" ||
+  type === "hermes" ||
+  (type === "workbuddy" &&
+    (runtimeVariant ?? inferManagedRuntimeVariant(type, image)) === "linux");
 const supportsSkillSelection = (type: string) =>
   supportsRuntimeInjection(type) || type === "deepseek-harness";
 const isProOnlyInstanceType = (type: string) =>
@@ -82,12 +110,16 @@ const DESKTOP_STREAM_PROFILES: Array<{
 const runtimeWorkspaceDirectory = (type: string) => {
   if (type === "hermes") return ".hermes";
   if (type === "opencode") return ".opencode";
+  if (type === "codex") return ".codex";
+  if (type === "claude-code") return ".claude";
   return ".openclaw";
 };
 
 const runtimeProductName = (type: string) => {
   if (type === "hermes") return "Hermes";
   if (type === "opencode") return "OpenCode";
+  if (type === "codex") return "Codex";
+  if (type === "claude-code") return "Claude Code";
   return "OpenClaw";
 };
 
@@ -131,6 +163,14 @@ const INSTANCE_TYPE_I18N_KEYS: Record<
     label: "instances.typeOptions.workbuddy.label",
     description: "instances.typeOptions.workbuddy.description",
   },
+  codex: {
+    label: "instances.typeOptions.codex.label",
+    description: "instances.typeOptions.codex.description",
+  },
+  "claude-code": {
+    label: "instances.typeOptions.claudeCode.label",
+    description: "instances.typeOptions.claudeCode.description",
+  },
   custom: {
     label: "instances.typeOptions.custom.label",
     description: "instances.typeOptions.custom.description",
@@ -149,8 +189,11 @@ const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "opencode",
       "workbuddy",
       "deepseek-harness",
+      "codex",
+      "claude-code",
     ].includes(type.id) &&
-    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id),
+    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id) &&
+    (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
 );
 const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
   (type) =>
@@ -160,9 +203,12 @@ const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "opencode",
       "workbuddy",
       "deepseek-harness",
+      "codex",
+      "claude-code",
       "custom",
     ].includes(type.id) &&
-    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id),
+    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id) &&
+    (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
 );
 
 const INSTANCE_MODE_OPTIONS: {
@@ -590,6 +636,11 @@ const CreateInstancePage: React.FC = () => {
     ) ??
     runtimeImageOptions[0] ??
     null;
+  const selectedRuntimeVariant = resolveManagedRuntimeVariant(
+    formData.type,
+    selectedRuntimeImage,
+  );
+  const isWindowsVM = selectedRuntimeVariant === "windows";
   const primaryCustomProRuntimeImage =
     runtimeImageSettings.find(
       (item) =>

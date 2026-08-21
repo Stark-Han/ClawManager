@@ -17,6 +17,8 @@ var orderedSystemImageTypes = []string{
 	"hermes",
 	"opencode",
 	"workbuddy",
+	RuntimeTypeCodex,
+	RuntimeTypeClaudeCode,
 	"debian",
 	"centos",
 	"custom",
@@ -30,6 +32,8 @@ var supportedSystemImageTypes = map[string]string{
 	"hermes":                   "Hermes Pro",
 	"opencode":                 "OpenCode Pro",
 	"workbuddy":                "Workbuddy Pro",
+	RuntimeTypeCodex:           "Codex Pro",
+	RuntimeTypeClaudeCode:      "Claude Code Pro",
 	"debian":                   "Debian Desktop",
 	"centos":                   "CentOS Desktop",
 	"custom":                   "Custom Image",
@@ -43,9 +47,16 @@ var defaultSystemImageSettings = map[string]string{
 	"hermes":                   "ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest",
 	"opencode":                 "ghcr.io/yuan-lab-llm/agentsruntime/opencode:latest",
 	"workbuddy":                "ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest",
+	RuntimeTypeCodex:           "ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest",
+	RuntimeTypeClaudeCode:      "ghcr.io/yuan-lab-llm/agentsruntime/claude-code:latest",
 	"debian":                   "docker.io/clawreef/debian-desktop:12",
 	"centos":                   "docker.io/clawreef/centos-desktop:9",
 	"custom":                   "registry.example.com/your-custom-image:latest",
+}
+
+var defaultSystemImageRuntimeVariants = map[string]string{
+	"workbuddy":      WorkbuddyRuntimeLinux,
+	RuntimeTypeCodex: WorkbuddyRuntimeWindows,
 }
 
 var defaultGatewaySystemImageSettings = map[string]string{
@@ -66,6 +77,8 @@ var defaultEnabledSystemImageTypes = map[string]bool{
 	"hermes":                   true,
 	"opencode":                 true,
 	"workbuddy":                true,
+	RuntimeTypeCodex:           true,
+	RuntimeTypeClaudeCode:      true,
 	RuntimeTypeDeepSeekHarness: true,
 }
 

@@ -147,10 +147,10 @@ func TestShouldRewriteHTMLForProxyOpenCodeLite(t *testing.T) {
 	service := NewInstanceProxyService(NewInstanceAccessService())
 	service.instanceRepo = repo
 
-	if !service.shouldRewriteHTMLForProxy(7, "opencode") {
+	if !service.shouldRewriteHTMLForProxy(7, "opencode", 3001) {
 		t.Fatal("expected lite opencode to force HTML rewrite")
 	}
-	if service.shouldRewriteHTMLForProxy(8, "opencode") {
+	if service.shouldRewriteHTMLForProxy(8, "opencode", 3001) {
 		t.Fatal("pro opencode must not force lite HTML rewrite")
 	}
 }

@@ -213,7 +213,8 @@ type CreateInstanceRequest struct {
 	Name                 string                       `json:"name" binding:"required,min=3,max=50"`
 	Owner                *string                      `json:"owner,omitempty" binding:"omitempty,max=128"`
 	Description          *string                      `json:"description,omitempty"`
-	Type                 string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness"`
+	Type                 string                       `json:"type" binding:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness codex claude-code"`
+	RuntimeVariant       string                       `json:"runtime_variant,omitempty" binding:"omitempty,oneof=linux windows"`
 	Mode                 string                       `json:"mode" binding:"omitempty,oneof=lite pro"`
 	InstanceMode         string                       `json:"instance_mode" binding:"omitempty,oneof=lite pro"`
 	RuntimeType          string                       `json:"runtime_type" binding:"omitempty,oneof=gateway desktop shell"`
