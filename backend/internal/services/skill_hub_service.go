@@ -63,6 +63,7 @@ type BatchInstallHubSkillResult struct {
 	InstanceSkill *InstanceSkillPayload `json:"instance_skill,omitempty"`
 	Error         string                `json:"error,omitempty"`
 }
+
 func isAdminRole(role string) bool {
 	return strings.EqualFold(strings.TrimSpace(role), "admin")
 }
@@ -93,10 +94,6 @@ func isHubPublishableBlob(blob *models.SkillBlob) bool {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(blob.ScanStatus), "completed") {
-		return false
-	}
-	risk := strings.ToLower(strings.TrimSpace(blob.RiskLevel))
-	if risk != skillRiskNone && risk != skillRiskLow {
 		return false
 	}
 	if strings.TrimSpace(blob.ObjectKey) == "" {
@@ -146,9 +143,6 @@ func (s *skillService) CanAttachSkill(actorUserID int, actorRole string, skill *
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(skill.Status), "active") {
-		return false
-	}
-	if skill.RiskLevel == skillRiskMedium || skill.RiskLevel == skillRiskHigh {
 		return false
 	}
 	if isAdminRole(actorRole) {
@@ -331,10 +325,6 @@ func (s *skillService) publishBlockedReasonForSkill(skill *models.Skill, blob *m
 	}
 	if !strings.EqualFold(strings.TrimSpace(blob.ScanStatus), "completed") {
 		return reason("skill_not_scanned")
-	}
-	risk := strings.ToLower(strings.TrimSpace(blob.RiskLevel))
-	if risk != skillRiskNone && risk != skillRiskLow {
-		return reason("skill_risk_blocked")
 	}
 	return nil
 }
@@ -836,7 +826,7 @@ func (s *skillService) ListAttachableSkills(actorUserID int, actorRole string) (
 		if strings.EqualFold(item.SourceType, skillSourceDiscovered) {
 			continue
 		}
-		if item.Status != "active" || item.RiskLevel == skillRiskMedium || item.RiskLevel == skillRiskHigh {
+		if item.Status != "active" {
 			continue
 		}
 		if _, ok := seen[item.ID]; ok {

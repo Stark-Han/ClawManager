@@ -28,6 +28,8 @@ interface WorkspaceFileManagerProps {
   workspaceKey?: string | number;
   canWrite?: boolean;
   localeOverride?: Locale;
+  onSelectDirectory?: (path: string) => void | Promise<void>;
+  selectingDirectory?: boolean;
 }
 
 export interface WorkspaceFileOperations {
@@ -232,6 +234,8 @@ export function WorkspaceFileManager({
   workspaceKey,
   canWrite = true,
   localeOverride,
+  onSelectDirectory,
+  selectingDirectory = false,
 }: WorkspaceFileManagerProps) {
   const { locale, t } = useI18n();
   const effectiveLocale = localeOverride ?? locale;
@@ -565,6 +569,19 @@ export function WorkspaceFileManager({
           >
             <RefreshCw className={`h-4 w-4 ${entriesQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
+          {onSelectDirectory && (
+            <button
+              type="button"
+              className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              title={translateLabel("workspaceFileManager.setAsProjectTitle")}
+              disabled={selectingDirectory}
+              onClick={() => void onSelectDirectory(currentPath)}
+            >
+              {selectingDirectory
+                ? translateLabel("workspaceFileManager.settingProject")
+                : translateLabel("workspaceFileManager.setAsProject")}
+            </button>
+          )}
           {canWrite && (
             <>
               <button

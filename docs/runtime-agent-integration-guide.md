@@ -1,6 +1,8 @@
+[← 返回 README](../README.zh-CN.md)
+
 # Runtime Agent 通用接入规范
 
-本文定义任意新 runtime 接入 ClawManager Agent Control Plane 的通用方案。后续新增 OpenClaw、Hermes、OpenCode 以外的 runtime 时，应优先遵守本文，再补充该 runtime 自己的镜像构建细节。
+本文定义任意新 runtime 接入 ClawManager Agent Control Plane 的通用方案。后续新增 OpenClaw、Hermes、OpenCode、DeepSeek Harness 以外的 runtime 时，应优先遵守本文，再补充该 runtime 自己的镜像构建细节。
 
 ## 接入目标
 
@@ -85,13 +87,15 @@ Agent 启动时如果 `CLAWMANAGER_AGENT_ENABLED` 不是 `true`，应进入空�
 | `CLAWMANAGER_LLM_API_KEY` | 当前实例专属 Gateway API key |
 | `CLAWMANAGER_LLM_MODEL` | 平台注入的模型目录 JSON，首项通常包含 `auto` |
 | `CLAWMANAGER_LLM_PROVIDER` | 当前为 `openai-compatible` |
+| `CLAWMANAGER_LLM_REASONING` | 按模型显示名称索引的 Thinking 开关 JSON；平台保存的关闭状态是权威上限 |
+| `CLAWMANAGER_LLM_REASONING_CONTROL` | 按模型显示名称索引的供应商 Thinking 控制协议 JSON；空值表示 Runtime 不应猜测或强行开启 |
 | `CLAWMANAGER_INSTANCE_TOKEN` | 当前实例 token，和 Gateway API key 同源 |
 | `OPENAI_BASE_URL` | OpenAI SDK 兼容别名 |
 | `OPENAI_API_BASE` | OpenAI SDK 兼容别名 |
 | `OPENAI_API_KEY` | OpenAI SDK 兼容别名 |
 | `OPENAI_MODEL` | 默认模型，通常为 `auto` |
 
-Runtime 内的应用和 agent 如果需要调用模型，优先使用这些变量，不要让用户在镜像内手工写入 provider key。
+Runtime 内的应用和 agent 如果需要调用模型，优先使用这些变量，不要让用户在镜像内手工写入 provider key。Runtime 可以把受支持的会话级开关或强度随请求传给 AI Gateway，但不能仅凭模型名称猜测供应商 Thinking 协议，也不能绕过平台关闭的模型级开关。
 
 ### LLM Session 归因
 
@@ -436,7 +440,7 @@ Authorization: Bearer {session_token}
 - `mode=full` 表示这次 inventory 是全量结果，平台会用它对齐实例 skill 状态。
 - skill 内容变化后要重新计算 `content_md5` 并上报。
 - 如果支持上传 skill 包，使用 `POST {base}/api/v1/agent/skills/upload`，multipart 表单中带 `file`、`agent_id`、`skill_id`、`skill_version`、`identifier`、`content_md5`、`source`。
-- `content_md5` 必须按目录内容指纹计算，不是 zip 文件 MD5。完整算法见 [Skill Content MD5 Calculation Spec](skill-content-md5-spec.md)。
+- `content_md5` 必须匹配控制面契约测试所使用的规范化目录内容指纹，不能直接计算 ZIP 文件 MD5。
 
 ### 配置和安装包下载
 

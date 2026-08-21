@@ -43,7 +43,8 @@ assert(
 );
 assert(
   pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest") &&
-    pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
+    pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest") &&
+    pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
   "System settings page must use the Lite default runtime images.",
 );
 assert(
@@ -51,19 +52,11 @@ assert(
   "System settings page must keep custom Pro runtime card creation.",
 );
 assert(
-  pageSource.includes("instance_type: 'workbuddy'") &&
-    pageSource.includes("display_name: 'Workbuddy Pro'") &&
-    pageSource.includes("agentsruntime/windows-vm-workbuddy:latest"),
-  "System settings page must expose Workbuddy as a fixed Pro runtime card.",
-);
-assert(
-  serviceSource.includes('runtime_variant?: "linux" | "windows"') &&
-    pageSource.includes("RUNTIME_VARIANT_IMAGES") &&
-    pageSource.includes("systemSettingsPage.runtimeVariant") &&
-    pageSource.includes("instance_type: 'codex'") &&
-    pageSource.includes("agentsruntime/codex:latest") &&
-    pageSource.includes("agentsruntime/windows-vm-codex:latest"),
-  "Workbuddy and Codex must use one fixed card with an explicit Linux/Windows runtime variant.",
+  pageSource.includes('TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES') &&
+    pageSource.includes("new Set(['workbuddy'])") &&
+    pageSource.includes('VISIBLE_PRO_BASE_RUNTIME_CARDS') &&
+    pageSource.includes('isRuntimeCardVisible(item)'),
+  "System settings page must hide Workbuddy from image-card configuration without removing runtime support.",
 );
 assert(
   pageSource.includes("systemSettingsPage.liteRolloutTitle") &&

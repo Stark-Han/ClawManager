@@ -148,7 +148,7 @@ func workbuddyRuntimeVariantForInstance(instance *models.Instance) string {
 	if instance.PVCName != nil && strings.TrimSpace(*instance.PVCName) != "" {
 		return WorkbuddyRuntimeWindows
 	}
-	return WorkbuddyRuntimeWindows
+	return WorkbuddyRuntimeLinux
 }
 
 func isWindowsWorkbuddyInstance(instance *models.Instance) bool {

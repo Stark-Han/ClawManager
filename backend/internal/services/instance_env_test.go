@@ -126,7 +126,7 @@ func TestBuildInstancePodEnvAppliesOverridesAfterDefaults(t *testing.T) {
 	}
 }
 
-func TestBuildInstancePodEnvKeepsWorkbuddyWindowsRuntimeIsolated(t *testing.T) {
+func TestBuildInstancePodEnvConfiguresWorkbuddyProxyAndManagedRuntime(t *testing.T) {
 	t.Setenv("CLAWMANAGER_EGRESS_PROXY_URL", "")
 	t.Setenv("CLAWMANAGER_SYSTEM_NAMESPACE", "")
 	t.Setenv("K8S_NAMESPACE", "")
@@ -143,17 +143,14 @@ func TestBuildInstancePodEnvKeepsWorkbuddyWindowsRuntimeIsolated(t *testing.T) {
 		t.Fatalf("buildInstancePodEnv returned error: %v", err)
 	}
 
-	if _, ok := env["SUBFOLDER"]; ok {
-		t.Fatalf("Windows Workbuddy must not receive Webtop SUBFOLDER, got %q", env["SUBFOLDER"])
+	if env["SUBFOLDER"] != "/api/v1/instances/923/proxy/" {
+		t.Fatalf("expected managed Workbuddy proxy path, got %q", env["SUBFOLDER"])
 	}
-	if _, ok := env["TITLE"]; ok {
-		t.Fatalf("Windows Workbuddy must not receive Webtop TITLE, got %q", env["TITLE"])
+	if env["TITLE"] != "Workbuddy" {
+		t.Fatalf("expected Workbuddy desktop title, got %q", env["TITLE"])
 	}
 	if env["CLAWMANAGER_RUNTIME_TYPE"] != RuntimeBackendDesktop {
 		t.Fatalf("expected Workbuddy desktop runtime marker, got %q", env["CLAWMANAGER_RUNTIME_TYPE"])
-	}
-	if env["VERSION"] != "10l" || env["DISK_FMT"] != "qcow2" {
-		t.Fatalf("expected Windows runtime environment, got %#v", env)
 	}
 }
 

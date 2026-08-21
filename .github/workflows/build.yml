@@ -1,0 +1,218 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  backend:
+    name: Backend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build backend
+        run: go build -o bin/server ./cmd/server
+
+      - name: Run backend tests
+        run: go test ./...
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs:
+      - frontend
+      - backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-platform application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64
+          tags: clawmanager:ci
+
+  k8s-smoke:
+    name: Kubernetes Deploy Smoke Test
+    runs-on: ubuntu-latest
+    needs:
+      - frontend
+      - backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local application image
+        run: docker build -t clawmanager:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: clawmanager-ci
+          ignore_failed_clean: true
+
+      - name: Load image into kind
+        run: kind load docker-image clawmanager:ci --name clawmanager-ci
+
+      - name: Deploy manifest to cluster
+        shell: bash
+        run: |
+          kubectl label node clawmanager-ci-control-plane clawmanager.io/storage-node=true --overwrite
+          cp deployments/k8s/single-node/clawmanager.yaml /tmp/clawmanager-ci.yaml
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("/tmp/clawmanager-ci.yaml")
+          text = path.read_text(encoding="utf-8")
+
+          text = text.replace(
+              "image: ghcr.io/yuan-lab-llm/clawmanager:latest",
+              "image: clawmanager:ci",
+          )
+
+          text = re.sub(
+              r"(kind: Deployment\s+metadata:\s+name: mysql\s+namespace: clawmanager-system\s+spec:\s+replicas: 1\s+selector:\s+matchLabels:\s+app: mysql\s+template:\s+metadata:\s+labels:\s+app: mysql\s+spec:\s+containers:\s+- name: mysql.*?volumeMounts:\s+- name: mysql-data\s+mountPath: /var/lib/mysql\s+- name: mysql-init\s+mountPath: /docker-entrypoint-initdb.d\s+readinessProbe:.*?periodSeconds: 10\s+)volumes:\s+- name: mysql-data\s+persistentVolumeClaim:\s+claimName: mysql-data\s+- name: mysql-init\s+configMap:\s+name: clawmanager-mysql-init",
+              r"\1volumes:\n        - name: mysql-data\n          emptyDir: {}\n        - name: mysql-init\n          configMap:\n            name: clawmanager-mysql-init",
+              text,
+              flags=re.S,
+          )
+
+          text = re.sub(
+              r"(kind: Deployment\s+metadata:\s+name: clawmanager-app\s+namespace: clawmanager-system\s+spec:\s+)replicas: 1",
+              r"\1replicas: 0",
+              text,
+              count=1,
+              flags=re.S,
+          )
+
+          text = re.sub(
+              r"(kind: Service\s+metadata:\s+name: clawmanager-frontend\s+namespace: clawmanager-system\s+spec:\s+)type: NodePort",
+              r"\1type: ClusterIP",
+              text,
+              count=1,
+              flags=re.S,
+          )
+
+          text = re.sub(
+              r"\n\s+nodePort:\s+\d+",
+              "",
+              text,
+              count=1,
+          )
+
+          text = re.sub(
+              r"(\n\s+- name: workspaces\s+)nfs:\s+server: workspace-store\.clawmanager-system\.svc\.cluster\.local\s+path: /exports/workspaces",
+              r"\1emptyDir: {}",
+              text,
+          )
+
+          text = re.sub(
+              r"(\n\s+- name: workspaces\s+)persistentVolumeClaim:\s+claimName: clawmanager-workspaces",
+              r"\1emptyDir: {}",
+              text,
+          )
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          kubectl apply -f /tmp/clawmanager-ci.yaml
+
+      - name: Wait for MySQL deployment
+        run: kubectl -n clawmanager-system rollout status deployment/mysql --timeout=300s
+
+      - name: Start ClawManager after MySQL is ready
+        run: kubectl -n clawmanager-system scale deployment/clawmanager-app --replicas=1
+
+      - name: Wait for ClawManager deployment
+        run: kubectl -n clawmanager-system rollout status deployment/clawmanager-app --timeout=300s
+
+      - name: Show cluster status on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl get pvc -A || true
+          kubectl get events -A --sort-by=.lastTimestamp || true
+          kubectl -n clawmanager-system describe deployment mysql || true
+          kubectl -n clawmanager-system describe deployment clawmanager-app || true
+          kubectl -n clawmanager-system describe pod -l app=mysql || true
+          kubectl -n clawmanager-system describe pod -l app=clawmanager-app || true
+          kubectl -n clawmanager-system logs deployment/mysql --tail=200 || true
+          kubectl -n clawmanager-system logs deployment/clawmanager-app --tail=200 || true
+
+      - name: Start port-forward
+        run: |
+          kubectl -n clawmanager-system port-forward svc/clawmanager-frontend 8443:443 > /tmp/clawmanager-port-forward.log 2>&1 &
+          echo $! > /tmp/clawmanager-port-forward.pid
+          sleep 10
+
+      - name: Verify health endpoint
+        run: curl --fail --insecure https://127.0.0.1:8443/healthz
+
+      - name: Verify web page is reachable
+        run: curl --fail --insecure https://127.0.0.1:8443/ | grep -i "<!doctype html>"
+
+      - name: Stop port-forward
+        if: always()
+        run: |
+          if [ -f /tmp/clawmanager-port-forward.pid ]; then
+            kill "$(cat /tmp/clawmanager-port-forward.pid)" || true
+          fi

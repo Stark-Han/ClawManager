@@ -15,8 +15,9 @@ export interface Instance {
     | "custom"
     | "webtop"
     | "hermes"
-    | "workbuddy"
     | "opencode"
+    | "workbuddy"
+    | "deepseek-harness"
     | "codex"
     | "claude-code";
   runtime_type: "desktop" | "shell" | "gateway";
@@ -50,7 +51,35 @@ export interface Instance {
   stopped_at?: string;
 }
 
-export type V2InstanceType = "openclaw" | "hermes" | "opencode" | "codex" | "claude-code";
+export type V2InstanceType =
+  | "openclaw"
+  | "hermes"
+  | "opencode"
+  | "workbuddy"
+  | "deepseek-harness"
+  | "codex"
+  | "claude-code";
+
+export function formatInstanceType(type: string): string {
+  switch (type) {
+    case "openclaw":
+      return "OpenClaw";
+    case "hermes":
+      return "Hermes";
+    case "opencode":
+      return "OpenCode";
+    case "workbuddy":
+      return "Workbuddy";
+    case "deepseek-harness":
+      return "DeepSeek Harness";
+    case "codex":
+      return "Codex";
+    case "claude-code":
+      return "Claude Code";
+    default:
+      return type;
+  }
+}
 export type InstanceMode = "lite" | "pro";
 export type InstanceAvailability = "available" | "starting" | "unavailable";
 
@@ -187,14 +216,15 @@ export interface CreateInstanceRequest {
     | "custom"
     | "webtop"
     | "hermes"
-    | "workbuddy"
     | "opencode"
+    | "workbuddy"
+    | "deepseek-harness"
     | "codex"
     | "claude-code";
-  runtime_variant?: "linux" | "windows";
   mode?: InstanceMode;
   instance_mode?: InstanceMode;
   runtime_type?: "desktop" | "shell" | "gateway";
+  runtime_variant?: "linux" | "windows";
   desktop_stream_profile?: DesktopStreamProfile;
   cpu_cores: number;
   memory_gb: number;
@@ -332,14 +362,6 @@ export const INSTANCE_TYPES: InstanceType[] = [
     defaultVersion: "latest",
   },
   {
-    id: "workbuddy",
-    name: "Workbuddy",
-    description: "Managed Workbuddy runtime on a persistent Windows desktop",
-    icon: "workbuddy",
-    defaultOs: "workbuddy",
-    defaultVersion: "latest",
-  },
-  {
     id: "opencode",
     name: "OpenCode Runtime",
     description: "OpenCode coding agent runtime",
@@ -348,19 +370,19 @@ export const INSTANCE_TYPES: InstanceType[] = [
     defaultVersion: "latest",
   },
   {
-    id: "codex",
-    name: "Codex",
-    description: "OpenAI Codex coding agent runtime",
-    icon: "codex",
-    defaultOs: "codex",
+    id: "deepseek-harness",
+    name: "DeepSeek Harness",
+    description: "DeepSeek Harness workspace managed by ClawManager",
+    icon: "deepseek-harness",
+    defaultOs: "deepseek-harness",
     defaultVersion: "latest",
   },
   {
-    id: "claude-code",
-    name: "Claude Code",
-    description: "Anthropic Claude Code agent runtime",
-    icon: "claude-code",
-    defaultOs: "claude-code",
+    id: "workbuddy",
+    name: "Workbuddy",
+    description: "Managed Workbuddy runtime on a webtop desktop base",
+    icon: "workbuddy",
+    defaultOs: "workbuddy",
     defaultVersion: "latest",
   },
   {

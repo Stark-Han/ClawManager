@@ -5,6 +5,7 @@ import AdminLayout from "../../components/AdminLayout";
 import { useI18n } from "../../contexts/I18nContext";
 import { useRuntimeAdminWebSocket } from "../../hooks/useWebSocket";
 import { runtimePoolService } from "../../services/runtimePoolService";
+import { formatInstanceType } from "../../types/instance";
 import type { RuntimePod, RuntimeType } from "../../types/runtimePool";
 
 type RuntimeFilter = "all" | RuntimeType;
@@ -14,8 +15,7 @@ const FILTERS: Array<{ value: RuntimeFilter; labelKey?: string; label?: string }
   { value: "openclaw", label: "OpenClaw" },
   { value: "hermes", label: "Hermes" },
   { value: "opencode", label: "OpenCode" },
-  { value: "codex", label: "Codex" },
-  { value: "claude-code", label: "Claude Code" },
+  { value: "deepseek-harness", label: "DeepSeek Harness" },
 ];
 
 function formatBytes(value: number) {
@@ -30,14 +30,6 @@ function formatBytes(value: number) {
     unitIndex += 1;
   }
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-function formatRuntimeType(value: string) {
-  if (value === "hermes") return "Hermes";
-  if (value === "opencode") return "OpenCode";
-  if (value === "codex") return "Codex";
-  if (value === "claude-code") return "Claude Code";
-  return "OpenClaw";
 }
 
 function stateClass(pod: RuntimePod) {
@@ -267,7 +259,7 @@ const RuntimePodsPage: React.FC = () => {
                         {t("runtimePods.typeLabel")}
                       </div>
                       <div className="mt-1 text-sm font-medium text-slate-950">
-                        {formatRuntimeType(pod.runtime_type)}
+                        {formatInstanceType(pod.runtime_type)}
                       </div>
                     </div>
                     <div className="min-w-[128px] text-right">

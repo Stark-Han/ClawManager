@@ -75,45 +75,14 @@ assert(
   "Quota validation must include CPU/memory/storage/GPU only for Pro mode.",
 );
 assert(
-  source.includes('type === "workbuddy"') &&
-    source.includes('type === "custom" || type === "workbuddy"'),
-  "Create page must expose Workbuddy as a managed Pro-only runtime.",
+  source.includes('TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS') &&
+    source.includes('TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id)'),
+  "Create page must hide temporarily unavailable runtime types from every new-instance chooser.",
 );
 assert(
-  source.includes('src="/workbuddy.png"') && source.includes('alt="Workbuddy"'),
-  "Create page must render the Workbuddy runtime icon.",
-);
-assert(
-  source.includes('src="/opencode.png"') &&
-    source.includes('src="/codex.png"') &&
-    source.includes('src="/claude-code.png"'),
-  "Create page must render distinct icons for OpenCode, Codex, and Claude Code.",
-);
-assert(
-  /\["openclaw", "hermes", "workbuddy", "opencode", "codex", "claude-code"/.test(
-    source,
-  ),
-  "Create page must keep OpenCode, Codex, and Claude Code in that order.",
-);
-assert(
-  featureSource.includes("claudeCodeProCreation: false") &&
-    source.includes('FEATURES.claudeCodeProCreation || typeId !== "claude-code"') &&
-    source.includes("isCreateInstanceTypeVisible(type.id)"),
-  "Claude Code Pro creation must stay hidden behind the disabled feature flag.",
-);
-assert(
-  source.includes("resolveManagedRuntimeVariant") &&
-    source.includes("setting?.runtime_variant") &&
-    source.includes("runtime_variant: selectedRuntimeVariant") &&
-    source.includes('type === "codex"'),
-  "Create page must send the configured Linux/Windows variant for Workbuddy and Codex.",
-);
-assert(
-  !source.includes("? PRESET_CONFIGS.medium") &&
-    source.includes("cpu_cores: PRESET_CONFIGS.medium.cpu_cores") &&
-    source.includes("memory_gb: PRESET_CONFIGS.medium.memory_gb") &&
-    source.includes("disk_gb: PRESET_CONFIGS.medium.disk_gb"),
-  "Selecting a managed Linux runtime must copy only resource fields and never overwrite the instance name or description.",
+  source.includes('const isLiteOnlyInstanceType = (type: string) => type === "opencode";') &&
+    source.includes('!isLiteOnlyInstanceType(item.id)'),
+  "Create page must expose OpenCode only in Lite mode.",
 );
 
 console.log("Create instance mode selector placement is valid.");

@@ -153,6 +153,108 @@ func TestRuntimeSkillInstallRootOpenClawAndHermes(t *testing.T) {
 	}
 }
 
+func TestRuntimeSkillInstallRootOpenCodeLite(t *testing.T) {
+	workspace := "/workspaces/opencode/user-45/instance-91"
+	opencode := &models.Instance{
+		Type:          RuntimeTypeOpenCode,
+		RuntimeType:   RuntimeBackendGateway,
+		InstanceMode:  InstanceModeLite,
+		WorkspacePath: &workspace,
+	}
+
+	want := filepath.Join(workspace, "home", ".config", "opencode", "skills")
+	if got := runtimeSkillInstallRoot(opencode); got != want {
+		t.Fatalf("OpenCode skill root = %q, want %q", got, want)
+	}
+	if !SupportsServerWorkspaceSkillScan(opencode) {
+		t.Fatal("OpenCode Lite must support workspace skill scanning")
+	}
+}
+
+func TestRuntimeSkillInstallRootOpenCodeProFollowsSelectedProject(t *testing.T) {
+	workspace := t.TempDir()
+	environment, err := marshalEnvironmentOverrides(map[string]string{
+		openCodeDefaultProjectEnv: "/config/workspace/project-alpha",
+	})
+	if err != nil {
+		t.Fatalf("marshal environment: %v", err)
+	}
+	instance := &models.Instance{
+		Type: RuntimeTypeOpenCode, InstanceMode: InstanceModePro,
+		RuntimeType: RuntimeBackendDesktop, WorkspacePath: &workspace,
+		EnvironmentOverridesJSON: environment,
+	}
+
+	want := filepath.Join(workspace, "workspace", "project-alpha", ".opencode", "skills")
+	if got := runtimeSkillInstallRoot(instance); got != want {
+		t.Fatalf("OpenCode Pro selected-project root = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeSkillInstallRootOpenCodeProRejectsProjectEscape(t *testing.T) {
+	workspace := t.TempDir()
+	for _, projectPath := range []string{
+		"/config/workspace/../outside",
+		"/config/other-project",
+		"/tmp/project",
+	} {
+		environment, err := marshalEnvironmentOverrides(map[string]string{
+			openCodeDefaultProjectEnv: projectPath,
+		})
+		if err != nil {
+			t.Fatalf("marshal environment: %v", err)
+		}
+		instance := &models.Instance{
+			Type: RuntimeTypeOpenCode, InstanceMode: InstanceModePro,
+			RuntimeType: RuntimeBackendDesktop, WorkspacePath: &workspace,
+			EnvironmentOverridesJSON: environment,
+		}
+
+		want := filepath.Join(workspace, "workspace", ".opencode", "skills")
+		if got := runtimeSkillInstallRoot(instance); got != want {
+			t.Fatalf("OpenCode Pro root for %q = %q, want safe fallback %q", projectPath, got, want)
+		}
+	}
+}
+
+func TestRuntimeSkillInstallRootDeepSeekHarness(t *testing.T) {
+	workspace := "/workspaces/deepseek-harness/user-45/instance-92"
+	for _, tc := range []struct {
+		name         string
+		runtimeType  string
+		instanceMode string
+		want         string
+	}{
+		{
+			name:         "lite",
+			runtimeType:  RuntimeBackendGateway,
+			instanceMode: InstanceModeLite,
+			want:         filepath.Join(workspace, "home", ".dsh", "skills"),
+		},
+		{
+			name:         "pro",
+			runtimeType:  RuntimeBackendDesktop,
+			instanceMode: InstanceModePro,
+			want:         filepath.Join(workspace, ".dsh", "skills"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := &models.Instance{
+				Type:          RuntimeTypeDeepSeekHarness,
+				RuntimeType:   tc.runtimeType,
+				InstanceMode:  tc.instanceMode,
+				WorkspacePath: &workspace,
+			}
+			if got := runtimeSkillInstallRoot(instance); got != tc.want {
+				t.Fatalf("DeepSeek Harness skill root = %q, want %q", got, tc.want)
+			}
+			if !SupportsServerWorkspaceSkillScan(instance) {
+				t.Fatal("DeepSeek Harness must support workspace skill scanning")
+			}
+		})
+	}
+}
+
 func TestResolveInstanceSkillSourceTypePreservesInjected(t *testing.T) {
 	existing := &models.InstanceSkill{SourceType: "injected_by_clawmanager"}
 	skill := &models.Skill{SourceType: skillSourceUploaded}
@@ -234,22 +336,22 @@ func TestSyncAgentSkillsPreservesInjectedProvenanceAfterWorkspaceScan(t *testing
 	stub := &provenanceCaptureRepoStub{
 		capturingSkillRepoStub: capturingSkillRepoStub{
 			skillRepoStub: skillRepoStub{
-			skills: map[int]*models.Skill{
-				10: {
-					ID: 10, UserID: 1, SkillKey: "ppt-1-0-0", Name: "ppt-1.0.0",
-					SourceType: skillSourceUploaded, Status: skillStatusActive,
-					Visibility: skillVisibilityPublic, CurrentVersionID: &versionID,
+				skills: map[int]*models.Skill{
+					10: {
+						ID: 10, UserID: 1, SkillKey: "ppt-1-0-0", Name: "ppt-1.0.0",
+						SourceType: skillSourceUploaded, Status: skillStatusActive,
+						Visibility: skillVisibilityPublic, CurrentVersionID: &versionID,
+					},
 				},
-			},
-			blobs: map[int]*models.SkillBlob{
-				1: {ID: 1, ContentHash: contentHash, ObjectKey: "hub/ppt.zip", ScanStatus: "completed"},
-			},
-			versions: map[int]*models.SkillVersion{
-				1: {ID: 1, SkillID: 10, BlobID: 1, VersionNo: 1},
-			},
-			instanceSkills: []models.InstanceSkill{
-				{InstanceID: 1, SkillID: 10, SourceType: "injected_by_clawmanager", Status: "active"},
-			},
+				blobs: map[int]*models.SkillBlob{
+					1: {ID: 1, ContentHash: contentHash, ObjectKey: "hub/ppt.zip", ScanStatus: "completed"},
+				},
+				versions: map[int]*models.SkillVersion{
+					1: {ID: 1, SkillID: 10, BlobID: 1, VersionNo: 1},
+				},
+				instanceSkills: []models.InstanceSkill{
+					{InstanceID: 1, SkillID: 10, SourceType: "injected_by_clawmanager", Status: "active"},
+				},
 			},
 		},
 	}
@@ -283,19 +385,19 @@ func TestSyncAgentSkillsReusesUploadedSkillOnWorkspaceScan(t *testing.T) {
 	stub := &provenanceCaptureRepoStub{
 		capturingSkillRepoStub: capturingSkillRepoStub{
 			skillRepoStub: skillRepoStub{
-			skills: map[int]*models.Skill{
-				10: {
-					ID: 10, UserID: 1, SkillKey: "ppt-1-0-0", Name: "ppt-1.0.0",
-					SourceType: skillSourceUploaded, Status: skillStatusActive,
-					Visibility: skillVisibilityPublic, CurrentVersionID: &versionID,
+				skills: map[int]*models.Skill{
+					10: {
+						ID: 10, UserID: 1, SkillKey: "ppt-1-0-0", Name: "ppt-1.0.0",
+						SourceType: skillSourceUploaded, Status: skillStatusActive,
+						Visibility: skillVisibilityPublic, CurrentVersionID: &versionID,
+					},
 				},
-			},
-			blobs: map[int]*models.SkillBlob{
-				1: {ID: 1, ContentHash: contentHash, ObjectKey: "hub/ppt.zip", ScanStatus: "completed"},
-			},
-			versions: map[int]*models.SkillVersion{
-				1: {ID: 1, SkillID: 10, BlobID: 1, VersionNo: 1},
-			},
+				blobs: map[int]*models.SkillBlob{
+					1: {ID: 1, ContentHash: contentHash, ObjectKey: "hub/ppt.zip", ScanStatus: "completed"},
+				},
+				versions: map[int]*models.SkillVersion{
+					1: {ID: 1, SkillID: 10, BlobID: 1, VersionNo: 1},
+				},
 			},
 		},
 	}
@@ -408,9 +510,9 @@ func TestRequestLiteSkillInventorySyncUsesIncrementalWhenAgentResyncFollows(t *t
 	}}
 
 	svc := &skillService{
-		repo:         stub,
-		instanceRepo: instRepo,
-		commandRepo:  cmdRepo,
+		repo:           stub,
+		instanceRepo:   instRepo,
+		commandRepo:    cmdRepo,
 		commandService: &noopInstanceCommandService{},
 	}
 	svc.ConfigureRuntimeSkillSync(bindingRepo, podRepo, agent)
@@ -429,6 +531,40 @@ func TestRequestLiteSkillInventorySyncUsesIncrementalWhenAgentResyncFollows(t *t
 	}
 	if cmdRepo.commands[0].Status != instanceCommandStatusPending {
 		t.Fatalf("command status = %q, want pending until agent inventory arrives", cmdRepo.commands[0].Status)
+	}
+}
+
+func TestRequestLiteSkillInventorySyncUsesOpenCodeWorkspaceAsAuthority(t *testing.T) {
+	workspace := t.TempDir()
+	skillRoot := filepath.Join(workspace, "home", ".config", "opencode", "skills", "ppt-generator")
+	if err := os.MkdirAll(skillRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte("---\nname: ppt-generator\ndescription: test\n---\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	stub := &capturingSkillRepoStub{skillRepoStub: skillRepoStub{
+		skills: map[int]*models.Skill{
+			10: {ID: 10, UserID: 1, SkillKey: "ppt-generator", Name: "ppt-generator", SourceType: skillSourceUploaded, Status: skillStatusActive},
+		},
+		blobs: map[int]*models.SkillBlob{}, versions: map[int]*models.SkillVersion{},
+		instanceSkills: []models.InstanceSkill{{InstanceID: 1, SkillID: 10, Status: "active", SourceType: "injected_by_clawmanager"}},
+	}}
+	instRepo := &importTestInstanceRepo{instances: map[int]*models.Instance{
+		1: {ID: 1, UserID: 1, Type: RuntimeTypeOpenCode, InstanceMode: InstanceModeLite, RuntimeType: RuntimeBackendGateway, WorkspacePath: &workspace, RuntimeGeneration: 1},
+	}}
+	agent := &recordingSkillResyncAgentClient{}
+	svc := &skillService{repo: stub, instanceRepo: instRepo, commandService: &noopInstanceCommandService{}}
+	svc.ConfigureRuntimeSkillSync(newFakeRuntimeBindingRepo(), &fakeRuntimePodRepo{}, agent)
+
+	if err := svc.RequestLiteSkillInventorySync(1); err != nil {
+		t.Fatalf("RequestLiteSkillInventorySync() error = %v", err)
+	}
+	if len(agent.calls) != 0 {
+		t.Fatalf("OpenCode agent resync calls = %#v, want none", agent.calls)
+	}
+	if len(stub.instanceSkills) != 1 || stub.instanceSkills[0].Status != "active" {
+		t.Fatalf("instance skills = %#v, want active workspace skill", stub.instanceSkills)
 	}
 }
 

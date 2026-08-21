@@ -188,7 +188,7 @@ type CreateInstanceRequest struct {
 	Name                    string              `json:"name" validate:"required,min=3,max=50"`
 	Owner                   *string             `json:"owner,omitempty"`
 	Description             *string             `json:"description,omitempty"`
-	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes workbuddy opencode codex claude-code"`
+	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness codex claude-code"`
 	RuntimeVariant          string              `json:"runtime_variant,omitempty" validate:"omitempty,oneof=linux windows"`
 	Mode                    string              `json:"mode" validate:"omitempty,oneof=lite pro"`
 	InstanceMode            string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
@@ -1285,8 +1285,7 @@ func (s *instanceService) securityModeForInstance(instanceType string) k8s.PodSe
 	}
 	if strings.EqualFold(strings.TrimSpace(instanceType), "openclaw") ||
 		strings.EqualFold(strings.TrimSpace(instanceType), "opencode") ||
-		strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex) ||
-		strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeClaudeCode) {
+		strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") {
 		return k8s.PodSecurityChromiumCompat
 	}
 	return k8s.PodSecurityDefault
@@ -1302,15 +1301,13 @@ func (s *instanceService) securityModeForRuntime(instance *models.Instance) k8s.
 	if s != nil && s.allowPrivilegedPods {
 		return k8s.PodSecurityPrivileged
 	}
-	if strings.EqualFold(strings.TrimSpace(instance.Type), "openclaw") ||
-		strings.EqualFold(strings.TrimSpace(instance.Type), "opencode") ||
-		strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeCodex) ||
-		strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeClaudeCode) {
+	switch strings.ToLower(strings.TrimSpace(instance.Type)) {
+	case "openclaw", "opencode", "workbuddy", RuntimeTypeCodex, RuntimeTypeClaudeCode:
 		return k8s.PodSecurityChromiumCompat
+	default:
+		return k8s.PodSecurityDefault
 	}
-	return k8s.PodSecurityDefault
 }
-
 func (s *instanceService) ensureGatewayToken(instance *models.Instance) (string, error) {
 	if instance.AccessToken != nil && strings.TrimSpace(*instance.AccessToken) != "" {
 		token := strings.TrimSpace(*instance.AccessToken)
@@ -1490,15 +1487,61 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 	if strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeOpenCode) {
 		env["OPENCODE_SERVER_PASSWORD"] = token
 		env["OPENCODE_SERVER_USERNAME"] = "opencode"
-	}
-	if strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeClaudeCode) {
-		// Claude Code uses the Anthropic Messages protocol. Its endpoint is the
-		// ClawManager compatibility route under the same governed gateway base.
-		env["ANTHROPIC_BASE_URL"] = baseURL
-		env["ANTHROPIC_API_KEY"] = token
-		env["ANTHROPIC_MODEL"] = env["OPENAI_MODEL"]
+		configContent, err := buildOpenCodeGatewayConfig(modelInjection.modelsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build opencode gateway config: %w", err)
+		}
+		// The Lite runtime agent materializes this in the instance's persistent
+		// OpenCode config directory before it starts `opencode web`.  Keeping the
+		// credentials as env references ensures the generated file does not embed
+		// a user-managed provider or a direct external API key.
+		env["OPENCODE_CONFIG_CONTENT"] = configContent
 	}
 	return env, nil
+}
+
+// buildOpenCodeGatewayConfig translates ClawManager's active model catalogue
+// into OpenCode's custom-provider format. The gateway's "auto" model is always
+// included, so a newly-created Lite instance is usable even when the active
+// catalogue contains only aliases added after the runtime image was built.
+func buildOpenCodeGatewayConfig(modelsJSON string) (string, error) {
+	var modelIDs []string
+	if err := json.Unmarshal([]byte(modelsJSON), &modelIDs); err != nil {
+		return "", fmt.Errorf("invalid gateway model catalogue: %w", err)
+	}
+
+	models := make(map[string]map[string]string, len(modelIDs))
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			continue
+		}
+		models[modelID] = map[string]string{"name": modelID}
+	}
+	if _, ok := models["auto"]; !ok {
+		models["auto"] = map[string]string{"name": "auto"}
+	}
+
+	config := map[string]interface{}{
+		"$schema": "https://opencode.ai/config.json",
+		"model":   "clawmanager/auto",
+		"provider": map[string]interface{}{
+			"clawmanager": map[string]interface{}{
+				"npm":  "@ai-sdk/openai-compatible",
+				"name": "ClawManager AI Gateway",
+				"options": map[string]string{
+					"baseURL": "{env:CLAWMANAGER_LLM_BASE_URL}",
+					"apiKey":  "{env:CLAWMANAGER_LLM_API_KEY}",
+				},
+				"models": models,
+			},
+		},
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 func (s *instanceService) BuildGatewayEnv(instance *models.Instance) (map[string]string, error) {
@@ -1602,7 +1645,7 @@ func (s *instanceService) buildAgentEnv(instance *models.Instance) (map[string]s
 
 func supportsManagedRuntimeIntegration(instanceType string) bool {
 	switch strings.ToLower(strings.TrimSpace(instanceType)) {
-	case "openclaw", "hermes", "opencode", "codex", "claude-code":
+	case "openclaw", "hermes", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness:
 		return true
 	default:
 		return false
@@ -1647,7 +1690,7 @@ func (s *instanceService) syncInstanceNetworkPolicy(ctx context.Context, userID 
 
 func supportsRuntimeConfigInjection(instanceType string) bool {
 	switch strings.ToLower(strings.TrimSpace(instanceType)) {
-	case "openclaw", "hermes":
+	case "openclaw", "hermes", "workbuddy":
 		return true
 	default:
 		return false
@@ -1663,6 +1706,9 @@ func managedRuntimePersistentDir(instance *models.Instance) string {
 		if strings.EqualFold(instance.Type, "hermes") {
 			return path.Join(workspacePath, "home", ".hermes")
 		}
+		if strings.EqualFold(instance.Type, RuntimeTypeDeepSeekHarness) {
+			return path.Join(workspacePath, "home", ".dsh")
+		}
 		if strings.EqualFold(instance.Type, "opencode") {
 			return path.Join(workspacePath, "home", ".opencode")
 		}
@@ -1671,14 +1717,11 @@ func managedRuntimePersistentDir(instance *models.Instance) string {
 	if strings.EqualFold(instance.Type, "hermes") {
 		return "/config/.hermes"
 	}
+	if strings.EqualFold(instance.Type, RuntimeTypeDeepSeekHarness) {
+		return "/config/.dsh"
+	}
 	if strings.EqualFold(instance.Type, "opencode") {
 		return "/config/.opencode"
-	}
-	if strings.EqualFold(instance.Type, RuntimeTypeCodex) {
-		return "/config/.codex"
-	}
-	if strings.EqualFold(instance.Type, RuntimeTypeClaudeCode) {
-		return "/config/.claude"
 	}
 	return persistentVolumeMountPath(instance)
 }
@@ -1708,7 +1751,37 @@ func persistentVolumeMountPath(instance *models.Instance) string {
 }
 
 func runtimeVolumeInitScripts(instanceType, mountPath string) []k8s.VolumeInitScript {
-	if !strings.EqualFold(strings.TrimSpace(instanceType), "hermes") || strings.TrimSpace(mountPath) != "/config" {
+	if strings.TrimSpace(mountPath) != "/config" {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(instanceType), "opencode") {
+		return []k8s.VolumeInitScript{
+			{
+				Name:      "data",
+				MountPath: "/config",
+				// Some Webtop/Konsole builds do not provide a default profile.  In
+				// that state Konsole attempts to execute an empty command and shows
+				// a misleading warning before falling back to bash.  Persist an
+				// explicit profile for every OpenCode Pro desktop.
+				Script: `set -eu
+base="${CLAWMANAGER_VOLUME_PATH:-/config}"
+mkdir -p "$base/.config" "$base/.local/share/konsole"
+cat >"$base/.config/konsolerc" <<'EOF'
+[Desktop Entry]
+DefaultProfile=ClawManager.profile
+EOF
+cat >"$base/.local/share/konsole/ClawManager.profile" <<'EOF'
+[General]
+Command=/bin/bash
+Name=ClawManager Shell
+Parent=FALLBACK/
+EOF
+chmod 644 "$base/.config/konsolerc" "$base/.local/share/konsole/ClawManager.profile"
+chown -R 911:1001 "$base/.config" "$base/.local" || true`,
+			},
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(instanceType), "hermes") {
 		return nil
 	}
 	return []k8s.VolumeInitScript{
@@ -1753,7 +1826,7 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 
 	modelsForInjection := []string{"auto"}
 	reasoningForInjection := map[string]bool{"auto": false}
-	reasoningControlForInjection := map[string]string{"auto": "none"}
+	reasoningControlForInjection := map[string]string{"auto": models.ReasoningControlNone}
 	seen := map[string]struct{}{
 		"auto": {},
 	}
@@ -1773,8 +1846,10 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 		}
 		seen[normalizedName] = struct{}{}
 		modelsForInjection = append(modelsForInjection, displayName)
-		reasoningForInjection[displayName] = false
-		reasoningControlForInjection[displayName] = "none"
+		models.PopulateLLMReasoningCapability(&item)
+		reasoningForInjection[displayName] = item.SupportsReasoning && item.ReasoningEnabled
+		reasoningControlForInjection[displayName] = item.ReasoningControl
+
 	}
 
 	rawModels, err := json.Marshal(modelsForInjection)
@@ -1856,6 +1931,12 @@ func (s *instanceService) prepareV2InstanceStart(ctx context.Context, instance *
 			if err := s.cleanupV2GatewayBinding(ctx, instance); err != nil {
 				return err
 			}
+		}
+	}
+	runtimeType, runtimeTypeOK := NormalizeV2RuntimeType(instance.Type)
+	if runtimeTypeOK && runtimeType == RuntimeTypeOpenClaw && instance.WorkspacePath != nil {
+		if _, err := quarantineCorruptLegacyOpenClawTaskState(strings.TrimSpace(*instance.WorkspacePath), instance.RuntimeGeneration, instance.RuntimeErrorMessage); err != nil {
+			return fmt.Errorf("failed to quarantine corrupt legacy OpenClaw task state: %w", err)
 		}
 	}
 	return nil

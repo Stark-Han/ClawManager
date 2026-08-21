@@ -1,0 +1,243 @@
+name: Release
+
+on:
+  schedule:
+    # 09:00 Asia/Shanghai = 01:00 UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: Force create a release even if the image fingerprint is unchanged
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  prepare-scheduled-release:
+    name: Prepare Scheduled Release
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.decision.outputs.should_release }}
+      tag_name: ${{ steps.decision.outputs.tag_name }}
+      image_fingerprint: ${{ steps.compute-fingerprint.outputs.image_fingerprint }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 candidate image
+        shell: bash
+        run: |
+          docker buildx build --pull --platform linux/amd64 --load -t clawmanager:release-candidate-amd64 .
+
+      - name: Build arm64 candidate image
+        shell: bash
+        run: |
+          docker buildx build --pull --platform linux/arm64 --load -t clawmanager:release-candidate-arm64 .
+
+      - name: Compute release fingerprint
+        id: compute-fingerprint
+        shell: bash
+        run: |
+          AMD64_FINGERPRINT="$(python3 .github/scripts/compute_image_fingerprint.py clawmanager:release-candidate-amd64)"
+          ARM64_FINGERPRINT="$(python3 .github/scripts/compute_image_fingerprint.py clawmanager:release-candidate-arm64)"
+          IMAGE_FINGERPRINT="$(printf '%s\n%s\n' "${AMD64_FINGERPRINT}" "${ARM64_FINGERPRINT}" | sha256sum | cut -d' ' -f1)"
+          echo "IMAGE_FINGERPRINT=${IMAGE_FINGERPRINT}" >> "$GITHUB_ENV"
+          echo "image_fingerprint=${IMAGE_FINGERPRINT}" >> "$GITHUB_OUTPUT"
+
+      - name: Read latest release fingerprint
+        id: latest-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const release = await github.rest.repos.getLatestRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+              const body = release.data.body || "";
+              const match = body.match(/Build-Fingerprint:\s*`?([^\s`]+)`?/);
+              core.setOutput("tag", release.data.tag_name || "");
+              core.setOutput("fingerprint", match ? match[1] : "");
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput("tag", "");
+                core.setOutput("fingerprint", "");
+                return;
+              }
+              throw error;
+            }
+
+      - name: Decide whether to create a new release tag
+        id: decision
+        shell: bash
+        env:
+          FORCE_RELEASE: ${{ github.event.inputs.force_release || 'false' }}
+          LAST_FINGERPRINT: ${{ steps.latest-release.outputs.fingerprint }}
+        run: |
+          CURRENT_FINGERPRINT="${IMAGE_FINGERPRINT}"
+          TAG_NAME="v$(date -u +'%Y.%-m.%-d')"
+
+          LAST_FINGERPRINT="${LAST_FINGERPRINT//\`/}"
+          CURRENT_FINGERPRINT="${CURRENT_FINGERPRINT//\`/}"
+
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$FORCE_RELEASE" = "true" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "$LAST_FINGERPRINT" ] && [ "$LAST_FINGERPRINT" = "$CURRENT_FINGERPRINT" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag_name=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push release tag
+        if: steps.decision.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          TAG_NAME="${{ steps.decision.outputs.tag_name }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
+
+  release:
+    name: Publish Release
+    needs:
+      - prepare-scheduled-release
+    if: |
+      always() && (
+        github.event_name == 'push' ||
+        needs.prepare-scheduled-release.outputs.should_release == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release metadata
+        shell: bash
+        run: |
+          REPOSITORY_OWNER_LOWER="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "TAG_NAME=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "TAG_NAME=${{ needs.prepare-scheduled-release.outputs.tag_name }}" >> "$GITHUB_ENV"
+          fi
+          echo "IMAGE_URI=ghcr.io/${REPOSITORY_OWNER_LOWER}/clawmanager" >> "$GITHUB_ENV"
+
+      - name: Checkout release tag
+        if: github.event_name != 'push'
+        run: git checkout "${TAG_NAME}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 release candidate
+        shell: bash
+        run: |
+          docker buildx build --pull --platform linux/amd64 --load -t clawmanager:release-candidate-amd64 .
+
+      - name: Build arm64 release candidate
+        shell: bash
+        run: |
+          docker buildx build --pull --platform linux/arm64 --load -t clawmanager:release-candidate-arm64 .
+
+      - name: Compute release fingerprint
+        shell: bash
+        run: |
+          if [ -n "${{ needs.prepare-scheduled-release.outputs.image_fingerprint }}" ]; then
+            echo "IMAGE_FINGERPRINT=${{ needs.prepare-scheduled-release.outputs.image_fingerprint }}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          AMD64_FINGERPRINT="$(python3 .github/scripts/compute_image_fingerprint.py clawmanager:release-candidate-amd64)"
+          ARM64_FINGERPRINT="$(python3 .github/scripts/compute_image_fingerprint.py clawmanager:release-candidate-arm64)"
+          IMAGE_FINGERPRINT="$(printf '%s\n%s\n' "${AMD64_FINGERPRINT}" "${ARM64_FINGERPRINT}" | sha256sum | cut -d' ' -f1)"
+          echo "IMAGE_FINGERPRINT=${IMAGE_FINGERPRINT}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push multi-platform release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_URI }}:${{ env.TAG_NAME }}
+            ${{ env.IMAGE_URI }}:latest
+
+      - name: Read pushed image digest
+        shell: bash
+        run: |
+          IMAGE_DIGEST="$(docker buildx imagetools inspect "${IMAGE_URI}:${TAG_NAME}" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            echo "Failed to resolve image digest for ${IMAGE_URI}:${TAG_NAME}" >&2
+            exit 1
+          fi
+          echo "IMAGE_DIGEST=${IMAGE_DIGEST}" >> "$GITHUB_ENV"
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          cat <<EOF > /tmp/release-highlights.md
+          ## Highlights
+
+          - Added automated release flow for scheduled checks and \`v*\` tag publishing.
+          - Added in-app delete confirmation dialogs instead of browser-native prompts.
+          - Fixed WebSocket authentication so real-time status updates can connect in browser environments.
+          - Fixed Linux container startup script handling and enforced LF line endings for shell scripts.
+
+          ## Release Assets
+
+          Image: \`${IMAGE_URI}:${TAG_NAME}\`
+          Latest: \`${IMAGE_URI}:latest\`
+          Platforms: \`linux/amd64\`, \`linux/arm64\`
+          Image-Digest: \`${IMAGE_DIGEST}\`
+          Build-Fingerprint: \`${IMAGE_FINGERPRINT}\`
+          EOF
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          generate_release_notes: true
+          body_path: /tmp/release-highlights.md

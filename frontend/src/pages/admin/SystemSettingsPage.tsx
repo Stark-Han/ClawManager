@@ -41,6 +41,12 @@ const LITE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     display_name: 'OpenCode Lite',
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest',
   },
+  {
+    instance_type: 'deepseek-harness',
+    runtime_type: 'gateway',
+    display_name: 'DeepSeek Harness Lite',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness-lite:latest',
+  },
 ];
 
 const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
@@ -57,17 +63,10 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/hermes:latest',
   },
   {
-    instance_type: 'workbuddy',
+    instance_type: 'deepseek-harness',
     runtime_type: 'desktop',
-    runtime_variant: 'windows',
-    display_name: 'Workbuddy Pro',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-workbuddy:latest',
-  },
-  {
-    instance_type: 'opencode',
-    runtime_type: 'desktop',
-    display_name: 'OpenCode Pro',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/opencode:latest',
+    display_name: 'DeepSeek Harness Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness:latest',
   },
   {
     instance_type: 'codex',
@@ -82,7 +81,21 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     display_name: 'Claude Code Pro',
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/claude-code:latest',
   },
+  {
+    instance_type: 'workbuddy',
+    runtime_type: 'desktop',
+    display_name: 'Workbuddy Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest',
+  },
 ];
+
+// The Workbuddy implementation remains available to existing instances, but
+// its image must not be configurable through the UI while it is hidden from
+// new-instance creation.
+const TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES = new Set(['workbuddy']);
+const isRuntimeCardVisible = (card: Pick<RuntimeCardDefinition, 'instance_type'>) =>
+  !TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES.has(card.instance_type);
+const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(isRuntimeCardVisible);
 
 const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVariant, string>> = {
   workbuddy: {
@@ -94,9 +107,8 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
     windows: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest',
   },
 };
-
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
-const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
+const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...VISIBLE_PRO_BASE_RUNTIME_CARDS];
 
 interface EditableImageCard extends SystemImageSetting {
   local_id: string;
@@ -203,7 +215,11 @@ function toEditableCard(
 
 function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
   const enabledCards = items
-    .filter((item) => item.is_enabled !== false)
+    .filter(
+      (item) =>
+        item.is_enabled !== false &&
+        isRuntimeCardVisible(item),
+    )
     .map((item, index) => toEditableCard(item, index));
   const byFixedKey = new Map(enabledCards.map((card) => [fixedCardKey(card), card]));
 
@@ -267,7 +283,7 @@ const SystemSettingsPage: React.FC = () => {
   );
 
   const proBaseCards = useMemo(
-    () => PRO_BASE_RUNTIME_CARDS.map((definition) =>
+    () => VISIBLE_PRO_BASE_RUNTIME_CARDS.map((definition) =>
       cards.find((card) => fixedCardKey(card) === fixedCardKey(definition)),
     ).filter((card): card is EditableImageCard => Boolean(card)),
     [cards],

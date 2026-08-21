@@ -7,7 +7,7 @@ func appendManagedRuntimeLabels(instanceType string, labels map[string]string) {
 		return
 	}
 	switch strings.ToLower(strings.TrimSpace(instanceType)) {
-	case "openclaw", "hermes", "opencode", "codex", "claude-code":
+	case "openclaw", "hermes", "opencode", "workbuddy", "deepseek-harness":
 		labels["clawmanager.io/managed-runtime"] = "true"
 	}
 }
