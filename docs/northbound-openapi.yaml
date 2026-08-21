@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: ClawManager Northbound API
-  version: 1.2.0
-  description: Public API for authenticated Lite instance provisioning and password-protected ShareLink management.
+  version: 1.3.0
+  description: Public API for authenticated Lite provisioning, Linux WorkBuddy Pro provisioning, and password-protected Lite ShareLink management.
 servers:
   - url: https://northbound.example.com:38443
 paths:
@@ -207,6 +207,102 @@ paths:
                 $ref: "#/components/schemas/LiteInstance"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/northbound/v1/pro-instances:
+    post:
+      summary: Submit a Linux WorkBuddy Pro provisioning operation
+      operationId: createProInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProInstance"
+      responses:
+        "202":
+          description: Operation accepted; Location identifies the operation resource.
+          headers:
+            Location:
+              schema: { type: string }
+            Idempotent-Replayed:
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "401":
+          $ref: "#/components/responses/AuthInvalid"
+        "403":
+          $ref: "#/components/responses/ScopeDenied"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      summary: List the current user's Linux WorkBuddy Pro instances
+      operationId: listProInstances
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: owner
+          in: query
+          required: true
+          description: Exact, case-sensitive owner identifier used when the instances were created.
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Paginated Linux WorkBuddy Pro instances
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instances, owner, total, page, limit]
+                properties:
+                  instances:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProInstance"
+                  owner: { type: string }
+                  total: { type: integer }
+                  page: { type: integer }
+                  limit: { type: integer }
+        "401":
+          $ref: "#/components/responses/AuthInvalid"
+        "403":
+          $ref: "#/components/responses/ScopeDenied"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+  /api/northbound/v1/pro-instances/{id}:
+    get:
+      summary: Get one Linux WorkBuddy Pro instance owned by the current user
+      operationId: getProInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Linux WorkBuddy Pro instance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProInstance"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/northbound/v1/lite-instances/{id}/external-access/password:
     post:
       summary: Enable password-protected ShareLink access for a Lite instance
@@ -395,7 +491,7 @@ components:
           description: Permissions fixed when the session is created; re-login is required to receive newly introduced scopes.
           items:
             type: string
-            enum: [lite-instances:create, lite-instances:read, lite-instances:share-link:manage, lite-instances:share-link:reset]
+            enum: [lite-instances:create, lite-instances:read, pro-instances:create, pro-instances:read, lite-instances:share-link:manage, lite-instances:share-link:reset]
         session_id: { type: string, description: Northbound session identifier for audit and logout; it is not an access token. }
     CreateLiteInstance:
       type: object
@@ -420,6 +516,29 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: Optional metadata only; it is not injected into the runtime. The server enforces at most 2000 UTF-8 bytes.
+    CreateProInstance:
+      type: object
+      additionalProperties: false
+      required: [name, owner, type]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Display name using the same contract as CreateLiteInstance.
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Creator or business owner identifier using the same normalization and exact-query contract as CreateLiteInstance.
+        type:
+          type: string
+          const: workbuddy
+          description: WorkBuddy is provisioned as a Linux desktop with a server-controlled small resource preset.
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: Optional metadata only; it is not injected into the runtime.
     EmptyRequest:
       type: object
       additionalProperties: false
@@ -461,13 +580,27 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
+    ProInstance:
+      type: object
+      required: [id, name, owner, type, status, created_at, updated_at]
+      properties:
+        id: { type: integer, minimum: 1 }
+        name: { type: string }
+        owner: { type: string }
+        description: { type: [string, "null"] }
+        type: { type: string, const: workbuddy }
+        status: { type: string }
+        availability: { type: string, enum: [available, starting, unavailable] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
     Operation:
       type: object
       required: [operation_id, status, resource_type, created_at, updated_at]
       properties:
         operation_id: { type: string, description: Opaque ID used to poll this operation. }
         status: { type: string, enum: [queued, processing, succeeded, failed] }
-        resource_type: { type: string, const: lite_instance }
+        resource_type: { type: string, enum: [lite_instance, pro_instance] }
         instance_id: { type: integer, minimum: 1, description: Present after success; use it for instance and ShareLink endpoints. }
         error_code: { type: string }
         error_message: { type: string }

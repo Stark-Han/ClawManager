@@ -1,8 +1,3 @@
-export interface IEIRuntimeModeDescription {
-  title: string;
-  summary: string;
-}
-
 export interface IEIRuntimePresentation {
   id: string;
   name: string;
@@ -11,8 +6,6 @@ export interface IEIRuntimePresentation {
   positioning: string;
   capabilities: string[];
   scenarios: string;
-  lite: IEIRuntimeModeDescription;
-  pro: IEIRuntimeModeDescription;
   badge?: string;
   notice?: string;
   theme: {
@@ -34,14 +27,6 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
       "面向通用智能体任务的受管工作空间，提供原生会话、工具调用、定时任务、Channel、Skill 与 Team 协作能力。",
     capabilities: ["原生智能体会话", "工具与定时任务", "Channel 接入", "Skill 扩展", "Team 协作"],
     scenarios: "市场分析、知识处理、自动化任务、业务助理与多智能体协作。",
-    lite: {
-      title: "Lite · 共享运行时",
-      summary: "在共享 Runtime 池中运行独立 Gateway，启动更快、资源占用更低，适合大多数日常智能体任务。",
-    },
-    pro: {
-      title: "Pro · 专属桌面",
-      summary: "使用独立桌面和专属运行资源，适合长期运行、复杂工具链与需要完整图形环境的任务。",
-    },
     theme: {
       accent: "text-rose-600",
       accentSoft: "bg-rose-50",
@@ -59,14 +44,6 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
       "保留 Hermes 原生会话和工具体验，以持久化工作区承载上下文、配置与执行结果，也可作为 Team Worker 参与协作。",
     capabilities: ["持久化原生会话", "Hermes 工具集", "模型统一接入", "Skill 扩展", "Team Worker"],
     scenarios: "知识问答、资料整理、深度研究、持续对话与团队任务执行。",
-    lite: {
-      title: "Lite · 共享运行时",
-      summary: "在共享池中保留独立的 Hermes 会话与工作区，兼顾快速启动和资源效率。",
-    },
-    pro: {
-      title: "Pro · 专属桌面",
-      summary: "提供独立 Hermes 桌面和完整交互环境，适合持续会话、复杂工具操作及专属运行要求。",
-    },
     theme: {
       accent: "text-violet-600",
       accentSoft: "bg-violet-50",
@@ -84,14 +61,6 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
       "面向软件研发的智能编码工作空间，将代码生成、文件操作、终端命令和仓库协作整合在统一工作台中。",
     capabilities: ["智能代码生成与补全", "终端命令执行", "仓库浏览与协作", "代码审查与建议", "自动化脚本"],
     scenarios: "软件开发、代码维护、运维管理、自动化构建及团队研发协作。",
-    lite: {
-      title: "Lite · 共享运行时",
-      summary: "使用共享 Runtime 池中的隔离编码工作区，启动迅速，适合日常开发与中轻量仓库任务。",
-    },
-    pro: {
-      title: "Pro · 专属桌面",
-      summary: "提供独立桌面、终端和专属资源，适合大型仓库、长期编码任务及复杂本地工具链。",
-    },
     theme: {
       accent: "text-blue-600",
       accentSoft: "bg-blue-50",
@@ -109,14 +78,6 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
       "DeepSeek 官方开源的 Agent Harness。基于 Cordis 插件化架构，将模型、工具、工作流与子代理组合成可扩展的智能体工作空间。",
     capabilities: ["插件化能力组合", "工作区读写", "命令与任务规划", "子代理协作", "多模型接入"],
     scenarios: "智能研发、复杂任务分解、多代理协作、插件实验与可扩展 Agent 工作流。",
-    lite: {
-      title: "Lite · 共享运行时",
-      summary: "在共享 Harness Runtime 池中运行隔离的 dsh web 进程，保留独立工作区、配置和原生 Web UI。",
-    },
-    pro: {
-      title: "Pro · 专属桌面",
-      summary: "每个实例拥有独立 Webtop 与专属运行环境，适合长期任务、重型工具链和完整图形桌面操作。",
-    },
     badge: "NEW",
     notice: "Developer Preview · 官方仍在快速迭代，后续版本可能存在兼容性变化。",
     theme: {
@@ -125,6 +86,24 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
       border: "border-teal-200",
       dot: "bg-teal-500",
       selection: "border-teal-300 bg-teal-50/70 shadow-[inset_4px_0_0_#14b8a6]",
+    },
+  },
+  workbuddy: {
+    id: "workbuddy",
+    name: "WorkBuddy",
+    category: "研发智能工作空间",
+    tagline: "代码、终端与项目协作桌面",
+    positioning:
+      "面向软件研发和项目协作的独立 Linux 桌面，将 WorkBuddy、终端、代码文件和平台模型接入集中在一个持续可用的工作空间中。",
+    capabilities: ["智能编码协作", "Linux 图形桌面", "终端与项目文件", "平台模型接入", "持久化工作区"],
+    scenarios: "代码开发、项目维护、终端操作、技术资料整理与持续研发协作。",
+    notice: "Linux 兼容运行环境",
+    theme: {
+      accent: "text-amber-700",
+      accentSoft: "bg-amber-50",
+      border: "border-amber-200",
+      dot: "bg-amber-500",
+      selection: "border-amber-300 bg-amber-50/70 shadow-[inset_4px_0_0_#f59e0b]",
     },
   },
 };
@@ -137,14 +116,6 @@ const fallbackRuntime: IEIRuntimePresentation = {
   positioning: "该实例使用扩展 Runtime。具体工具、交互方式和运行能力由所配置的 Runtime 镜像提供。",
   capabilities: ["独立工作区", "生命周期管理", "安全访问", "文件管理"],
   scenarios: "适用于企业自定义镜像和后续接入的新型 Runtime。",
-  lite: {
-    title: "Lite · 共享运行时",
-    summary: "以共享运行时方式提供隔离工作区，具体能力由 Runtime 实现决定。",
-  },
-  pro: {
-    title: "Pro · 专属桌面",
-    summary: "以独立桌面和专属资源方式运行，具体能力由 Runtime 实现决定。",
-  },
   theme: {
     accent: "text-slate-600",
     accentSoft: "bg-slate-100",
@@ -163,11 +134,4 @@ export function getIEIRuntimePresentation(type: string): IEIRuntimePresentation 
     id: normalized || fallbackRuntime.id,
     name: type.trim() || fallbackRuntime.name,
   };
-}
-
-export function getIEIInstanceMode(instanceMode: string, runtimeType: string) {
-  const normalizedMode = instanceMode.trim().toLowerCase();
-  if (normalizedMode === "pro") return "Pro";
-  if (normalizedMode === "lite") return "Lite";
-  return runtimeType.trim().toLowerCase() === "gateway" ? "Lite" : "Pro";
 }

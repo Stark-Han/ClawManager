@@ -35,17 +35,18 @@ type ieiSessionExchangeRequest struct {
 }
 
 type ieiInstanceView struct {
-	ID           int        `json:"id"`
-	Owner        string     `json:"owner"`
-	Name         string     `json:"name"`
-	Description  *string    `json:"description,omitempty"`
-	Type         string     `json:"type"`
-	RuntimeType  string     `json:"runtime_type"`
-	InstanceMode string     `json:"instance_mode"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
+	ID             int        `json:"id"`
+	Owner          string     `json:"owner"`
+	Name           string     `json:"name"`
+	Description    *string    `json:"description,omitempty"`
+	Type           string     `json:"type"`
+	RuntimeType    string     `json:"runtime_type"`
+	RuntimeVariant string     `json:"runtime_variant,omitempty"`
+	InstanceMode   string     `json:"instance_mode"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
 }
 
 func NewIEISystemHandler(
@@ -120,18 +121,18 @@ func (h *IEISystemHandler) ListInstances(c *gin.Context) {
 		utils.Error(c, http.StatusServiceUnavailable, "IEI system instance lookup is unavailable")
 		return
 	}
-	instances, total, err := ownerService.GetLiteByOwnerEmail(session.Email, (page-1)*limit, limit)
+	instances, total, err := ownerService.GetSupportedByOwnerEmail(session.Email, (page-1)*limit, limit)
 	if err != nil {
 		utils.HandleError(c, err)
 		return
 	}
 	views := make([]ieiInstanceView, 0, len(instances))
 	for idx := range instances {
-		if h.ownedLiteInstance(&instances[idx], session.Email) {
+		if h.ownedSupportedInstance(&instances[idx], session.Email) {
 			views = append(views, newIEIInstanceView(&instances[idx]))
 		}
 	}
-	utils.Success(c, http.StatusOK, "IEI Lite instances retrieved", gin.H{
+	utils.Success(c, http.StatusOK, "IEI instances retrieved", gin.H{
 		"instances": views,
 		"total":     total,
 		"page":      page,
@@ -145,11 +146,11 @@ func (h *IEISystemHandler) GetInstance(c *gin.Context) {
 	if !ok {
 		return
 	}
-	instance, ok := h.requireOwnedLiteInstance(c, session.Email)
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
 	if !ok {
 		return
 	}
-	utils.Success(c, http.StatusOK, "IEI Lite instance retrieved", gin.H{
+	utils.Success(c, http.StatusOK, "IEI instance retrieved", gin.H{
 		"instance": newIEIInstanceView(instance),
 	})
 }
@@ -160,7 +161,7 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 	if !ok {
 		return
 	}
-	instance, ok := h.requireOwnedLiteInstance(c, session.Email)
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
 	if !ok {
 		return
 	}
@@ -265,7 +266,7 @@ func (h *IEISystemHandler) handleWorkspace(c *gin.Context, next func(*WorkspaceF
 	if !ok {
 		return
 	}
-	instance, ok := h.requireOwnedLiteInstance(c, session.Email)
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
 	if !ok {
 		return
 	}
@@ -300,7 +301,7 @@ func (h *IEISystemHandler) requireSession(c *gin.Context) (*services.IEISession,
 	return session, true
 }
 
-func (h *IEISystemHandler) requireOwnedLiteInstance(c *gin.Context, owner string) (*models.Instance, bool) {
+func (h *IEISystemHandler) requireOwnedSupportedInstance(c *gin.Context, owner string) (*models.Instance, bool) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
 		utils.Error(c, http.StatusBadRequest, "Invalid instance ID")
@@ -311,21 +312,34 @@ func (h *IEISystemHandler) requireOwnedLiteInstance(c *gin.Context, owner string
 		utils.HandleError(c, err)
 		return nil, false
 	}
-	// Deliberately collapse missing, non-Lite and wrong-owner cases so this
+	// Deliberately collapse missing, unsupported and wrong-owner cases so this
 	// public endpoint cannot be used to enumerate other owners' instances.
-	if !h.ownedLiteInstance(instance, owner) {
+	if !h.ownedSupportedInstance(instance, owner) {
 		utils.Error(c, http.StatusNotFound, "Instance not found")
 		return nil, false
 	}
 	return instance, true
 }
 
-func (h *IEISystemHandler) ownedLiteInstance(instance *models.Instance, owner string) bool {
+func (h *IEISystemHandler) ownedSupportedInstance(instance *models.Instance, owner string) bool {
 	if instance == nil || instance.Owner == nil || !strings.EqualFold(strings.TrimSpace(*instance.Owner), strings.TrimSpace(owner)) {
 		return false
 	}
 	mode, ok := services.NormalizeInstanceMode(instance.InstanceMode)
-	return ok && mode == services.InstanceModeLite
+	if !ok {
+		return false
+	}
+	typeName := strings.ToLower(strings.TrimSpace(instance.Type))
+	if mode == services.InstanceModeLite {
+		switch typeName {
+		case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, "opencode", "deepseek-harness":
+			return true
+		default:
+			return false
+		}
+	}
+	return mode == services.InstanceModePro && typeName == "workbuddy" &&
+		strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
 }
 
 func newIEIInstanceView(instance *models.Instance) ieiInstanceView {
@@ -334,17 +348,18 @@ func newIEIInstanceView(instance *models.Instance) ieiInstanceView {
 		owner = *instance.Owner
 	}
 	return ieiInstanceView{
-		ID:           instance.ID,
-		Owner:        owner,
-		Name:         instance.Name,
-		Description:  instance.Description,
-		Type:         instance.Type,
-		RuntimeType:  instance.RuntimeType,
-		InstanceMode: instance.InstanceMode,
-		Status:       instance.Status,
-		CreatedAt:    instance.CreatedAt,
-		UpdatedAt:    instance.UpdatedAt,
-		StartedAt:    instance.StartedAt,
+		ID:             instance.ID,
+		Owner:          owner,
+		Name:           instance.Name,
+		Description:    instance.Description,
+		Type:           instance.Type,
+		RuntimeType:    instance.RuntimeType,
+		RuntimeVariant: instance.RuntimeVariant,
+		InstanceMode:   instance.InstanceMode,
+		Status:         instance.Status,
+		CreatedAt:      instance.CreatedAt,
+		UpdatedAt:      instance.UpdatedAt,
+		StartedAt:      instance.StartedAt,
 	}
 }
 

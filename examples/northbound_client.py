@@ -80,6 +80,19 @@ def env_positive_int(name: str, fallback: int) -> int:
     return value if value > 0 else fallback
 
 
+def northbound_instance_mode() -> str:
+    mode = os.getenv("NORTHBOUND_INSTANCE_MODE", "lite").strip().lower()
+    if mode not in {"lite", "pro"}:
+        raise ValueError("NORTHBOUND_INSTANCE_MODE must be lite or pro")
+    return mode
+
+
+def instance_collection_path(mode: str) -> str:
+    if mode not in {"lite", "pro"}:
+        raise ValueError("instance mode must be lite or pro")
+    return f"/{mode}-instances"
+
+
 def required_positive_int(name: str) -> int:
     try:
         value = int(os.getenv(name, ""))
@@ -424,9 +437,14 @@ def run(command: str) -> None:
             "Missing dependency 'python-dotenv'. Run: "
             "python -m pip install -r examples/requirements-northbound.txt"
         )
+    instance_mode = northbound_instance_mode()
     auto_enable_share_link = command == "create" and env_bool(
         "NORTHBOUND_ENABLE_SHARELINK"
     )
+    if auto_enable_share_link and instance_mode == "pro":
+        raise ValueError(
+            "NORTHBOUND_ENABLE_SHARELINK is available only for Lite instances"
+        )
     creates_share_link_password = (
         command in {"enable-password", "reset-password"} or auto_enable_share_link
     )
@@ -455,12 +473,17 @@ def run(command: str) -> None:
 
     if command == "create":
         owner = required_env("NORTHBOUND_OWNER")
-        instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", "openclaw").lower()
-        if instance_type not in {"openclaw", "hermes"}:
-            raise ValueError("NORTHBOUND_INSTANCE_TYPE must be openclaw or hermes")
+        default_type = "workbuddy" if instance_mode == "pro" else "openclaw"
+        instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", default_type).lower()
+        allowed_types = {"workbuddy"} if instance_mode == "pro" else {"openclaw", "hermes"}
+        if instance_type not in allowed_types:
+            choices = "workbuddy" if instance_mode == "pro" else "openclaw or hermes"
+            raise ValueError(
+                f"NORTHBOUND_INSTANCE_TYPE must be {choices} when NORTHBOUND_INSTANCE_MODE={instance_mode}"
+            )
         instance_name = os.getenv("NORTHBOUND_INSTANCE_NAME", "").strip()
         payload: dict[str, Any] = {
-            "name": instance_name or f"api-lite-{int(time.time() * 1000)}",
+            "name": instance_name or f"api-{instance_mode}-{int(time.time() * 1000)}",
             "owner": owner,
             "type": instance_type,
         }
@@ -471,7 +494,7 @@ def run(command: str) -> None:
         )
         operation, headers = client.authenticated_request(
             "POST",
-            "/lite-instances",
+            instance_collection_path(instance_mode),
             body=payload,
             headers={"Idempotency-Key": idempotency_key},
         )
@@ -501,13 +524,17 @@ def run(command: str) -> None:
                 "limit": env_positive_int("NORTHBOUND_LIMIT", 20),
             }
         )
-        result, _ = client.authenticated_request("GET", f"/lite-instances?{query}")
+        result, _ = client.authenticated_request(
+            "GET", f"{instance_collection_path(instance_mode)}?{query}"
+        )
         print_result(client, result)
         return
 
     if command == "get":
         instance_id = required_positive_int("NORTHBOUND_INSTANCE_ID")
-        result, _ = client.authenticated_request("GET", f"/lite-instances/{instance_id}")
+        result, _ = client.authenticated_request(
+            "GET", f"{instance_collection_path(instance_mode)}/{instance_id}"
+        )
         print_result(client, result)
         return
 

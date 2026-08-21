@@ -46,6 +46,8 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 	}
 	content := string(raw)
 	for _, route := range []string{
+		"/api/northbound/v1/pro-instances:",
+		"/api/northbound/v1/pro-instances/{id}:",
 		"/api/northbound/v1/lite-instances/{id}/external-access/password:",
 		"/api/northbound/v1/lite-instances/{id}/external-access/share-link/reset:",
 		"/api/northbound/v1/lite-instances/{id}/external-access/password/reset:",
@@ -60,10 +62,15 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 	if !strings.Contains(content, ScopeShareLinkManage) {
 		t.Fatalf("northbound OpenAPI is missing scope %s", ScopeShareLinkManage)
 	}
+	if !strings.Contains(content, ScopeProCreate) || !strings.Contains(content, ScopeProRead) {
+		t.Fatalf("northbound OpenAPI is missing Pro instance scopes")
+	}
 	for _, required := range []string{
 		"required: [name, owner, type]",
 		"required: [id, name, owner, type, status, created_at, updated_at]",
 		"Exact, case-sensitive owner identifier",
+		"const: workbuddy",
+		"server-controlled small resource preset",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("northbound OpenAPI is missing owner contract %q", required)

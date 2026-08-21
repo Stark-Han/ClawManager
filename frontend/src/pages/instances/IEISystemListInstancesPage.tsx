@@ -4,7 +4,6 @@ import {
   Box,
   CheckCircle2,
   ChevronRight,
-  Code2,
   LogOut,
   RefreshCw,
   Search,
@@ -14,10 +13,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  getIEIInstanceMode,
-  getIEIRuntimePresentation,
-} from "../../lib/ieiRuntimeCatalog";
+import { getIEIRuntimePresentation } from "../../lib/ieiRuntimeCatalog";
 import {
   ieiSystemService,
   type IEISystemInstance,
@@ -80,6 +76,9 @@ function InstanceTypeIcon({
       />
     );
   }
+  if (normalizedType === "workbuddy") {
+    return <img src="/workbuddy.png" alt="WorkBuddy" className={`${className} object-contain`} />;
+  }
   return <Box aria-label={type || "Instance"} className={`${className} text-slate-500`} />;
 }
 
@@ -87,7 +86,7 @@ function errorMessage(error: unknown) {
   if (axios.isAxiosError(error) && typeof error.response?.data?.error === "string") {
     return error.response.data.error;
   }
-  return "无法加载 Lite 实例，请稍后重试。";
+  return "无法加载实例，请稍后重试。";
 }
 
 function installNoReferrerPolicy() {
@@ -201,10 +200,6 @@ export default function IEISystemListInstancesPage() {
   const selectedRuntime = selectedInstance
     ? getIEIRuntimePresentation(selectedInstance.type)
     : null;
-  const selectedMode = selectedInstance
-    ? getIEIInstanceMode(selectedInstance.instance_mode, selectedInstance.runtime_type)
-    : "Lite";
-
   const handleLogout = async () => {
     await ieiSystemService.clearSession().catch(() => undefined);
     setSession(null);
@@ -278,8 +273,8 @@ export default function IEISystemListInstancesPage() {
         ) : instances.length === 0 ? (
           <div className="mx-auto mt-16 flex max-w-xl flex-col items-center rounded-2xl border border-slate-200 bg-white px-6 py-16 text-center shadow-sm">
             <Box className="h-10 w-10 text-slate-300" />
-            <h2 className="mt-4 text-lg font-semibold">暂无 Lite 实例</h2>
-            <p className="mt-1 text-sm text-slate-500">当前 owner 下没有可展示的 Lite 实例。</p>
+            <h2 className="mt-4 text-lg font-semibold">暂无实例</h2>
+            <p className="mt-1 text-sm text-slate-500">当前 owner 下没有可展示的实例。</p>
           </div>
         ) : selectedInstance && selectedRuntime ? (
           <div className="grid gap-4 lg:h-[calc(100vh-132px)] lg:min-h-[640px] lg:grid-cols-[minmax(280px,330px)_minmax(460px,1fr)_minmax(280px,320px)] 2xl:grid-cols-[minmax(320px,380px)_minmax(560px,1fr)_minmax(320px,360px)]">
@@ -329,7 +324,6 @@ export default function IEISystemListInstancesPage() {
                 ) : (
                   visibleInstances.map((instance) => {
                     const runtime = getIEIRuntimePresentation(instance.type);
-                    const mode = getIEIInstanceMode(instance.instance_mode, instance.runtime_type);
                     const selected = instance.id === selectedInstance.id;
                     return (
                       <button
@@ -360,7 +354,7 @@ export default function IEISystemListInstancesPage() {
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
-                              {runtime.name} {mode} · #{instance.id}
+                              {runtime.name} · #{instance.id}
                             </p>
                             <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
                               <span className={`h-2 w-2 rounded-full ${runtime.theme.dot}`} />
@@ -398,7 +392,7 @@ export default function IEISystemListInstancesPage() {
                       </span>
                     </div>
                     <p className="mt-2 text-base text-slate-500">
-                      {selectedRuntime.name} {selectedMode} · #{selectedInstance.id}
+                      {selectedRuntime.name} · #{selectedInstance.id}
                     </p>
                     <p
                       className={`mt-2 flex items-center gap-2 text-sm font-medium ${selectedRuntime.theme.accent}`}
@@ -425,7 +419,6 @@ export default function IEISystemListInstancesPage() {
                       ["实例名称", selectedInstance.name],
                       ["实例 ID", `#${selectedInstance.id}`],
                       ["运行时", selectedRuntime.name],
-                      ["实例模式", selectedMode],
                       ["运行时类型", selectedRuntime.category],
                       ["状态", statusLabel(selectedInstance.status)],
                       ["更新时间", formatTime(selectedInstance.updated_at)],
@@ -507,24 +500,6 @@ export default function IEISystemListInstancesPage() {
                       </li>
                     ))}
                   </ul>
-                </div>
-
-                <div className="mt-7">
-                  <h4 className="text-sm font-bold text-slate-900">版本说明</h4>
-                  <div className="mt-3 space-y-3">
-                    {[selectedRuntime.lite, selectedRuntime.pro].map((mode) => (
-                      <div
-                        key={mode.title}
-                        className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5"
-                      >
-                        <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
-                          <Code2 className="h-3.5 w-3.5 text-slate-500" />
-                          {mode.title}
-                        </div>
-                        <p className="mt-2 text-xs leading-5 text-slate-500">{mode.summary}</p>
-                      </div>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="mt-7">

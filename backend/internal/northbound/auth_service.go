@@ -159,7 +159,14 @@ func (s *AuthService) Login(ctx context.Context, challengeID, compactJWE, source
 	if user == nil || !user.IsActive || !passwordValid {
 		return nil, apiError(401, "INVALID_CREDENTIALS", "Invalid username or password", nil)
 	}
-	return s.createSession(user.ID, sourceIP, userAgent, []string{ScopeLiteCreate, ScopeLiteRead, ScopeShareLinkManage, ScopeShareLinkReset})
+	return s.createSession(user.ID, sourceIP, userAgent, []string{
+		ScopeLiteCreate,
+		ScopeLiteRead,
+		ScopeProCreate,
+		ScopeProRead,
+		ScopeShareLinkManage,
+		ScopeShareLinkReset,
+	})
 }
 
 func (s *AuthService) createSession(userID int, sourceIP, userAgent string, scopes []string) (*TokenResponse, error) {

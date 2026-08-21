@@ -107,6 +107,34 @@ const instances = [
     updated_at: new Date(now.getTime() - 12_600_000).toISOString(),
     started_at: new Date(now.getTime() - 12_600_000).toISOString(),
   },
+  {
+    id: 109,
+    owner,
+    name: "研发协作工作台",
+    description: "用于代码开发、终端操作、项目文件管理和持续研发协作。",
+    type: "workbuddy",
+    runtime_type: "desktop",
+    runtime_variant: "linux",
+    instance_mode: "pro",
+    status: "running",
+    created_at: new Date(now.getTime() - 86_400_000 * 0.2).toISOString(),
+    updated_at: new Date(now.getTime() - 14_400_000).toISOString(),
+    started_at: new Date(now.getTime() - 14_400_000).toISOString(),
+  },
+  {
+    id: 110,
+    owner,
+    name: "项目维护空间",
+    description: "面向仓库维护、问题排查、构建验证与技术文档整理。",
+    type: "workbuddy",
+    runtime_type: "desktop",
+    runtime_variant: "linux",
+    instance_mode: "pro",
+    status: "running",
+    created_at: new Date(now.getTime() - 86_400_000 * 0.1).toISOString(),
+    updated_at: new Date(now.getTime() - 16_200_000).toISOString(),
+    started_at: new Date(now.getTime() - 16_200_000).toISOString(),
+  },
 ];
 
 const workspaceEntries = {
@@ -158,7 +186,7 @@ function runtimeHTML(instance) {
     .card{border:1px solid #e2e8f0;border-radius:14px;padding:16px}.label{font-size:12px;color:#94a3b8}.value{margin-top:8px;font-weight:650}
   </style></head><body><main class="shell"><div class="bar"><div class="brand">${runtimeName} Runtime</div><div class="status">运行中</div></div>
   <section class="hero"><div class="eyebrow">IEI OWNER MOCK</div><h1>${instance?.name ?? "模拟实例"}</h1><p>这是本地模拟的实例服务界面，用于检查 IEI owner 门户的布局、比例和右侧文件管理器，不连接真实 Runtime。</p>
-  <div class="cards"><div class="card"><div class="label">Runtime</div><div class="value">${runtimeName} Lite</div></div><div class="card"><div class="label">Owner</div><div class="value">${owner}</div></div><div class="card"><div class="label">Instance ID</div><div class="value">#${instance?.id ?? "-"}</div></div></div></section></main></body></html>`;
+  <div class="cards"><div class="card"><div class="label">Runtime</div><div class="value">${runtimeName}</div></div><div class="card"><div class="label">Owner</div><div class="value">${owner}</div></div><div class="card"><div class="label">Instance ID</div><div class="value">#${instance?.id ?? "-"}</div></div></div></section></main></body></html>`;
 }
 
 const server = http.createServer((request, response) => {

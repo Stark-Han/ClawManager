@@ -46,6 +46,7 @@ assert(
     listPage.includes('src="/hermes.png"') &&
     listPage.includes('src="/opencode.png"') &&
     listPage.includes('src="/deepseek-harness.svg"') &&
+    listPage.includes('src="/workbuddy.png"') &&
     !listPage.includes("instance.description"),
   "IEI instance cards must show their runtime icon without the Created by description line.",
 );
@@ -54,19 +55,24 @@ assert(
   listPage.includes("我的实例") &&
     listPage.includes("实例详情") &&
     listPage.includes("运行时说明") &&
-    listPage.includes("实例模式") &&
-    listPage.includes("selectedRuntime.lite") &&
-    listPage.includes("selectedRuntime.pro") &&
+    !listPage.includes("实例模式") &&
+    !listPage.includes("Lite") &&
+    !listPage.includes("Pro") &&
+    !runtimeCatalog.includes("Lite") &&
+    !runtimeCatalog.includes("Pro") &&
     runtimeCatalog.includes('"deepseek-harness"') &&
+    runtimeCatalog.includes('workbuddy: {') &&
     runtimeCatalog.includes("Developer Preview"),
-  "The owner portal must use the three-column runtime-aware master/detail layout with neutral Lite and Pro descriptions.",
+  "The owner portal must use the three-column runtime-aware layout without exposing deployment modes.",
 );
 
 assert(
   ["openclaw", "hermes", "opencode", "deepseek-harness"].every(
     (type) => (mockServer.match(new RegExp(`type: "${type}"`, "g")) ?? []).length === 2,
-  ),
-  "The local IEI test server must provide two Lite instances for every supported runtime presentation.",
+  ) &&
+    (mockServer.match(/type: "workbuddy"/g) ?? []).length === 2 &&
+    (mockServer.match(/runtime_variant: "linux"/g) ?? []).length === 2,
+  "The local IEI test server must provide two instances for every supported runtime and Linux-only WorkBuddy data.",
 );
 
 assert(

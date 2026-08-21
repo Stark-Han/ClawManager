@@ -54,6 +54,24 @@ func (s *northboundInstanceStub) GetLiteByUserIDAndOwner(userID int, owner strin
 	return items[offset:end], total, nil
 }
 
+func (s *northboundInstanceStub) GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	items := make([]models.Instance, 0)
+	for _, item := range s.items {
+		if item.UserID == userID && item.Owner != nil && *item.Owner == owner && isWorkbuddyLinuxPro(item) {
+			items = append(items, *item)
+		}
+	}
+	total := len(items)
+	if offset >= total {
+		return []models.Instance{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
+}
+
 type shareLinkResetStub struct {
 	passwordCreateResult *services.PasswordExternalAccessResult
 	urlResult            *services.EnableShareLinkResult
@@ -268,7 +286,7 @@ func TestCoreServiceHidesForeignShareLinkAndMapsStateConflicts(t *testing.T) {
 	}
 }
 
-func TestNorthboundShareLinkResetRoutesAreRegistered(t *testing.T) {
+func TestNorthboundResourceRoutesAreRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	publicRouter := gin.New()
 	RegisterGatewayRoutes(publicRouter, &AuthHandler{}, &CoreClient{})
@@ -276,6 +294,12 @@ func TestNorthboundShareLinkResetRoutesAreRegistered(t *testing.T) {
 	RegisterCoreRoutes(internalRouter, NewCoreHandler(&CoreService{}, "internal-secret"))
 
 	want := map[string]bool{
+		"POST /api/northbound/v1/pro-instances":                                            false,
+		"GET /api/northbound/v1/pro-instances":                                             false,
+		"GET /api/northbound/v1/pro-instances/:id":                                         false,
+		"POST /internal/northbound/v1/pro-instances":                                       false,
+		"GET /internal/northbound/v1/pro-instances":                                        false,
+		"GET /internal/northbound/v1/pro-instances/:id":                                    false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password":              false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/share-link/reset":      false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password/reset":        false,

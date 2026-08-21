@@ -47,12 +47,15 @@
 | POST | `/lite-instances` | `lite-instances:create` | 异步创建 Lite 实例 |
 | GET | `/lite-instances?owner=...` | `lite-instances:read` | 按 owner 查询当前用户的 Lite 实例列表 |
 | GET | `/lite-instances/{id}` | `lite-instances:read` | 查询一个 Lite 实例 |
+| POST | `/pro-instances` | `pro-instances:create` | 异步创建固定 Linux 运行环境和小规格资源的 WorkBuddy 实例 |
+| GET | `/pro-instances?owner=...` | `pro-instances:read` | 按 owner 查询当前用户的 WorkBuddy 实例列表 |
+| GET | `/pro-instances/{id}` | `pro-instances:read` | 查询一个 Linux WorkBuddy 实例 |
 | GET | `/operations/{id}` | create 或 read | 查询异步操作状态 |
 | POST | `/lite-instances/{id}/external-access/password` | `lite-instances:share-link:manage` | 启用密码模式 ShareLink 并生成 URL/密码 |
 | POST | `/lite-instances/{id}/external-access/share-link/reset` | `lite-instances:share-link:reset` | 重置 ShareLink URL |
 | POST | `/lite-instances/{id}/external-access/password/reset` | `lite-instances:share-link:reset` | 重置 ShareLink 密码 |
 
-完整路径需要加上 `/api/northbound/v1` 前缀。新登录会话会获得上述四个 Lite 实例 Scope；部署新版本前创建的会话需要重新执行 JWE 登录才能获得 ShareLink 管理 Scope。
+完整路径需要加上 `/api/northbound/v1` 前缀。新登录会话会获得 Lite、Pro 和 ShareLink Scope；部署新版本前创建的会话需要重新执行 JWE 登录才能获得新增 Scope。
 
 Scope 含义：
 
@@ -60,6 +63,8 @@ Scope 含义：
 | --- | --- |
 | `lite-instances:create` | 提交 Lite 创建 Operation，并可读取自己提交的 Operation。 |
 | `lite-instances:read` | 按 owner 列出当前用户自己的 Lite 实例、查询单个实例，并可读取 Operation。 |
+| `pro-instances:create` | 提交 Linux WorkBuddy 创建 Operation，并可读取自己提交的 Operation。 |
+| `pro-instances:read` | 按 owner 列出当前用户自己的 Linux WorkBuddy 实例、查询单个实例，并可读取 Operation。 |
 | `lite-instances:share-link:manage` | 为当前用户自己的 Lite 实例显式启用密码模式 ShareLink；会生成并返回敏感凭据。 |
 | `lite-instances:share-link:reset` | 重置已经启用的 ShareLink URL 或密码；不能首次启用，也不能修改有效期或 Workspace 权限。 |
 
@@ -320,7 +325,29 @@ Idempotency-Key: create-alice-openclaw-001
 
 `Location` 响应头指向操作查询地址。相同用户使用相同 `Idempotency-Key` 和相同请求体重试时，返回同一操作，并带有 `Idempotent-Replayed: true`。相同 Key 搭配不同请求体会返回 `IDEMPOTENCY_CONFLICT`。
 
-### 4.2 查询操作
+### 4.2 创建 Linux WorkBuddy 实例
+
+WorkBuddy 请求沿用 Lite 创建接口的字段，不接收运行环境、镜像或资源参数：
+
+```http
+POST /api/northbound/v1/pro-instances
+Authorization: Bearer <access-token>
+Content-Type: application/json
+Idempotency-Key: create-alice-workbuddy-001
+
+{
+  "name": "alice-workbuddy",
+  "owner": "alice",
+  "type": "workbuddy",
+  "description": "Created by northbound API"
+}
+```
+
+服务端固定使用 Linux WorkBuddy、独立桌面运行环境、2 CPU、4 GB 内存、20 GB 存储且不启用 GPU。调用方不能切换到 Windows，也不能通过北向接口放大资源或替换镜像。成功提交仍返回 `202 Accepted`，`resource_type` 为 `pro_instance`，并使用同一个 `/operations/{id}` 接口轮询。
+
+WorkBuddy 不使用 Lite ShareLink 接口。IEI owner 门户会在 owner 身份校验成功后提供实例入口和工作区文件管理。
+
+### 4.3 查询操作
 
 ```http
 GET /api/northbound/v1/operations/op_example
@@ -342,12 +369,12 @@ Operation 字段：
 | --- | --- |
 | `operation_id` | 异步操作 ID，供 `/operations/{id}` 查询。 |
 | `status` | `queued`、`processing`、`succeeded` 或 `failed`。 |
-| `resource_type` | 当前固定为 `lite_instance`。 |
+| `resource_type` | Lite 创建为 `lite_instance`，WorkBuddy 创建为 `pro_instance`。 |
 | `instance_id` | 仅成功后出现，后续实例和 ShareLink 接口使用该正整数。 |
 | `error_code` / `error_message` | 仅失败时出现；适合程序判断和运维排查，不包含底层敏感信息。 |
 | `created_at` / `started_at` / `finished_at` / `updated_at` | RFC 3339 时间；尚未发生的阶段字段会省略。 |
 
-### 4.3 查询实例
+### 4.4 查询实例
 
 ```http
 GET /api/northbound/v1/lite-instances?owner=alice&page=1&limit=20
@@ -644,16 +671,17 @@ Demo 环境变量说明：
 | `NORTHBOUND_CA_FILE` | 全部 | 使用私有 CA 时必填 | 用于验证北向 Gateway 服务端证书的 CA 文件路径。不要用关闭 TLS 校验代替。 |
 | `NORTHBOUND_USERNAME` | 全部 | 必填 | 现有 ClawManager 用户名。只在本地构造 JWE，不以明文发送。 |
 | `NORTHBOUND_PASSWORD` | 全部 | 必填 | 现有用户密码。只在本地构造 JWE；不得提交到版本库。 |
-| `NORTHBOUND_OWNER` | `create`、`list` | 必填 | 创建者或业务归属标识；列表只返回与它精确匹配的 Lite 实例。 |
+| `NORTHBOUND_OWNER` | `create`、`list` | 必填 | 创建者或业务归属标识；列表只返回与它精确匹配的实例。 |
+| `NORTHBOUND_INSTANCE_MODE` | `create`、`list`、`get` | 默认 `lite` | `lite` 调用现有 Lite 接口；`pro` 调用 Linux WorkBuddy 接口。 |
 | `NORTHBOUND_HTTP_TIMEOUT_SECONDS` | 全部 | 默认 `30` | 单次 HTTPS 请求超时，正整数秒；空值、非整数或非正数回退到默认值。 |
-| `NORTHBOUND_INSTANCE_TYPE` | `create` | 默认 `openclaw` | `openclaw` 或 `hermes`。 |
-| `NORTHBOUND_INSTANCE_NAME` | `create` | 默认自动生成 | 实例名称；空值时生成 `api-lite-<毫秒时间戳>`，非空时必须同时满足创建接口的 3～50 Unicode 字符和 3～50 UTF-8 字节限制。 |
+| `NORTHBOUND_INSTANCE_TYPE` | `create` | Lite 默认 `openclaw`，Pro 默认 `workbuddy` | Lite 可选 `openclaw` 或 `hermes`；Pro 只允许 `workbuddy`。 |
+| `NORTHBOUND_INSTANCE_NAME` | `create` | 默认自动生成 | 实例名称；空值时生成 `api-<模式>-<毫秒时间戳>`，非空时必须同时满足创建接口的 3～50 Unicode 字符和 3～50 UTF-8 字节限制。 |
 | `NORTHBOUND_DESCRIPTION` | `create` | 默认省略 | 实例备注，最多 2000 UTF-8 字节。 |
 | `NORTHBOUND_IDEMPOTENCY_KEY` | `create` | 默认每次生成 UUID | 8～128 UTF-8 字节。要安全重试同一次业务创建，必须保存并复用相同值。 |
 | `NORTHBOUND_WAIT_CREATE` | `create` | 默认 `true` | 是否轮询 Operation 到终态。启用自动 ShareLink 时必须为 `true`。 |
 | `NORTHBOUND_POLL_INTERVAL_MS` | `create` | 默认 `2000` | Operation 轮询间隔，正整数毫秒。 |
 | `NORTHBOUND_POLL_TIMEOUT_MS` | `create` | 默认 `180000` | Operation 总等待时间，正整数毫秒；超时不代表服务端创建一定失败，可用 Operation ID 继续查询。 |
-| `NORTHBOUND_ENABLE_SHARELINK` | `create` | 默认 `false` | `true` 时在创建 Operation 成功后调用密码模式启用接口。必须同时设置 `NORTHBOUND_WAIT_CREATE=true` 和 `NORTHBOUND_SHOW_SECRETS=true`。 |
+| `NORTHBOUND_ENABLE_SHARELINK` | `create` | 默认 `false` | 仅适用于 Lite。`true` 时在创建 Operation 成功后调用密码模式启用接口。必须同时设置 `NORTHBOUND_WAIT_CREATE=true` 和 `NORTHBOUND_SHOW_SECRETS=true`。 |
 | `NORTHBOUND_SHARELINK_EXPIRES_MODE` | `create`、`enable-password` | 默认 `preset` | `preset`、`custom` 或 `permanent`；语义及组合规则见 5.1。 |
 | `NORTHBOUND_SHARELINK_EXPIRES_PRESET` | `create`、`enable-password` | 默认 `24h` | 预设模式下使用：`1h`、`24h`、`7d` 或 `30d`。 |
 | `NORTHBOUND_SHARELINK_EXPIRES_AT` | `create`、`enable-password` | custom 模式必填 | 未来的 RFC 3339 时间；仅在 `expires_mode=custom` 时发送。 |

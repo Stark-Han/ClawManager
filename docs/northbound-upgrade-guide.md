@@ -1,7 +1,7 @@
 # ClawManager 北向接口版本升级说明
 
-本文说明如何把已有 ClawManager 升级到本分支的北向接口版本，包含 Lite 实例 owner
-隔离和智慧协作平台单点登录页面。本文适用于仓库中的 Kubernetes 和 K3s 部署；自定义
+本文说明如何把已有 ClawManager 升级到本分支的北向接口版本，包含 Lite 实例、Linux
+WorkBuddy 实例、owner 隔离和智慧协作平台单点登录页面。本文适用于仓库中的 Kubernetes 和 K3s 部署；自定义
 部署可按文末的组件清单完成等价升级。
 
 升级采用增量方式，不需要重建现有 MySQL、Workspace PVC 或 Lite Runtime。现有用户、
@@ -19,6 +19,7 @@
 | --- | --- | --- |
 | Core 应用 | 增加北向内部服务和异步 Operation Worker | 与现有管理页面共用应用镜像；内部端口为 `9002` |
 | 北向 Gateway | 新增独立进程 `clawreef-northbound-gateway` | 唯一新增的对外入口，NodePort 为 `38443` |
+| WorkBuddy Linux | 增加 `/pro-instances` 创建和查询 | 固定 Linux Webtop、2 CPU、4 GB 内存、20 GB 存储；不需要 Windows 节点或 Golden PVC |
 | 数据库 | 自动执行 `045_add_northbound_api.sql` 和 `047_add_instance_owner.sql` | 新增北向表和实例 owner 字段 |
 | 登录 | 新增一次性挑战和 JWE 登录 | 兼容现有用户；用户名和密码不会作为明文请求字段传输 |
 | Lite 实例 | 新增异步创建、查询接口 | 仅操作当前登录用户自己的 Lite 实例 |
@@ -342,7 +343,20 @@ python examples/northbound_client.py create
 `workspace_access=none` 不包含 Workspace 文件。完整调用顺序和参数范围见
 [北向接口使用说明](./northbound-api-guide.md)。
 
-### 9.4 验证网络边界
+### 9.4 验证 WorkBuddy Linux 创建
+
+重新登录以获得 `pro-instances:create` 和 `pro-instances:read` Scope，然后设置：
+
+```powershell
+$env:NORTHBOUND_INSTANCE_MODE = "pro"
+$env:NORTHBOUND_INSTANCE_TYPE = "workbuddy"
+python examples/northbound_client.py create
+```
+
+确认实例为 Linux WorkBuddy，使用 2 CPU、4 GB 内存、20 GB 存储、3001 端口和 `/config`
+工作区。不得出现 Windows 镜像、8006 端口、Windows 节点选择器或 Golden PVC。
+
+### 9.5 验证网络边界
 
 正式开放前至少确认：
 

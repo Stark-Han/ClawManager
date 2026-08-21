@@ -90,6 +90,8 @@ func northboundEventType(method, route string) string {
 		return "northbound.auth.logout"
 	case "POST /api/northbound/v1/lite-instances":
 		return "northbound.lite.create"
+	case "POST /api/northbound/v1/pro-instances":
+		return "northbound.pro.create"
 	case "POST /api/northbound/v1/lite-instances/:id/external-access/password":
 		return "northbound.share_link.password_enabled"
 	case "POST /api/northbound/v1/lite-instances/:id/external-access/share-link/reset":
