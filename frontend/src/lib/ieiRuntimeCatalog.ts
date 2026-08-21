@@ -22,11 +22,11 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
     id: "openclaw",
     name: "OpenClaw",
     category: "通用智能体工作台",
-    tagline: "会话、工具与自动化协作空间",
+    tagline: "会话、工具与自动化任务空间",
     positioning:
-      "面向通用智能体任务的受管工作空间，提供原生会话、工具调用、定时任务、Channel、Skill 与 Team 协作能力。",
-    capabilities: ["原生智能体会话", "工具与定时任务", "Channel 接入", "Skill 扩展", "Team 协作"],
-    scenarios: "市场分析、知识处理、自动化任务、业务助理与多智能体协作。",
+      "面向通用智能体任务的受管工作空间，提供原生会话、工具调用、定时任务、Channel 与 Skill 扩展能力。",
+    capabilities: ["原生智能体会话", "工具与定时任务", "Channel 接入", "Skill 扩展", "持续工作区"],
+    scenarios: "市场分析、知识处理、自动化任务、资料整理与日常业务助理。",
     theme: {
       accent: "text-rose-600",
       accentSoft: "bg-rose-50",
@@ -39,11 +39,11 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
     id: "hermes",
     name: "Hermes",
     category: "知识与任务智能体",
-    tagline: "持久会话与原生工具协作空间",
+    tagline: "持久会话与原生工具工作空间",
     positioning:
-      "保留 Hermes 原生会话和工具体验，以持久化工作区承载上下文、配置与执行结果，也可作为 Team Worker 参与协作。",
-    capabilities: ["持久化原生会话", "Hermes 工具集", "模型统一接入", "Skill 扩展", "Team Worker"],
-    scenarios: "知识问答、资料整理、深度研究、持续对话与团队任务执行。",
+      "保留 Hermes 原生会话和工具体验，以持久化工作区承载上下文、配置与执行结果，适合连续推进复杂知识任务。",
+    capabilities: ["持久化原生会话", "Hermes 工具集", "模型统一接入", "Skill 扩展", "长任务执行"],
+    scenarios: "知识问答、资料整理、深度研究、持续对话与复杂任务执行。",
     theme: {
       accent: "text-violet-600",
       accentSoft: "bg-violet-50",
