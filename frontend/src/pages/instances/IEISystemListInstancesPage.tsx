@@ -212,13 +212,13 @@ export default function IEISystemListInstancesPage() {
       <header className="shrink-0 border-b border-slate-200 bg-white/95 shadow-[0_1px_16px_rgba(15,23,42,0.025)] backdrop-blur">
         <div className="flex min-h-[92px] items-center justify-between gap-6 px-7 py-4 lg:px-9">
           <div className="flex min-w-0 items-center gap-7">
-            <div className="flex shrink-0 flex-col items-start">
+            <div className="flex shrink-0 items-center gap-4">
               <img
                 src="/inspur-information.png"
                 alt="浪潮信息"
                 className="h-auto w-[180px] object-contain object-left"
               />
-              <div className="mt-0.5 pl-0.5 text-[11px] font-medium tracking-[0.18em] text-slate-500">
+              <div className="hidden h-8 items-center whitespace-nowrap rounded-lg border border-blue-100 bg-blue-50/80 px-3 text-sm font-semibold tracking-[0.04em] text-blue-700 sm:inline-flex">
                 智慧协作门户
               </div>
             </div>
