@@ -45,14 +45,16 @@ type InstanceRepository interface {
 type InstanceOwnerRepository interface {
 	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
 	CountLiteByUserIDAndOwner(userID int, owner string) (int, error)
+	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
+	CountWorkbuddyProByUserIDAndOwner(userID int, owner string) (int, error)
 }
 
 // IEISystemInstanceRepository is the case-insensitive owner lookup used after
 // the unified platform has authenticated an email address. It intentionally
 // does not depend on a ClawManager user session.
 type IEISystemInstanceRepository interface {
-	GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error)
-	CountLiteByOwnerEmail(owner string) (int, error)
+	GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error)
+	CountSupportedByOwnerEmail(owner string) (int, error)
 }
 
 // instanceRepository implements InstanceRepository
@@ -286,26 +288,66 @@ func (r *instanceRepository) CountLiteByUserIDAndOwner(userID int, owner string)
 	return int(count), nil
 }
 
-func (r *instanceRepository) GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error) {
+func (r *instanceRepository) GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error) {
 	var instances []models.Instance
 	err := r.sess.Collection("instances").Find(db.Cond{
-		"instance_mode":    "lite",
-		"owner_normalized": strings.ToLower(strings.TrimSpace(owner)),
-	}).
-		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+		"user_id":         userID,
+		"owner":           owner,
+		"instance_mode":   "pro",
+		"type":            "workbuddy",
+		"runtime_variant": "linux",
+	}).OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IEI owner Lite instances: %w", err)
+		return nil, fmt.Errorf("failed to get owner WorkBuddy Pro instances: %w", err)
 	}
 	return instances, nil
 }
 
-func (r *instanceRepository) CountLiteByOwnerEmail(owner string) (int, error) {
+func (r *instanceRepository) CountWorkbuddyProByUserIDAndOwner(userID int, owner string) (int, error) {
 	count, err := r.sess.Collection("instances").Find(db.Cond{
-		"instance_mode":    "lite",
-		"owner_normalized": strings.ToLower(strings.TrimSpace(owner)),
+		"user_id":         userID,
+		"owner":           owner,
+		"instance_mode":   "pro",
+		"type":            "workbuddy",
+		"runtime_variant": "linux",
 	}).Count()
 	if err != nil {
-		return 0, fmt.Errorf("failed to count IEI owner Lite instances: %w", err)
+		return 0, fmt.Errorf("failed to count owner WorkBuddy Pro instances: %w", err)
+	}
+	return int(count), nil
+}
+
+func supportedIEIOwnerInstances(owner string) db.LogicalExpr {
+	return db.And(
+		db.Cond{"owner_normalized": strings.ToLower(strings.TrimSpace(owner))},
+		db.Or(
+			db.Cond{
+				"instance_mode": "lite",
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
+			},
+			db.Cond{
+				"instance_mode":   "pro",
+				"type":            "workbuddy",
+				"runtime_variant": "linux",
+			},
+		),
+	)
+}
+
+func (r *instanceRepository) GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(supportedIEIOwnerInstances(owner)).
+		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get IEI owner instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountSupportedByOwnerEmail(owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(supportedIEIOwnerInstances(owner)).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count IEI owner instances: %w", err)
 	}
 	return int(count), nil
 }

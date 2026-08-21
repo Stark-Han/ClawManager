@@ -1,6 +1,6 @@
 # Workbuddy Pro Runtime Progress
 
-> Historical implementation note (2026-08-01). Workbuddy and the Windows VM runtime were later removed from the current AgentsRuntime baseline and are not selectable product features in the current ClawManager UI. Do not use this document as a deployment or user guide.
+> Historical implementation note (2026-08-01), updated for the IEI northbound integration. The northbound API and IEI owner portal support Linux WorkBuddy Pro only. Windows compatibility code may remain for existing administrative workflows, but northbound callers cannot request Windows, choose an image, or change the fixed resource preset. Use `northbound-upgrade-guide.md` for deployment.
 
 ## Scope
 

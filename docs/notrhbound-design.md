@@ -10,7 +10,7 @@ ClawManager 当前已经提供面向管理前端的实例接口，例如 `POST /
 
 现有接口主要服务于网页登录会话，不应直接作为外部系统的稳定北向契约。北向接口需要满足以下目标：
 
-1. 外部系统能够通过 API 自动创建 OpenClaw 或 Hermes Lite 实例。
+1. 外部系统能够通过 API 自动创建 OpenClaw、Hermes、OpenCode 或 DeepSeek Harness Lite 实例。
 2. 北向登录过程中，用户名和密码不得以明文形式出现在 HTTP 请求体中。
 3. 核心 ClawManager 后端不直接暴露到公网。
 4. 外部契约与内部实例模型解耦，不暴露镜像、Pod、内部 Token 等实现细节。
@@ -294,7 +294,7 @@ Content-Type: application/json
 | 字段 | 必填 | 约束 |
 |---|---|---|
 | `name` | 是 | 3 至 50 个字符，同一用户下唯一 |
-| `type` | 是 | `openclaw` 或 `hermes` |
+| `type` | 是 | `openclaw`、`hermes`、`opencode` 或 `deepseek-harness` |
 | `description` | 否 | 最大长度应在实施阶段统一确定 |
 
 请求不得包含 `user_id`。实例归属用户只能由北向 Token 的 `sub` 决定。
@@ -606,7 +606,7 @@ source_ip
 
 ### 15.3 创建与幂等测试
 
-- OpenClaw 和 Hermes Lite 创建成功。
+- OpenClaw、Hermes、OpenCode 和 DeepSeek Harness Lite 创建成功。
 - 外部请求不能覆盖 Mode、Runtime、镜像和环境变量。
 - 相同幂等键和相同请求只创建一个实例。
 - 相同幂等键和不同请求返回 `IDEMPOTENCY_CONFLICT`。

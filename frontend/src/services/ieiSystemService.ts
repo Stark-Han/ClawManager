@@ -14,6 +14,7 @@ export interface IEISystemInstance {
   description?: string;
   type: string;
   runtime_type: string;
+  runtime_variant?: "linux" | "windows" | string;
   instance_mode: string;
   status: string;
   created_at: string;

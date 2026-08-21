@@ -144,7 +144,7 @@ export default function IEISystemInstancePage() {
           </Link>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-slate-950">{instance.name}</h1>
-            <p className="text-xs text-slate-500">IEI 安全访问 · {instance.owner}</p>
+            <p className="text-xs text-slate-500">浪潮信息安全访问 · {instance.owner}</p>
           </div>
         </div>
         <span className="inline-flex shrink-0 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
@@ -189,6 +189,7 @@ export default function IEISystemInstancePage() {
               service={ieiSystemWorkspaceService}
               workspaceKey={`iei:${instance.owner}:${instance.id}`}
               canWrite
+              localeOverride="zh"
             />
           </div>
         ) : (

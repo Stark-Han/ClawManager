@@ -15,6 +15,16 @@ const (
 	defaultLinuxCodexImage     = "ghcr.io/yuan-lab-llm/agentsruntime/codex:latest"
 )
 
+// LinuxWorkbuddyImage returns the managed Linux WorkBuddy image. Northbound
+// provisioning passes it explicitly so a Windows system-image default cannot
+// override the Linux-only API contract.
+func LinuxWorkbuddyImage() string {
+	if image := strings.TrimSpace(os.Getenv("CLAWMANAGER_WORKBUDDY_LINUX_IMAGE")); image != "" {
+		return image
+	}
+	return defaultLinuxWorkbuddyImage
+}
+
 func normalizeWorkbuddyRuntimeVariant(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case WorkbuddyRuntimeLinux:

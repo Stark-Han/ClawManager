@@ -81,10 +81,6 @@ func (s *CoreService) ValidatePrincipal(principal Principal) error {
 }
 
 func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, req CreateLiteInstanceRequest) (*models.NorthboundOperation, bool, error) {
-	idempotencyKey = strings.TrimSpace(idempotencyKey)
-	if len(idempotencyKey) < 8 || len(idempotencyKey) > 128 {
-		return nil, false, apiError(400, "INVALID_REQUEST", "Idempotency-Key must contain 8 to 128 characters", nil)
-	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	owner, ownerErr := services.NormalizeInstanceOwner(req.Owner)
@@ -92,19 +88,74 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
 	}
 	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || (req.Type != services.RuntimeTypeOpenClaw && req.Type != services.RuntimeTypeHermes) {
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundLiteType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", nil)
 	}
 	if req.Description != nil && len(*req.Description) > 2000 {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
 	}
-	payload, err := json.Marshal(req)
+	return s.submitCreateOperation(
+		principal,
+		idempotencyKey,
+		req,
+		OperationTypeLiteInstance,
+		"Too many unfinished Lite instance operations",
+	)
+}
+
+func isSupportedNorthboundLiteType(instanceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(instanceType)) {
+	case services.RuntimeTypeOpenClaw,
+		services.RuntimeTypeHermes,
+		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string, req CreateProInstanceRequest) (*models.NorthboundOperation, bool, error) {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	owner, ownerErr := services.NormalizeInstanceOwner(req.Owner)
+	if ownerErr != nil {
+		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
+	}
+	req.Owner = owner
+	if len(req.Name) < 3 || len(req.Name) > 50 || req.Type != "workbuddy" {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", nil)
+	}
+	if req.Description != nil && len(*req.Description) > 2000 {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
+	}
+	return s.submitCreateOperation(
+		principal,
+		idempotencyKey,
+		req,
+		OperationTypeProInstance,
+		"Too many unfinished Pro instance operations",
+	)
+}
+
+func (s *CoreService) submitCreateOperation(
+	principal Principal,
+	idempotencyKey string,
+	request any,
+	operationType string,
+	pendingMessage string,
+) (*models.NorthboundOperation, bool, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 128 {
+		return nil, false, apiError(400, "INVALID_REQUEST", "Idempotency-Key must contain 8 to 128 characters", nil)
+	}
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return nil, false, err
 	}
 	requestHash := sha256Hex(string(payload))
 	keyHash := sha256Hex(idempotencyKey)
-	existing, err := s.repo.GetOperationByIdempotency(principal.UserID, OperationTypeLiteInstance, keyHash)
+	existing, err := s.repo.GetOperationByIdempotency(principal.UserID, operationType, keyHash)
 	if err != nil {
 		return nil, false, err
 	}
@@ -119,7 +170,7 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		return nil, false, err
 	}
 	if pending >= 5 {
-		return nil, false, apiError(429, "RATE_LIMITED", "Too many unfinished Lite instance operations", nil)
+		return nil, false, apiError(429, "RATE_LIMITED", pendingMessage, nil)
 	}
 	operationID, err := randomToken("op_", 18)
 	if err != nil {
@@ -130,7 +181,7 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		OperationID:        operationID,
 		UserID:             principal.UserID,
 		SessionID:          principal.SessionID,
-		OperationType:      OperationTypeLiteInstance,
+		OperationType:      operationType,
 		IdempotencyKeyHash: keyHash,
 		RequestHash:        requestHash,
 		RequestPayload:     string(payload),
@@ -140,7 +191,7 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		UpdatedAt:          now,
 	}
 	if err := s.repo.CreateOperation(item); err != nil {
-		existing, getErr := s.repo.GetOperationByIdempotency(principal.UserID, OperationTypeLiteInstance, keyHash)
+		existing, getErr := s.repo.GetOperationByIdempotency(principal.UserID, operationType, keyHash)
 		if getErr == nil && existing != nil {
 			if existing.RequestHash != requestHash {
 				return nil, false, apiError(409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for a different request", nil)
@@ -169,6 +220,17 @@ func (s *CoreService) GetInstance(userID, instanceID int) (*models.Instance, err
 		return nil, err
 	}
 	if item == nil || item.UserID != userID || !isLite(item) {
+		return nil, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
+	}
+	return item, nil
+}
+
+func (s *CoreService) GetProInstance(userID, instanceID int) (*models.Instance, error) {
+	item, err := s.instances.GetByID(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil || item.UserID != userID || !isWorkbuddyLinuxPro(item) {
 		return nil, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
 	}
 	return item, nil
@@ -322,6 +384,37 @@ func (s *CoreService) ListInstances(userID int, owner string, page, limit int) (
 	return filtered, total, nil
 }
 
+func (s *CoreService) ListProInstances(userID int, owner string, page, limit int) ([]LiteInstanceResponse, int, error) {
+	normalizedOwner, err := services.NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, apiError(400, "INVALID_REQUEST", err.Error(), err)
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	ownerService, ok := s.instances.(services.InstanceOwnerService)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance service does not support owner filtering")
+	}
+	items, total, err := ownerService.GetWorkbuddyProByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	filtered := make([]LiteInstanceResponse, 0, len(items))
+	for idx := range items {
+		if isWorkbuddyLinuxPro(&items[idx]) {
+			filtered = append(filtered, liteInstanceResponse(&items[idx]))
+		}
+	}
+	return filtered, total, nil
+}
+
 func isLite(item *models.Instance) bool {
 	if item == nil {
 		return false
@@ -330,6 +423,15 @@ func isLite(item *models.Instance) bool {
 		return mode == services.InstanceModeLite
 	}
 	return strings.EqualFold(strings.TrimSpace(item.RuntimeType), services.RuntimeBackendGateway)
+}
+
+func isWorkbuddyLinuxPro(item *models.Instance) bool {
+	if item == nil || !strings.EqualFold(strings.TrimSpace(item.Type), "workbuddy") ||
+		!strings.EqualFold(strings.TrimSpace(item.RuntimeVariant), services.WorkbuddyRuntimeLinux) {
+		return false
+	}
+	mode, ok := services.NormalizeInstanceMode(item.InstanceMode)
+	return ok && mode == services.InstanceModePro
 }
 
 type OperationWorker struct {
@@ -404,12 +506,11 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	if item == nil {
 		return
 	}
-	var request CreateLiteInstanceRequest
-	if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
+	createRequest, auditPrefix, err := operationCreateRequest(item)
+	if err != nil {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
 		return
 	}
-	createRequest := liteCreateRequest(item, request)
 	instance, createErr := w.service.instances.Create(item.UserID, createRequest)
 	if createErr == nil {
 		if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, instance.ID, time.Now().UTC()); err != nil {
@@ -418,10 +519,10 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 		}
 		item.Status = "succeeded"
 		item.InstanceID = &instance.ID
-		w.service.auditOperation(item, "northbound.lite.create.succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &instance.ID, "")
+		w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &instance.ID, "")
 		return
 	}
-	code, message, retryable := classifyCreateError(createErr)
+	code, message, retryable := classifyCreateError(createErr, item.OperationType)
 	maxAttempts := w.service.config.OperationMaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 5
@@ -429,7 +530,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	if !retryable || item.AttemptCount >= maxAttempts {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, code, message, time.Now().UTC())
 		item.Status = "failed"
-		w.service.auditOperation(item, "northbound.lite.create.failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), nil, code)
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), nil, code)
 		return
 	}
 	delay := time.Duration(math.Pow(2, float64(item.AttemptCount-1))) * time.Second
@@ -439,7 +540,32 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	requeueAt := time.Now().UTC()
 	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, code, message, requeueAt.Add(delay), requeueAt)
 	item.Status = "queued"
-	w.service.auditOperation(item, "northbound.lite.create.retry", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "retry scheduled"), nil, code)
+	w.service.auditOperation(item, auditPrefix+".retry", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "retry scheduled"), nil, code)
+}
+
+func operationCreateRequest(item *models.NorthboundOperation) (services.CreateInstanceRequest, string, error) {
+	if item == nil {
+		return services.CreateInstanceRequest{}, "", errors.New("operation is required")
+	}
+	switch item.OperationType {
+	case OperationTypeLiteInstance:
+		var request CreateLiteInstanceRequest
+		if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
+			return services.CreateInstanceRequest{}, "", err
+		}
+		return liteCreateRequest(item, request), "northbound.lite.create", nil
+	case OperationTypeProInstance:
+		var request CreateProInstanceRequest
+		if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
+			return services.CreateInstanceRequest{}, "", err
+		}
+		if strings.ToLower(strings.TrimSpace(request.Type)) != "workbuddy" {
+			return services.CreateInstanceRequest{}, "", errors.New("unsupported Pro instance type")
+		}
+		return proCreateRequest(item, request), "northbound.pro.create", nil
+	default:
+		return services.CreateInstanceRequest{}, "", fmt.Errorf("unsupported operation type %q", item.OperationType)
+	}
 }
 
 func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInstanceRequest) services.CreateInstanceRequest {
@@ -462,17 +588,46 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 	}
 }
 
-func classifyCreateError(err error) (string, string, bool) {
+func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanceRequest) services.CreateInstanceRequest {
+	image := services.LinuxWorkbuddyImage()
+	return services.CreateInstanceRequest{
+		Name:                    request.Name,
+		Owner:                   &request.Owner,
+		Description:             request.Description,
+		Type:                    "workbuddy",
+		RuntimeVariant:          services.WorkbuddyRuntimeLinux,
+		Mode:                    services.InstanceModePro,
+		InstanceMode:            services.InstanceModePro,
+		RuntimeType:             services.RuntimeBackendDesktop,
+		CPUCores:                2,
+		MemoryGB:                4,
+		DiskGB:                  20,
+		GPUEnabled:              false,
+		GPUCount:                0,
+		OSType:                  "workbuddy",
+		OSVersion:               "latest",
+		ImageRegistry:           &image,
+		ProvisioningOperationID: item.OperationID,
+	}
+}
+
+func classifyCreateError(err error, operationType string) (string, string, bool) {
 	message := strings.ToLower(err.Error())
+	modeName := "Lite"
+	capacityCode := "LITE_CAPACITY_EXHAUSTED"
+	if operationType == OperationTypeProInstance {
+		modeName = "Pro"
+		capacityCode = "PRO_CAPACITY_EXHAUSTED"
+	}
 	switch {
 	case strings.Contains(message, "instance name already exists"):
 		return "NAME_CONFLICT", "Instance name already exists", false
 	case strings.Contains(message, "quota"), strings.Contains(message, "instance limit reached"):
 		return "QUOTA_EXCEEDED", "Instance quota exceeded", false
 	case strings.Contains(message, "capacity reached"):
-		return "LITE_CAPACITY_EXHAUSTED", "Lite instance capacity is temporarily exhausted", true
+		return capacityCode, modeName + " instance capacity is temporarily exhausted", true
 	case strings.Contains(message, "invalid"), strings.Contains(message, "unsupported"):
-		return "VALIDATION_ERROR", "Lite instance request is invalid", false
+		return "VALIDATION_ERROR", modeName + " instance request is invalid", false
 	default:
 		return "DEPENDENCY_UNAVAILABLE", "A provisioning dependency is temporarily unavailable", true
 	}
