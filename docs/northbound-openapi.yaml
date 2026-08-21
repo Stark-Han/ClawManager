@@ -510,8 +510,8 @@ components:
           description: Creator or business owner identifier. The server trims it, stores at most 128 UTF-8 bytes, rejects control characters, and uses case-sensitive exact matching for list queries.
         type:
           type: string
-          enum: [openclaw, hermes]
-          description: Lite runtime family; openclaw creates an OpenClaw Lite instance and hermes creates a Hermes Lite instance.
+          enum: [openclaw, hermes, opencode, deepseek-harness]
+          description: Managed Lite runtime family. WorkBuddy is intentionally excluded because it is Linux Pro only on the northbound API.
         description:
           type: [string, "null"]
           maxLength: 2000
@@ -574,7 +574,7 @@ components:
         name: { type: string, description: Instance display name. }
         owner: { type: string, description: Creator or business owner identifier stored on this instance. }
         description: { type: [string, "null"], description: Optional instance metadata. }
-        type: { type: string, enum: [openclaw, hermes], description: Lite runtime family. }
+        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness], description: Managed Lite runtime family. }
         status: { type: string, description: Runtime lifecycle status; callers should wait for running before treating the instance as ready. }
         availability: { type: string, enum: [available, starting, unavailable], description: Derived display state; running maps to available and creating maps to starting. }
         created_at: { type: string, format: date-time }

@@ -64,6 +64,31 @@ func TestLiteCreateRequestPropagatesOwner(t *testing.T) {
 	}
 }
 
+func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
+	for _, instanceType := range []string{
+		services.RuntimeTypeOpenClaw,
+		services.RuntimeTypeHermes,
+		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness,
+	} {
+		if !isSupportedNorthboundLiteType(instanceType) {
+			t.Fatalf("runtime %q must be accepted by the northbound Lite contract", instanceType)
+		}
+		request := liteCreateRequest(
+			&models.NorthboundOperation{OperationID: "op_" + instanceType},
+			CreateLiteInstanceRequest{Name: instanceType + "-test", Owner: "tenant-a", Type: instanceType},
+		)
+		if request.Type != instanceType || request.InstanceMode != services.InstanceModeLite || request.RuntimeType != services.RuntimeBackendGateway {
+			t.Fatalf("unexpected %s Lite request: %+v", instanceType, request)
+		}
+	}
+	for _, instanceType := range []string{"workbuddy", "codex", "claude-code", "custom"} {
+		if isSupportedNorthboundLiteType(instanceType) {
+			t.Fatalf("runtime %q must not be accepted by the northbound Lite contract", instanceType)
+		}
+	}
+}
+
 func TestProCreateRequestUsesFixedSmallLinuxWorkbuddyPreset(t *testing.T) {
 	t.Setenv("CLAWMANAGER_WORKBUDDY_LINUX_IMAGE", "registry.example/workbuddy-linux:test")
 	request := proCreateRequest(

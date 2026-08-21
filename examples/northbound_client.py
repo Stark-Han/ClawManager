@@ -475,9 +475,17 @@ def run(command: str) -> None:
         owner = required_env("NORTHBOUND_OWNER")
         default_type = "workbuddy" if instance_mode == "pro" else "openclaw"
         instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", default_type).lower()
-        allowed_types = {"workbuddy"} if instance_mode == "pro" else {"openclaw", "hermes"}
+        allowed_types = (
+            {"workbuddy"}
+            if instance_mode == "pro"
+            else {"openclaw", "hermes", "opencode", "deepseek-harness"}
+        )
         if instance_type not in allowed_types:
-            choices = "workbuddy" if instance_mode == "pro" else "openclaw or hermes"
+            choices = (
+                "workbuddy"
+                if instance_mode == "pro"
+                else "openclaw, hermes, opencode, or deepseek-harness"
+            )
             raise ValueError(
                 f"NORTHBOUND_INSTANCE_TYPE must be {choices} when NORTHBOUND_INSTANCE_MODE={instance_mode}"
             )

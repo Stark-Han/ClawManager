@@ -306,7 +306,7 @@ Idempotency-Key: create-alice-openclaw-001
 | --- | --- | --- |
 | `name` | 是 | 实例显示名称；去除首尾空白后需同时满足 3～50 个 Unicode 字符和 3～50 个 UTF-8 字节，同一用户下不能重名。不会作为 Kubernetes 参数或镜像名使用。 |
 | `owner` | 是 | 创建者或业务归属标识；去除首尾空白后为 1～128 个 UTF-8 字节，不能包含控制字符。保存和列表查询采用区分大小写的精确匹配。 |
-| `type` | 是 | `openclaw`：创建 OpenClaw Lite；`hermes`：创建 Hermes Lite。大小写会被规范为小写，其他类型不允许。 |
+| `type` | 是 | Lite 可选 `openclaw`、`hermes`、`opencode` 或 `deepseek-harness`。大小写会被规范为小写，其他类型不允许。 |
 | `description` | 否 | 实例备注，最多 2000 个 UTF-8 字节；只作为元数据，不会注入 Runtime。可省略或传 `null`。 |
 
 `Idempotency-Key` Header 必填，去除首尾空白后长度为 8～128 个 UTF-8 字节。建议使用业务订单号或 UUID，并保证同一业务创建请求始终使用相同 Key。相同用户、相同 Key、相同请求体会返回原 Operation；相同 Key 搭配不同请求体返回 `IDEMPOTENCY_CONFLICT`。不要在 Key 中放入用户名、密码或其他敏感数据。
@@ -674,7 +674,7 @@ Demo 环境变量说明：
 | `NORTHBOUND_OWNER` | `create`、`list` | 必填 | 创建者或业务归属标识；列表只返回与它精确匹配的实例。 |
 | `NORTHBOUND_INSTANCE_MODE` | `create`、`list`、`get` | 默认 `lite` | `lite` 调用现有 Lite 接口；`pro` 调用 Linux WorkBuddy 接口。 |
 | `NORTHBOUND_HTTP_TIMEOUT_SECONDS` | 全部 | 默认 `30` | 单次 HTTPS 请求超时，正整数秒；空值、非整数或非正数回退到默认值。 |
-| `NORTHBOUND_INSTANCE_TYPE` | `create` | Lite 默认 `openclaw`，Pro 默认 `workbuddy` | Lite 可选 `openclaw` 或 `hermes`；Pro 只允许 `workbuddy`。 |
+| `NORTHBOUND_INSTANCE_TYPE` | `create` | Lite 默认 `openclaw`，Pro 默认 `workbuddy` | Lite 可选 `openclaw`、`hermes`、`opencode` 或 `deepseek-harness`；Pro 只允许 `workbuddy`。 |
 | `NORTHBOUND_INSTANCE_NAME` | `create` | 默认自动生成 | 实例名称；空值时生成 `api-<模式>-<毫秒时间戳>`，非空时必须同时满足创建接口的 3～50 Unicode 字符和 3～50 UTF-8 字节限制。 |
 | `NORTHBOUND_DESCRIPTION` | `create` | 默认省略 | 实例备注，最多 2000 UTF-8 字节。 |
 | `NORTHBOUND_IDEMPOTENCY_KEY` | `create` | 默认每次生成 UUID | 8～128 UTF-8 字节。要安全重试同一次业务创建，必须保存并复用相同值。 |

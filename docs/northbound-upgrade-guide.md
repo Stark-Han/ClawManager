@@ -20,11 +20,11 @@ WorkBuddy 实例、owner 隔离和智慧协作平台单点登录页面。本文�
 | Core 应用 | 增加北向内部服务和异步 Operation Worker | 与现有管理页面共用应用镜像；内部端口为 `9002` |
 | 北向 Gateway | 新增独立进程 `clawreef-northbound-gateway` | 唯一新增的对外入口，NodePort 为 `38443` |
 | WorkBuddy Linux | 增加 `/pro-instances` 创建和查询 | 固定 Linux Webtop、2 CPU、4 GB 内存、20 GB 存储；不需要 Windows 节点或 Golden PVC |
-| 数据库 | 自动执行 `045_add_northbound_api.sql` 和 `047_add_instance_owner.sql` | 新增北向表和实例 owner 字段 |
+| 数据库 | 自动执行北向、owner 与 Runtime ENUM 迁移 | 新增北向表、owner 字段并保留所有现有 Runtime 类型 |
 | 登录 | 新增一次性挑战和 JWE 登录 | 兼容现有用户；用户名和密码不会作为明文请求字段传输 |
 | Lite 实例 | 新增异步创建、查询接口 | 仅操作当前登录用户自己的 Lite 实例 |
 | ShareLink | 新增启用、重置 URL、重置密码接口 | 不会自动开启现有或新建实例的 ShareLink |
-| IEI 页面 | 新增 `/ieisystem/list-instances` | 使用平台 AES Token 换取独立会话，并按 owner 展示 Lite 实例 |
+| IEI 页面 | 新增 `/ieisystem/list-instances` | 使用平台 AES Token 换取独立会话，并按 owner 展示受支持的 Lite 实例和 Linux WorkBuddy Pro 实例 |
 
 北向 Gateway 只通过 mTLS 访问 Core 的 `9002` 端口。不要对外暴露 Core `9002`、后端
 `9001` 或数据库 `3306`。
@@ -106,6 +106,22 @@ docker push $Image
 不要使用会被重复覆盖的标签进行生产升级。私有仓库还应提前配置相应的
 `imagePullSecrets`。
 
+### 3.1 准备 Linux WorkBuddy Runtime 镜像
+
+`/pro-instances` 只创建 Linux WorkBuddy。Core 所在 Namespace 必须能够拉取实际的
+WorkBuddy Linux 镜像，并在 Core Deployment 中显式设置不可变镜像引用：
+
+```powershell
+$WorkBuddyImage = "<registry>/workbuddy-linux:<immutable-tag>"
+kubectl set env deployment/clawmanager-app -n $Namespace "CLAWMANAGER_WORKBUDDY_LINUX_IMAGE=$WorkBuddyImage"
+kubectl rollout status deployment/clawmanager-app -n $Namespace --timeout=10m
+```
+
+当前 IEI 内网 Registry 已有 `10.130.14.23:5000/workbuddy-linux:2026.8.1`。部署前仍必须从
+目标 Kubernetes 节点验证该 digest 可拉取；不要依赖无法匿名拉取的
+`ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest`。WorkBuddy 镜像未准备好时，不得把
+Pro 创建验收为可用。
+
 ## 4. 先升级 Core 并执行数据库迁移
 
 先只更新现有 Core 镜像，此时不要部署 Gateway：
@@ -131,13 +147,16 @@ kubectl exec -it -n $Namespace $MySqlPod -- sh -c 'mysql -uroot -p"$MYSQL_ROOT_P
 ```sql
 SELECT filename, applied_at
 FROM schema_migrations
-WHERE filename IN ('045_add_northbound_api.sql', '047_add_instance_owner.sql')
+WHERE filename IN ('045_add_northbound_api.sql', '047_add_instance_owner.sql', '055_reconcile_instance_type_enum.sql')
 ORDER BY filename;
 
 SHOW TABLES LIKE 'northbound_%';
+SHOW COLUMNS FROM instances LIKE 'type';
 ```
 
-预期结果包含迁移 `045_add_northbound_api.sql`、`047_add_instance_owner.sql`，以及以下
+预期结果包含迁移 `045_add_northbound_api.sql`、`047_add_instance_owner.sql`、
+`055_reconcile_instance_type_enum.sql`，`instances.type` 至少保留 `workbuddy`、`opencode` 和
+`deepseek-harness`，以及以下
 三张表：
 
 ```text
@@ -355,6 +374,8 @@ python examples/northbound_client.py create
 
 确认实例为 Linux WorkBuddy，使用 2 CPU、4 GB 内存、20 GB 存储、3001 端口和 `/config`
 工作区。不得出现 Windows 镜像、8006 端口、Windows 节点选择器或 Golden PVC。
+同时确认实例 Pod 的镜像等于第 3.1 节配置的不可变引用，且没有
+`ImagePullBackOff`。
 
 ### 9.5 验证网络边界
 
@@ -415,7 +436,7 @@ ClawManager Core -> 现有高权限数据库账号和 Kubernetes Runtime 管理�
 
 | 进程 | 必需配置 |
 | --- | --- |
-| Core | `CLAWMANAGER_NORTHBOUND_ENABLED=true`、`NORTHBOUND_CORE_INTERNAL_ADDRESS=:9002`、`NORTHBOUND_INTERNAL_JWT_SECRET`、`NORTHBOUND_CORE_TLS_CERT_FILE`、`NORTHBOUND_CORE_TLS_KEY_FILE`、`NORTHBOUND_CORE_CLIENT_CA_FILE` |
+| Core | `CLAWMANAGER_NORTHBOUND_ENABLED=true`、`NORTHBOUND_CORE_INTERNAL_ADDRESS=:9002`、`NORTHBOUND_INTERNAL_JWT_SECRET`、`NORTHBOUND_CORE_TLS_CERT_FILE`、`NORTHBOUND_CORE_TLS_KEY_FILE`、`NORTHBOUND_CORE_CLIENT_CA_FILE`；启用 Pro 时还必须设置可拉取的 `CLAWMANAGER_WORKBUDDY_LINUX_IMAGE` |
 | Gateway | `CLAWMANAGER_NORTHBOUND_ENABLED=true`、`NORTHBOUND_GATEWAY_ADDRESS=:9443`、`NORTHBOUND_CORE_BASE_URL`、`NORTHBOUND_GATEWAY_TLS_CERT_FILE`、`NORTHBOUND_GATEWAY_TLS_KEY_FILE`、`NORTHBOUND_GATEWAY_CLIENT_CERT_FILE`、`NORTHBOUND_GATEWAY_CLIENT_KEY_FILE`、`NORTHBOUND_CORE_CA_FILE`、`NORTHBOUND_JWE_PRIVATE_KEY_FILE`、`NORTHBOUND_JWE_KEY_ID`、`NORTHBOUND_JWT_SECRET`、`NORTHBOUND_REFRESH_TOKEN_PEPPER`、`NORTHBOUND_INTERNAL_JWT_SECRET`，以及最小权限 `DB_*` 配置 |
 
 Core 与 Gateway 的 `NORTHBOUND_INTERNAL_JWT_SECRET` 必须完全一致；Gateway 的

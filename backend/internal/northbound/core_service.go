@@ -88,7 +88,7 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
 	}
 	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || (req.Type != services.RuntimeTypeOpenClaw && req.Type != services.RuntimeTypeHermes) {
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundLiteType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", nil)
 	}
 	if req.Description != nil && len(*req.Description) > 2000 {
@@ -101,6 +101,18 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		OperationTypeLiteInstance,
 		"Too many unfinished Lite instance operations",
 	)
+}
+
+func isSupportedNorthboundLiteType(instanceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(instanceType)) {
+	case services.RuntimeTypeOpenClaw,
+		services.RuntimeTypeHermes,
+		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string, req CreateProInstanceRequest) (*models.NorthboundOperation, bool, error) {
