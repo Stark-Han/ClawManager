@@ -1,6 +1,7 @@
 import axios from "axios";
 import {
   ArrowRight,
+  Briefcase,
   Box,
   CheckCircle2,
   ChevronRight,
@@ -20,6 +21,14 @@ import {
 } from "../../services/ieiSystemService";
 
 const PAGE_SIZE = 100;
+
+const EMPTY_STATE_RUNTIMES = [
+  { type: "openclaw", description: "通用智能体工作台" },
+  { type: "hermes", description: "自主研究与知识助手" },
+  { type: "opencode", description: "开发者代码工作台" },
+  { type: "deepseek-harness", description: "一切皆插件" },
+  { type: "workbuddy", description: "你的智能办公搭档" },
+] as const;
 
 function statusClass(status: string) {
   switch (status.toLowerCase()) {
@@ -266,10 +275,75 @@ export default function IEISystemListInstancesPage() {
             正在验证身份并加载实例…
           </div>
         ) : instances.length === 0 ? (
-          <div className="mx-auto mt-16 flex max-w-xl flex-col items-center rounded-2xl border border-slate-200 bg-white px-6 py-16 text-center shadow-sm">
-            <Box className="h-10 w-10 text-slate-300" />
-            <h2 className="mt-4 text-lg font-semibold">暂无实例</h2>
-            <p className="mt-1 text-sm text-slate-500">当前 owner 下没有可展示的实例。</p>
+          <div className="relative mx-auto flex min-h-[calc(100vh-132px)] max-w-6xl items-center justify-center overflow-hidden rounded-2xl border border-blue-100 bg-[#f3f7ff] px-5 py-10 text-center shadow-[0_12px_35px_rgba(15,23,42,0.035)] sm:px-8">
+            <div className="pointer-events-none absolute -left-24 -top-24 h-64 w-64 rounded-full bg-blue-100/60" />
+            <div className="pointer-events-none absolute -bottom-36 -right-28 h-72 w-72 rounded-full bg-blue-100/60" />
+            <div className="relative flex w-full max-w-4xl flex-col items-center">
+              <div className="flex h-[70px] w-[70px] items-center justify-center rounded-2xl bg-white text-blue-600 shadow-[0_12px_28px_rgba(37,99,235,0.10)]">
+                <Briefcase className="h-7 w-7" />
+              </div>
+              <h2 className="mt-5 text-2xl font-semibold tracking-tight text-[#10203b]">
+                工作空间尚未分配
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                实例由智慧协作平台统一分配，分配完成后会自动出现在这里。
+              </p>
+              <button
+                type="button"
+                className="mt-6 inline-flex h-11 items-center gap-2 rounded-lg bg-gradient-to-r from-blue-700 to-blue-600 px-5 text-sm font-semibold text-white shadow-[0_9px_20px_rgba(37,99,235,0.18)] transition hover:from-blue-800 hover:to-blue-700 disabled:opacity-60"
+                onClick={() => void initialize()}
+                disabled={loading}
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                重新检查
+              </button>
+              <div className="mt-6 flex flex-col items-center gap-2 text-xs text-slate-500 sm:flex-row sm:gap-6">
+                <span className="inline-flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                  所有者身份已验证
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <RefreshCw className="h-4 w-4 text-slate-400" />
+                  实例状态自动同步
+                </span>
+              </div>
+
+              <div className="mt-9 w-full rounded-2xl border border-blue-100 bg-white/80 px-4 pb-3 pt-4 shadow-[0_9px_24px_rgba(60,96,149,0.05)] sm:px-5">
+                <div className="flex flex-col items-start justify-between gap-1 px-1 pb-3 text-left sm:flex-row sm:items-center">
+                  <h3 className="text-sm font-semibold text-slate-800">支持的工作空间</h3>
+                  <p className="text-xs text-slate-400">分配后将在门户中自动显示</p>
+                </div>
+                <div className="grid grid-cols-1 border-t border-slate-100 sm:grid-cols-2 md:grid-cols-5">
+                  {EMPTY_STATE_RUNTIMES.map((runtime, index) => {
+                    const presentation = getIEIRuntimePresentation(runtime.type);
+                    return (
+                      <div
+                        key={runtime.type}
+                        className={`flex min-w-0 items-center gap-3 border-slate-100 px-3 py-4 text-left md:min-h-[114px] md:flex-col md:justify-center md:gap-0 md:border-l md:px-1 md:text-center ${
+                          index === 0 ? "md:border-l-0" : ""
+                        } ${index > 0 ? "border-t sm:border-t-0" : ""}`}
+                      >
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white p-1.5">
+                          <InstanceTypeIcon type={runtime.type} />
+                        </div>
+                        <div className="min-w-0 md:mt-2 md:w-full">
+                          <p
+                            className={`whitespace-nowrap font-medium text-slate-700 ${
+                              runtime.type === "deepseek-harness" ? "text-xs" : "text-[13px]"
+                            }`}
+                          >
+                            {presentation.name}
+                          </p>
+                          <p className="mt-1 text-[11px] leading-4 text-slate-400">
+                            {runtime.description}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           </div>
         ) : selectedInstance && selectedRuntime ? (
           <div className="grid gap-4 lg:h-[calc(100vh-132px)] lg:min-h-[640px] lg:grid-cols-[minmax(280px,330px)_minmax(460px,1fr)_minmax(280px,320px)] 2xl:grid-cols-[minmax(320px,380px)_minmax(560px,1fr)_minmax(320px,360px)]">
