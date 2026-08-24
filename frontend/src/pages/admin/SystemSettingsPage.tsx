@@ -84,18 +84,11 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
   {
     instance_type: 'workbuddy',
     runtime_type: 'desktop',
+    runtime_variant: 'linux',
     display_name: 'Workbuddy Pro',
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest',
   },
 ];
-
-// The Workbuddy implementation remains available to existing instances, but
-// its image must not be configurable through the UI while it is hidden from
-// new-instance creation.
-const TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES = new Set(['workbuddy']);
-const isRuntimeCardVisible = (card: Pick<RuntimeCardDefinition, 'instance_type'>) =>
-  !TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES.has(card.instance_type);
-const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(isRuntimeCardVisible);
 
 const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVariant, string>> = {
   workbuddy: {
@@ -108,7 +101,7 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
   },
 };
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
-const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...VISIBLE_PRO_BASE_RUNTIME_CARDS];
+const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
 
 interface EditableImageCard extends SystemImageSetting {
   local_id: string;
@@ -147,6 +140,10 @@ function groupForRuntimeType(runtimeType: ImageRuntimeType): RuntimeGroup {
 
 function supportsRuntimeVariant(instanceType: string): instanceType is 'workbuddy' | 'codex' {
   return instanceType === 'workbuddy' || instanceType === 'codex';
+}
+
+function canSelectRuntimeVariant(instanceType: string): instanceType is 'codex' {
+  return instanceType === 'codex';
 }
 
 function inferRuntimeVariant(instanceType: string, image?: string): RuntimeVariant {
@@ -218,7 +215,8 @@ function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
     .filter(
       (item) =>
         item.is_enabled !== false &&
-        isRuntimeCardVisible(item),
+        (item.instance_type !== 'workbuddy' ||
+          runtimeVariantForCard(item) === 'linux'),
     )
     .map((item, index) => toEditableCard(item, index));
   const byFixedKey = new Map(enabledCards.map((card) => [fixedCardKey(card), card]));
@@ -283,7 +281,7 @@ const SystemSettingsPage: React.FC = () => {
   );
 
   const proBaseCards = useMemo(
-    () => VISIBLE_PRO_BASE_RUNTIME_CARDS.map((definition) =>
+    () => PRO_BASE_RUNTIME_CARDS.map((definition) =>
       cards.find((card) => fixedCardKey(card) === fixedCardKey(definition)),
     ).filter((card): card is EditableImageCard => Boolean(card)),
     [cards],
@@ -537,7 +535,7 @@ const SystemSettingsPage: React.FC = () => {
         </div>
       )}
 
-      {card.runtime_type === 'desktop' && supportsRuntimeVariant(card.instance_type) && (
+      {card.runtime_type === 'desktop' && canSelectRuntimeVariant(card.instance_type) && (
         <div className="mt-4">
           <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.runtimeVariant')}</label>
           <select

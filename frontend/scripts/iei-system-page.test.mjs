@@ -71,6 +71,18 @@ assert(
 );
 
 assert(
+  listPage.includes("工作空间尚未分配") &&
+    listPage.includes("支持的工作空间") &&
+    listPage.includes("所有者身份已验证") &&
+    listPage.includes("实例状态自动同步") &&
+    listPage.includes("一切皆插件") &&
+    listPage.includes("你的智能办公搭档") &&
+    runtimeCatalog.includes('tagline: "一切皆插件"') &&
+    runtimeCatalog.includes('tagline: "你的智能办公搭档"'),
+  "The owner portal empty state must present all supported runtimes with approved Chinese positioning.",
+);
+
+assert(
   ["openclaw", "hermes", "opencode", "deepseek-harness"].every(
     (type) => (mockServer.match(new RegExp(`type: "${type}"`, "g")) ?? []).length === 2,
   ) &&

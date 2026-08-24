@@ -73,9 +73,9 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
     id: "deepseek-harness",
     name: "DeepSeek Harness",
     category: "插件化智能体工作台",
-    tagline: "Everything is a Plugin",
+    tagline: "一切皆插件",
     positioning:
-      "DeepSeek 官方开源的 Agent Harness。基于 Cordis 插件化架构，将模型、工具、工作流与子代理组合成可扩展的智能体工作空间。",
+      "DeepSeek 官方开源的 Agent Harness。采用“一切皆插件”的 Cordis 架构，将模型、工具、工作流与子代理组合成可扩展的智能体工作空间。",
     capabilities: ["插件化能力组合", "工作区读写", "命令与任务规划", "子代理协作", "多模型接入"],
     scenarios: "智能研发、复杂任务分解、多代理协作、插件实验与可扩展 Agent 工作流。",
     badge: "NEW",
@@ -91,12 +91,12 @@ const runtimeCatalog: Record<string, IEIRuntimePresentation> = {
   workbuddy: {
     id: "workbuddy",
     name: "WorkBuddy",
-    category: "研发智能工作空间",
-    tagline: "代码、终端与项目协作桌面",
+    category: "智能办公工作台",
+    tagline: "你的智能办公搭档",
     positioning:
-      "面向软件研发和项目协作的独立 Linux 桌面，将 WorkBuddy、终端、代码文件和平台模型接入集中在一个持续可用的工作空间中。",
-    capabilities: ["智能编码协作", "Linux 图形桌面", "终端与项目文件", "平台模型接入", "持久化工作区"],
-    scenarios: "代码开发、项目维护、终端操作、技术资料整理与持续研发协作。",
+      "面向日常办公和项目协作的独立 Linux 桌面，将 WorkBuddy、文档文件、桌面工具和平台模型接入集中在一个持续可用的智能工作空间中。",
+    capabilities: ["智能办公协作", "Linux 图形桌面", "文档与项目文件", "平台模型接入", "持久化工作区"],
+    scenarios: "资料整理、内容处理、项目协作、日常办公与需要桌面工具的持续任务。",
     notice: "Linux 兼容运行环境",
     theme: {
       accent: "text-amber-700",

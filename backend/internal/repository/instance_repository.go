@@ -49,6 +49,14 @@ type InstanceOwnerRepository interface {
 	CountWorkbuddyProByUserIDAndOwner(userID int, owner string) (int, error)
 }
 
+// NorthboundInstanceOwnerRepository exposes the unified, owner-scoped view
+// used by the canonical northbound instance collection. It includes only the
+// four managed Lite runtimes and Linux WorkBuddy Pro.
+type NorthboundInstanceOwnerRepository interface {
+	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
+	CountNorthboundByUserIDAndOwner(userID int, owner string) (int, error)
+}
+
 // IEISystemInstanceRepository is the case-insensitive owner lookup used after
 // the unified platform has authenticated an email address. It intentionally
 // does not depend on a ClawManager user session.
@@ -313,6 +321,41 @@ func (r *instanceRepository) CountWorkbuddyProByUserIDAndOwner(userID int, owner
 	}).Count()
 	if err != nil {
 		return 0, fmt.Errorf("failed to count owner WorkBuddy Pro instances: %w", err)
+	}
+	return int(count), nil
+}
+
+func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr {
+	return db.And(
+		db.Cond{"user_id": userID, "owner": owner},
+		db.Or(
+			db.Cond{
+				"instance_mode": "lite",
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
+			},
+			db.Cond{
+				"instance_mode":   "pro",
+				"type":            "workbuddy",
+				"runtime_variant": "linux",
+			},
+		),
+	)
+}
+
+func (r *instanceRepository) GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(supportedNorthboundOwnerInstances(userID, owner)).
+		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get owner northbound instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountNorthboundByUserIDAndOwner(userID int, owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(supportedNorthboundOwnerInstances(userID, owner)).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count owner northbound instances: %w", err)
 	}
 	return int(count), nil
 }
