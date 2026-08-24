@@ -35,6 +35,18 @@
 
 除特别说明外，请不要发送文档未定义的字段。`null`、空字符串和省略字段含义可能不同，调用方应遵循各字段的“必填”和默认值说明。
 
+### 1.2 门户、北向 Gateway 与 Core 的地址职责
+
+三个入口用途不同，不能互相替代：
+
+| 入口 | 既有部署示例 | 用途 | 调用方是否直接访问 |
+| --- | --- | --- | --- |
+| ClawManager 门户 | `https://<host>:30443` | 管理页面、IEI owner 门户、实例代理和 `/s/.../` ShareLink | 浏览器和 ShareLink 使用者访问 |
+| 北向 Gateway | `https://<host>:32343` | 对外提供 `/api/northbound/v1`，负责 JWE 登录、Scope、限流、审计和转发 | 系统集成方访问 |
+| 北向 Core | 集群内 `9002` | 处理实例、Operation 和 ShareLink 业务；Gateway 与 Core 之间使用 mTLS | 不允许外部调用方直接访问 |
+
+上表端口是既有部署示例，不是业务协议的一部分；实际环境可以通过 NodePort、负载均衡器或 Ingress 映射到其他端口。集成方应分别配置北向 Gateway Base URL 和门户公开 Origin，不能用 Gateway 地址拼接 ShareLink。
+
 ## 2. 接口清单和权限
 
 | 方法 | 路径 | Scope | 说明 |
@@ -68,12 +80,12 @@ Scope 含义：
 | `lite-instances:share-link:manage` | 为当前用户自己的受支持实例显式启用密码模式 ShareLink；会生成并返回敏感凭据。 |
 | `lite-instances:share-link:reset` | 重置已经启用的 ShareLink URL 或密码；不能首次启用，也不能修改有效期或 Workspace 权限。 |
 
-### 2.1 创建 OpenClaw 实例的标准调用顺序
+### 2.1 创建任一受支持实例的标准调用顺序
 
-创建一个可用的 OpenClaw Lite 实例时，推荐按以下顺序调用。认证、异步创建和 Runtime 就绪是三个不同阶段，不能只调用创建接口后立即使用实例。
+创建任一受支持实例时，推荐按以下顺序调用。OpenClaw、Hermes、OpenCode、DeepSeek Harness 和 WorkBuddy 的调用路径与返回结构相同，仅请求体中的 `type` 不同。认证、异步创建和 Runtime 就绪是三个不同阶段，不能只调用创建接口后立即使用实例。
 
 ```text
-申请挑战 → 本地生成 JWE → 登录取得 Token → 提交 OpenClaw 创建请求
+申请挑战 → 本地生成 JWE → 登录取得 Token → 按 type 提交创建请求
     → 轮询 Operation 到终态 → 查询实例直到 running
     →（可选）启用密码模式 ShareLink → 保存并交付 URL/密码
 ```
@@ -83,14 +95,14 @@ Scope 含义：
 | 1 | `POST /auth/challenge` | 空对象 `{}` | 保存 `challenge_id`、`nonce`、`encryption` 和 HTTPS `Date` 响应头。挑战默认 60 秒有效且只能使用一次。 | 在挑战过期前执行第 2、3 步。 |
 | 2 | 客户端本地生成 Compact JWE | 现有用户名和密码，以及第 1 步返回的挑战参数 | JWE Protected Header 固定使用挑战的 `kid`、`RSA-OAEP-256`、`A256GCM`；明文载荷包含新的 `client_nonce` 和 `issued_at`。 | 不发送明文用户名和密码，只发送 JWE。 |
 | 3 | `POST /auth/login` | `challenge_id`、`credential_jwe` | 保存 `access_token`、`refresh_token`、`expires_in`、`refresh_expires_in` 和 `scopes`。确认 Scope 包含 `lite-instances:create` 与 `lite-instances:read`；需要第 7 步时还必须包含 `lite-instances:share-link:manage`。 | 使用 Access Token 调用创建接口。 |
-| 4 | `POST /lite-instances` | `Authorization`、稳定的 `Idempotency-Key`；请求体中提供 `owner`，`type` 固定为 `openclaw` | 接口返回 `202`。保存 `operation_id` 和 `Location`；不要把 `202` 当成实例已经可用。 | 按第 5 步轮询 Operation。 |
+| 4 | `POST /lite-instances` | `Authorization`、稳定的 `Idempotency-Key`；请求体中提供 `owner` 和受支持的 `type` | 接口返回 `202`。保存 `operation_id` 和 `Location`；不要把 `202` 当成实例已经可用。 | 按第 5 步轮询 Operation。 |
 | 5 | `GET /operations/{operation_id}` | 第 4 步的 Operation ID | `queued` 或 `processing`：继续轮询；`failed`：记录 `error_code`、`error_message` 并停止；`succeeded`：保存正整数 `instance_id`。 | 仅 `succeeded` 时进入第 6 步。 |
 | 6 | `GET /lite-instances/{instance_id}` | 第 5 步的实例 ID | `status=creating`：继续轮询；`status=running` 且 `availability=available`：实例可用；其他状态按不可用处理并结合状态排查。 | 实例可直接由用户使用，或进入可选的第 7 步。 |
 | 7（可选） | `POST /lite-instances/{instance_id}/external-access/password` | 先确定 `expires_mode`、有效期参数和 `workspace_access` | 保存 `share_url`、`password`、`expires_at` 和实际生效的 `workspace_access`。该调用会替换同一实例已有的外部访问凭据。 | 立即把凭据写入安全存储。 |
 | 8（可选） | 客户端拼接完整 ShareLink | 门户公开 Origin 与第 7 步的相对 `share_url` | `absolute_share_url = CLAWMANAGER_PUBLIC_BASE_URL + share_url`。不要默认使用北向 Gateway 地址。 | 将完整 URL 和密码通过安全渠道交付。 |
 | 9 | `POST /auth/refresh` 或 `/auth/logout` | Refresh Token，或当前 Access Token | 长期集成在 Access Token 到期前刷新并覆盖旧 Refresh Token；任务结束且无需维持会话时注销。 | 刷新后继续使用新 Token，或结束流程。 |
 
-第 4 步的 OpenClaw 创建请求示例：
+第 4 步的 OpenClaw 创建请求示例；创建其他 Runtime 时只需更换 `type`、名称和幂等键：
 
 ```http
 POST /api/northbound/v1/lite-instances HTTP/1.1
@@ -309,6 +321,20 @@ Idempotency-Key: create-alice-openclaw-001
 | `type` | 是 | 可选 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 或 `workbuddy`。大小写会被规范为小写，其他类型不允许。前四种由服务端创建为 Lite；WorkBuddy 固定创建为 Linux Pro。 |
 | `description` | 否 | 实例备注，最多 2000 个 UTF-8 字节；只作为元数据，不会注入 Runtime。可省略或传 `null`。 |
 
+#### 4.1.1 Runtime 映射与固定资源
+
+调用方不传 `lite`、`pro`、镜像、操作系统、CPU、内存、磁盘或 GPU 参数。服务端只根据 `type` 选择已批准的运行模式、镜像配置和资源预设：
+
+| `type` | 产品定位 | 服务端模式 | Runtime 后端 | 固定资源 | 北向约束 |
+| --- | --- | --- | --- | --- | --- |
+| `openclaw` | 通用智能体工作空间，适合信息处理、资料整理和持续任务 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、20 GB 存储、无 GPU | 仅创建 Lite |
+| `hermes` | 面向研究、知识检索和长上下文任务的智能体工作空间 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、20 GB 存储、无 GPU | 仅创建 Lite |
+| `opencode` | 面向代码生成、终端操作和仓库协作的开发者代码工作台 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、20 GB 存储、无 GPU | 仅创建 Lite |
+| `deepseek-harness` | 插件化智能体执行平台，适合复杂任务拆解、多代理协作和可扩展 Agent 工作流 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、20 GB 存储、无 GPU | 仅创建 Lite；Everything is a Plugin（万般能力，皆可插件化） |
+| `workbuddy` | 面向日常办公、资料处理和内容协作的智能办公搭档 | Linux Pro | 独立 Desktop Runtime | 4 CPU、8 GB 内存、40 GB 存储、无 GPU | 固定 Linux；不允许切换 Windows |
+
+这些资源值是北向接口的安全预设，不代表 ClawManager 管理端支持的全部规格。即使管理端存在其他模式或镜像，北向调用方也不能借助额外字段绕过上述映射。运行镜像由服务端系统镜像设置或部署配置决定，创建响应不会返回镜像地址。
+
 `Idempotency-Key` Header 必填，去除首尾空白后长度为 8～128 个 UTF-8 字节。建议使用业务订单号或 UUID，并保证同一业务创建请求始终使用相同 Key。相同用户、相同 Key、相同请求体会返回原 Operation；相同 Key 搭配不同请求体返回 `IDEMPOTENCY_CONFLICT`。不要在 Key 中放入用户名、密码或其他敏感数据。
 
 成功提交返回 `202 Accepted`：
@@ -343,7 +369,7 @@ Idempotency-Key: create-alice-workbuddy-001
 }
 ```
 
-服务端检测到 `type=workbuddy` 后，固定使用 Linux WorkBuddy、独立桌面运行环境、2 CPU、4 GB 内存、20 GB 存储且不启用 GPU。调用方不能切换到 Windows，也不能通过北向接口放大资源或替换镜像。成功提交仍返回 `202 Accepted`，新请求的 `resource_type` 与原流程一致为 `lite_instance`，并使用同一个 `/operations/{id}` 接口轮询。
+服务端检测到 `type=workbuddy` 后，固定使用 Linux WorkBuddy、独立桌面运行环境、4 CPU、8 GB 内存、40 GB 存储且不启用 GPU。调用方不能切换到 Windows，也不能通过北向接口修改资源或替换镜像。成功提交仍返回 `202 Accepted`，新请求的 `resource_type` 与原流程一致为 `lite_instance`，并使用同一个 `/operations/{id}` 接口轮询。
 
 WorkBuddy 使用相同的 ShareLink 启用、URL 重置和密码重置接口。生成的短链接会自动代理到 WorkBuddy Linux 桌面；`workspace_access=read` 或 `write` 时，共享文件浏览器访问其 `/config` 工作区。
 
@@ -400,6 +426,25 @@ Authorization: Bearer <access-token>
 
 实例响应中的 `status` 是 Runtime 生命周期状态；`availability` 是便于调用方展示的派生值：`running` 对应 `available`，`creating` 对应 `starting`，其他状态对应 `unavailable`。创建 Operation 成功只说明实例记录和调度请求已创建，调用方仍应查询实例直到 `status=running`。
 
+单实例成功响应示例：
+
+```json
+{
+  "id": 123,
+  "name": "alice-workspace",
+  "owner": "alice@example.com",
+  "description": "Created by northbound integration",
+  "type": "opencode",
+  "status": "running",
+  "availability": "available",
+  "created_at": "2026-08-24T05:30:00Z",
+  "updated_at": "2026-08-24T05:31:20Z",
+  "started_at": "2026-08-24T05:31:20Z"
+}
+```
+
+`name`、`owner` 和 `description` 都来自创建请求并由服务端保存；服务端不会替调用方生成业务标题或 Runtime 宣传文案。`description` 未提供时会省略。响应刻意不暴露 Kubernetes namespace、Pod、镜像、内部端口和底层错误。
+
 ### 4.4 IEI owner 实例页面与单点登录
 
 智慧协作平台使用单点登录 token 打开固定入口：
@@ -417,6 +462,20 @@ python examples/generate_iei_url.py
 ```
 
 脚本默认通过 `IEISYSTEM_KUBECONFIG` 从指定 Kubernetes Secret 读取 AES 密钥，只向标准输出写入拼接完成的 URL，不打印共享密钥。生成后需在 30 秒内打开。
+
+生成器的本地配置：
+
+| 环境变量 | 默认值/回退 | 说明 |
+| --- | --- | --- |
+| `IEISYSTEM_OWNER_EMAIL` | 回退到 `NORTHBOUND_OWNER` | 要进入 owner 门户的邮箱；生成前会规范为小写。 |
+| `IEISYSTEM_PORTAL_BASE_URL` | 回退到 `CLAWMANAGER_PUBLIC_BASE_URL` | ClawManager 门户公开 HTTPS Origin，例如 `https://<portal-host>:30443`；不是北向 Gateway 地址。 |
+| `IEISYSTEM_K8S_NAMESPACE` | `clawmanager-system` | 保存 IEI SSO Secret 的 namespace。 |
+| `IEISYSTEM_K8S_SECRET` | `clawmanager-iei-sso` | 保存 `aes-key` 和 `aes-iv` 的 Secret 名称。 |
+| `IEISYSTEM_KUBECONFIG` | 当前 `kubectl` context | 可选 kubeconfig 路径；本机当前 context 不能读取目标 Secret 时必须设置。 |
+| `IEISYSTEM_SSO_KEY` | 默认不设置 | 仅用于受控测试进程直接注入 16 字节密钥；不得写入 `.env`、命令历史或版本库。设置后不调用 `kubectl` 读取 key。 |
+| `IEISYSTEM_SSO_IV` | 默认不设置 | 仅用于受控测试进程直接注入 16 字节 IV；安全要求同上。设置后不调用 `kubectl` 读取 IV。 |
+
+生成器只负责按当前时间生成 token，不能延长有效期。30 秒上限由服务端强制执行；若测试人员经聊天工具复制链接导致过期，应在已信任门户 HTTPS 证书的浏览器所在机器上运行脚本，并在同一终端中生成后立即打开。不要通过把密钥写入文档或放宽生产 TTL 来解决测试延迟。
 
 服务端按 `Asia/Shanghai` 解析时间，默认只接受 30 秒内的 token，并允许最多 5 秒的未来时钟偏差。验证成功后，原始 AES token 只用于换取独立的 HttpOnly IEI 会话，并立即从浏览器地址栏移除。后续列表、详情和实例代理请求均验证该会话；实例代理能力令牌与当前 IEI 会话绑定，会话退出或过期后不可继续访问。
 
@@ -613,12 +672,12 @@ absolute_share_url = CLAWMANAGER_PUBLIC_BASE_URL + share_url
 | 401 | `INVALID_CREDENTIALS` | JWE、挑战、用户名或密码不正确 |
 | 401 | `AUTH_INVALID` | Access/Refresh Token 无效、过期或会话已撤销 |
 | 403 | `SCOPE_DENIED` | Token 缺少接口所需 Scope |
-| 404 | `INSTANCE_NOT_FOUND` | 实例不存在、不是 Lite 实例或不属于当前用户 |
+| 404 | `INSTANCE_NOT_FOUND` | 实例不存在、不是北向支持的 Runtime，或不属于当前用户 |
 | 404 | `OPERATION_NOT_FOUND` | 操作不存在或不属于当前用户 |
 | 409 | `IDEMPOTENCY_CONFLICT` | 幂等键已用于不同请求 |
 | 409 | `SHARE_LINK_NOT_ENABLED` | 实例未启用 ShareLink |
 | 409 | `SHARE_LINK_PASSWORD_NOT_ENABLED` | ShareLink 不是密码认证模式 |
-| 422 | `VALIDATION_ERROR` | Lite 实例创建或 ShareLink 参数不合法 |
+| 422 | `VALIDATION_ERROR` | 实例创建或 ShareLink 参数不合法 |
 | 429 | `RATE_LIMITED` | 超过接口速率或未完成操作数量限制 |
 | 503 | `DEPENDENCY_UNAVAILABLE` | Core 或依赖服务暂时不可用 |
 
@@ -632,7 +691,7 @@ absolute_share_url = CLAWMANAGER_PUBLIC_BASE_URL + share_url
 | --- | --- |
 | 获取挑战 | 每 IP 每分钟 10 次 |
 | 登录 | 每 IP 每分钟 5 次；每账号另有登录次数限制 |
-| 创建 Lite 实例 | 每用户每分钟 10 次，且最多 5 个未完成创建操作 |
+| 创建受支持实例 | 每用户每分钟 10 次，且最多 5 个未完成创建操作 |
 | 查询实例/操作 | 每用户每分钟 120 次 |
 | ShareLink 启用及 URL/密码重置 | 三个接口合计每用户每分钟 10 次 |
 
@@ -734,3 +793,20 @@ python examples/northbound_client.py reset-password
 
 Demo 每次执行都会获取新挑战并完成一次 JWE 登录，并使用经过 TLS 验证的网关 `Date` 响应头生成 `issued_at`，不依赖本机系统时钟。Demo 不会把用户名或密码放入登录请求明文中，也不会打印 Access Token 和 Refresh Token。
 为防止新密码生成后又因脱敏输出而丢失，`enable-password`、`reset-password` 以及自动启用 ShareLink 的 `create` 在未设置 `NORTHBOUND_SHOW_SECRETS=true` 时会在调用接口前终止。自动启用还要求 `NORTHBOUND_WAIT_CREATE=true`。
+
+## 9. 上线前验收清单
+
+至少使用一个专用测试 owner 完成以下验收，不要只检查 HTTP `202`：
+
+1. JWE challenge/login 成功，`/auth/me` 返回创建、读取和 ShareLink Scope；登录请求和日志中没有明文密码。
+2. 分别以 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 和 `workbuddy` 调用同一个 `POST /lite-instances`；调用方没有按 Lite/Pro 切换接口。
+3. 每次创建都保存并复用稳定的 `Idempotency-Key`；相同请求重放返回同一个 Operation，不产生重复实例。
+4. 轮询 Operation 到 `succeeded` 后，再轮询实例到 `status=running`、`availability=available`。
+5. 验证前四种 Runtime 为 Lite/Gateway 且保持 2 CPU、4 GB、20 GB、无 GPU；WorkBuddy 为 Linux Pro/Desktop，并符合 4 CPU、8 GB、40 GB、无 GPU 的北向预设。
+6. 使用正确 owner 列表能看到五种受支持实例；错误 owner 返回空列表；跨用户查询单实例返回 `INSTANCE_NOT_FOUND`。
+7. 五种 Runtime 都能通过统一 ShareLink 接口启用密码模式；完整 URL 使用门户 Origin 拼接，而不是北向 Gateway Origin。
+8. 分别验证 `workspace_access=none`、`read` 和 `write` 的文件权限边界；WorkBuddy Workspace 根目录按服务端映射到 `/config`。
+9. 验证 URL 重置后旧 URL 立即失效，密码重置后旧密码和旧会话立即失效，未启用 ShareLink 时重置返回对应 `409`。
+10. 使用 IEI SSO URL 换取独立 HttpOnly 会话，确认 owner 门户只显示同邮箱实例；原始 AES token 从地址栏移除，匿名请求返回 `401`。
+11. 使用受信任 CA 验证 Gateway 和门户 HTTPS；不要以关闭 TLS 校验作为验收通过条件。
+12. 检查 Gateway/Core 审计日志和 `X-Request-ID`，确认没有 Access Token、Refresh Token、JWE 明文、ShareLink 密码或 IEI AES 密钥泄漏。

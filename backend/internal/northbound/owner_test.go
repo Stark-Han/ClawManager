@@ -103,7 +103,7 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 	}
 }
 
-func TestProCreateRequestUsesFixedSmallLinuxWorkbuddyPreset(t *testing.T) {
+func TestProCreateRequestUsesFixedLinuxWorkbuddyPreset(t *testing.T) {
 	t.Setenv("CLAWMANAGER_WORKBUDDY_LINUX_IMAGE", "registry.example/workbuddy-linux:test")
 	request := proCreateRequest(
 		&models.NorthboundOperation{OperationID: "op_pro_owner_test"},
@@ -117,7 +117,7 @@ func TestProCreateRequestUsesFixedSmallLinuxWorkbuddyPreset(t *testing.T) {
 		request.RuntimeType != services.RuntimeBackendDesktop {
 		t.Fatalf("unexpected WorkBuddy runtime selection: %+v", request)
 	}
-	if request.CPUCores != 2 || request.MemoryGB != 4 || request.DiskGB != 20 || request.GPUEnabled || request.GPUCount != 0 {
+	if request.CPUCores != 4 || request.MemoryGB != 8 || request.DiskGB != 40 || request.GPUEnabled || request.GPUCount != 0 {
 		t.Fatalf("unexpected WorkBuddy resource preset: %+v", request)
 	}
 	if request.ImageRegistry == nil || !strings.Contains(*request.ImageRegistry, "workbuddy-linux") {
