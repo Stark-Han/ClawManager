@@ -540,7 +540,7 @@ components:
         type:
           type: string
           const: workbuddy
-          description: WorkBuddy is provisioned as a Linux desktop with a server-controlled small resource preset.
+          description: WorkBuddy is provisioned as a Linux desktop with a server-controlled preset of 4 CPU, 8 GB memory, 40 GB storage, and no GPU.
         description:
           type: [string, "null"]
           maxLength: 2000

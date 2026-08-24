@@ -17,6 +17,12 @@ import (
 	"clawreef/internal/services"
 )
 
+const (
+	northboundWorkbuddyCPUCores = 4
+	northboundWorkbuddyMemoryGB = 8
+	northboundWorkbuddyDiskGB   = 40
+)
+
 type CoreService struct {
 	repo           *repository.NorthboundRepository
 	users          repository.UserRepository
@@ -625,9 +631,9 @@ func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanc
 		Mode:                    services.InstanceModePro,
 		InstanceMode:            services.InstanceModePro,
 		RuntimeType:             services.RuntimeBackendDesktop,
-		CPUCores:                2,
-		MemoryGB:                4,
-		DiskGB:                  20,
+		CPUCores:                northboundWorkbuddyCPUCores,
+		MemoryGB:                northboundWorkbuddyMemoryGB,
+		DiskGB:                  northboundWorkbuddyDiskGB,
 		GPUEnabled:              false,
 		GPUCount:                0,
 		OSType:                  "workbuddy",

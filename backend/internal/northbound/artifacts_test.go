@@ -70,7 +70,7 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 		"required: [id, name, owner, type, status, created_at, updated_at]",
 		"Exact, case-sensitive owner identifier",
 		"const: workbuddy",
-		"server-controlled small resource preset",
+		"server-controlled preset of 4 CPU, 8 GB memory, 40 GB storage, and no GPU",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("northbound OpenAPI is missing owner contract %q", required)

@@ -19,7 +19,7 @@ WorkBuddy 实例、owner 隔离和智慧协作平台单点登录页面。本文�
 | --- | --- | --- |
 | Core 应用 | 增加北向内部服务和异步 Operation Worker | 与现有管理页面共用应用镜像；内部端口为 `9002` |
 | 北向 Gateway | 新增独立进程 `clawreef-northbound-gateway` | 唯一新增的对外入口，NodePort 为 `38443` |
-| WorkBuddy Linux | 统一由 `/lite-instances` 按 `type=workbuddy` 创建和查询；保留 `/pro-instances` 兼容入口 | 固定 Linux Webtop、2 CPU、4 GB 内存、20 GB 存储；不需要 Windows 节点或 Golden PVC |
+| WorkBuddy Linux | 统一由 `/lite-instances` 按 `type=workbuddy` 创建和查询；保留 `/pro-instances` 兼容入口 | 固定 Linux Webtop、4 CPU、8 GB 内存、40 GB 存储；不需要 Windows 节点或 Golden PVC |
 | 数据库 | 自动执行北向、owner 与 Runtime ENUM 迁移 | 新增北向表、owner 字段并保留所有现有 Runtime 类型 |
 | 登录 | 新增一次性挑战和 JWE 登录 | 兼容现有用户；用户名和密码不会作为明文请求字段传输 |
 | Lite 实例 | 新增异步创建、查询接口 | 仅操作当前登录用户自己的 Lite 实例 |
@@ -371,7 +371,7 @@ $env:NORTHBOUND_INSTANCE_TYPE = "workbuddy"
 python examples/northbound_client.py create
 ```
 
-确认实例为 Linux WorkBuddy，使用 2 CPU、4 GB 内存、20 GB 存储、3001 端口和 `/config`
+确认实例为 Linux WorkBuddy，使用 4 CPU、8 GB 内存、40 GB 存储、3001 端口和 `/config`
 工作区。不得出现 Windows 镜像、8006 端口、Windows 节点选择器或 Golden PVC。
 同时确认实例 Pod 的镜像等于第 3.1 节配置的不可变引用，且没有
 `ImagePullBackOff`。
