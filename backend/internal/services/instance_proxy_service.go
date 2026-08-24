@@ -62,6 +62,7 @@ type serviceLookupCall struct {
 
 const (
 	defaultServiceCacheTTL                 = 30 * time.Second
+	openCodePublicURLTemplateEnvVar        = "CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE"
 	deepSeekHarnessPublicURLTemplateEnvVar = "CLAWMANAGER_DEEPSEEK_HARNESS_PUBLIC_URL_TEMPLATE"
 )
 
@@ -259,6 +260,11 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 
 	if location := resp.Header.Get("Location"); location != "" && !dedicatedRuntimeOrigin {
 		resp.Header.Set("Location", s.rewriteRedirectLocation(instanceID, location))
+	}
+	// OpenCode is authenticated transparently on the upstream request. Do not
+	// let a failed upstream challenge open a native browser Basic-auth dialog.
+	if isOpenCodeRuntimeType(accessToken.InstanceType) {
+		resp.Header.Del("WWW-Authenticate")
 	}
 
 	if openCodeProjectSearchRewritten && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
@@ -580,7 +586,7 @@ func isDedicatedRuntimeOriginRequest(r *http.Request, instanceType string) bool 
 	if !managed || !originManaged || runtimeType != originRuntimeType {
 		return false
 	}
-	return runtimeType == RuntimeTypeDeepSeekHarness
+	return runtimeType == RuntimeTypeOpenCode || runtimeType == RuntimeTypeDeepSeekHarness
 }
 
 func setOpenCodeServerBasicAuthHeaders(header http.Header, token string) {
@@ -1317,7 +1323,8 @@ func (s *InstanceProxyService) GetProxyURLForInstance(instance *models.Instance,
 	if instance == nil {
 		return ""
 	}
-	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeDeepSeekHarness {
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok &&
+		(runtimeType == RuntimeTypeOpenCode || runtimeType == RuntimeTypeDeepSeekHarness) {
 		if publicURL := managedRuntimePublicURL(runtimeType, instance.ID, token); publicURL != "" {
 			return publicURL
 		}
@@ -1334,6 +1341,8 @@ func managedRuntimePublicURL(runtimeType string, instanceID int, token string) s
 	// wildcard DNS (for example nip.io) and an offline authoritative DNS zone.
 	var envVar string
 	switch runtimeType {
+	case RuntimeTypeOpenCode:
+		envVar = openCodePublicURLTemplateEnvVar
 	case RuntimeTypeDeepSeekHarness:
 		envVar = deepSeekHarnessPublicURLTemplateEnvVar
 	default:

@@ -1681,7 +1681,7 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 	originRuntimeType, originManaged := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
 	instanceRuntimeType, instanceManaged := services.NormalizeV2RuntimeType(accessToken.InstanceType)
 	dedicatedOrigin := originManaged && instanceManaged && originRuntimeType == instanceRuntimeType &&
-		originRuntimeType == services.RuntimeTypeDeepSeekHarness
+		(originRuntimeType == services.RuntimeTypeOpenCode || originRuntimeType == services.RuntimeTypeDeepSeekHarness)
 	if dedicatedOrigin {
 		cookiePath = "/"
 		cookieSecure = true
@@ -1696,7 +1696,45 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 		cookieSecure,
 		true,
 	)
+	if dedicatedOrigin && originRuntimeType == services.RuntimeTypeOpenCode &&
+		(c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+		c.Redirect(http.StatusTemporaryRedirect, dedicatedRuntimeCleanLocation(c.Request.URL, id, queryToken))
+		return "", false
+	}
 	return queryToken, true
+}
+
+func dedicatedRuntimeCleanLocation(requestURL *url.URL, instanceID int, accessToken string) string {
+	if requestURL == nil {
+		return "/"
+	}
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	pathValue := strings.TrimPrefix(requestURL.Path, prefix)
+	if pathValue == "" {
+		pathValue = "/"
+	} else if !strings.HasPrefix(pathValue, "/") {
+		pathValue = "/" + pathValue
+	}
+
+	query := requestURL.Query()
+	values := query["token"]
+	if len(values) > 0 {
+		kept := values[:0]
+		for _, value := range values {
+			if value != accessToken {
+				kept = append(kept, value)
+			}
+		}
+		if len(kept) == 0 {
+			query.Del("token")
+		} else {
+			query["token"] = kept
+		}
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return pathValue + "?" + encoded
+	}
+	return pathValue
 }
 
 // validCurrentExternalSession makes a share-issued instance token revocable.

@@ -1,12 +1,47 @@
 package db
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestRuntimeManifestsAreValidYAML(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, manifest := range deploymentRuntimeManifests(repoRoot) {
+		t.Run(manifest, func(t *testing.T) {
+			file, err := os.Open(manifest)
+			if err != nil {
+				t.Fatalf("open manifest: %v", err)
+			}
+			defer file.Close()
+
+			decoder := yaml.NewDecoder(file)
+			documents := 0
+			for {
+				var document any
+				err := decoder.Decode(&document)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("parse manifest document %d: %v", documents+1, err)
+				}
+				if document != nil {
+					documents++
+				}
+			}
+			if documents == 0 {
+				t.Fatal("manifest contains no YAML documents")
+			}
+		})
+	}
+}
 
 func TestRuntimeManifestsStartHermesRuntime(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
@@ -63,6 +98,21 @@ func TestRuntimeManifestsExposeDeepSeekHarnessPublicURLTemplate(t *testing.T) {
 	}
 }
 
+func TestRuntimeManifestsExposeOpenCodePublicURLTemplate(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, manifest := range deploymentRuntimeManifests(repoRoot) {
+		t.Run(manifest, func(t *testing.T) {
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			if !strings.Contains(string(raw), "name: CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE") {
+				t.Fatalf("manifest %s must expose the OpenCode public URL template", manifest)
+			}
+		})
+	}
+}
+
 func TestDesktopAuthAcceptsDedicatedRuntimeInstanceVariable(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "njs", "desktop_auth.js"))
@@ -72,6 +122,23 @@ func TestDesktopAuthAcceptsDedicatedRuntimeInstanceVariable(t *testing.T) {
 	text := string(raw)
 	if !strings.Contains(text, "r.variables.inst_id || r.variables.runtime_inst_id") {
 		t.Fatal("desktop auth must accept both path-based and dedicated-origin instance variables")
+	}
+}
+
+func TestNginxRoutesOpenCodeDedicatedOrigins(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`server_name ~^opencode-(?<runtime_inst_id>[0-9]+)\..+$;`,
+		"proxy_set_header X-ClawManager-Runtime-Origin opencode;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("nginx config must contain %q", want)
+		}
 	}
 }
 
