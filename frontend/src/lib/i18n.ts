@@ -2618,6 +2618,14 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Workbuddy",
           description: "Managed Workbuddy runtime on a webtop desktop base",
         },
+        codex: {
+          label: "Codex Pro",
+          description: "Managed Codex coding workspace on a dedicated desktop",
+        },
+        claudeCode: {
+          label: "Claude Code Pro",
+          description: "Managed Claude Code workspace on a dedicated desktop",
+        },
         custom: {
           label: "Custom Image",
           description: "Use your own custom image",
@@ -4160,6 +4168,14 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Workbuddy",
           description: "基于 Webtop 桌面基础镜像构建的托管 Workbuddy 运行时",
         },
+        codex: {
+          label: "Codex Pro",
+          description: "运行在独立桌面中的托管 Codex 编码工作空间",
+        },
+        claudeCode: {
+          label: "Claude Code Pro",
+          description: "运行在独立桌面中的托管 Claude Code 工作空间",
+        },
         custom: {
           label: "自定义镜像",
           description: "使用你自己的自定义镜像",
@@ -5645,6 +5661,14 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "Webtop デスクトップベースで動作する管理対象 Workbuddy ランタイム",
         },
+        codex: {
+          label: "Codex Pro",
+          description: "専用デスクトップで動作する管理対象 Codex コーディングワークスペース",
+        },
+        claudeCode: {
+          label: "Claude Code Pro",
+          description: "専用デスクトップで動作する管理対象 Claude Code ワークスペース",
+        },
         custom: {
           label: "カスタムイメージ",
           description: "独自のカスタムイメージを使用",
@@ -7091,6 +7115,14 @@ export const translations: Record<Locale, TranslationTree> = {
         workbuddy: {
           label: "Workbuddy",
           description: "Webtop 데스크톱 기반의 관리형 Workbuddy 런타임",
+        },
+        codex: {
+          label: "Codex Pro",
+          description: "전용 데스크톱에서 실행되는 관리형 Codex 코딩 작업 공간",
+        },
+        claudeCode: {
+          label: "Claude Code Pro",
+          description: "전용 데스크톱에서 실행되는 관리형 Claude Code 작업 공간",
         },
         custom: {
           label: "사용자 지정 이미지",
@@ -8563,6 +8595,14 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Workbuddy",
           description:
             "Verwaltete Workbuddy-Runtime auf Basis des Webtop-Desktop-Images",
+        },
+        codex: {
+          label: "Codex Pro",
+          description: "Verwalteter Codex-Coding-Arbeitsbereich auf einem dedizierten Desktop",
+        },
+        claudeCode: {
+          label: "Claude Code Pro",
+          description: "Verwalteter Claude-Code-Arbeitsbereich auf einem dedizierten Desktop",
         },
         custom: {
           label: "Benutzerdefiniertes Image",
