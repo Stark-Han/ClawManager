@@ -54,7 +54,7 @@ func (h *CoreHandler) SubmitCreate(c *gin.Context) {
 	}
 	var req CreateLiteInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", err))
+		writeError(c, apiError(422, "VALIDATION_ERROR", "Invalid instance request", err))
 		return
 	}
 	item, replayed, err := h.service.SubmitCreate(*principal, c.GetHeader("Idempotency-Key"), req)

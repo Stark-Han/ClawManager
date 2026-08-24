@@ -19,7 +19,7 @@ WorkBuddy 实例、owner 隔离和智慧协作平台单点登录页面。本文�
 | --- | --- | --- |
 | Core 应用 | 增加北向内部服务和异步 Operation Worker | 与现有管理页面共用应用镜像；内部端口为 `9002` |
 | 北向 Gateway | 新增独立进程 `clawreef-northbound-gateway` | 唯一新增的对外入口，NodePort 为 `38443` |
-| WorkBuddy Linux | 增加 `/pro-instances` 创建和查询 | 固定 Linux Webtop、2 CPU、4 GB 内存、20 GB 存储；不需要 Windows 节点或 Golden PVC |
+| WorkBuddy Linux | 统一由 `/lite-instances` 按 `type=workbuddy` 创建和查询；保留 `/pro-instances` 兼容入口 | 固定 Linux Webtop、2 CPU、4 GB 内存、20 GB 存储；不需要 Windows 节点或 Golden PVC |
 | 数据库 | 自动执行北向、owner 与 Runtime ENUM 迁移 | 新增北向表、owner 字段并保留所有现有 Runtime 类型 |
 | 登录 | 新增一次性挑战和 JWE 登录 | 兼容现有用户；用户名和密码不会作为明文请求字段传输 |
 | Lite 实例 | 新增异步创建、查询接口 | 仅操作当前登录用户自己的 Lite 实例 |
@@ -108,7 +108,7 @@ docker push $Image
 
 ### 3.1 准备 Linux WorkBuddy Runtime 镜像
 
-`/pro-instances` 只创建 Linux WorkBuddy。Core 所在 Namespace 必须能够拉取实际的
+统一创建接口在 `type=workbuddy` 时只创建 Linux WorkBuddy。Core 所在 Namespace 必须能够拉取实际的
 WorkBuddy Linux 镜像，并在 Core Deployment 中显式设置不可变镜像引用：
 
 ```powershell
@@ -364,10 +364,9 @@ python examples/northbound_client.py create
 
 ### 9.4 验证 WorkBuddy Linux 创建
 
-重新登录以获得 `pro-instances:create` 和 `pro-instances:read` Scope，然后设置：
+重新登录以获得最新 Scope，然后设置：
 
 ```powershell
-$env:NORTHBOUND_INSTANCE_MODE = "pro"
 $env:NORTHBOUND_INSTANCE_TYPE = "workbuddy"
 python examples/northbound_client.py create
 ```
@@ -376,6 +375,10 @@ python examples/northbound_client.py create
 工作区。不得出现 Windows 镜像、8006 端口、Windows 节点选择器或 Golden PVC。
 同时确认实例 Pod 的镜像等于第 3.1 节配置的不可变引用，且没有
 `ImagePullBackOff`。
+
+创建成功后再设置 `NORTHBOUND_INSTANCE_ID`，分别执行 `enable-password`、`reset-url` 和
+`reset-password`，确认 WorkBuddy 使用与四种 Lite Runtime 相同的 ShareLink 返回结构，且
+`workspace_access=read` 或 `write` 时共享文件入口映射到 `/config`。
 
 ### 9.5 验证网络边界
 

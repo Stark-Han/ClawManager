@@ -88,27 +88,56 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
 	}
 	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundLiteType(req.Type) {
-		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", nil)
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundType(req.Type) {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid instance request", nil)
 	}
 	if req.Description != nil && len(*req.Description) > 2000 {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
+	}
+	// A WorkBuddy request may be a retry of an operation originally submitted
+	// through /pro-instances before the collections were unified. Reuse that
+	// operation instead of provisioning a duplicate across an upgrade.
+	if req.Type == "workbuddy" {
+		existing, err := s.findLegacyProOperation(principal.UserID, idempotencyKey, req)
+		if err != nil || existing != nil {
+			return existing, existing != nil, err
+		}
 	}
 	return s.submitCreateOperation(
 		principal,
 		idempotencyKey,
 		req,
 		OperationTypeLiteInstance,
-		"Too many unfinished Lite instance operations",
+		"Too many unfinished instance operations",
 	)
 }
 
-func isSupportedNorthboundLiteType(instanceType string) bool {
+func (s *CoreService) findLegacyProOperation(userID int, idempotencyKey string, req CreateLiteInstanceRequest) (*models.NorthboundOperation, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 128 {
+		return nil, apiError(400, "INVALID_REQUEST", "Idempotency-Key must contain 8 to 128 characters", nil)
+	}
+	payload, err := json.Marshal(CreateProInstanceRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.repo.GetOperationByIdempotency(userID, OperationTypeProInstance, sha256Hex(idempotencyKey))
+	if err != nil || existing == nil {
+		return existing, err
+	}
+	if existing.RequestHash != sha256Hex(string(payload)) {
+		return nil, apiError(409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for a different request", nil)
+	}
+	return existing, nil
+}
+
+func isSupportedNorthboundType(instanceType string) bool {
 	switch strings.ToLower(strings.TrimSpace(instanceType)) {
 	case services.RuntimeTypeOpenClaw,
 		services.RuntimeTypeHermes,
 		services.RuntimeTypeOpenCode,
-		services.RuntimeTypeDeepSeekHarness:
+		services.RuntimeTypeDeepSeekHarness,
+		"workbuddy":
 		return true
 	default:
 		return false
@@ -116,26 +145,9 @@ func isSupportedNorthboundLiteType(instanceType string) bool {
 }
 
 func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string, req CreateProInstanceRequest) (*models.NorthboundOperation, bool, error) {
-	req.Name = strings.TrimSpace(req.Name)
-	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
-	owner, ownerErr := services.NormalizeInstanceOwner(req.Owner)
-	if ownerErr != nil {
-		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
-	}
-	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || req.Type != "workbuddy" {
-		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", nil)
-	}
-	if req.Description != nil && len(*req.Description) > 2000 {
-		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
-	}
-	return s.submitCreateOperation(
-		principal,
-		idempotencyKey,
-		req,
-		OperationTypeProInstance,
-		"Too many unfinished Pro instance operations",
-	)
+	// Keep /pro-instances as a compatibility alias, but place every newly
+	// submitted request in the canonical idempotency and operation domain.
+	return s.SubmitCreate(principal, idempotencyKey, CreateLiteInstanceRequest(req))
 }
 
 func (s *CoreService) submitCreateOperation(
@@ -219,7 +231,7 @@ func (s *CoreService) GetInstance(userID, instanceID int) (*models.Instance, err
 	if err != nil {
 		return nil, err
 	}
-	if item == nil || item.UserID != userID || !isLite(item) {
+	if item == nil || item.UserID != userID || !isSupportedNorthboundInstance(item) {
 		return nil, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
 	}
 	return item, nil
@@ -373,7 +385,7 @@ func (s *CoreService) ListInstances(userID int, owner string, page, limit int) (
 	if !ok {
 		return nil, 0, fmt.Errorf("instance service does not support owner filtering")
 	}
-	items, total, err := ownerService.GetLiteByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
+	items, total, err := ownerService.GetNorthboundByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -432,6 +444,17 @@ func isWorkbuddyLinuxPro(item *models.Instance) bool {
 	}
 	mode, ok := services.NormalizeInstanceMode(item.InstanceMode)
 	return ok && mode == services.InstanceModePro
+}
+
+func isSupportedNorthboundInstance(item *models.Instance) bool {
+	if item == nil {
+		return false
+	}
+	if isWorkbuddyLinuxPro(item) {
+		return true
+	}
+	return isLite(item) && isSupportedNorthboundType(item.Type) &&
+		!strings.EqualFold(strings.TrimSpace(item.Type), "workbuddy")
 }
 
 type OperationWorker struct {
@@ -522,7 +545,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 		w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &instance.ID, "")
 		return
 	}
-	code, message, retryable := classifyCreateError(createErr, item.OperationType)
+	code, message, retryable := classifyCreateError(createErr, createRequest.InstanceMode)
 	maxAttempts := w.service.config.OperationMaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 5
@@ -552,6 +575,9 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 		var request CreateLiteInstanceRequest
 		if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
 			return services.CreateInstanceRequest{}, "", err
+		}
+		if strings.EqualFold(strings.TrimSpace(request.Type), "workbuddy") {
+			return proCreateRequest(item, CreateProInstanceRequest(request)), "northbound.pro.create", nil
 		}
 		return liteCreateRequest(item, request), "northbound.lite.create", nil
 	case OperationTypeProInstance:
@@ -611,11 +637,11 @@ func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanc
 	}
 }
 
-func classifyCreateError(err error, operationType string) (string, string, bool) {
+func classifyCreateError(err error, instanceMode string) (string, string, bool) {
 	message := strings.ToLower(err.Error())
 	modeName := "Lite"
 	capacityCode := "LITE_CAPACITY_EXHAUSTED"
-	if operationType == OperationTypeProInstance {
+	if strings.EqualFold(strings.TrimSpace(instanceMode), services.InstanceModePro) || instanceMode == OperationTypeProInstance {
 		modeName = "Pro"
 		capacityCode = "PRO_CAPACITY_EXHAUSTED"
 	}

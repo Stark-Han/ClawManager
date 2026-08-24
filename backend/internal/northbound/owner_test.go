@@ -12,18 +12,29 @@ func ownerPointer(value string) *string { return &value }
 
 func TestCoreServiceListsOnlyExactOwnerLiteInstances(t *testing.T) {
 	service := &CoreService{instances: &northboundInstanceStub{items: map[int]*models.Instance{
-		1: {ID: 1, UserID: 7, Owner: ownerPointer("tenant-a"), InstanceMode: services.InstanceModeLite, Name: "match"},
-		2: {ID: 2, UserID: 7, Owner: ownerPointer("Tenant-A"), InstanceMode: services.InstanceModeLite, Name: "case-mismatch"},
-		3: {ID: 3, UserID: 8, Owner: ownerPointer("tenant-a"), InstanceMode: services.InstanceModeLite, Name: "other-user"},
-		4: {ID: 4, UserID: 7, Owner: ownerPointer("tenant-a"), InstanceMode: services.InstanceModePro, Name: "pro"},
+		1: {ID: 1, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite, Name: "lite-match"},
+		2: {ID: 2, UserID: 7, Owner: ownerPointer("Tenant-A"), Type: services.RuntimeTypeHermes, InstanceMode: services.InstanceModeLite, Name: "case-mismatch"},
+		3: {ID: 3, UserID: 8, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenCode, InstanceMode: services.InstanceModeLite, Name: "other-user"},
+		4: {ID: 4, UserID: 7, Owner: ownerPointer("tenant-a"), Type: "workbuddy", RuntimeVariant: services.WorkbuddyRuntimeLinux, InstanceMode: services.InstanceModePro, Name: "pro-match"},
+		5: {ID: 5, UserID: 7, Owner: ownerPointer("tenant-a"), Type: "custom", InstanceMode: services.InstanceModeLite, Name: "unsupported"},
 	}}}
 
 	items, total, err := service.ListInstances(7, " tenant-a ", 1, 20)
 	if err != nil {
 		t.Fatalf("ListInstances returned error: %v", err)
 	}
-	if total != 1 || len(items) != 1 || items[0].ID != 1 || items[0].Owner != "tenant-a" {
+	if total != 2 || len(items) != 2 {
 		t.Fatalf("unexpected owner-scoped instances: total=%d items=%+v", total, items)
+	}
+	seen := map[int]bool{}
+	for _, item := range items {
+		seen[item.ID] = true
+		if item.Owner != "tenant-a" {
+			t.Fatalf("unexpected owner-scoped instance owner: %+v", item)
+		}
+	}
+	if !seen[1] || !seen[4] {
+		t.Fatalf("unified list must contain Lite and Linux WorkBuddy Pro: %+v", items)
 	}
 }
 
@@ -71,7 +82,7 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 		services.RuntimeTypeOpenCode,
 		services.RuntimeTypeDeepSeekHarness,
 	} {
-		if !isSupportedNorthboundLiteType(instanceType) {
+		if !isSupportedNorthboundType(instanceType) {
 			t.Fatalf("runtime %q must be accepted by the northbound Lite contract", instanceType)
 		}
 		request := liteCreateRequest(
@@ -82,9 +93,12 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 			t.Fatalf("unexpected %s Lite request: %+v", instanceType, request)
 		}
 	}
-	for _, instanceType := range []string{"workbuddy", "codex", "claude-code", "custom"} {
-		if isSupportedNorthboundLiteType(instanceType) {
-			t.Fatalf("runtime %q must not be accepted by the northbound Lite contract", instanceType)
+	if !isSupportedNorthboundType("workbuddy") {
+		t.Fatal("workbuddy must be accepted by the unified northbound contract")
+	}
+	for _, instanceType := range []string{"codex", "claude-code", "custom"} {
+		if isSupportedNorthboundType(instanceType) {
+			t.Fatalf("runtime %q must not be accepted by the northbound contract", instanceType)
 		}
 	}
 }
@@ -114,7 +128,7 @@ func TestProCreateRequestUsesFixedSmallLinuxWorkbuddyPreset(t *testing.T) {
 	}
 }
 
-func TestOperationCreateRequestKeepsLiteAndProPayloadsSeparate(t *testing.T) {
+func TestOperationCreateRequestSelectsModeFromType(t *testing.T) {
 	lite, _, err := operationCreateRequest(&models.NorthboundOperation{
 		OperationID:    "op_lite",
 		OperationType:  OperationTypeLiteInstance,
@@ -123,6 +137,15 @@ func TestOperationCreateRequestKeepsLiteAndProPayloadsSeparate(t *testing.T) {
 	if err != nil || lite.InstanceMode != services.InstanceModeLite || lite.Type != "openclaw" {
 		t.Fatalf("unexpected Lite operation request: request=%+v err=%v", lite, err)
 	}
+	workbuddy, _, err := operationCreateRequest(&models.NorthboundOperation{
+		OperationID:    "op_unified_workbuddy",
+		OperationType:  OperationTypeLiteInstance,
+		RequestPayload: `{"name":"workbuddy-test","owner":"tenant-a","type":"workbuddy"}`,
+	})
+	if err != nil || workbuddy.InstanceMode != services.InstanceModePro || workbuddy.RuntimeVariant != services.WorkbuddyRuntimeLinux {
+		t.Fatalf("unexpected unified WorkBuddy operation request: request=%+v err=%v", workbuddy, err)
+	}
+	// Legacy queued pro_instance operations remain executable during upgrades.
 	pro, _, err := operationCreateRequest(&models.NorthboundOperation{
 		OperationID:    "op_pro",
 		OperationType:  OperationTypeProInstance,

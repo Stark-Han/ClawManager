@@ -48,6 +48,7 @@ type InstanceService interface {
 type InstanceOwnerService interface {
 	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
+	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 }
 
 // IEISystemInstanceService provides the email-owner scoped supported-instance
@@ -1045,6 +1046,30 @@ func (s *instanceService) GetWorkbuddyProByUserIDAndOwner(userID int, owner stri
 	}
 	hydrateInstancesDesktopStreamProfile(instances)
 	total, err := repo.CountWorkbuddyProByUserIDAndOwner(userID, normalized)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+// GetNorthboundByUserIDAndOwner returns the unified collection exposed by the
+// legacy /lite-instances northbound path: managed Lite runtimes plus Linux
+// WorkBuddy Pro. Mode selection remains an internal provisioning concern.
+func (s *instanceService) GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	normalized, err := NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, err
+	}
+	repo, ok := s.instanceRepo.(repository.NorthboundInstanceOwnerRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support northbound owner filtering")
+	}
+	instances, err := repo.GetNorthboundByUserIDAndOwner(userID, normalized, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountNorthboundByUserIDAndOwner(userID, normalized)
 	if err != nil {
 		return nil, 0, err
 	}
