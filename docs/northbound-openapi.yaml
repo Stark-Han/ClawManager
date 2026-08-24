@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: ClawManager Northbound API
-  version: 1.2.0
-  description: Public API for authenticated Lite instance provisioning and password-protected ShareLink management.
+  version: 1.3.0
+  description: Public API for authenticated managed-runtime provisioning and password-protected ShareLink management. The stable `/lite-instances` path accepts four Lite runtimes and Linux WorkBuddy Pro; the server selects the mode from `type`.
 servers:
   - url: https://northbound.example.com:38443
 paths:
@@ -110,7 +110,7 @@ paths:
           $ref: "#/components/responses/AuthInvalid"
   /api/northbound/v1/lite-instances:
     post:
-      summary: Submit a Lite instance provisioning operation
+      summary: Submit a managed instance provisioning operation
       operationId: createLiteInstance
       security:
         - bearerAuth: []
@@ -145,7 +145,7 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
     get:
-      summary: List the current user's Lite instances
+      summary: List the current user's supported northbound instances
       operationId: listLiteInstances
       security:
         - bearerAuth: []
@@ -165,7 +165,7 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
       responses:
         "200":
-          description: Paginated Lite instances
+          description: Paginated managed Lite instances and Linux WorkBuddy Pro instances
           content:
             application/json:
               schema:
@@ -188,7 +188,7 @@ paths:
           $ref: "#/components/responses/ValidationError"
   /api/northbound/v1/lite-instances/{id}:
     get:
-      summary: Get one Lite instance owned by the current user
+      summary: Get one supported northbound instance owned by the current user
       operationId: getLiteInstance
       security:
         - bearerAuth: []
@@ -196,21 +196,123 @@ paths:
         - name: id
           in: path
           required: true
-          description: Positive Lite instance ID owned by the authenticated user.
+          description: Positive supported instance ID owned by the authenticated user.
           schema: { type: integer, minimum: 1 }
       responses:
         "200":
-          description: Lite instance
+          description: Managed Lite instance or Linux WorkBuddy Pro instance
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/LiteInstance"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/northbound/v1/pro-instances:
+    post:
+      summary: Submit a Linux WorkBuddy Pro provisioning operation
+      deprecated: true
+      description: Compatibility alias. New integrations should send `type=workbuddy` to `/api/northbound/v1/lite-instances`; both paths use the same canonical operation and idempotency domain.
+      operationId: createProInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProInstance"
+      responses:
+        "202":
+          description: Operation accepted; Location identifies the operation resource.
+          headers:
+            Location:
+              schema: { type: string }
+            Idempotent-Replayed:
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "401":
+          $ref: "#/components/responses/AuthInvalid"
+        "403":
+          $ref: "#/components/responses/ScopeDenied"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      summary: List the current user's Linux WorkBuddy Pro instances
+      deprecated: true
+      description: Compatibility view. New integrations should use `/api/northbound/v1/lite-instances`, which returns all supported runtimes for the owner.
+      operationId: listProInstances
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: owner
+          in: query
+          required: true
+          description: Exact, case-sensitive owner identifier used when the instances were created.
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Paginated Linux WorkBuddy Pro instances
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instances, owner, total, page, limit]
+                properties:
+                  instances:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProInstance"
+                  owner: { type: string }
+                  total: { type: integer }
+                  page: { type: integer }
+                  limit: { type: integer }
+        "401":
+          $ref: "#/components/responses/AuthInvalid"
+        "403":
+          $ref: "#/components/responses/ScopeDenied"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+  /api/northbound/v1/pro-instances/{id}:
+    get:
+      summary: Get one Linux WorkBuddy Pro instance owned by the current user
+      deprecated: true
+      description: Compatibility view. New integrations should use `/api/northbound/v1/lite-instances/{id}`.
+      operationId: getProInstance
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Linux WorkBuddy Pro instance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProInstance"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/northbound/v1/lite-instances/{id}/external-access/password:
     post:
-      summary: Enable password-protected ShareLink access for a Lite instance
-      description: Requires `lite-instances:share-link:manage`. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
+      summary: Enable password-protected ShareLink access for a supported instance
+      description: Requires `lite-instances:share-link:manage`. Supports the four managed Lite runtimes and Linux WorkBuddy Pro. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
       operationId: enableLiteInstanceShareLinkPassword
       security:
         - bearerAuth: []
@@ -218,7 +320,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: Positive Lite instance ID owned by the authenticated user.
+          description: Positive supported instance ID owned by the authenticated user.
           schema: { type: integer, minimum: 1 }
       requestBody:
         required: true
@@ -246,7 +348,7 @@ paths:
           $ref: "#/components/responses/RateLimited"
   /api/northbound/v1/lite-instances/{id}/external-access/share-link/reset:
     post:
-      summary: Reset the share-link URL for a Lite instance owned by the current user
+      summary: Reset the share-link URL for a supported instance owned by the current user
       description: Requires `lite-instances:share-link:reset`. The old URL and existing sessions become invalid immediately. Password, expiration, and workspace permissions are preserved.
       operationId: resetLiteInstanceShareLinkURL
       security:
@@ -255,7 +357,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: Positive Lite instance ID owned by the authenticated user.
+          description: Positive supported instance ID owned by the authenticated user.
           schema: { type: integer, minimum: 1 }
       requestBody:
         required: true
@@ -280,7 +382,7 @@ paths:
           $ref: "#/components/responses/RateLimited"
   /api/northbound/v1/lite-instances/{id}/external-access/password/reset:
     post:
-      summary: Reset the share-link password for a Lite instance owned by the current user
+      summary: Reset the share-link password for a supported instance owned by the current user
       description: Requires `lite-instances:share-link:reset`. The share URL is preserved. The old password and existing authenticated sessions become invalid immediately.
       operationId: resetLiteInstanceShareLinkPassword
       security:
@@ -289,7 +391,7 @@ paths:
         - name: id
           in: path
           required: true
-          description: Positive Lite instance ID owned by the authenticated user.
+          description: Positive supported instance ID owned by the authenticated user.
           schema: { type: integer, minimum: 1 }
       requestBody:
         required: true
@@ -395,7 +497,7 @@ components:
           description: Permissions fixed when the session is created; re-login is required to receive newly introduced scopes.
           items:
             type: string
-            enum: [lite-instances:create, lite-instances:read, lite-instances:share-link:manage, lite-instances:share-link:reset]
+            enum: [lite-instances:create, lite-instances:read, pro-instances:create, pro-instances:read, lite-instances:share-link:manage, lite-instances:share-link:reset]
         session_id: { type: string, description: Northbound session identifier for audit and logout; it is not an access token. }
     CreateLiteInstance:
       type: object
@@ -414,12 +516,35 @@ components:
           description: Creator or business owner identifier. The server trims it, stores at most 128 UTF-8 bytes, rejects control characters, and uses case-sensitive exact matching for list queries.
         type:
           type: string
-          enum: [openclaw, hermes]
-          description: Lite runtime family; openclaw creates an OpenClaw Lite instance and hermes creates a Hermes Lite instance.
+          enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy]
+          description: Runtime family. OpenClaw, Hermes, OpenCode, and DeepSeek Harness are provisioned as Lite; WorkBuddy is provisioned as a fixed Linux Pro desktop. Callers do not select the mode.
         description:
           type: [string, "null"]
           maxLength: 2000
           description: Optional metadata only; it is not injected into the runtime. The server enforces at most 2000 UTF-8 bytes.
+    CreateProInstance:
+      type: object
+      additionalProperties: false
+      required: [name, owner, type]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 50
+          description: Display name using the same contract as CreateLiteInstance.
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Creator or business owner identifier using the same normalization and exact-query contract as CreateLiteInstance.
+        type:
+          type: string
+          const: workbuddy
+          description: WorkBuddy is provisioned as a Linux desktop with a server-controlled small resource preset.
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: Optional metadata only; it is not injected into the runtime.
     EmptyRequest:
       type: object
       additionalProperties: false
@@ -451,13 +576,27 @@ components:
       type: object
       required: [id, name, owner, type, status, created_at, updated_at]
       properties:
-        id: { type: integer, minimum: 1, description: Lite instance ID used by subsequent instance and ShareLink calls. }
+        id: { type: integer, minimum: 1, description: Supported instance ID used by subsequent instance and ShareLink calls. }
         name: { type: string, description: Instance display name. }
         owner: { type: string, description: Creator or business owner identifier stored on this instance. }
         description: { type: [string, "null"], description: Optional instance metadata. }
-        type: { type: string, enum: [openclaw, hermes], description: Lite runtime family. }
+        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy], description: Managed runtime family; workbuddy identifies the fixed Linux Pro runtime. }
         status: { type: string, description: Runtime lifecycle status; callers should wait for running before treating the instance as ready. }
         availability: { type: string, enum: [available, starting, unavailable], description: Derived display state; running maps to available and creating maps to starting. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+    ProInstance:
+      type: object
+      required: [id, name, owner, type, status, created_at, updated_at]
+      properties:
+        id: { type: integer, minimum: 1 }
+        name: { type: string }
+        owner: { type: string }
+        description: { type: [string, "null"] }
+        type: { type: string, const: workbuddy }
+        status: { type: string }
+        availability: { type: string, enum: [available, starting, unavailable] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         started_at: { type: [string, "null"], format: date-time }
@@ -467,7 +606,7 @@ components:
       properties:
         operation_id: { type: string, description: Opaque ID used to poll this operation. }
         status: { type: string, enum: [queued, processing, succeeded, failed] }
-        resource_type: { type: string, const: lite_instance }
+        resource_type: { type: string, enum: [lite_instance, pro_instance], description: New submissions through either collection return lite_instance for compatibility with the original workflow. pro_instance remains readable for operations queued by older versions. }
         instance_id: { type: integer, minimum: 1, description: Present after success; use it for instance and ShareLink endpoints. }
         error_code: { type: string }
         error_message: { type: string }

@@ -254,6 +254,17 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 			writeError(c, err)
 		}
 	})
+	resources.POST("/pro-instances", RequireScope(ScopeProCreate), RateLimit(createLimiter, func(c *gin.Context) string {
+		principal := currentPrincipal(c)
+		if principal == nil {
+			return c.ClientIP()
+		}
+		return strconv.Itoa(principal.UserID)
+	}), func(c *gin.Context) {
+		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
+			writeError(c, err)
+		}
+	})
 	queryRateLimit := RateLimit(queryLimiter, func(c *gin.Context) string {
 		principal := currentPrincipal(c)
 		if principal == nil {
@@ -267,6 +278,16 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 		}
 	})
 	resources.GET("/lite-instances/:id", RequireScope(ScopeLiteRead), queryRateLimit, func(c *gin.Context) {
+		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
+			writeError(c, err)
+		}
+	})
+	resources.GET("/pro-instances", RequireScope(ScopeProRead), queryRateLimit, func(c *gin.Context) {
+		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
+			writeError(c, err)
+		}
+	})
+	resources.GET("/pro-instances/:id", RequireScope(ScopeProRead), queryRateLimit, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
 		}
@@ -293,7 +314,7 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 			writeError(c, err)
 		}
 	})
-	resources.GET("/operations/:id", RequireAnyScope(ScopeLiteCreate, ScopeLiteRead), queryRateLimit, func(c *gin.Context) {
+	resources.GET("/operations/:id", RequireAnyScope(ScopeLiteCreate, ScopeLiteRead, ScopeProCreate, ScopeProRead), queryRateLimit, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
 		}

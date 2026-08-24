@@ -177,10 +177,6 @@ const INSTANCE_TYPE_I18N_KEYS: Record<
   },
 };
 
-// Keep the runtime implementation and existing-instance views intact while
-// temporarily removing unavailable runtimes from the new-instance chooser.
-const TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS = new Set(["workbuddy"]);
-
 const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
   (type) =>
     [
@@ -192,7 +188,6 @@ const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "codex",
       "claude-code",
     ].includes(type.id) &&
-    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id) &&
     (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
 );
 const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
@@ -207,7 +202,6 @@ const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "claude-code",
       "custom",
     ].includes(type.id) &&
-    !TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id) &&
     (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
 );
 
@@ -726,7 +720,12 @@ const CreateInstancePage: React.FC = () => {
     const loadAvailableTypes = async () => {
       try {
         const items = await systemSettingsService.getImageSettings();
-        const enabledItems = items.filter((item) => item.is_enabled !== false);
+        const enabledItems = items.filter(
+          (item) =>
+            item.is_enabled !== false &&
+            (item.instance_type !== "workbuddy" ||
+              resolveManagedRuntimeVariant("workbuddy", item) === "linux"),
+        );
         setRuntimeImageSettings(enabledItems);
         const enabledTypes = new Set(
           enabledItems.map((item) => item.instance_type),

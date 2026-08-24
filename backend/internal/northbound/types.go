@@ -20,10 +20,13 @@ func requireStrongSecret(name, value string) error {
 const (
 	ScopeLiteCreate      = "lite-instances:create"
 	ScopeLiteRead        = "lite-instances:read"
+	ScopeProCreate       = "pro-instances:create"
+	ScopeProRead         = "pro-instances:read"
 	ScopeShareLinkManage = "lite-instances:share-link:manage"
 	ScopeShareLinkReset  = "lite-instances:share-link:reset"
 
 	OperationTypeLiteInstance = "lite_instance"
+	OperationTypeProInstance  = "pro_instance"
 )
 
 type APIError struct {
@@ -94,7 +97,17 @@ func (p Principal) HasScope(required string) bool {
 type CreateLiteInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
 	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes"`
+	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness workbuddy"`
+	Description *string `json:"description,omitempty"`
+}
+
+// CreateProInstanceRequest intentionally mirrors the existing Lite request.
+// The server owns the Linux runtime variant and resource preset so callers
+// cannot accidentally request the Windows VM or oversized resources.
+type CreateProInstanceRequest struct {
+	Name        string  `json:"name" binding:"required,min=3,max=50"`
+	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
+	Type        string  `json:"type" binding:"required,oneof=workbuddy"`
 	Description *string `json:"description,omitempty"`
 }
 

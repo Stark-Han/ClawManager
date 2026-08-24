@@ -164,21 +164,21 @@ func TestJWELoginAuthenticatesExistingBcryptUser(t *testing.T) {
 	if result.UserID != 7 || result.AccessToken == "" || result.RefreshToken == "" || repo.session == nil {
 		t.Fatalf("incomplete login result: %+v", result)
 	}
-	hasShareLinkResetScope := false
-	hasShareLinkManageScope := false
+	requiredScopes := map[string]bool{
+		ScopeProCreate:       false,
+		ScopeProRead:         false,
+		ScopeShareLinkReset:  false,
+		ScopeShareLinkManage: false,
+	}
 	for _, scope := range result.Scopes {
-		if scope == ScopeShareLinkReset {
-			hasShareLinkResetScope = true
-		}
-		if scope == ScopeShareLinkManage {
-			hasShareLinkManageScope = true
+		if _, required := requiredScopes[scope]; required {
+			requiredScopes[scope] = true
 		}
 	}
-	if !hasShareLinkResetScope {
-		t.Fatalf("login scopes = %v, missing %s", result.Scopes, ScopeShareLinkReset)
-	}
-	if !hasShareLinkManageScope {
-		t.Fatalf("login scopes = %v, missing %s", result.Scopes, ScopeShareLinkManage)
+	for scope, present := range requiredScopes {
+		if !present {
+			t.Fatalf("login scopes = %v, missing %s", result.Scopes, scope)
+		}
 	}
 	if repo.challenge.Status != "consumed" {
 		t.Fatalf("challenge status = %q, want consumed", repo.challenge.Status)

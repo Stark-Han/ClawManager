@@ -54,6 +54,42 @@ func (s *northboundInstanceStub) GetLiteByUserIDAndOwner(userID int, owner strin
 	return items[offset:end], total, nil
 }
 
+func (s *northboundInstanceStub) GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	items := make([]models.Instance, 0)
+	for _, item := range s.items {
+		if item.UserID == userID && item.Owner != nil && *item.Owner == owner && isWorkbuddyLinuxPro(item) {
+			items = append(items, *item)
+		}
+	}
+	total := len(items)
+	if offset >= total {
+		return []models.Instance{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
+}
+
+func (s *northboundInstanceStub) GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	items := make([]models.Instance, 0)
+	for _, item := range s.items {
+		if item.UserID == userID && item.Owner != nil && *item.Owner == owner && isSupportedNorthboundInstance(item) {
+			items = append(items, *item)
+		}
+	}
+	total := len(items)
+	if offset >= total {
+		return []models.Instance{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
+}
+
 type shareLinkResetStub struct {
 	passwordCreateResult *services.PasswordExternalAccessResult
 	urlResult            *services.EnableShareLinkResult
@@ -112,7 +148,7 @@ func TestCoreServiceResetsOwnedLiteShareLink(t *testing.T) {
 	}
 	service := &CoreService{
 		instances: &northboundInstanceStub{items: map[int]*models.Instance{
-			12: {ID: 12, UserID: 7, InstanceMode: services.InstanceModeLite},
+			12: {ID: 12, UserID: 7, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite},
 		}},
 		externalAccess: resetter,
 	}
@@ -153,7 +189,7 @@ func TestCoreServiceEnablesPasswordShareLinkForOwnedLiteInstance(t *testing.T) {
 	}}
 	service := &CoreService{
 		instances: &northboundInstanceStub{items: map[int]*models.Instance{
-			12: {ID: 12, UserID: 7, InstanceMode: services.InstanceModeLite},
+			12: {ID: 12, UserID: 7, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite},
 		}},
 		externalAccess: externalAccess,
 	}
@@ -176,11 +212,47 @@ func TestCoreServiceEnablesPasswordShareLinkForOwnedLiteInstance(t *testing.T) {
 	}
 }
 
+func TestCoreServiceEnablesPasswordShareLinkForOwnedLinuxWorkbuddyPro(t *testing.T) {
+	now := time.Now().UTC()
+	externalAccess := &shareLinkResetStub{passwordCreateResult: &services.PasswordExternalAccessResult{
+		Access: &models.InstanceExternalAccess{
+			InstanceID: 21, Enabled: true, AuthMode: services.ExternalAccessModePassword,
+			WorkspaceAccess: services.ExternalWorkspaceAccessWrite, UpdatedAt: now,
+		},
+		ShareURL: "/s/sl_workbuddy/", Password: "pwd_workbuddy",
+	}}
+	service := &CoreService{
+		instances: &northboundInstanceStub{items: map[int]*models.Instance{
+			21: {
+				ID: 21, UserID: 7, Type: "workbuddy", RuntimeVariant: services.WorkbuddyRuntimeLinux,
+				InstanceMode: services.InstanceModePro, RuntimeType: services.RuntimeBackendDesktop,
+			},
+		}},
+		externalAccess: externalAccess,
+	}
+	principal := Principal{UserID: 7, SessionID: "nbs_test", Scopes: []string{ScopeShareLinkManage}}
+
+	result, err := service.EnableShareLinkPassword(context.Background(), principal, 21, EnableShareLinkPasswordRequest{
+		WorkspaceAccess: services.ExternalWorkspaceAccessWrite,
+	})
+	if err != nil {
+		t.Fatalf("EnableShareLinkPassword for WorkBuddy failed: %v", err)
+	}
+	if result.InstanceID != 21 || result.ShareURL != "/s/sl_workbuddy/" || result.Password != "pwd_workbuddy" ||
+		result.WorkspaceAccess != services.ExternalWorkspaceAccessWrite {
+		t.Fatalf("unexpected WorkBuddy password enable response: %+v", result)
+	}
+	if externalAccess.passwordCreateCalls != 1 || externalAccess.lastInstanceID != 21 ||
+		externalAccess.lastExpiration.WorkspaceAccess != services.ExternalWorkspaceAccessWrite {
+		t.Fatalf("unexpected WorkBuddy external access call: %+v", externalAccess)
+	}
+}
+
 func TestCoreServiceRejectsForeignOrInvalidPasswordShareLinkEnable(t *testing.T) {
 	externalAccess := &shareLinkResetStub{}
 	service := &CoreService{
 		instances: &northboundInstanceStub{items: map[int]*models.Instance{
-			12: {ID: 12, UserID: 7, InstanceMode: services.InstanceModeLite},
+			12: {ID: 12, UserID: 7, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite},
 		}},
 		externalAccess: externalAccess,
 	}
@@ -216,7 +288,7 @@ func TestEnableShareLinkPasswordResponseIsNotCacheable(t *testing.T) {
 	}}
 	service := &CoreService{
 		instances: &northboundInstanceStub{items: map[int]*models.Instance{
-			12: {ID: 12, UserID: 7, InstanceMode: services.InstanceModeLite},
+			12: {ID: 12, UserID: 7, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite},
 		}},
 		externalAccess: externalAccess,
 	}
@@ -250,7 +322,7 @@ func TestCoreServiceHidesForeignShareLinkAndMapsStateConflicts(t *testing.T) {
 	resetter := &shareLinkResetStub{urlErr: services.ErrExternalAccessNotEnabled}
 	service := &CoreService{
 		instances: &northboundInstanceStub{items: map[int]*models.Instance{
-			12: {ID: 12, UserID: 7, InstanceMode: services.InstanceModeLite},
+			12: {ID: 12, UserID: 7, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite},
 		}},
 		externalAccess: resetter,
 	}
@@ -268,7 +340,7 @@ func TestCoreServiceHidesForeignShareLinkAndMapsStateConflicts(t *testing.T) {
 	}
 }
 
-func TestNorthboundShareLinkResetRoutesAreRegistered(t *testing.T) {
+func TestNorthboundResourceRoutesAreRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	publicRouter := gin.New()
 	RegisterGatewayRoutes(publicRouter, &AuthHandler{}, &CoreClient{})
@@ -276,6 +348,12 @@ func TestNorthboundShareLinkResetRoutesAreRegistered(t *testing.T) {
 	RegisterCoreRoutes(internalRouter, NewCoreHandler(&CoreService{}, "internal-secret"))
 
 	want := map[string]bool{
+		"POST /api/northbound/v1/pro-instances":                                            false,
+		"GET /api/northbound/v1/pro-instances":                                             false,
+		"GET /api/northbound/v1/pro-instances/:id":                                         false,
+		"POST /internal/northbound/v1/pro-instances":                                       false,
+		"GET /internal/northbound/v1/pro-instances":                                        false,
+		"GET /internal/northbound/v1/pro-instances/:id":                                    false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password":              false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/share-link/reset":      false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password/reset":        false,

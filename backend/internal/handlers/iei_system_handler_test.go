@@ -24,7 +24,7 @@ type fakeIEIInstanceService struct {
 	ownerInstances []models.Instance
 }
 
-func (s *fakeIEIInstanceService) GetLiteByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
+func (s *fakeIEIInstanceService) GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
 	start := min(offset, len(s.ownerInstances))
 	end := min(start+limit, len(s.ownerInstances))
 	return s.ownerInstances[start:end], len(s.ownerInstances), nil
@@ -43,8 +43,13 @@ func TestIEISystemEndpointsRequireSessionAndHideWrongOwner(t *testing.T) {
 		fakeWorkspaceHandlerInstanceService: &fakeWorkspaceHandlerInstanceService{instances: map[int]*models.Instance{
 			1: {ID: 1, UserID: 10, Owner: &owner, Name: "Owner Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
 			2: {ID: 2, UserID: 11, Owner: &other, Name: "Other Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+			3: {ID: 3, UserID: 10, Owner: &owner, Name: "Owner WorkBuddy", Type: "workbuddy", RuntimeType: "desktop", RuntimeVariant: "linux", InstanceMode: "pro", Status: "running"},
+			4: {ID: 4, UserID: 10, Owner: &owner, Name: "Windows WorkBuddy", Type: "workbuddy", RuntimeType: "desktop", RuntimeVariant: "windows", InstanceMode: "pro", Status: "running"},
 		}},
-		ownerInstances: []models.Instance{{ID: 1, UserID: 10, Owner: &owner, Name: "Owner Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"}},
+		ownerInstances: []models.Instance{
+			{ID: 1, UserID: 10, Owner: &owner, Name: "Owner Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+			{ID: 3, UserID: 10, Owner: &owner, Name: "Owner WorkBuddy", Type: "workbuddy", RuntimeType: "desktop", RuntimeVariant: "linux", InstanceMode: "pro", Status: "running"},
+		},
 	}
 	handler := NewIEISystemHandler(cfg, sso, instanceService, nil)
 	router := gin.New()
@@ -63,8 +68,27 @@ func TestIEISystemEndpointsRequireSessionAndHideWrongOwner(t *testing.T) {
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/ieisystem/instances", nil)
 	listRequest.AddCookie(sessionCookie)
 	router.ServeHTTP(listRecorder, listRequest)
-	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), "Owner Lite") || strings.Contains(listRecorder.Body.String(), "Other Lite") {
+	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), "Owner Lite") ||
+		!strings.Contains(listRecorder.Body.String(), "Owner WorkBuddy") ||
+		!strings.Contains(listRecorder.Body.String(), `"runtime_variant":"linux"`) ||
+		strings.Contains(listRecorder.Body.String(), "Other Lite") {
 		t.Fatalf("owner list status = %d, body = %s", listRecorder.Code, listRecorder.Body.String())
+	}
+
+	workbuddyRecorder := httptest.NewRecorder()
+	workbuddyRequest := httptest.NewRequest(http.MethodGet, "/api/v1/ieisystem/instances/3", nil)
+	workbuddyRequest.AddCookie(sessionCookie)
+	router.ServeHTTP(workbuddyRecorder, workbuddyRequest)
+	if workbuddyRecorder.Code != http.StatusOK || !strings.Contains(workbuddyRecorder.Body.String(), "Owner WorkBuddy") {
+		t.Fatalf("Linux WorkBuddy detail status = %d, body = %s", workbuddyRecorder.Code, workbuddyRecorder.Body.String())
+	}
+
+	windowsRecorder := httptest.NewRecorder()
+	windowsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/ieisystem/instances/4", nil)
+	windowsRequest.AddCookie(sessionCookie)
+	router.ServeHTTP(windowsRecorder, windowsRequest)
+	if windowsRecorder.Code != http.StatusNotFound {
+		t.Fatalf("Windows WorkBuddy detail status = %d, body = %s", windowsRecorder.Code, windowsRecorder.Body.String())
 	}
 
 	wrongOwnerRecorder := httptest.NewRecorder()

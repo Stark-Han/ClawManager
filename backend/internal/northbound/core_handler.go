@@ -54,10 +54,33 @@ func (h *CoreHandler) SubmitCreate(c *gin.Context) {
 	}
 	var req CreateLiteInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, apiError(422, "VALIDATION_ERROR", "Invalid Lite instance request", err))
+		writeError(c, apiError(422, "VALIDATION_ERROR", "Invalid instance request", err))
 		return
 	}
 	item, replayed, err := h.service.SubmitCreate(*principal, c.GetHeader("Idempotency-Key"), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	if replayed {
+		c.Header("Idempotent-Replayed", "true")
+	}
+	c.Header("Location", "/api/northbound/v1/operations/"+item.OperationID)
+	c.JSON(http.StatusAccepted, operationResponse(item))
+}
+
+func (h *CoreHandler) SubmitProCreate(c *gin.Context) {
+	principal := currentPrincipal(c)
+	if principal == nil || !principal.HasScope(ScopeProCreate) {
+		writeError(c, apiError(403, "SCOPE_DENIED", "Insufficient permission", nil))
+		return
+	}
+	var req CreateProInstanceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", err))
+		return
+	}
+	item, replayed, err := h.service.SubmitProCreate(*principal, c.GetHeader("Idempotency-Key"), req)
 	if err != nil {
 		writeError(c, err)
 		return
@@ -94,6 +117,21 @@ func (h *CoreHandler) GetInstance(c *gin.Context) {
 	c.JSON(http.StatusOK, liteInstanceResponse(item))
 }
 
+func (h *CoreHandler) GetProInstance(c *gin.Context) {
+	principal := currentPrincipal(c)
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		writeError(c, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil))
+		return
+	}
+	item, err := h.service.GetProInstance(principal.UserID, id)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, liteInstanceResponse(item))
+}
+
 func (h *CoreHandler) ListInstances(c *gin.Context) {
 	principal := currentPrincipal(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -108,6 +146,27 @@ func (h *CoreHandler) ListInstances(c *gin.Context) {
 	}
 	owner := strings.TrimSpace(c.Query("owner"))
 	items, total, err := h.service.ListInstances(principal.UserID, owner, page, limit)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"instances": items, "owner": owner, "total": total, "page": page, "limit": limit})
+}
+
+func (h *CoreHandler) ListProInstances(c *gin.Context) {
+	principal := currentPrincipal(c)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	owner := strings.TrimSpace(c.Query("owner"))
+	items, total, err := h.service.ListProInstances(principal.UserID, owner, page, limit)
 	if err != nil {
 		writeError(c, err)
 		return
@@ -184,6 +243,9 @@ func RegisterCoreRoutes(router *gin.Engine, handler *CoreHandler) {
 	group.POST("/lite-instances", handler.SubmitCreate)
 	group.GET("/lite-instances", handler.ListInstances)
 	group.GET("/lite-instances/:id", handler.GetInstance)
+	group.POST("/pro-instances", handler.SubmitProCreate)
+	group.GET("/pro-instances", handler.ListProInstances)
+	group.GET("/pro-instances/:id", handler.GetProInstance)
 	group.POST("/lite-instances/:id/external-access/password", handler.EnableShareLinkPassword)
 	group.POST("/lite-instances/:id/external-access/share-link/reset", handler.ResetShareLinkURL)
 	group.POST("/lite-instances/:id/external-access/password/reset", handler.ResetShareLinkPassword)

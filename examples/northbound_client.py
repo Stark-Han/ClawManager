@@ -80,6 +80,11 @@ def env_positive_int(name: str, fallback: int) -> int:
     return value if value > 0 else fallback
 
 
+def instance_collection_path() -> str:
+    """Return the stable collection path for every supported runtime."""
+    return "/lite-instances"
+
+
 def required_positive_int(name: str) -> int:
     try:
         value = int(os.getenv(name, ""))
@@ -455,12 +460,22 @@ def run(command: str) -> None:
 
     if command == "create":
         owner = required_env("NORTHBOUND_OWNER")
-        instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", "openclaw").lower()
-        if instance_type not in {"openclaw", "hermes"}:
-            raise ValueError("NORTHBOUND_INSTANCE_TYPE must be openclaw or hermes")
+        instance_type = os.getenv("NORTHBOUND_INSTANCE_TYPE", "openclaw").strip().lower()
+        allowed_types = {
+            "openclaw",
+            "hermes",
+            "opencode",
+            "deepseek-harness",
+            "workbuddy",
+        }
+        if instance_type not in allowed_types:
+            raise ValueError(
+                "NORTHBOUND_INSTANCE_TYPE must be openclaw, hermes, opencode, "
+                "deepseek-harness, or workbuddy"
+            )
         instance_name = os.getenv("NORTHBOUND_INSTANCE_NAME", "").strip()
         payload: dict[str, Any] = {
-            "name": instance_name or f"api-lite-{int(time.time() * 1000)}",
+            "name": instance_name or f"api-{instance_type}-{int(time.time() * 1000)}",
             "owner": owner,
             "type": instance_type,
         }
@@ -471,7 +486,7 @@ def run(command: str) -> None:
         )
         operation, headers = client.authenticated_request(
             "POST",
-            "/lite-instances",
+            instance_collection_path(),
             body=payload,
             headers={"Idempotency-Key": idempotency_key},
         )
@@ -501,13 +516,17 @@ def run(command: str) -> None:
                 "limit": env_positive_int("NORTHBOUND_LIMIT", 20),
             }
         )
-        result, _ = client.authenticated_request("GET", f"/lite-instances?{query}")
+        result, _ = client.authenticated_request(
+            "GET", f"{instance_collection_path()}?{query}"
+        )
         print_result(client, result)
         return
 
     if command == "get":
         instance_id = required_positive_int("NORTHBOUND_INSTANCE_ID")
-        result, _ = client.authenticated_request("GET", f"/lite-instances/{instance_id}")
+        result, _ = client.authenticated_request(
+            "GET", f"{instance_collection_path()}/{instance_id}"
+        )
         print_result(client, result)
         return
 

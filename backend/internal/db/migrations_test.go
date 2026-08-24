@@ -235,6 +235,32 @@ func TestMigration048AddsWorkbuddyRuntime(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeEnumMigrationsPreserveAllRuntimeTypes(t *testing.T) {
+	files := []string{
+		"044_add_workbuddy_instance_type.sql",
+		"045_add_opencode_instance_type.sql",
+		"046_add_opencode_lite_runtime.sql",
+		"047_add_deepseek_harness_runtime.sql",
+		"048_add_workbuddy_instance_type.sql",
+		"049_add_opencode_instance_type.sql",
+		"051_add_codex_and_claude_code_instance_types.sql",
+		"055_reconcile_instance_type_enum.sql",
+	}
+	requiredTypes := []string{"'workbuddy'", "'opencode'", "'deepseek-harness'", "'codex'", "'claude-code'"}
+	for _, name := range files {
+		raw, err := embeddedMigrations.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		sql := string(raw)
+		for _, instanceType := range requiredTypes {
+			if !strings.Contains(sql, instanceType) {
+				t.Fatalf("migration %s must preserve instance type %s", name, instanceType)
+			}
+		}
+	}
+}
+
 func TestMigration050UpdatesWorkbuddyWindowsRuntime(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/050_update_workbuddy_windows_runtime.sql")
 	if err != nil {
