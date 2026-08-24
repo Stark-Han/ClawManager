@@ -214,8 +214,8 @@ export function InstanceShellTerminal({
     manuallyDisconnectedRef.current = false;
   }, [instanceId]);
 
-  // OpenCode Lite uses this terminal as its primary UI. Connect as soon as
-  // its xterm surface exists, while preserving a user's explicit disconnect.
+  // Shell runtimes and the optional OpenCode terminal fallback connect as soon
+  // as the xterm surface exists, while preserving an explicit disconnect.
   useEffect(() => {
     if (!autoConnect || !isRunning || !terminalElement || manuallyDisconnectedRef.current) {
       return;

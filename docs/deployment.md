@@ -64,6 +64,48 @@ kubectl get pvc -n clawmanager-system
 kubectl get pods -n clawmanager-system
 ```
 
+## OpenCode Lite Public-Origin Strategy
+
+OpenCode Lite serves its web application and APIs from absolute root paths such
+as `/assets` and `/global/health`. Each logical OpenCode instance therefore
+needs a dedicated browser origin even though the runtime Pod is shared. Set:
+
+```text
+CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE
+```
+
+The value must be an absolute HTTP(S) URL containing `{instance_id}`. The
+bundled manifests expose the variable with an empty value; installers must set
+it to a hostname covered by wildcard DNS and TLS, for example:
+
+```text
+CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE=https://opencode-{instance_id}.172-16-1-12.nip.io:39443/
+```
+
+For an offline installation, use a deployment-owned wildcard DNS zone:
+
+```text
+CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE=https://opencode-{instance_id}.clawmanager.test:39443/
+```
+
+The wildcard record must resolve to the ClawManager gateway, and the gateway
+certificate must cover the generated hostnames. Apply and verify the setting:
+
+```bash
+kubectl -n clawmanager-system set env deployment/clawmanager-app \
+  'CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE=https://opencode-{instance_id}.clawmanager.test:39443/'
+kubectl -n clawmanager-system rollout status deployment/clawmanager-app
+nslookup opencode-123.clawmanager.test
+curl -I https://opencode-123.clawmanager.test:39443/
+```
+
+The first browser navigation carries a short-lived access token. Nginx and the
+control plane validate it, promote it to an origin-scoped HttpOnly cookie, and
+redirect to a clean root-relative URL. Existing instances do not need to be
+recreated. An empty or invalid template falls back to the legacy path proxy,
+which is not compatible with current OpenCode root-relative web assets and
+should be treated as a deployment error when OpenCode Lite is enabled.
+
 ## DeepSeek Harness Runtime
 
 DeepSeek Harness is available in both runtime modes:

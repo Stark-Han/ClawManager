@@ -84,6 +84,72 @@ func TestInstanceProxyServiceUsesRuntimeBindingForV2(t *testing.T) {
 	}
 }
 
+func TestInstanceProxyServiceLeavesDedicatedOpenCodeOriginAtRoot(t *testing.T) {
+	instanceToken := "igt_opencode_instance"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "opencode" || password != instanceToken {
+			t.Fatalf("BasicAuth = %q/%q/%v", username, password, ok)
+		}
+		if r.URL.Path == "/redirect" {
+			w.Header().Set("Location", "/session/next")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><script src="/assets/app.js"></script></head><body></body></html>`))
+	}))
+	defer upstream.Close()
+
+	service, token := newOpenCodeV2ProxyTestService(t, upstream.URL, 134, instanceToken)
+	client := upstream.Client()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	service.httpClient = client
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instances/134/proxy/?token="+url.QueryEscape(token.Token), nil)
+	req.Header.Set(DedicatedRuntimeOriginHeader, RuntimeTypeOpenCode)
+	rec := httptest.NewRecorder()
+	if err := service.ProxyRequest(req.Context(), 134, token.Token, rec, req); err != nil {
+		t.Fatalf("ProxyRequest returned error: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), "<base ") || strings.Contains(rec.Body.String(), "/api/v1/instances/134/proxy/assets") {
+		t.Fatalf("dedicated-origin HTML was rewritten: %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/instances/134/proxy/redirect?token="+url.QueryEscape(token.Token), nil)
+	req.Header.Set(DedicatedRuntimeOriginHeader, RuntimeTypeOpenCode)
+	rec = httptest.NewRecorder()
+	if err := service.ProxyRequest(req.Context(), 134, token.Token, rec, req); err != nil {
+		t.Fatalf("redirect ProxyRequest returned error: %v", err)
+	}
+	if got := rec.Header().Get("Location"); got != "/session/next" {
+		t.Fatalf("Location = %q, want root-origin redirect", got)
+	}
+}
+
+func TestInstanceProxyServiceSuppressesOpenCodeBasicChallenge(t *testing.T) {
+	instanceToken := "igt_opencode_instance"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="Secure Area"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	service, token := newOpenCodeV2ProxyTestService(t, upstream.URL, 130, instanceToken)
+	service.httpClient = upstream.Client()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/instances/130/proxy/?token="+url.QueryEscape(token.Token), nil)
+	rec := httptest.NewRecorder()
+	if err := service.ProxyRequest(req.Context(), 130, token.Token, rec, req); err != nil {
+		t.Fatalf("ProxyRequest returned error: %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want empty", got)
+	}
+}
+
 func TestInstanceProxyServiceNormalizesDeepSeekHarnessDedicatedOrigin(t *testing.T) {
 	instanceToken := "igt_deepseek_harness_instance"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -937,6 +1003,40 @@ func TestInstanceProxyServiceUsesConfiguredDedicatedOriginForDeepSeekHarnessLite
 	}
 }
 
+func TestInstanceProxyServiceUsesConfiguredDedicatedOriginForOpenCodeLite(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{
+			name:     "online nip.io DNS",
+			template: "https://opencode-{instance_id}.172-16-1-12.nip.io:39443/",
+			want:     "https://opencode-123.172-16-1-12.nip.io:39443/?token=token%2Bwith%2Fslash",
+		},
+		{
+			name:     "offline BIND DNS",
+			template: "https://opencode-{instance_id}.clawmanager.test:39443/",
+			want:     "https://opencode-123.clawmanager.test:39443/?token=token%2Bwith%2Fslash",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(openCodePublicURLTemplateEnvVar, tt.template)
+			workspacePath := "/workspaces/opencode/user-45/instance-123"
+			accessService := NewInstanceAccessService()
+			t.Cleanup(accessService.Stop)
+			service := NewInstanceProxyService(accessService)
+			got := service.GetProxyURLForInstance(&models.Instance{
+				ID: 123, Type: RuntimeTypeOpenCode, RuntimeType: RuntimeBackendGateway,
+				InstanceMode: InstanceModeLite, WorkspacePath: &workspacePath,
+			}, "token+with/slash")
+			if got != tt.want {
+				t.Fatalf("GetProxyURLForInstance() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInstanceProxyServiceUsesChatEntryForHermesLite(t *testing.T) {
 	workspacePath := "/workspaces/hermes/user-45/instance-123"
 	accessService := NewInstanceAccessService()
@@ -1133,6 +1233,28 @@ func newV2ProxyTestService(t *testing.T, instanceRepo repository.InstanceReposit
 	service.bindingRepo = bindingRepo
 	service.runtimePodRepo = podRepo
 	return service, token
+}
+
+func newOpenCodeV2ProxyTestService(t *testing.T, upstreamURL string, instanceID int, instanceToken string) (*InstanceProxyService, *AccessToken) {
+	t.Helper()
+	podIP, gatewayPort := splitURLHostPortForProxyTest(t, upstreamURL)
+	workspacePath := "/workspaces/opencode/user-45/instance-" + strconv.Itoa(instanceID)
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[instanceID] = &models.Instance{
+		ID: instanceID, UserID: 45, Type: RuntimeTypeOpenCode,
+		RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite,
+		Status: "running", AccessToken: &instanceToken, WorkspacePath: &workspacePath,
+		RuntimeGeneration: 1,
+	}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[instanceID] = &models.InstanceRuntimeBinding{
+		InstanceID: instanceID, RuntimePodID: int64(instanceID), GatewayPort: gatewayPort,
+		State: "running", Generation: 1,
+	}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		int64(instanceID): {ID: int64(instanceID), PodIP: &podIP, State: "ready"},
+	}}
+	return newV2ProxyTestService(t, instanceRepo, bindingRepo, podRepo, 45, instanceID, RuntimeTypeOpenCode)
 }
 
 func newDeepSeekHarnessV2ProxyTestService(t *testing.T, upstreamURL string, instanceID int, instanceToken string) (*InstanceProxyService, *AccessToken) {
