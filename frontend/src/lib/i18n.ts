@@ -2610,6 +2610,10 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description: "Hermes runtime built on the webtop desktop base",
         },
+        opencode: {
+          label: "OpenCode",
+          description: "Browser-based coding workspace powered by OpenCode",
+        },
         deepseekHarness: {
           label: "DeepSeek Harness",
           description: "Managed DeepSeek Harness workspace, available in Lite and Pro modes",
@@ -4160,6 +4164,10 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description: "基于 Webtop 桌面基础镜像构建的 Hermes 运行时",
         },
+        opencode: {
+          label: "OpenCode",
+          description: "基于 OpenCode 的浏览器代码工作台",
+        },
         deepseekHarness: {
           label: "DeepSeek Harness",
           description: "由 ClawManager 管理的 DeepSeek Harness 工作空间，支持 Lite 和 Pro 模式",
@@ -5651,6 +5659,10 @@ export const translations: Record<Locale, TranslationTree> = {
           description:
             "Webtop デスクトップベースで構築された Hermes ランタイム",
         },
+        opencode: {
+          label: "OpenCode",
+          description: "OpenCode を利用したブラウザベースのコードワークスペース",
+        },
         deepseekHarness: {
           label: "DeepSeek Harness",
           description:
@@ -7107,6 +7119,10 @@ export const translations: Record<Locale, TranslationTree> = {
         hermes: {
           label: "Hermes Runtime",
           description: "Webtop 데스크톱 기반으로 빌드된 Hermes 런타임",
+        },
+        opencode: {
+          label: "OpenCode",
+          description: "OpenCode 기반 브라우저 코드 작업 공간",
         },
         deepseekHarness: {
           label: "DeepSeek Harness",
@@ -8585,6 +8601,10 @@ export const translations: Record<Locale, TranslationTree> = {
           label: "Hermes Runtime",
           description:
             "Hermes-Runtime auf Basis des Webtop-Desktop-Images",
+        },
+        opencode: {
+          label: "OpenCode",
+          description: "Browserbasierter Code-Arbeitsbereich mit OpenCode",
         },
         deepseekHarness: {
           label: "DeepSeek Harness",
