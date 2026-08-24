@@ -8,8 +8,12 @@ const sourcePath = path.resolve(
   "../src/pages/instances/CreateInstancePage.tsx",
 );
 const source = readFileSync(sourcePath, "utf8");
-const featureSource = readFileSync(
-  path.resolve(scriptDir, "../src/config/features.ts"),
+const instanceTypeSource = readFileSync(
+  path.resolve(scriptDir, "../src/types/instance.ts"),
+  "utf8",
+);
+const i18nSource = readFileSync(
+  path.resolve(scriptDir, "../src/lib/i18n.ts"),
   "utf8",
 );
 
@@ -75,9 +79,26 @@ assert(
   "Quota validation must include CPU/memory/storage/GPU only for Pro mode.",
 );
 assert(
-  source.includes('TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS') &&
-    source.includes('TEMPORARILY_HIDDEN_CREATE_INSTANCE_TYPE_IDS.has(type.id)'),
-  "Create page must hide temporarily unavailable runtime types from every new-instance chooser.",
+  instanceTypeSource.includes('id: "codex"') &&
+    instanceTypeSource.includes('id: "claude-code"') &&
+    source.includes('"codex"') &&
+    source.includes('"claude-code"') &&
+    !source.includes("claudeCodeProCreation"),
+  "Codex and Claude Code must be available in the Pro instance chooser without a frontend feature gate.",
+);
+const proOnlyTypes = sectionBetween(
+  "const isProOnlyInstanceType",
+  "const isLiteOnlyInstanceType",
+);
+assert(
+  proOnlyTypes.includes('type === "codex"') &&
+    proOnlyTypes.includes('type === "claude-code"'),
+  "Codex and Claude Code must only be shown in Pro mode.",
+);
+assert(
+  (i18nSource.match(/\bcodex:\s*\{/g) ?? []).length >= 5 &&
+    (i18nSource.match(/\bclaudeCode:\s*\{/g) ?? []).length >= 5,
+  "Codex and Claude Code chooser text must exist in every supported locale.",
 );
 assert(
   source.includes('const isLiteOnlyInstanceType = (type: string) => type === "opencode";') &&

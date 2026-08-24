@@ -386,6 +386,22 @@ export const INSTANCE_TYPES: InstanceType[] = [
     defaultVersion: "latest",
   },
   {
+    id: "codex",
+    name: "Codex Pro",
+    description: "Managed Codex coding workspace on a dedicated desktop",
+    icon: "codex",
+    defaultOs: "codex",
+    defaultVersion: "latest",
+  },
+  {
+    id: "claude-code",
+    name: "Claude Code Pro",
+    description: "Managed Claude Code workspace on a dedicated desktop",
+    icon: "claude-code",
+    defaultOs: "claude-code",
+    defaultVersion: "latest",
+  },
+  {
     id: "custom",
     name: "Custom Image",
     description: "Use your own custom image",

@@ -21,7 +21,6 @@ import {
   type SystemImageSetting,
 } from "../../services/systemSettingsService";
 import type { DesktopStreamProfile } from "../../types/instance";
-import { FEATURES } from "../../config/features";
 
 type BuiltInEnvTemplate = {
   key: string;
@@ -79,7 +78,10 @@ const supportsRuntimeInjection = (
 const supportsSkillSelection = (type: string) =>
   supportsRuntimeInjection(type) || type === "deepseek-harness";
 const isProOnlyInstanceType = (type: string) =>
-  type === "custom" || type === "workbuddy";
+  type === "custom" ||
+  type === "workbuddy" ||
+  type === "codex" ||
+  type === "claude-code";
 const isLiteOnlyInstanceType = (type: string) => type === "opencode";
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
@@ -187,8 +189,7 @@ const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "deepseek-harness",
       "codex",
       "claude-code",
-    ].includes(type.id) &&
-    (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
+    ].includes(type.id),
 );
 const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
   (type) =>
@@ -201,8 +202,7 @@ const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "codex",
       "claude-code",
       "custom",
-    ].includes(type.id) &&
-    (FEATURES.claudeCodeProCreation || type.id !== "claude-code"),
+    ].includes(type.id),
 );
 
 const INSTANCE_MODE_OPTIONS: {
@@ -1306,6 +1306,26 @@ const CreateInstancePage: React.FC = () => {
         <img
           src="/deepseek-harness.svg?v=20260819-2"
           alt="DeepSeek Harness"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
+
+    if (typeId === "codex") {
+      return (
+        <img
+          src="/codex.png"
+          alt="Codex"
+          className="h-10 w-10 object-contain"
+        />
+      );
+    }
+
+    if (typeId === "claude-code") {
+      return (
+        <img
+          src="/claude-code.png"
+          alt="Claude Code"
           className="h-10 w-10 object-contain"
         />
       );
