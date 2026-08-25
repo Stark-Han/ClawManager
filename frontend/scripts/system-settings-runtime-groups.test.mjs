@@ -52,11 +52,12 @@ assert(
   "System settings page must keep custom Pro runtime card creation.",
 );
 assert(
-  pageSource.includes('TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES') &&
-    pageSource.includes("new Set(['workbuddy'])") &&
-    pageSource.includes('VISIBLE_PRO_BASE_RUNTIME_CARDS') &&
+  pageSource.includes('TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS') &&
+    pageSource.includes("new Set(['workbuddy:windows'])") &&
+    pageSource.includes("runtime_variant: 'linux'") &&
+    pageSource.includes('workbuddy-linux:latest') &&
     pageSource.includes('isRuntimeCardVisible(item)'),
-  "System settings page must hide Workbuddy from image-card configuration without removing runtime support.",
+  "System settings page must hide only the Windows WorkBuddy image card and keep Linux WorkBuddy configurable.",
 );
 assert(
   pageSource.includes("systemSettingsPage.liteRolloutTitle") &&

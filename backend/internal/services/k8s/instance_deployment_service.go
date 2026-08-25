@@ -295,7 +295,7 @@ func instanceDeploymentStrategy(config PodConfig) appsv1.DeploymentStrategy {
 }
 
 func instanceDeploymentAnnotations(config PodConfig) map[string]string {
-	if config.SecurityMode == PodSecurityChromiumCompat {
+	if requiresUnconfinedAppArmor(config.SecurityMode) {
 		return map[string]string{"container.apparmor.security.beta.kubernetes.io/desktop": "unconfined"}
 	}
 	return nil

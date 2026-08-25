@@ -28,6 +28,7 @@ const (
 
 	PodSecurityDefault        PodSecurityMode = "default"
 	PodSecurityChromiumCompat PodSecurityMode = "chromium-compat"
+	PodSecurityWorkbuddyLinux PodSecurityMode = "workbuddy-linux"
 	PodSecurityPrivileged     PodSecurityMode = "privileged"
 )
 
@@ -160,7 +161,7 @@ func (s *PodService) CreatePod(ctx context.Context, config PodConfig) (*corev1.P
 	}
 
 	annotations := map[string]string{}
-	if config.SecurityMode == PodSecurityChromiumCompat {
+	if requiresUnconfinedAppArmor(config.SecurityMode) {
 		annotations["container.apparmor.security.beta.kubernetes.io/desktop"] = "unconfined"
 	}
 
@@ -455,6 +456,22 @@ func buildContainerSecurityContext(mode PodSecurityMode) *corev1.SecurityContext
 				Type: corev1.SeccompProfileTypeUnconfined,
 			},
 		}
+	case PodSecurityWorkbuddyLinux:
+		privileged := true
+		allowPrivilegeEscalation := true
+		return &corev1.SecurityContext{
+			Privileged:               &privileged,
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{"NET_ADMIN", "SYS_ADMIN"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeUnconfined,
+			},
+			AppArmorProfile: &corev1.AppArmorProfile{
+				Type: corev1.AppArmorProfileTypeUnconfined,
+			},
+		}
 	case PodSecurityPrivileged:
 		privileged := true
 		return &corev1.SecurityContext{
@@ -463,6 +480,10 @@ func buildContainerSecurityContext(mode PodSecurityMode) *corev1.SecurityContext
 	default:
 		return nil
 	}
+}
+
+func requiresUnconfinedAppArmor(mode PodSecurityMode) bool {
+	return mode == PodSecurityChromiumCompat || mode == PodSecurityWorkbuddyLinux
 }
 
 func buildVolumeOwnershipInitContainer(index int, image string, pullPolicy corev1.PullPolicy, fix VolumeOwnershipFix) corev1.Container {

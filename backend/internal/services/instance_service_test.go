@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"clawreef/internal/models"
+	"clawreef/internal/services/k8s"
 )
 
 func TestGatewayTokenAliasTTLConfig(t *testing.T) {
@@ -525,5 +526,24 @@ func TestSecurityModeForInstance(t *testing.T) {
 	service.allowPrivilegedPods = true
 	if got := service.securityModeForInstance("openclaw"); got != "privileged" {
 		t.Fatalf("expected explicit privileged override to win, got %q", got)
+	}
+}
+
+func TestSecurityModeForRuntimeUsesLinuxWorkbuddySandboxMode(t *testing.T) {
+	service := &instanceService{}
+
+	linuxWorkbuddy := &models.Instance{Type: "workbuddy", RuntimeVariant: WorkbuddyRuntimeLinux}
+	if got := service.securityModeForRuntime(linuxWorkbuddy); got != k8s.PodSecurityWorkbuddyLinux {
+		t.Fatalf("expected Linux WorkBuddy to use its bubblewrap-compatible mode, got %q", got)
+	}
+
+	windowsWorkbuddy := &models.Instance{Type: "workbuddy", RuntimeVariant: WorkbuddyRuntimeWindows}
+	if got := service.securityModeForRuntime(windowsWorkbuddy); got != k8s.PodSecurityPrivileged {
+		t.Fatalf("expected Windows WorkBuddy to retain the KVM privileged mode, got %q", got)
+	}
+
+	linuxCodex := &models.Instance{Type: RuntimeTypeCodex, RuntimeVariant: WorkbuddyRuntimeLinux}
+	if got := service.securityModeForRuntime(linuxCodex); got != k8s.PodSecurityChromiumCompat {
+		t.Fatalf("expected Linux Codex to retain chromium compat mode, got %q", got)
 	}
 }

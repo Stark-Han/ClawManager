@@ -102,6 +102,10 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
 };
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
 const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
+// Keep the saved Windows image setting intact so it can be restored later,
+// but do not expose it in the image configuration page while Linux WorkBuddy
+// is the only supported option in the instance creation flow.
+const TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS = new Set(['workbuddy:windows']);
 
 interface EditableImageCard extends SystemImageSetting {
   local_id: string;
@@ -162,6 +166,11 @@ function runtimeVariantForCard(item: SystemImageSetting, definition?: RuntimeCar
   return item.runtime_variant ?? definition?.runtime_variant ?? inferRuntimeVariant(item.instance_type, item.image);
 }
 
+function isRuntimeCardVisible(item: SystemImageSetting) {
+  const runtimeVariant = runtimeVariantForCard(item);
+  return !runtimeVariant || !TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS.has(`${item.instance_type}:${runtimeVariant}`);
+}
+
 function defaultImageForVariant(instanceType: string, variant?: RuntimeVariant) {
   return supportsRuntimeVariant(instanceType) && variant
     ? RUNTIME_VARIANT_IMAGES[instanceType][variant]
@@ -212,12 +221,7 @@ function toEditableCard(
 
 function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
   const enabledCards = items
-    .filter(
-      (item) =>
-        item.is_enabled !== false &&
-        (item.instance_type !== 'workbuddy' ||
-          runtimeVariantForCard(item) === 'linux'),
-    )
+    .filter((item) => item.is_enabled !== false && isRuntimeCardVisible(item))
     .map((item, index) => toEditableCard(item, index));
   const byFixedKey = new Map(enabledCards.map((card) => [fixedCardKey(card), card]));
 

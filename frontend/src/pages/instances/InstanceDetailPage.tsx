@@ -146,11 +146,16 @@ function formatBytes(value?: number) {
 }
 
 function supportsWorkspace(instance: Instance) {
+  if (instance.type === "workbuddy" || instance.type === "codex") {
+    return (
+      instance.runtime_variant === "linux" ||
+      (!instance.runtime_variant && instance.mount_path?.trim() === "/config")
+    );
+  }
   return (
     instance.type === "openclaw" ||
     instance.type === "hermes" ||
     instance.type === "opencode" ||
-    instance.type === "workbuddy" ||
     instance.type === "deepseek-harness" ||
     Boolean(instance.workspace_path)
   );

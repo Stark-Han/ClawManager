@@ -174,6 +174,55 @@ func TestBuildInstanceDeploymentConfiguresWindowsWorkbuddy(t *testing.T) {
 	}
 }
 
+func TestBuildInstanceDeploymentConfiguresLinuxWorkbuddySecurity(t *testing.T) {
+	client := &Client{Clientset: fake.NewSimpleClientset(), Namespace: "clawreef"}
+	deployment := BuildInstanceDeployment(client, PodConfig{
+		InstanceID:    46,
+		InstanceName:  "Workbuddy Linux",
+		UserID:        7,
+		Type:          "workbuddy",
+		RuntimeType:   "desktop",
+		CPUCores:      4,
+		MemoryGB:      8,
+		Image:         "registry/workbuddy-linux:v1",
+		MountPath:     "/config",
+		ContainerPort: 3001,
+		SecurityMode:  PodSecurityWorkbuddyLinux,
+	}, 1)
+
+	template := deployment.Spec.Template
+	if got := template.Annotations["container.apparmor.security.beta.kubernetes.io/desktop"]; got != "unconfined" {
+		t.Fatalf("AppArmor annotation = %q, want unconfined", got)
+	}
+	securityContext := template.Spec.Containers[0].SecurityContext
+	if securityContext == nil || securityContext.Privileged == nil || !*securityContext.Privileged {
+		t.Fatalf("expected privileged Linux WorkBuddy container, got %#v", securityContext)
+	}
+	if securityContext.AllowPrivilegeEscalation == nil || !*securityContext.AllowPrivilegeEscalation {
+		t.Fatalf("expected Linux WorkBuddy container to allow privilege escalation")
+	}
+	if securityContext.SeccompProfile == nil || securityContext.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Fatalf("expected unconfined Seccomp profile, got %#v", securityContext.SeccompProfile)
+	}
+	if securityContext.AppArmorProfile == nil || securityContext.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Fatalf("expected unconfined AppArmor profile, got %#v", securityContext.AppArmorProfile)
+	}
+	if securityContext.Capabilities == nil {
+		t.Fatal("expected Linux WorkBuddy sandbox capabilities")
+	}
+	wantedCapabilities := map[corev1.Capability]bool{"NET_ADMIN": false, "SYS_ADMIN": false}
+	for _, capability := range securityContext.Capabilities.Add {
+		if _, ok := wantedCapabilities[capability]; ok {
+			wantedCapabilities[capability] = true
+		}
+	}
+	for capability, found := range wantedCapabilities {
+		if !found {
+			t.Fatalf("expected capability %q, got %#v", capability, securityContext.Capabilities.Add)
+		}
+	}
+}
+
 func TestBuildInstanceDeploymentMountsSecretDirectory(t *testing.T) {
 	client := &Client{Clientset: fake.NewSimpleClientset(), Namespace: "clawreef"}
 	deployment := BuildInstanceDeployment(client, PodConfig{
