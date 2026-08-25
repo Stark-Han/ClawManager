@@ -458,7 +458,7 @@ token 按《智慧协作平台单点登录文档》的“方式二”生成：�
 python examples/generate_iei_url.py
 ```
 
-脚本默认通过 `IEISYSTEM_KUBECONFIG` 从指定 Kubernetes Secret 读取 AES 密钥，只向标准输出写入拼接完成的 URL，不打印共享密钥。生成后需在 30 秒内打开。
+脚本默认通过 `IEISYSTEM_KUBECONFIG` 从指定 Kubernetes Secret 读取 AES 密钥，只向标准输出写入拼接完成的 URL，不打印共享密钥。生成的 URL 默认在 24 小时内有效。
 
 生成器的本地配置：
 
@@ -472,9 +472,9 @@ python examples/generate_iei_url.py
 | `IEISYSTEM_SSO_KEY` | 默认不设置 | 仅用于受控测试进程直接注入 16 字节密钥；不得写入 `.env`、命令历史或版本库。设置后不调用 `kubectl` 读取 key。 |
 | `IEISYSTEM_SSO_IV` | 默认不设置 | 仅用于受控测试进程直接注入 16 字节 IV；安全要求同上。设置后不调用 `kubectl` 读取 IV。 |
 
-生成器只负责按当前时间生成 token，不能延长有效期。30 秒上限由服务端强制执行；若测试人员经聊天工具复制链接导致过期，应在已信任门户 HTTPS 证书的浏览器所在机器上运行脚本，并在同一终端中生成后立即打开。不要通过把密钥写入文档或放宽生产 TTL 来解决测试延迟。
+生成器只负责按当前时间生成 token，实际有效期由服务端 `IEISYSTEM_SSO_TOKEN_TTL` 控制，默认和允许上限均为 24 小时。链接在有效期内属于可直接换取 IEI 会话的 bearer credential，不应发送到无关人员或写入日志。
 
-服务端按 `Asia/Shanghai` 解析时间，默认只接受 30 秒内的 token，并允许最多 5 秒的未来时钟偏差。验证成功后，原始 AES token 只用于换取独立的 HttpOnly IEI 会话，并立即从浏览器地址栏移除。后续列表、详情和实例代理请求均验证该会话；实例代理能力令牌与当前 IEI 会话绑定，会话退出或过期后不可继续访问。
+服务端按 `Asia/Shanghai` 解析时间，默认接受 24 小时内的 token，并允许最多 5 秒的未来时钟偏差。验证成功后，原始 AES token 只用于换取独立的 HttpOnly IEI 会话，并立即从浏览器地址栏移除。后续列表、详情、工作区和同源实例代理请求均验证该会话。OpenCode、DeepSeek Harness 使用独立运行时 Origin 时，服务端签发与实例和 IEI 会话绑定的短期入口能力，并由运行时 Origin 换取自己的 HttpOnly Cookie；该能力不会超过 IEI 会话的到期时间。IEI 主会话退出后不再签发新能力，已经打开的独立 Origin 最多持续到现有入口能力到期。
 
 owner 取解密后的邮箱并按邮箱语义进行不区分大小写的匹配。列表只返回该 owner 的四种受支持 Lite 实例和 Linux WorkBuddy Pro；访问详情或生成实例入口时会再次校验 owner 与受支持类型。不存在、不受支持、owner 不匹配三种情况统一返回 `404`，防止枚举其他实例。
 
@@ -487,7 +487,7 @@ owner 取解密后的邮箱并按邮箱语义进行不区分大小写的匹配�
 | `IEISYSTEM_SSO_ENABLED` | 设置为 `true` 才启用；默认 `false`。 |
 | `IEISYSTEM_SSO_KEY` | 必填，严格 16 个 UTF-8 字节；通过 Kubernetes Secret 注入。 |
 | `IEISYSTEM_SSO_IV` | 必填，严格 16 个 UTF-8 字节；当前约定为 `CLAWMANAGETOKENS`。 |
-| `IEISYSTEM_SSO_TOKEN_TTL` | 默认 `30s`，必须大于 0 且不超过 `30s`。 |
+| `IEISYSTEM_SSO_TOKEN_TTL` | 默认 `24h`，必须大于 0 且不超过 `24h`。 |
 | `IEISYSTEM_SESSION_SECRET` | 必填，至少 32 个 UTF-8 字节，且不得与北向 JWT 密钥复用。 |
 | `IEISYSTEM_SESSION_TTL` | 默认 `30m`，必须大于 0 且不超过 `24h`。 |
 | `IEISYSTEM_SSO_TIMEZONE` | 默认 `Asia/Shanghai`。 |

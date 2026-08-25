@@ -944,13 +944,46 @@ func TestProxyAccessTokenBootstrapsDedicatedOpenCodeOriginCookie(t *testing.T) {
 		t.Fatalf("Location = %q", got)
 	}
 	setCookie := recorder.Header().Get("Set-Cookie")
-	for _, want := range []string{"instance_access_171=", "Path=/", "HttpOnly", "Secure", "SameSite=None"} {
+	for _, want := range []string{"instance_access_171=", "Path=/", "HttpOnly", "Secure", "SameSite=None", "Partitioned"} {
 		if !strings.Contains(setCookie, want) {
 			t.Fatalf("Set-Cookie missing %q: %s", want, setCookie)
 		}
 	}
 	if strings.Contains(recorder.Header().Get("Location"), token.Token) {
 		t.Fatal("redirect leaked the ClawManager access token")
+	}
+}
+
+func TestProxyAccessTokenUsesValidPartitionedCookieAfterStaleLegacyCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	accessService := services.NewInstanceAccessService()
+	defer accessService.Stop()
+	stale, err := accessService.GenerateToken(
+		1, 171, services.RuntimeTypeOpenCode,
+		"https://opencode-171.runtime.example.test/", "", 20000, -time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := accessService.GenerateToken(
+		1, 171, services.RuntimeTypeOpenCode,
+		"https://opencode-171.runtime.example.test/", "", 20000, time.Hour,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/instances/171/proxy/", nil)
+	c.Request.Host = "opencode-171.runtime.example.test"
+	c.Request.Header.Set(services.DedicatedRuntimeOriginHeader, services.RuntimeTypeOpenCode)
+	c.Request.AddCookie(&http.Cookie{Name: "instance_access_171", Value: stale.Token})
+	c.Request.AddCookie(&http.Cookie{Name: "instance_access_171", Value: current.Token})
+
+	handler := &InstanceHandler{accessService: accessService}
+	if got, ok := handler.proxyAccessToken(c, 171); !ok || got != current.Token {
+		t.Fatalf("proxyAccessToken = %q/%v, want the valid cookie", got, ok)
 	}
 }
 

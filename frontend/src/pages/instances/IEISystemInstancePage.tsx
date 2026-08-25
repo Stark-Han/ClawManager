@@ -1,8 +1,9 @@
 import axios from "axios";
-import { ArrowLeft, Maximize2, Minimize2, RefreshCw } from "lucide-react";
+import { ArrowLeft, Maximize2, Minimize2, RefreshCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
+import { useRuntimeCertificateTrust } from "../../hooks/useRuntimeCertificateTrust";
 import { prepareOpenClawControlUIStorage } from "../../lib/openclawControlStorage";
 import {
   ieiSystemService,
@@ -90,13 +91,25 @@ export default function IEISystemInstancePage() {
     return () => document.removeEventListener("fullscreenchange", handleFullscreen);
   }, []);
 
-  const frameSrc = useMemo(() => {
+  const accessFrameUrl = useMemo(() => {
     if (!instance || !access?.access_url) return "";
     const url = resolveEmbedUrl(access.access_url);
     return instance.type.toLowerCase() === "openclaw"
       ? prepareOpenClawControlUIStorage(instance.id, url)
       : url;
   }, [access, instance]);
+  const normalizedType = instance?.type.trim().toLowerCase() ?? "";
+  const requiresRuntimeCertificateTrust =
+    normalizedType === "opencode" || normalizedType === "deepseek-harness";
+  const {
+    frameUrl: frameSrc,
+    checkingCertificate,
+    certificateConfirmationRequired,
+    confirmCertificate,
+  } = useRuntimeCertificateTrust(
+    accessFrameUrl || null,
+    requiresRuntimeCertificateTrust,
+  );
 
   const handleFullscreen = () => {
     const element = frameContainerRef.current;
@@ -170,15 +183,39 @@ export default function IEISystemInstancePage() {
               </button>
             </div>
           </div>
-          <iframe
-            key={`${frameSrc}:${frameVersion}`}
-            title={`${instance.name} service`}
-            src={frameSrc}
-            className="min-h-0 w-full flex-1 border-0 bg-white"
-            scrolling="no"
-            allow="clipboard-read; clipboard-write; fullscreen; autoplay"
-            referrerPolicy="no-referrer"
-          />
+          {frameSrc ? (
+            <iframe
+              key={`${frameSrc}:${frameVersion}`}
+              title={`${instance.name} service`}
+              src={frameSrc}
+              className="min-h-0 w-full flex-1 border-0 bg-white"
+              scrolling="no"
+              allow="clipboard-read; clipboard-write; fullscreen; autoplay"
+              referrerPolicy="no-referrer"
+            />
+          ) : certificateConfirmationRequired ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <ShieldAlert className="h-8 w-8 text-amber-500" />
+              <div>
+                <p className="text-sm font-semibold text-slate-900">需要确认运行时 HTTPS 证书</p>
+                <p className="mt-1 max-w-lg text-sm leading-6 text-slate-600">
+                  请继续完成一次浏览器证书确认，确认后会自动返回当前实例页面。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="app-button-primary"
+                onClick={confirmCertificate}
+              >
+                继续确认
+              </button>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-600">
+              <RefreshCw className="mr-2 h-5 w-5 animate-spin" />
+              {checkingCertificate ? "正在检查 HTTPS 证书…" : "正在进入实例…"}
+            </div>
+          )}
         </section>
 
         {canShowWorkspace ? (

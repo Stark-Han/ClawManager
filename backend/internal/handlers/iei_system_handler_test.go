@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,59 @@ func TestIEISystemEndpointsRequireSessionAndHideWrongOwner(t *testing.T) {
 	router.ServeHTTP(wrongOwnerRecorder, wrongOwnerRequest)
 	if wrongOwnerRecorder.Code != http.StatusNotFound {
 		t.Fatalf("wrong-owner detail status = %d, body = %s", wrongOwnerRecorder.Code, wrongOwnerRecorder.Body.String())
+	}
+}
+
+func TestIEISystemDedicatedRuntimeAccessReturnsTokenBootstrapURL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("CLAWMANAGER_DEEPSEEK_HARNESS_PUBLIC_URL_TEMPLATE", "https://deepseek-harness-{instance_id}.runtime.example.test/")
+	cfg := testIEIHandlerConfig()
+	sso, err := services.NewIEISSOService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner@example.com"
+	instanceService := &fakeIEIInstanceService{
+		fakeWorkspaceHandlerInstanceService: &fakeWorkspaceHandlerInstanceService{instances: map[int]*models.Instance{
+			28: {ID: 28, UserID: 10, Owner: &owner, Name: "Owner DSH", Type: services.RuntimeTypeDeepSeekHarness, RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+		}},
+	}
+	accessService := services.NewInstanceAccessService()
+	defer accessService.Stop()
+	instanceHandler := &InstanceHandler{
+		accessService: accessService,
+		proxyService:  services.NewInstanceProxyService(accessService),
+	}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, instanceHandler)
+	router := gin.New()
+	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
+	router.POST("/api/v1/ieisystem/instances/:id/access", handler.GenerateInstanceAccess)
+
+	sessionCookie := exchangeIEITestSession(t, router, cfg, owner)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/28/access", nil)
+	request.AddCookie(sessionCookie)
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("access status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Data struct {
+			AccessURL string `json:"access_url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(response.Data.AccessURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Host != "deepseek-harness-28.runtime.example.test" || parsed.Query().Get("token") == "" {
+		t.Fatalf("dedicated access URL did not contain its token bootstrap: %q", response.Data.AccessURL)
+	}
+	if !accessService.IsInstanceAccessToken(parsed.Query().Get("token")) {
+		t.Fatal("dedicated access URL token is not an instance-access capability")
 	}
 }
 
@@ -199,6 +253,52 @@ func TestProxyAccessTokenRequiresMatchingIEISession(t *testing.T) {
 	if token, ok := handler.proxyAccessToken(requestContext(first.Token), 76); !ok || token != access.Token {
 		t.Fatalf("IEI-bound access rejected its matching session: %q/%v", token, ok)
 	}
+
+	dedicatedAccess, err := accessService.GenerateBoundToken(
+		1, 76, services.RuntimeTypeDeepSeekHarness, "https://deepseek-harness-76.runtime.example.test/", "", 3001, time.Hour,
+		ieiSystemSessionBinding(first.SessionID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dedicatedContext := func(host, queryToken, cookieToken string) (*gin.Context, *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		requestURL := "/api/v1/instances/76/proxy/"
+		if queryToken != "" {
+			requestURL += "?token=" + url.QueryEscape(queryToken)
+		}
+		ctx.Request = httptest.NewRequest(http.MethodGet, requestURL, nil)
+		ctx.Request.Host = host
+		ctx.Request.Header.Set(services.DedicatedRuntimeOriginHeader, services.RuntimeTypeDeepSeekHarness)
+		if cookieToken != "" {
+			ctx.Request.AddCookie(&http.Cookie{Name: "instance_access_76", Value: cookieToken})
+		}
+		return ctx, recorder
+	}
+	wrongHostContext, _ := dedicatedContext("attacker.example.test", dedicatedAccess.Token, "")
+	if token, ok := handler.proxyAccessToken(wrongHostContext, 76); ok || token != "" {
+		t.Fatalf("IEI-bound dedicated access accepted the wrong host: %q/%v", token, ok)
+	}
+
+	staleAccess, err := accessService.GenerateBoundToken(
+		1, 76, services.RuntimeTypeDeepSeekHarness, "https://deepseek-harness-76.runtime.example.test/", "", 3001, -time.Second,
+		ieiSystemSessionBinding(first.SessionID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dedicated, dedicatedRecorder := dedicatedContext(
+		"deepseek-harness-76.runtime.example.test:30443", dedicatedAccess.Token, staleAccess.Token,
+	)
+	if token, ok := handler.proxyAccessToken(dedicated, 76); !ok || token != dedicatedAccess.Token {
+		t.Fatalf("fresh IEI query capability did not replace stale dedicated cookie: %q/%v", token, ok)
+	}
+	setCookie := dedicatedRecorder.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "instance_access_76="+dedicatedAccess.Token) ||
+		!strings.Contains(setCookie, "Path=/") || !strings.Contains(setCookie, "SameSite=None") {
+		t.Fatalf("dedicated IEI access cookie was not promoted: %s", setCookie)
+	}
 }
 
 func testIEIHandlerConfig() config.IEISystemConfig {
@@ -206,7 +306,7 @@ func testIEIHandlerConfig() config.IEISystemConfig {
 		Enabled:       true,
 		AESKey:        "TESTKEY123456789",
 		AESIV:         "0123456789ABCDEF",
-		TokenTTL:      30 * time.Second,
+		TokenTTL:      24 * time.Hour,
 		SessionTTL:    30 * time.Minute,
 		SessionSecret: "test-only-iei-session-secret-at-least-32-bytes",
 		Timezone:      "Asia/Shanghai",

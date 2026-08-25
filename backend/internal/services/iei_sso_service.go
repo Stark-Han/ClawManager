@@ -73,8 +73,8 @@ func NewIEISSOService(cfg config.IEISystemConfig) (*IEISSOService, error) {
 	if len([]byte(cfg.SessionSecret)) < 32 {
 		return nil, fmt.Errorf("IEISYSTEM_SESSION_SECRET must contain at least 32 UTF-8 bytes")
 	}
-	if cfg.TokenTTL <= 0 || cfg.TokenTTL > 30*time.Second {
-		return nil, fmt.Errorf("IEISYSTEM_SSO_TOKEN_TTL must be greater than zero and no more than 30s")
+	if cfg.TokenTTL <= 0 || cfg.TokenTTL > 24*time.Hour {
+		return nil, fmt.Errorf("IEISYSTEM_SSO_TOKEN_TTL must be greater than zero and no more than 24h")
 	}
 	if cfg.SessionTTL <= 0 || cfg.SessionTTL > 24*time.Hour {
 		return nil, fmt.Errorf("IEISYSTEM_SESSION_TTL must be greater than zero and no more than 24h")

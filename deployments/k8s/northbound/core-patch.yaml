@@ -39,7 +39,7 @@ spec:
                   name: clawmanager-iei-sso
                   key: session-secret
             - name: IEISYSTEM_SSO_TOKEN_TTL
-              value: "30s"
+              value: "24h"
             - name: IEISYSTEM_SESSION_TTL
               value: "30m"
             - name: IEISYSTEM_SSO_TIMEZONE

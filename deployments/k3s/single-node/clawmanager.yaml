@@ -1268,6 +1268,8 @@ spec:
             - name: proxy
               containerPort: 9001
           env:
+            - name: TZ
+              value: "Asia/Shanghai"
             - name: SERVER_ADDRESS
               value: ":9001"
             - name: SERVER_MODE

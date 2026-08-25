@@ -184,9 +184,11 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 		return
 	}
 	targetPort := h.instanceHandler.proxyService.GetTargetPortForInstance(instance)
-	// IEI-bound tokens always use the control-plane proxy so every HTTP and
-	// websocket request can revalidate the current HttpOnly IEI session. The
-	// edge direct-proxy path validates only the instance capability token.
+	// IEI-bound tokens always use the control-plane proxy. Same-origin requests
+	// revalidate the HttpOnly IEI session; dedicated OpenCode/DSH origins use the
+	// signed instance-scoped handoff capability because browsers cannot send the
+	// management-origin IEI cookie there. The handoff cannot outlive the IEI
+	// session expiry used below.
 	upstream := ""
 	directProxyEnabled := false
 	duration := time.Until(session.ExpiresAt)
@@ -212,6 +214,8 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 		utils.HandleError(c, err)
 		return
 	}
+	proxyURL := h.instanceHandler.proxyService.GetProxyURLForInstance(instance, accessToken.Token)
+	browserURL := browserAccessEntryURL(accessURL, proxyURL)
 	workspaceAvailable := isDesktopWorkspaceInstance(instance) ||
 		(instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != "")
 	workspaceRoot := "Workspace"
@@ -220,7 +224,7 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 	}
 	h.setInstanceAccessCookie(c, instance.ID, accessToken.Token, accessToken.ExpiresAt)
 	utils.Success(c, http.StatusOK, "IEI instance access granted", gin.H{
-		"access_url":               accessURL,
+		"access_url":               browserURL,
 		"expires_at":               accessToken.ExpiresAt,
 		"desktop_proxy_mode":       desktopProxyMode(directProxyEnabled, upstream),
 		"desktop_upstream_present": upstream != "",

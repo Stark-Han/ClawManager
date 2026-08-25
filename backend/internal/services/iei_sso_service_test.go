@@ -13,7 +13,7 @@ func testIEISystemConfig() config.IEISystemConfig {
 		Enabled:       true,
 		AESKey:        "TESTKEY123456789",
 		AESIV:         "0123456789ABCDEF",
-		TokenTTL:      30 * time.Second,
+		TokenTTL:      24 * time.Hour,
 		SessionTTL:    30 * time.Minute,
 		SessionSecret: "test-only-iei-session-secret-at-least-32-bytes",
 		Timezone:      "Asia/Shanghai",
@@ -49,6 +49,22 @@ func TestIEISSOServiceExchangesDocumentCompatibleAESCBCToken(t *testing.T) {
 	}
 }
 
+func TestIEISSOServiceAcceptsExternalTokenAt24HourBoundary(t *testing.T) {
+	service, err := NewIEISSOService(testIEISystemConfig())
+	if err != nil {
+		t.Fatalf("NewIEISSOService() error = %v", err)
+	}
+	const externalToken = "xzOmdmY7dW9qI52/OrpGAcQFG1IPcJjc32hUjq/FfHCEiOdeJOJu01UGKEcw46pb"
+	location, _ := time.LoadLocation("Asia/Shanghai")
+	service.now = func() time.Time {
+		return time.Date(2026, 8, 19, 12, 34, 56, 0, location)
+	}
+
+	if _, err := service.ExchangeExternalToken(externalToken); err != nil {
+		t.Fatalf("ExchangeExternalToken() rejected a token at the 24-hour boundary: %v", err)
+	}
+}
+
 func TestIEISSOServiceRejectsExpiredOrTamperedExternalToken(t *testing.T) {
 	service, err := NewIEISSOService(testIEISystemConfig())
 	if err != nil {
@@ -57,7 +73,7 @@ func TestIEISSOServiceRejectsExpiredOrTamperedExternalToken(t *testing.T) {
 	const externalToken = "xzOmdmY7dW9qI52/OrpGAcQFG1IPcJjc32hUjq/FfHCEiOdeJOJu01UGKEcw46pb"
 	location, _ := time.LoadLocation("Asia/Shanghai")
 	service.now = func() time.Time {
-		return time.Date(2026, 8, 18, 12, 36, 0, 0, location)
+		return time.Date(2026, 8, 19, 12, 34, 57, 0, location)
 	}
 	if _, err := service.ExchangeExternalToken(externalToken); !errors.Is(err, ErrInvalidIEISystemToken) {
 		t.Fatalf("expired token error = %v", err)
@@ -77,9 +93,9 @@ func TestIEISSOServiceRejectsInvalidConfiguration(t *testing.T) {
 		t.Fatal("NewIEISSOService() accepted a non-16-byte IV")
 	}
 	cfg = testIEISystemConfig()
-	cfg.TokenTTL = 31 * time.Second
+	cfg.TokenTTL = 24*time.Hour + time.Second
 	if _, err := NewIEISSOService(cfg); err == nil {
-		t.Fatal("NewIEISSOService() accepted a token TTL above 30 seconds")
+		t.Fatal("NewIEISSOService() accepted a token TTL above 24 hours")
 	}
 	cfg = testIEISystemConfig()
 	cfg.SessionSecret = "short"
