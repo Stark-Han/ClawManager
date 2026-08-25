@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1655,15 +1656,33 @@ func (h *InstanceHandler) ProxyInstance(c *gin.Context) {
 }
 
 func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool) {
+	queryToken := strings.TrimSpace(c.Query("token"))
+	// A freshly issued ClawManager token must be allowed to replace an expired
+	// dedicated-origin cookie. Runtime applications can also own a `token`
+	// query parameter, so only prefer the query value when it is recognizably an
+	// instance-access JWT.
+	if queryToken != "" && h.accessService.IsInstanceAccessToken(queryToken) {
+		if accessToken, err := h.accessService.ValidateToken(queryToken); err == nil &&
+			accessToken.InstanceID == id && h.validCurrentExternalSession(c, accessToken) {
+			return h.promoteProxyAccessToken(c, id, queryToken, accessToken)
+		}
+	}
+
 	cookieName := fmt.Sprintf("instance_access_%d", id)
-	if cookieToken, err := c.Cookie(cookieName); err == nil && strings.TrimSpace(cookieToken) != "" {
+	for _, cookie := range c.Request.Cookies() {
+		if cookie.Name != cookieName {
+			continue
+		}
+		cookieToken := strings.TrimSpace(cookie.Value)
+		if cookieToken == "" {
+			continue
+		}
 		if accessToken, validateErr := h.accessService.ValidateToken(cookieToken); validateErr == nil &&
 			accessToken.InstanceID == id && h.validCurrentExternalSession(c, accessToken) {
 			return cookieToken, true
 		}
 	}
 
-	queryToken := strings.TrimSpace(c.Query("token"))
 	if queryToken == "" {
 		utils.Error(c, http.StatusBadRequest, "Access token required")
 		return "", false
@@ -1673,29 +1692,43 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 		utils.Error(c, http.StatusUnauthorized, "Access token expired or invalid")
 		return "", false
 	}
+	return h.promoteProxyAccessToken(c, id, queryToken, accessToken)
+}
 
+func (h *InstanceHandler) promoteProxyAccessToken(c *gin.Context, id int, queryToken string, accessToken *services.AccessToken) (string, bool) {
 	// Promote only a validated ClawManager access token. Runtime applications may
 	// also use a token query parameter for their own websocket/session protocol.
+	cookieName := fmt.Sprintf("instance_access_%d", id)
 	cookiePath := fmt.Sprintf("/api/v1/instances/%d/proxy", id)
-	cookieSecure := false
 	originRuntimeType, originManaged := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
 	instanceRuntimeType, instanceManaged := services.NormalizeV2RuntimeType(accessToken.InstanceType)
 	dedicatedOrigin := originManaged && instanceManaged && originRuntimeType == instanceRuntimeType &&
 		(originRuntimeType == services.RuntimeTypeOpenCode || originRuntimeType == services.RuntimeTypeDeepSeekHarness)
 	if dedicatedOrigin {
 		cookiePath = "/"
-		cookieSecure = true
-		c.SetSameSite(http.SameSiteNoneMode)
+		maxAge := max(1, int(time.Until(accessToken.ExpiresAt).Seconds()))
+		http.SetCookie(c.Writer, &http.Cookie{
+			Name:        cookieName,
+			Value:       queryToken,
+			Path:        cookiePath,
+			MaxAge:      maxAge,
+			Expires:     accessToken.ExpiresAt,
+			HttpOnly:    true,
+			Secure:      true,
+			SameSite:    http.SameSiteNoneMode,
+			Partitioned: true,
+		})
+	} else {
+		c.SetCookie(
+			cookieName,
+			queryToken,
+			int(time.Hour.Seconds()),
+			cookiePath,
+			"",
+			false,
+			true,
+		)
 	}
-	c.SetCookie(
-		cookieName,
-		queryToken,
-		int(time.Hour.Seconds()),
-		cookiePath,
-		"",
-		cookieSecure,
-		true,
-	)
 	if dedicatedOrigin && originRuntimeType == services.RuntimeTypeOpenCode &&
 		(c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
 		c.Redirect(http.StatusTemporaryRedirect, dedicatedRuntimeCleanLocation(c.Request.URL, id, queryToken))
@@ -1747,6 +1780,14 @@ func (h *InstanceHandler) validCurrentExternalSession(c *gin.Context, accessToke
 		return true
 	}
 	if strings.HasPrefix(accessToken.SessionBinding, ieiSystemSessionBindingPrefix) {
+		// The IEI session cookie belongs to the ClawManager management origin and
+		// browsers cannot send it to the per-instance OpenCode/DSH origin. The
+		// dedicated origin therefore treats the signed, instance-scoped token as
+		// the handoff capability. Its expiry is capped by the IEI session expiry
+		// when GenerateInstanceAccess issues it.
+		if isDedicatedIEIRuntimeOrigin(c, accessToken) {
+			return true
+		}
 		if h.ieiSSOService == nil {
 			return false
 		}
@@ -1766,6 +1807,25 @@ func (h *InstanceHandler) validCurrentExternalSession(c *gin.Context, accessToke
 	}
 	code := strings.TrimSpace(*access.PublicSlug)
 	return code != "" && accessToken.SessionBinding == sharedExternalAccessSessionBinding(code, access)
+}
+
+func isDedicatedIEIRuntimeOrigin(c *gin.Context, accessToken *services.AccessToken) bool {
+	if c == nil || c.Request == nil || accessToken == nil {
+		return false
+	}
+	originRuntimeType, originManaged := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
+	instanceRuntimeType, instanceManaged := services.NormalizeV2RuntimeType(accessToken.InstanceType)
+	if !originManaged || !instanceManaged || originRuntimeType != instanceRuntimeType ||
+		(originRuntimeType != services.RuntimeTypeOpenCode && originRuntimeType != services.RuntimeTypeDeepSeekHarness) {
+		return false
+	}
+
+	host := strings.TrimSpace(c.Request.Host)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	expectedPrefix := fmt.Sprintf("%s-%d.", originRuntimeType, accessToken.InstanceID)
+	return strings.HasPrefix(strings.ToLower(host), expectedPrefix)
 }
 
 func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token string) {

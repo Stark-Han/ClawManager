@@ -24,6 +24,8 @@ spec:
             - name: northbound
               containerPort: 9443
           env:
+            - name: TZ
+              value: Asia/Shanghai
             - name: SERVER_MODE
               value: release
             - name: CLAWMANAGER_NORTHBOUND_ENABLED

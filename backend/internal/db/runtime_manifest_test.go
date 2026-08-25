@@ -123,6 +123,15 @@ func TestDesktopAuthAcceptsDedicatedRuntimeInstanceVariable(t *testing.T) {
 	if !strings.Contains(text, "r.variables.inst_id || r.variables.runtime_inst_id") {
 		t.Fatal("desktop auth must accept both path-based and dedicated-origin instance variables")
 	}
+	queryPreference := strings.Index(text, "validateTokenCandidate(r, readQueryToken(r), key, false)")
+	cookieFallback := strings.Index(text, "var cookieTokens = readCookieTokens(r)")
+	if queryPreference < 0 || cookieFallback < 0 || queryPreference >= cookieFallback {
+		t.Fatal("desktop auth must prefer a fresh query capability before a stale runtime cookie")
+	}
+	if !strings.Contains(text, "var cookieTokens = readCookieTokens(r)") ||
+		!strings.Contains(text, "for (var i = 0; i < cookieTokens.length; i++)") {
+		t.Fatal("desktop auth must try every same-name runtime cookie so a stale legacy cookie cannot shadow a partitioned cookie")
+	}
 }
 
 func TestNginxRoutesOpenCodeDedicatedOrigins(t *testing.T) {
@@ -138,6 +147,33 @@ func TestNginxRoutesOpenCodeDedicatedOrigins(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("nginx config must contain %q", want)
+		}
+	}
+}
+
+func TestNginxDedicatedRuntimeOriginsExposeCertificateConfirmation(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"location = /__clawmanager_cert_check",
+		"location = /__clawmanager_cert_trust",
+		"window.setTimeout(function(){window.history.back();},150);",
+	} {
+		if count := strings.Count(text, want); count != 2 {
+			t.Fatalf("nginx dedicated runtime origins must contain %q twice, got %d", want, count)
+		}
+	}
+	for _, want := range []string{
+		`add_header Cache-Control "no-store" always;`,
+		`add_header X-Frame-Options "DENY" always;`,
+		`add_header Content-Security-Policy "default-src 'none';`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("nginx certificate confirmation must contain %q", want)
 		}
 	}
 }

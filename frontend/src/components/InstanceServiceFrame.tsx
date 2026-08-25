@@ -1,7 +1,8 @@
-import { Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RefreshCw } from "lucide-react";
+import { Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RefreshCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "../contexts/I18nContext";
 import { useInstanceDesktopAccess } from "../hooks/useInstanceDesktopAccess";
+import { useRuntimeCertificateTrust } from "../hooks/useRuntimeCertificateTrust";
 import { clearHermesDashboardStorage, prepareHermesDashboardStorage } from "../lib/hermesDashboardStorage";
 import { prepareOpenClawControlUIStorage } from "../lib/openclawControlStorage";
 import type { InstanceAvailability } from "../types/instance";
@@ -54,7 +55,7 @@ export function InstanceServiceFrame({
   const normalizedType = instanceType?.toLowerCase() ?? "";
   const isHermes = normalizedType === "hermes";
   const {
-    embedUrl,
+    embedUrl: accessEmbedUrl,
     loading,
     error,
     reconnecting,
@@ -67,6 +68,17 @@ export function InstanceServiceFrame({
     resolveEmbedUrl,
     failedMessage: "Failed to open instance service",
   });
+  const requiresRuntimeCertificateTrust =
+    normalizedType === "opencode" || normalizedType === "deepseek-harness";
+  const {
+    frameUrl: embedUrl,
+    checkingCertificate,
+    certificateConfirmationRequired,
+    confirmCertificate,
+  } = useRuntimeCertificateTrust(
+    accessEmbedUrl,
+    requiresRuntimeCertificateTrust,
+  );
 
   const handleRefresh = useCallback(() => {
     void refreshAccess({ forceReload: true });
@@ -187,10 +199,35 @@ export function InstanceServiceFrame({
   }
 
   if (!embedUrl || !frameSrc) {
+    if (certificateConfirmationRequired) {
+      return renderFrameShell(
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+          <ShieldAlert className="h-8 w-8 text-amber-500" />
+          <div>
+            <p className="text-sm font-semibold text-slate-900">
+              {t("instances.certificateConfirmationRequired")}
+            </p>
+            <p className="mt-1 max-w-lg text-sm leading-6 text-slate-600">
+              {t("instances.certificateConfirmationDescription")}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="app-button-primary"
+            onClick={confirmCertificate}
+          >
+            {t("instances.continueCertificateConfirmation")}
+          </button>
+        </div>,
+      );
+    }
+
     return renderFrameShell(
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-sm text-slate-600">
         <RefreshCw className={`h-5 w-5 ${loading || reconnecting ? "animate-spin" : ""}`} />
-        {error || "Opening"}
+        {checkingCertificate
+          ? t("instances.checkingCertificate")
+          : error || "Opening"}
       </div>,
     );
   }

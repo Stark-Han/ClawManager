@@ -53,7 +53,7 @@ assert(
 
 assert(
   listPage.includes("我的实例") &&
-    listPage.includes("实例详情") &&
+    listPage.includes("实例信息") &&
     listPage.includes("运行时说明") &&
     listPage.includes('src="/inspur-information.png"') &&
     listPage.includes('alt="浪潮信息"') &&
@@ -66,7 +66,7 @@ assert(
     !runtimeCatalog.includes("Pro") &&
     runtimeCatalog.includes('"deepseek-harness"') &&
     runtimeCatalog.includes('workbuddy: {') &&
-    runtimeCatalog.includes("Developer Preview"),
+    runtimeCatalog.includes('badge: "NEW"'),
   "The owner portal must use the three-column runtime-aware layout without exposing deployment modes.",
 );
 
@@ -77,8 +77,8 @@ assert(
     listPage.includes("实例状态自动同步") &&
     listPage.includes("一切皆插件") &&
     listPage.includes("你的智能办公搭档") &&
-    runtimeCatalog.includes('tagline: "一切皆插件"') &&
-    runtimeCatalog.includes('tagline: "你的智能办公搭档"'),
+    runtimeCatalog.includes('tagline: "一切皆插件，按需组合智能体能力"') &&
+    runtimeCatalog.includes('tagline: "围绕信息、文档与事务持续协作"'),
   "The owner portal empty state must present all supported runtimes with approved Chinese positioning.",
 );
 
@@ -94,6 +94,11 @@ assert(
 assert(
   detailPage.includes("getInstance(instanceID)") &&
     detailPage.includes("generateAccess(instanceID)") &&
+    detailPage.includes("useRuntimeCertificateTrust") &&
+    detailPage.includes('normalizedType === "opencode"') &&
+    detailPage.includes('normalizedType === "deepseek-harness"') &&
+    detailPage.includes("certificateConfirmationRequired") &&
+    detailPage.includes("confirmCertificate") &&
     detailPage.includes("浪潮信息安全访问") &&
     detailPage.includes('referrerPolicy="no-referrer"') &&
     detailPage.includes("WorkspaceFileManager") &&
