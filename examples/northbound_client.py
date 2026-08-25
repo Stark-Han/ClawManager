@@ -184,7 +184,7 @@ class NorthboundClient:
 
     def login(self, username: str, password: str) -> dict[str, Any]:
         challenge, response_headers = self.request(
-            "POST", f"{API_PREFIX}/auth/challenge", body={}
+            "POST", f"{API_PREFIX}/auth/challenge"
         )
         issued_at = http_date_epoch(response_headers)
         credential_jwe = encrypt_credential(
@@ -583,7 +583,7 @@ def run(command: str) -> None:
         return
 
     if command == "logout":
-        client.authenticated_request("POST", "/auth/logout", body={})
+        client.authenticated_request("POST", "/auth/logout")
         print_result(client, {"logged_out": True, "session_id": tokens["session_id"]})
         return
 

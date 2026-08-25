@@ -294,11 +294,32 @@ func TestRejectSuspiciousRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(RequestContext(), RejectSuspiciousRequest())
+	router.POST("/api/northbound/v1/auth/challenge", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	router.POST("/api/northbound/v1/auth/logout", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	router.POST("/api/northbound/v1/lite-instances", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
+	for _, requestPath := range []string{
+		"/api/northbound/v1/auth/challenge",
+		"/api/northbound/v1/auth/logout",
+	} {
+		request := httptest.NewRequest(http.MethodPost, requestPath, nil)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("bodyless POST %s status = %d, want 204", requestPath, response.Code)
+		}
+	}
+
 	request := httptest.NewRequest(http.MethodPost, "/api/northbound/v1/lite-instances", strings.NewReader("{}"))
-	request.Header.Set("Content-Type", "text/plain")
 	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("missing content-type status: %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/northbound/v1/lite-instances", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "text/plain")
+	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("unexpected content-type status: %d", response.Code)
