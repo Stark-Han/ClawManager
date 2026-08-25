@@ -75,6 +75,10 @@ Thumbs.db
 .clawmanager-last-image
 /pr138.patch
 /examples/northbound-ca.crt
+/docs/northbound-api-test-guide.private.md
+/deployments/k8s/sites/nine-node-production/server_login.md
+/deployments/k8s/sites/nine-node-production/private/
+/deployments/k8s/sites/nine-node-production/certificates/
 
 # Team runtime config snapshots
 /team-*.json

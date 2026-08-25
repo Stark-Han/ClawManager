@@ -92,7 +92,7 @@ Scope 含义：
 
 | 顺序 | 调用或动作 | 关键输入 | 必须保存/判断的结果 | 下一步 |
 | --- | --- | --- | --- | --- |
-| 1 | `POST /auth/challenge` | 空对象 `{}` | 保存 `challenge_id`、`nonce`、`encryption` 和 HTTPS `Date` 响应头。挑战默认 60 秒有效且只能使用一次。 | 在挑战过期前执行第 2、3 步。 |
+| 1 | `POST /auth/challenge` | 不带请求体 | 保存 `challenge_id`、`nonce`、`encryption` 和 HTTPS `Date` 响应头。挑战默认 60 秒有效且只能使用一次。 | 在挑战过期前执行第 2、3 步。 |
 | 2 | 客户端本地生成 Compact JWE | 现有用户名和密码，以及第 1 步返回的挑战参数 | JWE Protected Header 固定使用挑战的 `kid`、`RSA-OAEP-256`、`A256GCM`；明文载荷包含新的 `client_nonce` 和 `issued_at`。 | 不发送明文用户名和密码，只发送 JWE。 |
 | 3 | `POST /auth/login` | `challenge_id`、`credential_jwe` | 保存 `access_token`、`refresh_token`、`expires_in`、`refresh_expires_in` 和 `scopes`。确认 Scope 包含 `lite-instances:create` 与 `lite-instances:read`；需要第 7 步时还必须包含 `lite-instances:share-link:manage`。 | 使用 Access Token 调用创建接口。 |
 | 4 | `POST /lite-instances` | `Authorization`、稳定的 `Idempotency-Key`；请求体中提供 `owner` 和受支持的 `type` | 接口返回 `202`。保存 `operation_id` 和 `Location`；不要把 `202` 当成实例已经可用。 | 按第 5 步轮询 Operation。 |
@@ -152,9 +152,6 @@ python examples/northbound_client.py create
 ```http
 POST /api/northbound/v1/auth/challenge HTTP/1.1
 Host: northbound.example.com:38443
-Content-Type: application/json
-
-{}
 ```
 
 成功响应：`201 Created`

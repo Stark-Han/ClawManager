@@ -4,7 +4,6 @@ import {
   Briefcase,
   Box,
   CheckCircle2,
-  ChevronRight,
   LogOut,
   RefreshCw,
   Search,
@@ -440,7 +439,7 @@ export default function IEISystemListInstancesPage() {
 
             <section className="flex min-h-[680px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_12px_35px_rgba(15,23,42,0.045)] lg:min-h-0">
               <div className="border-b border-slate-100 px-6 py-5">
-                <h2 className="text-base font-bold text-[#14213a]">实例详情</h2>
+                <h2 className="text-base font-bold text-[#14213a]">运行时说明</h2>
               </div>
               <div className="flex-1 overflow-y-auto p-6">
                 <div className="flex flex-col gap-5 border-b border-slate-100 pb-6 sm:flex-row sm:items-center">
@@ -479,36 +478,74 @@ export default function IEISystemListInstancesPage() {
                   </Link>
                 </div>
 
-                <div className="mt-6 overflow-hidden rounded-xl border border-slate-200">
-                  <div className="border-b border-slate-200 bg-slate-50/70 px-5 py-3 text-sm font-bold text-slate-800">
-                    实例信息
+                <div className={`mt-6 overflow-hidden rounded-2xl border ${selectedRuntime.theme.border}`}>
+                  <div className={`border-b ${selectedRuntime.theme.border} ${selectedRuntime.theme.accentSoft} px-6 py-5`}>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className={`text-xs font-bold uppercase tracking-[0.18em] ${selectedRuntime.theme.accent}`}>
+                        {selectedRuntime.name}
+                      </span>
+                      {selectedRuntime.badge ? (
+                        <span className="rounded-full bg-gradient-to-r from-teal-500 to-cyan-500 px-2.5 py-1 text-[10px] font-bold tracking-wider text-white">
+                          {selectedRuntime.badge}
+                        </span>
+                      ) : null}
+                    </div>
+                    <h3 className="mt-2 text-xl font-bold leading-snug text-[#10203b]">
+                      {selectedRuntime.tagline}
+                    </h3>
                   </div>
-                  <dl className="divide-y divide-slate-100 px-5">
-                    {[
-                      ["实例名称", selectedInstance.name],
-                      ["实例 ID", `#${selectedInstance.id}`],
-                      ["运行时", selectedRuntime.name],
-                      ["运行时类型", selectedRuntime.category],
-                      ["状态", statusLabel(selectedInstance.status)],
-                      ["更新时间", formatTime(selectedInstance.updated_at)],
-                    ].map(([label, value]) => (
-                      <div
-                        key={label}
-                        className="grid grid-cols-[120px_minmax(0,1fr)] gap-5 py-3 text-sm"
-                      >
-                        <dt className="text-slate-500">{label}</dt>
-                        <dd className="font-medium text-slate-700">{value}</dd>
-                      </div>
-                    ))}
-                  </dl>
+
+                  <div className="grid divide-y divide-slate-100 bg-white xl:grid-cols-5 xl:divide-x xl:divide-y-0">
+                    <div className="px-6 py-5 xl:col-span-3">
+                      <h3 className="text-sm font-bold text-slate-900">运行时定位</h3>
+                      <p className="mt-3 text-sm leading-7 text-slate-600">
+                        {selectedRuntime.positioning}
+                      </p>
+                    </div>
+                    <div className="px-6 py-5 xl:col-span-2">
+                      <h3 className="text-sm font-bold text-slate-900">为什么选择它</h3>
+                      <p className="mt-3 text-sm leading-7 text-slate-600">
+                        {selectedRuntime.selectionGuide}
+                      </p>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="mt-6">
-                  <h3 className="text-sm font-bold text-slate-900">实例描述</h3>
-                  <p className="mt-2 text-sm leading-7 text-slate-600">
-                    {selectedInstance.description?.trim() || selectedRuntime.positioning}
-                  </p>
+                <div className="mt-5 rounded-2xl border border-slate-200 p-6">
+                  <div className="flex items-center justify-between gap-4">
+                    <h3 className="text-sm font-bold text-slate-900">核心能力</h3>
+                    <span className="text-xs text-slate-400">面向实际任务的能力组合</span>
+                  </div>
+                  <ul className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                    {selectedRuntime.capabilities.map((capability, index) => (
+                      <li
+                        key={capability}
+                        className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/70 px-4 py-3 text-sm font-medium text-slate-700"
+                      >
+                        <span
+                          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${selectedRuntime.theme.accentSoft} text-[11px] font-bold ${selectedRuntime.theme.accent}`}
+                        >
+                          {index + 1}
+                        </span>
+                        {capability}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
+
+                <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/50 p-6">
+                  <h3 className="text-sm font-bold text-slate-900">适用场景</h3>
+                  <p className="mt-3 text-sm leading-7 text-slate-600">
+                    {selectedRuntime.scenarios}
+                  </p>
+                  {selectedRuntime.notice ? (
+                    <div className="mt-4 flex gap-3 rounded-xl border border-teal-200 bg-teal-50 p-3.5 text-xs leading-5 text-teal-800">
+                      <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
+                      {selectedRuntime.notice}
+                    </div>
+                  ) : null}
+                </div>
+
                 <div className="mt-6">
                   <h3 className="text-sm font-bold text-slate-900">能力标签</h3>
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -527,61 +564,51 @@ export default function IEISystemListInstancesPage() {
 
             <aside className="flex min-h-[680px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_12px_35px_rgba(15,23,42,0.045)] lg:min-h-0">
               <div className="border-b border-slate-100 px-5 py-5">
-                <h2 className="text-base font-bold text-[#14213a]">运行时说明</h2>
+                <h2 className="text-base font-bold text-[#14213a]">实例信息</h2>
               </div>
               <div className="flex-1 overflow-y-auto px-5 py-6">
                 <div className="text-center">
                   <div
-                    className={`mx-auto flex h-20 w-20 items-center justify-center rounded-full ${selectedRuntime.theme.accentSoft} p-4`}
+                    className={`mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border ${selectedRuntime.theme.border} ${selectedRuntime.theme.accentSoft} p-3`}
                   >
                     <InstanceTypeIcon type={selectedInstance.type} />
                   </div>
                   <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-                    <h3 className="text-xl font-bold text-[#10203b]">{selectedRuntime.name}</h3>
-                    {selectedRuntime.badge ? (
-                      <span className="rounded-full bg-gradient-to-r from-teal-500 to-cyan-500 px-2 py-0.5 text-[10px] font-bold tracking-wider text-white">
-                        {selectedRuntime.badge}
-                      </span>
-                    ) : null}
+                    <h3 className="max-w-full truncate text-lg font-bold text-[#10203b]">
+                      {selectedInstance.name}
+                    </h3>
                   </div>
-                  <p
-                    className={`mt-2 flex items-center justify-center gap-2 text-sm font-medium ${selectedRuntime.theme.accent}`}
+                  <span
+                    className={`mt-3 inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(selectedInstance.status)}`}
                   >
-                    <span className={`h-2 w-2 rounded-full ${selectedRuntime.theme.dot}`} />
-                    {selectedRuntime.tagline}
-                  </p>
+                    {statusLabel(selectedInstance.status)}
+                  </span>
                 </div>
 
-                <div className="mt-7">
-                  <h4 className="text-sm font-bold text-slate-900">运行时定位</h4>
-                  <p className="mt-2 text-sm leading-7 text-slate-600">
-                    {selectedRuntime.positioning}
-                  </p>
-                </div>
-
-                <div className="mt-7">
-                  <h4 className="text-sm font-bold text-slate-900">核心能力</h4>
-                  <ul className="mt-3 space-y-2.5">
-                    {selectedRuntime.capabilities.map((capability) => (
-                      <li key={capability} className="flex items-center gap-2 text-sm text-slate-600">
-                        <ChevronRight className={`h-4 w-4 ${selectedRuntime.theme.accent}`} />
-                        {capability}
-                      </li>
+                <div className="mt-6 overflow-hidden rounded-xl border border-slate-200">
+                  <dl className="divide-y divide-slate-100 px-4">
+                    {[
+                      ["实例名称", selectedInstance.name],
+                      ["实例 ID", `#${selectedInstance.id}`],
+                      ["运行时", selectedRuntime.name],
+                      ["运行时类型", selectedRuntime.category],
+                      ["状态", statusLabel(selectedInstance.status)],
+                      ["更新时间", formatTime(selectedInstance.updated_at)],
+                    ].map(([label, value]) => (
+                      <div key={label} className="py-3 text-sm">
+                        <dt className="text-xs text-slate-400">{label}</dt>
+                        <dd className="mt-1 break-words font-medium text-slate-700">{value}</dd>
+                      </div>
                     ))}
-                  </ul>
+                  </dl>
                 </div>
 
                 <div className="mt-7">
-                  <h4 className="text-sm font-bold text-slate-900">适用场景</h4>
-                  <p className="mt-2 text-sm leading-7 text-slate-600">{selectedRuntime.scenarios}</p>
+                  <h4 className="text-sm font-bold text-slate-900">实例描述</h4>
+                  <p className="mt-2 text-sm leading-7 text-slate-600">
+                    {selectedInstance.description?.trim() || "暂未填写实例描述。"}
+                  </p>
                 </div>
-
-                {selectedRuntime.notice ? (
-                  <div className="mt-7 flex gap-3 rounded-xl border border-teal-200 bg-teal-50 p-3.5 text-xs leading-5 text-teal-800">
-                    <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
-                    {selectedRuntime.notice}
-                  </div>
-                ) : null}
               </div>
             </aside>
           </div>

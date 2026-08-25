@@ -202,7 +202,9 @@ func RejectSuspiciousRequest() gin.HandlerFunc {
 				return
 			}
 		}
-		if c.Request.Method == http.MethodPost && requestPath != "/api/northbound/v1/auth/challenge" {
+		bodylessPost := requestPath == "/api/northbound/v1/auth/challenge" ||
+			requestPath == "/api/northbound/v1/auth/logout"
+		if c.Request.Method == http.MethodPost && !bodylessPost {
 			contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(c.GetHeader("Content-Type"), ";", 2)[0]))
 			if contentType != "application/json" {
 				writeError(c, apiError(http.StatusUnsupportedMediaType, "INVALID_REQUEST", "Content-Type must be application/json", nil))

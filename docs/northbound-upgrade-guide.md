@@ -332,7 +332,7 @@ kubectl get deployment,pod,service,networkpolicy -n $Namespace | Select-String "
 ```powershell
 $GatewayCAFile = "<secure-path>/gateway-ca.crt"
 $NorthboundBaseURL = "https://<northbound-host>:38443"
-curl.exe --cacert $GatewayCAFile -i -X POST "$NorthboundBaseURL/api/northbound/v1/auth/challenge" -H "Content-Type: application/json" --data "{}"
+curl.exe --cacert $GatewayCAFile -i -X POST "$NorthboundBaseURL/api/northbound/v1/auth/challenge"
 ```
 
 预期返回 `201 Created`、可信的 `Date` 响应头，以及包含 `challenge_id`、`nonce` 和
