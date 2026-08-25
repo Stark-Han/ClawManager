@@ -1326,6 +1326,9 @@ func (s *instanceService) securityModeForRuntime(instance *models.Instance) k8s.
 	if s != nil && s.allowPrivilegedPods {
 		return k8s.PodSecurityPrivileged
 	}
+	if isLinuxWorkbuddyInstance(instance) {
+		return k8s.PodSecurityWorkbuddyLinux
+	}
 	switch strings.ToLower(strings.TrimSpace(instance.Type)) {
 	case "openclaw", "opencode", "workbuddy", RuntimeTypeCodex, RuntimeTypeClaudeCode:
 		return k8s.PodSecurityChromiumCompat
