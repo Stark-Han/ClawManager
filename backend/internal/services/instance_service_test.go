@@ -114,6 +114,37 @@ func TestBuildGatewayEnvInjectsGatewayModelCatalog(t *testing.T) {
 	}
 }
 
+func TestResolveGatewayModelInjectionExpandsProviderModelCatalog(t *testing.T) {
+	provider := models.LLMModel{
+		DisplayName:       "icompify",
+		ProviderType:      models.ProviderTypeOpenAICompatible,
+		ProtocolType:      models.ProtocolTypeOpenAICompatible,
+		ProviderModelName: "qwen3.8",
+		IsActive:          true,
+	}
+	if err := models.SetLLMProviderModels(&provider, []models.LLMProviderModel{
+		{ID: "qwen3.8"},
+		{ID: "glm-5.2"},
+		{ID: "minimax-m3"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := &instanceService{
+		llmModelRepo: &stubLLMModelRepository{active: []models.LLMModel{provider}},
+	}
+
+	injection, err := service.resolveGatewayModelInjection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if injection.modelsJSON != `["auto","qwen3.8","glm-5.2","minimax-m3"]` {
+		t.Fatalf("provider catalog was not expanded for instance injection: %s", injection.modelsJSON)
+	}
+	if injection.codingAgentDefaultModel != "qwen3.8" {
+		t.Fatalf("coding agent default = %q, want qwen3.8", injection.codingAgentDefaultModel)
+	}
+}
+
 func assertOpenCodeGatewayConfig(t *testing.T, raw string) {
 	t.Helper()
 	var config struct {

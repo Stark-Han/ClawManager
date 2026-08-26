@@ -34,7 +34,31 @@ func validReasoningModelRequest() SaveLLMModelRequest {
 		ProtocolType:      models.ProtocolTypeOpenAICompatible,
 		BaseURL:           "https://api.deepseek.com",
 		ProviderModelName: "deepseek-v4-flash",
+		ProviderModels:    []models.LLMProviderModel{{ID: "deepseek-v4-flash"}},
 		IsActive:          true,
+	}
+}
+
+func TestSaveLLMModelPersistsCompleteDiscoveredCatalog(t *testing.T) {
+	repo := &reasoningLLMModelRepository{}
+	service := NewLLMModelService(repo)
+	request := validReasoningModelRequest()
+	request.ProviderModels = []models.LLMProviderModel{
+		{ID: "qwen3.8"},
+		{ID: "glm-5.2", DisplayName: "GLM 5.2"},
+		{ID: "minimax-m3"},
+	}
+	request.ProviderModelName = "qwen3.8"
+
+	saved, err := service.SaveModel(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.ProviderModels) != 3 || saved.ProviderModels[1].ID != "glm-5.2" {
+		t.Fatalf("provider model catalog was not persisted: %#v", saved.ProviderModels)
+	}
+	if saved.ProviderModelsJSON == nil || *saved.ProviderModelsJSON == "" {
+		t.Fatal("provider model catalog JSON was not populated")
 	}
 }
 

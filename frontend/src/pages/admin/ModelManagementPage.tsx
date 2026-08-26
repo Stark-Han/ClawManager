@@ -532,7 +532,7 @@ const ModelManagementPage: React.FC = () => {
           isEditing: false,
           error: null,
           discovery_error: null,
-          discovered_models: [],
+          discovered_models: item.provider_models ?? [],
           edit_snapshot: undefined,
         })));
       } catch (error: any) {
@@ -726,6 +726,7 @@ const ModelManagementPage: React.FC = () => {
         protocol_type: resolveProviderProtocolType(card.provider_type, card.protocol_type),
         base_url: card.base_url.trim(),
         provider_model_name: card.provider_model_name.trim(),
+        provider_models: card.discovered_models ?? [],
         reasoning_enabled: supportsManagedReasoningControl(
           card.provider_type,
           card.protocol_type,
@@ -749,6 +750,7 @@ const ModelManagementPage: React.FC = () => {
               description: saved.description ?? '',
               api_key: saved.api_key ?? '',
               api_key_secret_ref: saved.api_key_secret_ref ?? '',
+              discovered_models: saved.provider_models ?? card.discovered_models ?? [],
               isNew: false,
               isEditing: false,
               saving: false,
@@ -883,8 +885,22 @@ const ModelManagementPage: React.FC = () => {
 
                       <dl className="mt-5 grid flex-1 content-start grid-cols-1 gap-4 text-sm sm:grid-cols-2">
                         <div>
-                          <dt className="font-medium text-gray-700">{t('modelManagementPage.providerModel')}</dt>
-                          <dd className="mt-1 text-gray-600">{card.provider_model_name || '-'}</dd>
+                          <dt className="font-medium text-gray-700">
+                            {t('modelManagementPage.providerModel')} ({discoveredModels.length || 1})
+                          </dt>
+                          <dd className="mt-2 flex flex-wrap gap-2 text-gray-600">
+                            {(discoveredModels.length > 0
+                              ? discoveredModels
+                              : [{ id: card.provider_model_name, display_name: card.provider_model_name }]
+                            ).filter((model) => model.id).map((model) => (
+                              <span
+                                key={model.id}
+                                className="rounded-full border border-[#ead8cf] bg-white px-2.5 py-1 text-xs"
+                              >
+                                {model.id}
+                              </span>
+                            ))}
+                          </dd>
                         </div>
                         <div>
                           <dt className="font-medium text-gray-700">{t('modelManagementPage.currency')}</dt>
@@ -1088,6 +1104,20 @@ const ModelManagementPage: React.FC = () => {
                             </option>
                           ))}
                         </datalist>
+                      )}
+
+                      {discoveredModels.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {discoveredModels.map((model) => (
+                            <span
+                              key={model.id}
+                              className="rounded-full border border-[#ead8cf] bg-white px-2.5 py-1 text-xs text-[#7c5a4d]"
+                              title={model.display_name}
+                            >
+                              {model.id}
+                            </span>
+                          ))}
+                        </div>
                       )}
 
                       <div className="mt-2 text-xs text-gray-500">

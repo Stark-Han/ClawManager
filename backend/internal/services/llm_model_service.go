@@ -34,6 +34,7 @@ type SaveLLMModelRequest struct {
 	ProtocolType      string
 	BaseURL           string
 	ProviderModelName string
+	ProviderModels    []models.LLMProviderModel
 	ReasoningEnabled  *bool
 	APIKey            *string
 	APIKeySecretRef   *string
@@ -54,10 +55,7 @@ type DiscoverLLMModelsRequest struct {
 }
 
 // DiscoveredLLMModel is a normalized provider model entry returned by discovery.
-type DiscoveredLLMModel struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name"`
-}
+type DiscoveredLLMModel = models.LLMProviderModel
 
 type llmModelService struct {
 	repo             repository.LLMModelRepository
@@ -193,6 +191,24 @@ func (s *llmModelService) SaveModel(req SaveLLMModelRequest) (*models.LLMModel, 
 		OutputPrice:       req.OutputPrice,
 		Currency:          currency,
 	}
+	providerModels := req.ProviderModels
+	if len(providerModels) == 0 {
+		discovered, discoverErr := s.DiscoverProviderModels(DiscoverLLMModelsRequest{
+			ProviderType:    model.ProviderType,
+			ProtocolType:    model.ProtocolType,
+			BaseURL:         model.BaseURL,
+			APIKey:          model.APIKey,
+			APIKeySecretRef: model.APIKeySecretRef,
+		})
+		if discoverErr == nil && len(discovered) > 0 {
+			providerModels = discovered
+		} else if current != nil && sameModelDiscoveryConfig(current, model) {
+			providerModels = current.ProviderModels
+		}
+	}
+	if err := models.SetLLMProviderModels(model, providerModels); err != nil {
+		return nil, fmt.Errorf("failed to encode provider models: %w", err)
+	}
 	models.PopulateLLMReasoningCapability(model)
 	if req.ReasoningEnabled != nil {
 		if *req.ReasoningEnabled && !model.SupportsReasoning {
@@ -215,6 +231,29 @@ func (s *llmModelService) SaveModel(req SaveLLMModelRequest) (*models.LLMModel, 
 	}
 
 	return model, nil
+}
+
+func sameModelDiscoveryConfig(current, next *models.LLMModel) bool {
+	if current == nil || next == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(current.ProviderType), strings.TrimSpace(next.ProviderType)) &&
+		strings.EqualFold(strings.TrimSpace(current.ProtocolType), strings.TrimSpace(next.ProtocolType)) &&
+		strings.EqualFold(strings.TrimRight(strings.TrimSpace(current.BaseURL), "/"), strings.TrimRight(strings.TrimSpace(next.BaseURL), "/")) &&
+		optionalStringEqual(current.APIKey, next.APIKey) &&
+		optionalStringEqual(current.APIKeySecretRef, next.APIKeySecretRef)
+}
+
+func optionalStringEqual(left, right *string) bool {
+	leftValue := ""
+	if left != nil {
+		leftValue = strings.TrimSpace(*left)
+	}
+	rightValue := ""
+	if right != nil {
+		rightValue = strings.TrimSpace(*right)
+	}
+	return leftValue == rightValue
 }
 
 func populateReasoningCapabilities(items []models.LLMModel) {

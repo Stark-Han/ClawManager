@@ -1848,6 +1848,7 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 	if len(items) == 0 {
 		return nil, fmt.Errorf("no active models are configured")
 	}
+	items = models.ExpandLLMModelCatalog(items)
 
 	modelsForInjection := []string{"auto"}
 	reasoningForInjection := map[string]bool{"auto": false}
