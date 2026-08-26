@@ -461,6 +461,28 @@ func TestMigration045BootstrapsAndUpgradesLLMModels(t *testing.T) {
 	}
 }
 
+func TestMigration056AddsLLMProviderModelCatalog(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/056_add_llm_provider_models.sql")
+	if err != nil {
+		t.Fatalf("read migration 056: %v", err)
+	}
+
+	sql := string(raw)
+	for _, required := range []string{
+		"information_schema.COLUMNS",
+		"TABLE_NAME = 'llm_models'",
+		"COLUMN_NAME = 'provider_models_json'",
+		"ALTER TABLE llm_models ADD COLUMN provider_models_json TEXT",
+		"PREPARE stmt FROM @stmt",
+		"EXECUTE stmt",
+		"DEALLOCATE PREPARE stmt",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 056 must contain %s", required)
+		}
+	}
+}
+
 func TestMigration047AddsDeepSeekHarnessRuntimes(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/047_add_deepseek_harness_runtime.sql")
 	if err != nil {

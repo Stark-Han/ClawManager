@@ -399,15 +399,18 @@ func (s *service) ListAvailableModels() ([]AvailableModel, error) {
 		return []AvailableModel{}, nil
 	}
 
-	return []AvailableModel{
-		{
-			ID:          0,
-			DisplayName: "Auto",
-			Description: stringPtr("Automatically route requests to the best available model under current governance policy."),
-			IsSecure:    false,
-			Provider:    "gateway",
-		},
-	}, nil
+	expanded := models.ExpandLLMModelCatalog(items)
+	available := make([]AvailableModel, 0, len(expanded))
+	for _, item := range expanded {
+		available = append(available, AvailableModel{
+			ID:          item.ID,
+			DisplayName: item.DisplayName,
+			Description: item.Description,
+			IsSecure:    item.IsSecure,
+			Provider:    item.ProviderType,
+		})
+	}
+	return available, nil
 }
 
 func (s *service) ChatCompletions(ctx context.Context, userID int, req ChatCompletionRequest) (*ProxyResponse, string, error) {
@@ -2296,7 +2299,7 @@ func (s *service) resolveTargetModel(selectedModel *models.LLMModel, analysis se
 	if err != nil {
 		return nil, models.RiskActionBlock, fmt.Errorf("failed to list active secure models: %w", err)
 	}
-	for _, item := range activeModels {
+	for _, item := range models.ExpandLLMModelCatalog(activeModels) {
 		if item.IsSecure {
 			resolved := item
 			return &resolved, models.RiskActionRouteSecureModel, nil
@@ -2310,14 +2313,17 @@ func (s *service) resolveRequestedModel(requestedModel string) (*models.LLMModel
 		return s.selectAutoModel()
 	}
 
-	selectedModel, err := s.modelRepo.GetByDisplayName(requestedModel)
+	items, err := s.modelRepo.ListActive()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get model: %w", err)
+		return nil, fmt.Errorf("failed to list active models: %w", err)
 	}
-	if selectedModel == nil || !selectedModel.IsActive {
-		return nil, errors.New("model is not active or does not exist")
+	for _, item := range models.ExpandLLMModelCatalog(items) {
+		if strings.EqualFold(strings.TrimSpace(item.DisplayName), strings.TrimSpace(requestedModel)) {
+			selected := item
+			return &selected, nil
+		}
 	}
-	return selectedModel, nil
+	return nil, errors.New("model is not active or does not exist")
 }
 
 func (s *service) selectAutoModel() (*models.LLMModel, error) {
@@ -2325,18 +2331,19 @@ func (s *service) selectAutoModel() (*models.LLMModel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list active models: %w", err)
 	}
-	if len(items) == 0 {
+	expanded := models.ExpandLLMModelCatalog(items)
+	if len(expanded) == 0 {
 		return nil, errors.New("no active models are configured")
 	}
 
-	for _, item := range items {
+	for _, item := range expanded {
 		if !item.IsSecure {
 			selected := item
 			return &selected, nil
 		}
 	}
 
-	selected := items[0]
+	selected := expanded[0]
 	return &selected, nil
 }
 
