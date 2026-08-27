@@ -15,6 +15,10 @@ func (s runtimeImageProviderStub) GetRuntimeImage(string) (RuntimeImageConfig, b
 	return s.config, s.ok
 }
 
+func (s runtimeImageProviderStub) GetRuntimeImageForRuntimeType(string, string) (RuntimeImageConfig, bool) {
+	return s.config, s.ok
+}
+
 func (s runtimeImageProviderStub) GetRuntimeImageForImage(string, string) (RuntimeImageConfig, bool) {
 	return s.config, s.ok
 }

@@ -342,8 +342,17 @@ func (h *IEISystemHandler) ownedSupportedInstance(instance *models.Instance, own
 			return false
 		}
 	}
-	return mode == services.InstanceModePro && typeName == "workbuddy" &&
-		strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	if mode != services.InstanceModePro {
+		return false
+	}
+	switch typeName {
+	case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, services.RuntimeTypeOpenCode:
+		return true
+	case "workbuddy":
+		return strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	default:
+		return false
+	}
 }
 
 func newIEIInstanceView(instance *models.Instance) ieiInstanceView {

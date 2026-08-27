@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
+	"clawreef/internal/services"
 	"github.com/gin-gonic/gin"
 )
 
@@ -129,7 +131,7 @@ func (s *CoreService) auditOperation(item *models.NorthboundOperation, eventType
 		RequestID:    &requestID,
 		UserID:       &userID,
 		InstanceID:   instanceID,
-		InstanceMode: stringPointer("lite"),
+		InstanceMode: stringPointer(operationInstanceMode(item)),
 		EventType:    eventType,
 		TrafficClass: "northbound",
 		Severity:     severity,
@@ -140,6 +142,22 @@ func (s *CoreService) auditOperation(item *models.NorthboundOperation, eventType
 	if err := s.audit.Create(event); err != nil {
 		log.Printf("northbound operation audit write failed (operation_id=%s): %v", item.OperationID, err)
 	}
+}
+
+func operationInstanceMode(item *models.NorthboundOperation) string {
+	if item == nil {
+		return services.InstanceModeLite
+	}
+	if item.OperationType == OperationTypeProInstance {
+		return services.InstanceModePro
+	}
+	if item.OperationType == OperationTypeLiteInstance {
+		var request CreateLiteInstanceRequest
+		if json.Unmarshal([]byte(item.RequestPayload), &request) == nil && strings.EqualFold(strings.TrimSpace(request.Type), "workbuddy") {
+			return services.InstanceModePro
+		}
+	}
+	return services.InstanceModeLite
 }
 
 func stringPointer(value string) *string { return &value }

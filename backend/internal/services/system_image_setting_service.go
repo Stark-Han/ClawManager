@@ -99,6 +99,7 @@ type RuntimeImageConfig struct {
 // RuntimeImageSettingsProvider exposes runtime image lookup for instance types.
 type RuntimeImageSettingsProvider interface {
 	GetRuntimeImage(instanceType string) (RuntimeImageConfig, bool)
+	GetRuntimeImageForRuntimeType(instanceType, runtimeType string) (RuntimeImageConfig, bool)
 	GetRuntimeImageForImage(instanceType, image string) (RuntimeImageConfig, bool)
 }
 
@@ -115,6 +116,7 @@ type SystemImageSettingService interface {
 	DeleteByID(id int) error
 	DisableType(instanceType string) error
 	GetRuntimeImage(instanceType string) (RuntimeImageConfig, bool)
+	GetRuntimeImageForRuntimeType(instanceType, runtimeType string) (RuntimeImageConfig, bool)
 	GetRuntimeImageForImage(instanceType, image string) (RuntimeImageConfig, bool)
 }
 
@@ -280,6 +282,26 @@ func (s *systemImageSettingService) GetRuntimeImage(instanceType string) (Runtim
 	return RuntimeImageConfig{}, false
 }
 
+// GetRuntimeImageForRuntimeType returns the enabled image for one concrete
+// backend. This prevents a Pro request from accidentally selecting the Lite
+// image when both cards are enabled for the same instance type.
+func (s *systemImageSettingService) GetRuntimeImageForRuntimeType(instanceType, runtimeType string) (RuntimeImageConfig, bool) {
+	normalizedType := strings.TrimSpace(strings.ToLower(instanceType))
+	normalizedRuntimeType := normalizeSystemImageRuntimeType(runtimeType)
+	items, err := s.repo.ListByInstanceType(normalizedType)
+	if err != nil {
+		return RuntimeImageConfig{}, false
+	}
+
+	for _, item := range enabledSystemImageSettingsForType(normalizedType, items) {
+		if normalizeSystemImageRuntimeType(item.RuntimeType) != normalizedRuntimeType || strings.TrimSpace(item.Image) == "" {
+			continue
+		}
+		return runtimeImageConfigForSetting(normalizedType, item), true
+	}
+	return RuntimeImageConfig{}, false
+}
+
 func (s *systemImageSettingService) GetRuntimeImageForImage(instanceType, image string) (RuntimeImageConfig, bool) {
 	normalizedType := strings.TrimSpace(strings.ToLower(instanceType))
 	normalizedImage := strings.TrimSpace(image)
@@ -320,6 +342,21 @@ func runtimeImageOverride(instanceType string) (RuntimeImageConfig, bool) {
 		return RuntimeImageConfig{}, false
 	}
 	return runtimeImageSettingsProvider.GetRuntimeImage(instanceType)
+}
+
+// RuntimeImageForBackend exposes exact backend image selection to trusted
+// server-side adapters such as the northbound API. Callers still cannot choose
+// arbitrary image references.
+func RuntimeImageForBackend(instanceType, runtimeType string) (RuntimeImageConfig, bool) {
+	if runtimeImageSettingsProvider == nil {
+		for _, item := range defaultSystemImagePresetsForType(strings.TrimSpace(strings.ToLower(instanceType))) {
+			if normalizeSystemImageRuntimeType(item.RuntimeType) == normalizeSystemImageRuntimeType(runtimeType) && item.IsEnabled && strings.TrimSpace(item.Image) != "" {
+				return runtimeImageConfigForSetting(instanceType, item), true
+			}
+		}
+		return RuntimeImageConfig{}, false
+	}
+	return runtimeImageSettingsProvider.GetRuntimeImageForRuntimeType(instanceType, runtimeType)
 }
 
 func runtimeImageOverrideForImage(instanceType, image string) (RuntimeImageConfig, bool) {

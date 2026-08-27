@@ -47,11 +47,13 @@ type InstanceOwnerRepository interface {
 	CountLiteByUserIDAndOwner(userID int, owner string) (int, error)
 	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
 	CountWorkbuddyProByUserIDAndOwner(userID int, owner string) (int, error)
+	GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
+	CountProByUserIDAndOwner(userID int, owner string) (int, error)
 }
 
-// NorthboundInstanceOwnerRepository exposes the unified, owner-scoped view
-// used by the canonical northbound instance collection. It includes only the
-// four managed Lite runtimes and Linux WorkBuddy Pro.
+// NorthboundInstanceOwnerRepository exposes the compatibility unified,
+// owner-scoped view used by /lite-instances. It includes managed Lite runtimes
+// and every Pro runtime supported by the northbound contract.
 type NorthboundInstanceOwnerRepository interface {
 	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
 	CountNorthboundByUserIDAndOwner(userID int, owner string) (int, error)
@@ -325,6 +327,34 @@ func (r *instanceRepository) CountWorkbuddyProByUserIDAndOwner(userID int, owner
 	return int(count), nil
 }
 
+func supportedNorthboundProOwnerInstances(userID int, owner string) db.LogicalExpr {
+	return db.And(
+		db.Cond{"user_id": userID, "owner": owner, "instance_mode": "pro"},
+		db.Or(
+			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode"}},
+			db.Cond{"type": "workbuddy", "runtime_variant": "linux"},
+		),
+	)
+}
+
+func (r *instanceRepository) GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(supportedNorthboundProOwnerInstances(userID, owner)).
+		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get owner Pro instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountProByUserIDAndOwner(userID int, owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(supportedNorthboundProOwnerInstances(userID, owner)).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count owner Pro instances: %w", err)
+	}
+	return int(count), nil
+}
+
 func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr {
 	return db.And(
 		db.Cond{"user_id": userID, "owner": owner},
@@ -337,6 +367,10 @@ func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr 
 				"instance_mode":   "pro",
 				"type":            "workbuddy",
 				"runtime_variant": "linux",
+			},
+			db.Cond{
+				"instance_mode": "pro",
+				"type IN":       []string{"openclaw", "hermes", "opencode"},
 			},
 		),
 	)
@@ -372,6 +406,10 @@ func supportedIEIOwnerInstances(owner string) db.LogicalExpr {
 				"instance_mode":   "pro",
 				"type":            "workbuddy",
 				"runtime_variant": "linux",
+			},
+			db.Cond{
+				"instance_mode": "pro",
+				"type IN":       []string{"openclaw", "hermes", "opencode"},
 			},
 		),
 	)

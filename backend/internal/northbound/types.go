@@ -102,12 +102,12 @@ type CreateLiteInstanceRequest struct {
 }
 
 // CreateProInstanceRequest intentionally mirrors the existing Lite request.
-// The server owns the Linux runtime variant and resource preset so callers
-// cannot accidentally request the Windows VM or oversized resources.
+// The endpoint fixes Pro/desktop mode and the server owns image and resource
+// selection, so callers cannot mix Lite and Pro provisioning parameters.
 type CreateProInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
 	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=workbuddy"`
+	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode workbuddy"`
 	Description *string `json:"description,omitempty"`
 }
 
@@ -147,16 +147,19 @@ func operationResponse(item *models.NorthboundOperation) OperationResponse {
 }
 
 type LiteInstanceResponse struct {
-	ID           int        `json:"id"`
-	Name         string     `json:"name"`
-	Owner        string     `json:"owner"`
-	Description  *string    `json:"description,omitempty"`
-	Type         string     `json:"type"`
-	Status       string     `json:"status"`
-	Availability string     `json:"availability,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
+	ID             int        `json:"id"`
+	Name           string     `json:"name"`
+	Owner          string     `json:"owner"`
+	Description    *string    `json:"description,omitempty"`
+	Type           string     `json:"type"`
+	InstanceMode   string     `json:"instance_mode"`
+	RuntimeType    string     `json:"runtime_type"`
+	RuntimeVariant string     `json:"runtime_variant,omitempty"`
+	Status         string     `json:"status"`
+	Availability   string     `json:"availability,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
 }
 
 type ShareLinkResetResponse struct {
@@ -178,16 +181,19 @@ func liteInstanceResponse(item *models.Instance) LiteInstanceResponse {
 		availability = "starting"
 	}
 	return LiteInstanceResponse{
-		ID:           item.ID,
-		Name:         item.Name,
-		Owner:        instanceOwner(item),
-		Description:  item.Description,
-		Type:         item.Type,
-		Status:       item.Status,
-		Availability: availability,
-		CreatedAt:    item.CreatedAt,
-		UpdatedAt:    item.UpdatedAt,
-		StartedAt:    item.StartedAt,
+		ID:             item.ID,
+		Name:           item.Name,
+		Owner:          instanceOwner(item),
+		Description:    item.Description,
+		Type:           item.Type,
+		InstanceMode:   item.InstanceMode,
+		RuntimeType:    item.RuntimeType,
+		RuntimeVariant: item.RuntimeVariant,
+		Status:         item.Status,
+		Availability:   availability,
+		CreatedAt:      item.CreatedAt,
+		UpdatedAt:      item.UpdatedAt,
+		StartedAt:      item.StartedAt,
 	}
 }
 
