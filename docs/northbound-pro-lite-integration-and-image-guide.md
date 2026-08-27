@@ -23,7 +23,7 @@ clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar
 SHA-256: 0225980fccda0e25eebd140a42150b7556bd09db9fdb96369f7423d9326e5582
 ```
 
-该 TAR 只包含 ClawManager 应用镜像，不包含 OpenClaw、Hermes、OpenCode、DeepSeek Harness、WorkBuddy 等 Runtime 镜像。Runtime 镜像必须提前存在于目标 Registry，或分别导出并导入目标集群节点。
+该 TAR 只包含 ClawManager 应用镜像，不包含 OpenClaw、Hermes、OpenCode、DeepSeek Harness、WorkBuddy 等 Runtime 镜像。本次不提供 Runtime 合并 TAR；部署方应从本文给出的源 Registry 自行拉取、转存或按现场方式导入。
 
 ## 2. 本次北向接口增加的能力
 
@@ -373,16 +373,24 @@ python examples/northbound_client.py list
 
 Lite 实例不会为每个实例单独创建 Runtime Pod，而是进入对应共享 Gateway Pool。因此 Lite 镜像需要落实到集群 Deployment。
 
-当前四个 Pool：
+当前可提供的源 Registry 为 `10.130.15.40:5000`。以下 tag 已通过 Registry 接口确认存在：
 
 | Runtime | Deployment | 建议镜像 |
 |---|---|---|
-| OpenClaw Lite | `openclaw-runtime` | `10.130.14.23:5000/agentsruntime/openclaw-lite:master-20260824-737ad4c` |
-| Hermes Lite | `hermes-runtime` | `10.130.14.23:5000/agentsruntime/hermes-lite:profile-skill-dedupe-20260826-0bf0a76` |
-| OpenCode Lite | `opencode-runtime` | `10.130.14.23:5000/agentsruntime/opencode-lite:master-20260825-987f05d` |
-| DeepSeek Harness Lite | `deepseek-harness-runtime` | `10.130.14.23:5000/agentsruntime/deepseek-harness-lite:master-20260824-737ad4c` |
+| OpenClaw Lite | `openclaw-runtime` | `10.130.15.40:5000/agentsruntime/openclaw-lite:master-20260824-737ad4c` |
+| Hermes Lite | `hermes-runtime` | `10.130.15.40:5000/agentsruntime/hermes-lite:profile-skill-dedupe-20260826-0bf0a76` |
+| OpenCode Lite | `opencode-runtime` | `10.130.15.40:5000/agentsruntime/opencode-lite:master-20260825-987f05d` |
+| DeepSeek Harness Lite | `deepseek-harness-runtime` | `10.130.15.40:5000/agentsruntime/deepseek-harness-lite:master-20260824-737ad4c` |
 
-部署 YAML 必须存在四个 Deployment，且都能挂载 Workspace。仅在管理后台保存 Lite 卡片并不会自动创建缺失的 Pool Deployment。
+部署方必须在自己实际使用的 k3s/Kubernetes 工作负载配置中写入上述 Lite 镜像，并确保四个 Deployment 都存在且能够挂载 Workspace。仅在管理后台保存 Lite 卡片不会自动创建缺失的 Pool Deployment，也不会自动更新正在运行的 Pool。
+
+k3s 注意事项：
+
+- 所有可能运行 Runtime Pod 的节点都必须能访问源 Registry 或部署方自己的目标 Registry。
+- 如果 Registry 使用 HTTP 或内部 CA，需要先完成 k3s Registry 镜像源/信任配置。
+- 多节点集群不能只在一个节点本地导入镜像，除非所有 Runtime 都被固定到该节点。
+- 正式部署应固定本文 tag 或 digest，不要使用浮动的 `latest`。
+- Runtime 桌面镜像解压后体积较大，节点需要预留足够磁盘空间。
 
 更新后检查：
 
@@ -409,14 +417,26 @@ Pro 镜像不再由北向 YAML 写死，也不允许调用方在请求体传入�
 
 为每个 Runtime 保存对应的 Pro/DESKTOP 镜像。
 
-建议配置：
+OpenClaw、Hermes、OpenCode 当前 Lite/Pro 使用相同构建内容。部署方可以从 `10.130.15.40:5000` 拉取对应 Lite tag，再在自己的 Registry 中增加不带 `-lite` 的 Pro tag。建议配置：
 
 | Runtime | `instance_type` | `runtime_type` | `runtime_variant` | 建议镜像 |
 |---|---|---|---|---|
-| OpenClaw Pro | `openclaw` | `desktop` | 空 | `10.130.14.23:5000/agentsruntime/openclaw:master-20260824-737ad4c` |
-| Hermes Pro | `hermes` | `desktop` | 空 | `10.130.14.23:5000/agentsruntime/hermes:profile-skill-dedupe-20260826-0bf0a76` |
-| OpenCode Pro | `opencode` | `desktop` | 空 | `10.130.14.23:5000/agentsruntime/opencode:master-20260825-987f05d` |
-| WorkBuddy Pro | `workbuddy` | `desktop` | `linux` | `10.130.14.23:5000/agentsruntime/workbuddy-linux:2026.8.1` |
+| OpenClaw Pro | `openclaw` | `desktop` | 空 | `<目标Registry>/agentsruntime/openclaw:master-20260824-737ad4c` |
+| Hermes Pro | `hermes` | `desktop` | 空 | `<目标Registry>/agentsruntime/hermes:profile-skill-dedupe-20260826-0bf0a76` |
+| OpenCode Pro | `opencode` | `desktop` | 空 | `<目标Registry>/agentsruntime/opencode:master-20260825-987f05d` |
+| WorkBuddy Pro | `workbuddy` | `desktop` | `linux` | `10.130.15.40:5000/agentsruntime/workbuddy-linux:2026.8.1` 或转存 tag |
+
+转存示例：
+
+```bash
+docker pull 10.130.15.40:5000/agentsruntime/openclaw-lite:master-20260824-737ad4c
+docker tag \
+  10.130.15.40:5000/agentsruntime/openclaw-lite:master-20260824-737ad4c \
+  <目标Registry>/agentsruntime/openclaw:master-20260824-737ad4c
+docker push <目标Registry>/agentsruntime/openclaw:master-20260824-737ad4c
+```
+
+Hermes 和 OpenCode 按相同方式转存。分开命名不是因为镜像内容必须不同，而是为了避免运维时把 Gateway/Lite 与 Desktop/Pro 配置混淆。
 
 后台保存接口：
 
@@ -433,7 +453,7 @@ DELETE /api/v1/system-settings/images/{id-or-instanceType}
   "instance_type": "opencode",
   "runtime_type": "desktop",
   "display_name": "OpenCode Pro",
-  "image": "10.130.14.23:5000/agentsruntime/opencode:master-20260825-987f05d"
+  "image": "<目标Registry>/agentsruntime/opencode:master-20260825-987f05d"
 }
 ```
 
@@ -445,7 +465,7 @@ DELETE /api/v1/system-settings/images/{id-or-instanceType}
   "runtime_type": "desktop",
   "runtime_variant": "linux",
   "display_name": "WorkBuddy Pro",
-  "image": "10.130.14.23:5000/agentsruntime/workbuddy-linux:2026.8.1"
+  "image": "10.130.15.40:5000/agentsruntime/workbuddy-linux:2026.8.1"
 }
 ```
 
@@ -486,41 +506,41 @@ WorkBuddy 当前只使用：
 agentsruntime/workbuddy-linux:<tag>
 ```
 
-## 14. 导入 ClawManager TAR
-
-Docker 导入：
-
-```bash
-docker load -i clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar
-```
+## 14. 在 k3s 中导入 ClawManager TAR
 
 校验：
 
 ```bash
 sha256sum -c clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar.sha256
-docker image inspect   10.130.14.23:5000/clawmanager-hxc-app:northbound-all-pro-20260827-2d3456c
 ```
 
-直接导入 Kubernetes 使用的 containerd：
+导入 k3s 使用的 containerd：
 
 ```bash
-ctr -n k8s.io images import   clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar
+sudo k3s ctr images import \
+  clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar
+
+sudo k3s crictl images | grep clawmanager-hxc-app
 ```
 
-多节点集群中，需要保证可能运行 `clawmanager-app` 和 `clawmanager-northbound-gateway` 的节点都能从 Registry 拉取该镜像；只有完全离线时才需要逐节点导入 TAR。
+多节点集群中，需要保证可能运行 `clawmanager-app` 和 `clawmanager-northbound-gateway` 的节点都能获取该镜像。部署方可以逐节点导入，也可以导入后转存到所有节点可访问的 Registry。
 
-## 15. 更新 ClawManager 应用
+## 15. k3s 部署注意事项
 
-使用部署脚本时显式传入应用镜像：
+部署方应将 ClawManager 应用镜像引用写入自己的 k3s 安装配置，并保证 `clawmanager-app` 与 `clawmanager-northbound-gateway` 使用同一版本。
 
-```bash
-APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:northbound-all-pro-20260827-2d3456c \
-TENANT_SUFFIX=<租户后缀> \
-NODE_PORT=<门户NodePort> \
-bash ./clawmanager-apply.sh
-```
+只导入或替换 ClawManager 应用镜像不会自动补齐以下内容：
 
-北向 Gateway NodePort、CA、JWE、内部 mTLS 和 SSO Secret 仍由部署 YAML/脚本管理。只替换应用镜像不会自动补齐缺失的北向 Deployment、Service 或 Secret。
+- 北向 Gateway Deployment 和 Service。
+- 北向外部 TLS CA/证书。
+- Gateway 与 Core 之间的内部 mTLS。
+- JWE 私钥及北向 JWT/Refresh Token Secret。
+- IEI Owner 门户使用的 SSO Secret。
+- 四个 Lite Runtime Pool。
+- Workspace 和 Pro 持久化存储。
+- 对外端口、防火墙、证书域名及 Runtime 公网 URL 模板。
+
+这些部署要素需要由部署方结合自己的 k3s 安装方式处理。
 
 更新后必须确认应用和 Gateway 使用同一版本镜像：
 
@@ -604,4 +624,3 @@ ShareLink password reset
 logout
 IEI Owner 门户 URL 生成
 ```
-
