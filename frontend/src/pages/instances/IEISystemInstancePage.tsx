@@ -1,5 +1,5 @@
 import axios from "axios";
-import { ArrowLeft, Maximize2, Minimize2, RefreshCw, ShieldAlert } from "lucide-react";
+import { ArrowLeft, Maximize2, Minimize2, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
@@ -22,11 +22,21 @@ function resolveEmbedUrl(url: string) {
   return url;
 }
 
-function errorMessage(error: unknown) {
+function errorMessage(error: unknown, fallback = "无法进入该实例，请稍后重试。") {
   if (axios.isAxiosError(error) && typeof error.response?.data?.error === "string") {
     return error.response.data.error;
   }
-  return "无法进入该实例，请稍后重试。";
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
+
+const restartPollIntervalMs = 2_000;
+const restartTimeoutMs = 180_000;
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 export default function IEISystemInstancePage() {
@@ -39,6 +49,17 @@ export default function IEISystemInstancePage() {
   const [error, setError] = useState<string | null>(null);
   const [frameVersion, setFrameVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
+  const [restartInProgress, setRestartInProgress] = useState(false);
+  const [restartNotice, setRestartNotice] = useState<string | null>(null);
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const openInstance = useCallback(async () => {
     if (!Number.isInteger(instanceID) || instanceID <= 0) {
@@ -118,6 +139,53 @@ export default function IEISystemInstancePage() {
     else void element.requestFullscreen().catch(() => undefined);
   };
 
+  const waitForRestartRecovery = useCallback(async () => {
+    const deadline = Date.now() + restartTimeoutMs;
+    while (Date.now() < deadline) {
+      await wait(restartPollIntervalMs);
+      if (!mountedRef.current) return;
+
+      const nextInstance = await ieiSystemService.getInstance(instanceID);
+      if (!mountedRef.current) return;
+      setInstance(nextInstance);
+
+      const status = nextInstance.status.trim().toLowerCase();
+      if (status === "running") {
+        const nextAccess = await ieiSystemService.generateAccess(instanceID);
+        if (!mountedRef.current) return;
+        setAccess(nextAccess);
+        setFrameVersion((version) => version + 1);
+        return;
+      }
+      if (status === "failed" || status === "stopped" || status === "deleting") {
+        throw new Error("实例未能恢复到运行状态。");
+      }
+    }
+    throw new Error("实例仍在重启，请稍后点击刷新访问。");
+  }, [instanceID]);
+
+  const handleRestart = async () => {
+    if (!instance || restartInProgress) return;
+    setRestartDialogOpen(false);
+    setRestartInProgress(true);
+    setRestartError(null);
+    setRestartNotice("正在重启实例，服务会短暂中断，恢复后将自动重新连接。");
+    try {
+      await ieiSystemService.restartInstance(instance.id);
+      await waitForRestartRecovery();
+      if (mountedRef.current) {
+        setRestartNotice("实例已完成重启并重新连接。");
+      }
+    } catch (restartFailure) {
+      if (mountedRef.current) {
+        setRestartNotice(null);
+        setRestartError(errorMessage(restartFailure, "实例重启失败，请稍后重试。"));
+      }
+    } finally {
+      if (mountedRef.current) setRestartInProgress(false);
+    }
+  };
+
   if (loading && !access) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-600">
@@ -160,16 +228,46 @@ export default function IEISystemInstancePage() {
             <p className="text-xs text-slate-500">浪潮信息安全访问 · {instance.owner}</p>
           </div>
         </div>
-        <span className="inline-flex shrink-0 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-          <span className="h-2 w-2 rounded-full bg-emerald-400" />
-          已验证
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            className="app-button-secondary"
+            disabled={restartInProgress || loading || instance.status.trim().toLowerCase() !== "running"}
+            onClick={() => {
+              setRestartError(null);
+              setRestartDialogOpen(true);
+            }}
+          >
+            <RotateCw className={`h-4 w-4 ${restartInProgress ? "animate-spin" : ""}`} />
+            {restartInProgress ? "正在重启" : "重启实例"}
+          </button>
+          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+            <span className="h-2 w-2 rounded-full bg-emerald-400" />
+            已验证
+          </span>
+        </div>
       </header>
+
+      {(restartNotice || restartError) && (
+        <div
+          className={`shrink-0 border-b px-4 py-2 text-sm ${
+            restartError
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-amber-200 bg-amber-50 text-amber-800"
+          }`}
+          role="status"
+        >
+          <div className="flex items-center gap-2">
+            <RotateCw className={`h-4 w-4 shrink-0 ${restartInProgress ? "animate-spin" : ""}`} />
+            <span>{restartError ?? restartNotice}</span>
+          </div>
+        </div>
+      )}
 
       <section className="grid min-h-0 flex-1 gap-4 p-4 max-xl:grid-rows-[minmax(420px,1fr)_minmax(360px,0.8fr)] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]">
         <section
           ref={frameContainerRef}
-          className="cm-surface flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
+          className="cm-surface relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
           style={isFullscreen ? { height: "100vh", width: "100vw", borderRadius: 0 } : undefined}
         >
           <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 px-3">
@@ -183,6 +281,15 @@ export default function IEISystemInstancePage() {
               </button>
             </div>
           </div>
+          {restartInProgress && (
+            <div className="absolute inset-x-0 bottom-0 top-12 z-20 flex items-center justify-center bg-white/95 px-6 text-center backdrop-blur-sm">
+              <div>
+                <RotateCw className="mx-auto h-8 w-8 animate-spin text-blue-600" />
+                <p className="mt-4 text-base font-semibold text-slate-950">实例正在重启</p>
+                <p className="mt-1 text-sm leading-6 text-slate-600">恢复运行后将自动重新连接，无需刷新页面。</p>
+              </div>
+            </div>
+          )}
           {frameSrc ? (
             <iframe
               key={`${frameSrc}:${frameVersion}`}
@@ -235,6 +342,30 @@ export default function IEISystemInstancePage() {
           </section>
         )}
       </section>
+
+      {restartDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="presentation">
+          <section
+            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="iei-restart-title"
+          >
+            <h2 id="iei-restart-title" className="text-lg font-semibold text-slate-950">确认重启实例？</h2>
+            <p className="mt-3 text-sm leading-6 text-slate-600">
+              重启期间实例会暂时不可访问，当前运行中的任务和会话可能中断；工作区及持久化数据不会删除。
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" className="app-button-secondary" onClick={() => setRestartDialogOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="app-button-primary" onClick={() => void handleRestart()}>
+                <RotateCw className="h-4 w-4" /> 确认重启
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

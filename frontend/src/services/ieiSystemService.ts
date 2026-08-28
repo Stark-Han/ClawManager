@@ -38,6 +38,11 @@ export interface IEISystemInstanceAccess {
   workspace_root: string;
 }
 
+export interface IEISystemRestartResult {
+  instance_id: number;
+  status: "restarting" | string;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 const ieiAPI = axios.create({
@@ -69,6 +74,11 @@ export const ieiSystemService = {
   async getInstance(id: number): Promise<IEISystemInstance> {
     const response = await ieiAPI.get(`/instances/${id}`);
     return response.data.data.instance;
+  },
+
+  async restartInstance(id: number): Promise<IEISystemRestartResult> {
+    const response = await ieiAPI.post(`/instances/${id}/restart`);
+    return response.data.data;
   },
 
   async generateAccess(id: number): Promise<IEISystemInstanceAccess> {

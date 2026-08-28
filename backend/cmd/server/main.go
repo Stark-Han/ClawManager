@@ -391,6 +391,7 @@ func main() {
 			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
 			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
+			ieiSystem.POST("/instances/:id/restart", ieiSystemHandler.RestartInstance)
 			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
 			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
 			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)
