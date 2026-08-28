@@ -12,12 +12,14 @@ import {
 import { teamService } from "../../services/teamService";
 import {
   formatInstanceType,
+  INSTANCE_TYPES,
   type Instance,
   type InstanceAvailability,
 } from "../../types/instance";
 import type { Team, TeamMember } from "../../types/team";
 
 type AvailabilityFilter = "all" | InstanceAvailability;
+type ModeFilter = "all" | Instance["instance_mode"];
 type TeamMembership = {
   team: Team;
   member: TeamMember;
@@ -44,20 +46,6 @@ const sortInstances = (items: Instance[]) =>
   [...items].sort(
     (left, right) => instanceTimeValue(right) - instanceTimeValue(left) || right.id - left.id,
   );
-
-const loadAllInstances = async () => {
-  const firstPage = await instanceService.getInstances(1, INSTANCE_LIST_PAGE_SIZE);
-  const instances = [...(firstPage.instances || [])];
-  const total = firstPage.total || instances.length;
-  const totalPages = Math.ceil(total / INSTANCE_LIST_PAGE_SIZE);
-
-  for (let page = 2; page <= totalPages; page += 1) {
-    const nextPage = await instanceService.getInstances(page, INSTANCE_LIST_PAGE_SIZE);
-    instances.push(...(nextPage.instances || []));
-  }
-
-  return sortInstances(instances);
-};
 
 const loadAllTeams = async () => {
   const firstPage = await teamService.listTeams(1, TEAM_LIST_PAGE_SIZE);
@@ -183,7 +171,12 @@ const InstanceListPage: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null);
   const [availabilityFilter, setAvailabilityFilter] = useState<AvailabilityFilter>("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [selectedLiteIds, setSelectedLiteIds] = useState<number[]>([]);
   const [batchCreateOpen, setBatchCreateOpen] = useState(false);
   const [batchCreatePrefix, setBatchCreatePrefix] = useState("lite-openclaw");
@@ -215,8 +208,17 @@ const InstanceListPage: React.FC = () => {
           setLoading(true);
         }
         setError(null);
-        const data = await loadAllInstances();
-        setInstances(data);
+        const data = await instanceService.getInstances(page, INSTANCE_LIST_PAGE_SIZE, {
+          query: debouncedSearchQuery.trim() || undefined,
+          type: typeFilter === "all" ? undefined : typeFilter,
+          instance_mode: modeFilter === "all" ? undefined : modeFilter,
+          availability: availabilityFilter === "all" ? undefined : availabilityFilter,
+        });
+        setInstances(sortInstances(data.instances || []));
+        setTotal(data.total || 0);
+        if ((data.instances || []).length === 0 && data.total > 0 && page > 1) {
+          setPage(Math.max(1, Math.ceil(data.total / INSTANCE_LIST_PAGE_SIZE)));
+        }
         if (options?.refreshTeams !== false) {
           void refreshTeamMemberships();
         }
@@ -228,12 +230,19 @@ const InstanceListPage: React.FC = () => {
         }
       }
     },
-    [refreshTeamMemberships, t],
+    [availabilityFilter, debouncedSearchQuery, modeFilter, page, refreshTeamMemberships, t, typeFilter],
   );
 
   useEffect(() => {
     void loadInstances();
   }, [loadInstances]);
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setPage(1);
+      setDebouncedSearchQuery(searchQuery);
+    }, 250);
+    return () => window.clearTimeout(timeoutId);
+  }, [searchQuery]);
   useEffect(() => {
     let cancelled = false;
     systemSettingsService
@@ -263,35 +272,32 @@ const InstanceListPage: React.FC = () => {
     return () => window.clearInterval(intervalId);
   }, [instances, loadInstances]);
 
-  const filteredInstances = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    return instances.filter((instance) => {
-      const availability = availabilityForStatus(instance.status);
-      if (availabilityFilter !== "all" && availability !== availabilityFilter) {
-        return false;
-      }
-      if (!query) {
-        return true;
-      }
-      return (
-        instance.name.toLowerCase().includes(query) ||
-        formatInstanceType(instance.type).toLowerCase().includes(query) ||
-        instance.instance_mode.toLowerCase().includes(query) ||
-        modeLabel(instance.instance_mode).toLowerCase().includes(query) ||
-        (teamMemberships.get(instance.id) || []).some(({ team, member }) =>
-          [
-            team.name,
-            member.display_name,
-            member.member_key,
-            member.role,
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(query),
-        )
-      );
-    });
-  }, [availabilityFilter, instances, searchQuery, teamMemberships]);
+  const filteredInstances = instances;
+  const typeOptions = useMemo(() => {
+    const values = new Set(INSTANCE_TYPES.map((item) => item.id));
+    runtimeImageSettings.forEach((item) => values.add(item.instance_type));
+    instances.forEach((instance) => values.add(instance.type));
+    return Array.from(values).sort((left, right) =>
+      formatInstanceType(left).localeCompare(formatInstanceType(right), locale),
+    );
+  }, [instances, locale, runtimeImageSettings]);
+  const totalPages = Math.max(1, Math.ceil(total / INSTANCE_LIST_PAGE_SIZE));
+  const resultFrom = total === 0 ? 0 : (page - 1) * INSTANCE_LIST_PAGE_SIZE + 1;
+  const resultTo = total === 0 ? 0 : Math.min(page * INSTANCE_LIST_PAGE_SIZE, total);
+  const filtersActive =
+    searchQuery.trim() !== "" ||
+    typeFilter !== "all" ||
+    modeFilter !== "all" ||
+    availabilityFilter !== "all";
+
+  const clearFilters = useCallback(() => {
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+    setTypeFilter("all");
+    setModeFilter("all");
+    setAvailabilityFilter("all");
+    setPage(1);
+  }, []);
 
   const batchRuntimeImageOptions = useMemo(
     () =>
@@ -670,7 +676,7 @@ const InstanceListPage: React.FC = () => {
           </Link>
         </div>
 
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex flex-col gap-2 xl:flex-row xl:flex-wrap xl:justify-end">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
             <input
@@ -682,17 +688,69 @@ const InstanceListPage: React.FC = () => {
             />
           </div>
           <select
-            value={availabilityFilter}
-            onChange={(event) => setAvailabilityFilter(event.target.value as AvailabilityFilter)}
+            value={typeFilter}
+            onChange={(event) => {
+              setTypeFilter(event.target.value);
+              setPage(1);
+            }}
             className="app-input"
+            aria-label={t("instances.instanceTypeFilter")}
           >
-            <option value="all">All</option>
+            <option value="all">{t("instances.allTypes")}</option>
+            {typeOptions.map((type) => (
+              <option key={type} value={type}>
+                {formatInstanceType(type)}
+              </option>
+            ))}
+          </select>
+          <select
+            value={modeFilter}
+            onChange={(event) => {
+              setModeFilter(event.target.value as ModeFilter);
+              setPage(1);
+            }}
+            className="app-input"
+            aria-label={t("instances.instanceModeFilter")}
+          >
+            <option value="all">{t("instances.allModes")}</option>
+            <option value="lite">Lite</option>
+            <option value="pro">Pro</option>
+          </select>
+          <select
+            value={availabilityFilter}
+            onChange={(event) => {
+              setAvailabilityFilter(event.target.value as AvailabilityFilter);
+              setPage(1);
+            }}
+            className="app-input"
+            aria-label={t("instances.availabilityFilter")}
+          >
+            <option value="all">{t("instances.allAvailability")}</option>
             <option value="available">Available</option>
             <option value="starting">Starting</option>
             <option value="unavailable">Unavailable</option>
           </select>
+          {filtersActive ? (
+            <button type="button" onClick={clearFilters} className="app-button-secondary">
+              {t("instances.clearFilters")}
+            </button>
+          ) : null}
         </div>
       </div>
+
+      {!loading && !error && total > 0 ? (
+        <div className="flex items-center justify-between text-xs text-slate-500">
+          <span>
+            {t("instances.showingResults", {
+              filtered: `${resultFrom}-${resultTo}`,
+              total,
+            })}
+          </span>
+          <span>
+            {t("instances.pageOf", { page, totalPages })}
+          </span>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="flex h-64 items-center justify-center text-sm text-slate-500">
@@ -702,7 +760,7 @@ const InstanceListPage: React.FC = () => {
         <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
-      ) : instances.length === 0 ? (
+      ) : instances.length === 0 && !filtersActive ? (
         <div className="cm-surface p-10 text-center">
           <h3 className="text-sm font-medium text-slate-950">{t("instances.noInstances")}</h3>
           <div className="mt-5">
@@ -784,7 +842,11 @@ const InstanceListPage: React.FC = () => {
                         {instance.name}
                       </Link>
                       <div className="mt-1 truncate text-xs text-slate-500">
-                        {instance.description || "-"} / {instance.updated_at ? new Date(instance.updated_at).toLocaleString(locale) : "-"}
+                        {t("instances.createdAt", {
+                          time: instance.created_at
+                            ? new Date(instance.created_at).toLocaleString(locale)
+                            : "-",
+                        })}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-slate-600">
@@ -880,6 +942,26 @@ const InstanceListPage: React.FC = () => {
               })}
             </tbody>
           </table>
+          {totalPages > 1 ? (
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                disabled={page <= 1}
+                className="app-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t("instances.previous")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                disabled={page >= totalPages}
+                className="app-button-secondary disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t("instances.nextPage")}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </UserLayout>

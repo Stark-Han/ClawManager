@@ -58,6 +58,13 @@ type IEISystemInstanceService interface {
 	GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error)
 }
 
+// InstanceQueryService exposes filtered caller-scoped listing and dashboard
+// aggregation without widening the lifecycle-oriented InstanceService.
+type InstanceQueryService interface {
+	GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error)
+	GetSummaryByUserID(userID int) (*models.InstanceSummary, error)
+}
+
 func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error {
 	if len(requests) == 0 {
 		return nil
@@ -1011,6 +1018,31 @@ func (s *instanceService) GetByUserID(userID int, offset, limit int) ([]models.I
 	}
 
 	return instances, total, nil
+}
+
+func (s *instanceService) GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support filtered queries")
+	}
+	instances, err := repo.GetFilteredByUserID(userID, filter, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountFilteredByUserID(userID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+func (s *instanceService) GetSummaryByUserID(userID int) (*models.InstanceSummary, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, fmt.Errorf("instance repository does not support summary queries")
+	}
+	return repo.SummarizeByUserID(userID)
 }
 
 // GetLiteByUserIDAndOwner returns only the caller's Lite instances whose owner

@@ -303,6 +303,23 @@ export interface InstanceListResponse {
   limit: number;
 }
 
+export interface InstanceListFilters {
+  query?: string;
+  type?: string;
+  instance_mode?: "lite" | "pro";
+  availability?: InstanceAvailability;
+}
+
+export interface InstanceSummary {
+  total: number;
+  running: number;
+  creating: number;
+  stopped: number;
+  error: number;
+  deleting: number;
+  allocated_storage_gb: number;
+}
+
 export interface InstanceType {
   id: string;
   name: string;

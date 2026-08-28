@@ -306,9 +306,13 @@ type RestartInstanceRequest struct {
 
 // ListInstancesRequest represents a list instances request
 type ListInstancesRequest struct {
-	Page   int    `form:"page,default=1"`
-	Limit  int    `form:"limit,default=20"`
-	Status string `form:"status,omitempty"`
+	Page         int    `form:"page,default=1"`
+	Limit        int    `form:"limit,default=20"`
+	Query        string `form:"query,omitempty"`
+	Type         string `form:"type,omitempty"`
+	InstanceMode string `form:"instance_mode,omitempty"`
+	Availability string `form:"availability,omitempty"`
+	Status       string `form:"status,omitempty"`
 }
 
 // ListInstances lists instances owned by the current user (workspace view).
@@ -325,11 +329,42 @@ func (h *InstanceHandler) ListInstances(c *gin.Context) {
 		utils.ValidationError(c, err)
 		return
 	}
+	if req.Page < 1 {
+		req.Page = 1
+	}
+	if req.Limit < 1 {
+		req.Limit = 20
+	}
+	if req.Limit > 100 {
+		req.Limit = 100
+	}
+	if mode := strings.ToLower(strings.TrimSpace(req.InstanceMode)); mode != "" && mode != services.InstanceModeLite && mode != services.InstanceModePro {
+		utils.ValidationError(c, fmt.Errorf("instance_mode must be lite or pro"))
+		return
+	}
+	if availability := strings.ToLower(strings.TrimSpace(req.Availability)); availability != "" && availability != "available" && availability != "starting" && availability != "unavailable" {
+		utils.ValidationError(c, fmt.Errorf("availability must be available, starting, or unavailable"))
+		return
+	}
 
 	// Calculate offset
 	offset := (req.Page - 1) * req.Limit
 
-	instances, total, err := h.instanceService.GetByUserID(userID.(int), offset, req.Limit)
+	queryService, supportsQuery := h.instanceService.(services.InstanceQueryService)
+	var instances []models.Instance
+	var total int
+	var err error
+	if supportsQuery {
+		instances, total, err = queryService.GetFilteredByUserID(userID.(int), models.InstanceListFilter{
+			Query:        req.Query,
+			Type:         req.Type,
+			InstanceMode: req.InstanceMode,
+			Availability: req.Availability,
+			Status:       req.Status,
+		}, offset, req.Limit)
+	} else {
+		instances, total, err = h.instanceService.GetByUserID(userID.(int), offset, req.Limit)
+	}
 	if err != nil {
 		utils.HandleError(c, err)
 		return
@@ -343,6 +378,22 @@ func (h *InstanceHandler) ListInstances(c *gin.Context) {
 	}
 
 	utils.Success(c, http.StatusOK, "Instances retrieved successfully", response)
+}
+
+// GetInstanceSummary returns aggregate instance counts for the current user.
+func (h *InstanceHandler) GetInstanceSummary(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	queryService, ok := h.instanceService.(services.InstanceQueryService)
+	if !ok {
+		utils.HandleError(c, fmt.Errorf("instance summary is not supported"))
+		return
+	}
+	summary, err := queryService.GetSummaryByUserID(userID.(int))
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "Instance summary retrieved successfully", summary)
 }
 
 // ListAllInstances lists every instance across all users (admin console view).

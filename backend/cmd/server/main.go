@@ -463,6 +463,7 @@ func main() {
 		instances.Use(middleware.SetUserInfo(userRepo))
 		{
 			instances.GET("", instanceHandler.ListInstances)
+			instances.GET("/summary", instanceHandler.GetInstanceSummary)
 			instances.POST("", instanceHandler.CreateInstance)
 			instances.POST("/batch/lite", instanceHandler.BatchCreateLiteInstances)
 			instances.POST("/batch/delete", instanceHandler.BatchDeleteLiteInstances)

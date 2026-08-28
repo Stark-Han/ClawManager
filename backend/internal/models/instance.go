@@ -49,6 +49,29 @@ type Instance struct {
 	StoppedAt                *time.Time `db:"stopped_at" json:"stopped_at,omitempty"`
 }
 
+// InstanceListFilter contains the caller-scoped filters supported by the
+// workspace instance list. Empty fields do not restrict the query.
+type InstanceListFilter struct {
+	Query        string
+	Type         string
+	InstanceMode string
+	Availability string
+	Status       string
+}
+
+// InstanceSummary is the aggregate instance data used by the user dashboard.
+// AllocatedStorageGB reflects configured instance capacity, not measured
+// workspace filesystem usage.
+type InstanceSummary struct {
+	Total              int   `json:"total"`
+	Running            int   `json:"running"`
+	Creating           int   `json:"creating"`
+	Stopped            int   `json:"stopped"`
+	Error              int   `json:"error"`
+	Deleting           int   `json:"deleting"`
+	AllocatedStorageGB int64 `json:"allocated_storage_gb"`
+}
+
 // TableName returns the table name for the Instance model
 func (i Instance) TableName() string {
 	return "instances"
