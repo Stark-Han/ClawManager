@@ -1015,6 +1015,9 @@ func TestBuildLiteBatchCreateRequestsDefaultsToGatewayLite(t *testing.T) {
 		if req.Type != "openclaw" || req.OSType != "openclaw" || req.OSVersion != "latest" {
 			t.Fatalf("request %d defaults = type %q os %q version %q", idx, req.Type, req.OSType, req.OSVersion)
 		}
+		if req.DiskGB != services.DefaultLiteDiskGB {
+			t.Fatalf("request %d disk = %dGiB, want %dGiB", idx, req.DiskGB, services.DefaultLiteDiskGB)
+		}
 	}
 }
 

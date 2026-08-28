@@ -126,6 +126,9 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 		if request.Type != instanceType || request.InstanceMode != services.InstanceModeLite || request.RuntimeType != services.RuntimeBackendGateway {
 			t.Fatalf("unexpected %s Lite request: %+v", instanceType, request)
 		}
+		if request.DiskGB != services.DefaultLiteDiskGB {
+			t.Fatalf("%s Lite disk = %dGiB, want %dGiB", instanceType, request.DiskGB, services.DefaultLiteDiskGB)
+		}
 	}
 	if !isSupportedNorthboundType("workbuddy") {
 		t.Fatal("workbuddy must be accepted by the unified northbound contract")

@@ -670,7 +670,7 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 		RuntimeType:             services.RuntimeBackendGateway,
 		CPUCores:                2,
 		MemoryGB:                4,
-		DiskGB:                  20,
+		DiskGB:                  services.DefaultLiteDiskGB,
 		GPUEnabled:              false,
 		GPUCount:                0,
 		OSType:                  request.Type,

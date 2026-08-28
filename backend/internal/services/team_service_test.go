@@ -261,6 +261,9 @@ func TestBuildTeamMemberInstanceRequestSupportsLiteMode(t *testing.T) {
 	if req.RuntimeType != RuntimeBackendGateway {
 		t.Fatalf("expected lite Team member to target gateway runtime, got %q", req.RuntimeType)
 	}
+	if req.DiskGB != DefaultLiteDiskGB {
+		t.Fatalf("expected Lite Team member disk to default to %dGiB, got %dGiB", DefaultLiteDiskGB, req.DiskGB)
+	}
 
 	rosterJSON := `{"teamId":"8","members":[{"memberId":"lite-worker"}]}`
 	liteReq := service.buildTeamMemberInstanceRequestWithSecrets(team, memberPlan, &teamRuntimeSecrets{
@@ -273,6 +276,22 @@ func TestBuildTeamMemberInstanceRequestSupportsLiteMode(t *testing.T) {
 	}
 	if liteReq.EnvironmentOverrides["CLAWMANAGER_TEAM_CONFIG_JSON"] != rosterJSON {
 		t.Fatalf("Lite Team roster JSON should preserve upstream logical sharedDir contract, got %#v", liteReq.EnvironmentOverrides)
+	}
+}
+
+func TestBuildTeamMemberInstanceRequestKeepsProDiskDefault(t *testing.T) {
+	service := &teamService{}
+	req := service.buildTeamMemberInstanceRequest(&models.Team{Name: "Pro Team"}, plannedTeamMember{
+		MemberKey:    "pro-worker",
+		RuntimeType:  "openclaw",
+		InstanceMode: InstanceModePro,
+	})
+
+	if req.InstanceMode != InstanceModePro || req.RuntimeType != RuntimeBackendDesktop {
+		t.Fatalf("expected Pro desktop request, got mode=%q runtime=%q", req.InstanceMode, req.RuntimeType)
+	}
+	if req.DiskGB != 20 {
+		t.Fatalf("expected existing Pro disk default to remain 20GiB, got %dGiB", req.DiskGB)
 	}
 }
 

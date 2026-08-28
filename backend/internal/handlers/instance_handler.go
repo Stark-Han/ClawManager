@@ -655,7 +655,7 @@ func buildLiteBatchCreateRequests(req BatchCreateLiteInstancesRequest) ([]servic
 		template.MemoryGB = 4
 	}
 	if template.DiskGB <= 0 {
-		template.DiskGB = 20
+		template.DiskGB = services.DefaultLiteDiskGB
 	}
 	if strings.TrimSpace(template.OSType) == "" {
 		template.OSType = template.Type

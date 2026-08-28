@@ -528,3 +528,5 @@ export const PRESET_CONFIGS = {
     description: "For heavy workloads",
   },
 };
+
+export const DEFAULT_LITE_DISK_GB = 10;
