@@ -12,6 +12,21 @@ import (
 	"clawreef/internal/models"
 )
 
+func TestValidateCreateInstanceDiskGBUsesModeSpecificMinimum(t *testing.T) {
+	if err := validateCreateInstanceDiskGB(CreateInstanceRequest{DiskGB: DefaultLiteDiskGB}, InstanceModeLite); err != nil {
+		t.Fatalf("Lite %dGiB disk should be accepted: %v", DefaultLiteDiskGB, err)
+	}
+	if err := validateCreateInstanceDiskGB(CreateInstanceRequest{DiskGB: DefaultLiteDiskGB - 1}, InstanceModeLite); err == nil {
+		t.Fatalf("Lite disk below %dGiB should be rejected", DefaultLiteDiskGB)
+	}
+	if err := validateCreateInstanceDiskGB(CreateInstanceRequest{DiskGB: MinimumProDiskGB}, InstanceModePro); err != nil {
+		t.Fatalf("Pro %dGiB disk should be accepted: %v", MinimumProDiskGB, err)
+	}
+	if err := validateCreateInstanceDiskGB(CreateInstanceRequest{DiskGB: DefaultLiteDiskGB}, InstanceModePro); err == nil {
+		t.Fatalf("Pro disk below %dGiB should be rejected", MinimumProDiskGB)
+	}
+}
+
 func TestInstanceServiceCreateV2CreatesWorkspaceOnly(t *testing.T) {
 	workspaceRoot := strings.ReplaceAll(t.TempDir(), "\\", "/")
 	instanceRepo := newV2LifecycleInstanceRepo()
@@ -1022,9 +1037,9 @@ func TestValidateCreateRequestsChecksAggregateModeCapacity(t *testing.T) {
 	}
 
 	err := service.ValidateCreateRequests(45, []CreateInstanceRequest{
-		{Name: "batch-lite-001", Mode: InstanceModeLite},
-		{Name: "batch-lite-002", Mode: InstanceModeLite},
-		{Name: "batch-lite-003", Mode: InstanceModeLite},
+		{Name: "batch-lite-001", Mode: InstanceModeLite, DiskGB: DefaultLiteDiskGB},
+		{Name: "batch-lite-002", Mode: InstanceModeLite, DiskGB: DefaultLiteDiskGB},
+		{Name: "batch-lite-003", Mode: InstanceModeLite, DiskGB: DefaultLiteDiskGB},
 	})
 	if err == nil || !strings.Contains(err.Error(), "lite instance capacity reached: 4/3") {
 		t.Fatalf("aggregate capacity error = %v", err)

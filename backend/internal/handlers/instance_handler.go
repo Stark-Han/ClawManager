@@ -222,7 +222,7 @@ type CreateInstanceRequest struct {
 	DesktopStreamProfile string                       `json:"desktop_stream_profile,omitempty" binding:"omitempty,oneof=low standard high"`
 	CPUCores             float64                      `json:"cpu_cores" binding:"required,min=0.1,max=32"`
 	MemoryGB             int                          `json:"memory_gb" binding:"required,min=1,max=128"`
-	DiskGB               int                          `json:"disk_gb" binding:"required,min=10,max=1000"`
+	DiskGB               int                          `json:"disk_gb" binding:"required,min=5,max=1000"`
 	GPUEnabled           bool                         `json:"gpu_enabled"`
 	GPUCount             int                          `json:"gpu_count" binding:"min=0,max=4"`
 	OSType               string                       `json:"os_type" binding:"required"`

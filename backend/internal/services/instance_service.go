@@ -90,6 +90,9 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 		if err := validateWindowsWorkbuddyRequest(requests[idx]); err != nil {
 			return err
 		}
+		if err := validateCreateInstanceDiskGB(requests[idx], resolveCreateInstanceMode(requests[idx])); err != nil {
+			return err
+		}
 	}
 
 	quota, err := s.quotaRepo.GetByUserID(userID)
@@ -205,7 +208,7 @@ type CreateInstanceRequest struct {
 	DesktopStreamProfile    string              `json:"desktop_stream_profile,omitempty" validate:"omitempty,oneof=low standard high"`
 	CPUCores                float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB                int                 `json:"memory_gb" validate:"required,min=1,max=128"`
-	DiskGB                  int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
+	DiskGB                  int                 `json:"disk_gb" validate:"required,min=5,max=1000"`
 	GPUEnabled              bool                `json:"gpu_enabled"`
 	GPUCount                int                 `json:"gpu_count" validate:"min=0,max=4"`
 	OSType                  string              `json:"os_type" validate:"required"`
@@ -406,6 +409,9 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	}
 
 	instanceMode := resolveCreateInstanceMode(req)
+	if err := validateCreateInstanceDiskGB(req, instanceMode); err != nil {
+		return nil, err
+	}
 	if err := validateWindowsWorkbuddyRequest(req); err != nil {
 		return nil, err
 	}
@@ -3040,6 +3046,24 @@ func modeForExistingInstance(instance *models.Instance) string {
 func instanceModeUsesDedicatedResources(mode string) bool {
 	normalized, ok := NormalizeInstanceMode(mode)
 	return ok && normalized == InstanceModePro
+}
+
+func validateCreateInstanceDiskGB(req CreateInstanceRequest, mode string) error {
+	normalizedMode, ok := NormalizeInstanceMode(mode)
+	if !ok {
+		return fmt.Errorf("unsupported instance mode %q", mode)
+	}
+	minimum := DefaultLiteDiskGB
+	if normalizedMode == InstanceModePro {
+		minimum = MinimumProDiskGB
+	}
+	if req.DiskGB < minimum {
+		return fmt.Errorf("%s disk must be at least %dGB", normalizedMode, minimum)
+	}
+	if req.DiskGB > 1000 {
+		return fmt.Errorf("disk must not exceed 1000GB")
+	}
+	return nil
 }
 
 func (s *instanceService) enforceInstanceModeLimits(ctx context.Context, mode string, cpuCores float64, memoryGB, storageGB, gpuCount int) error {
