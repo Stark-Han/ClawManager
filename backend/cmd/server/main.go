@@ -391,6 +391,7 @@ func main() {
 			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
 			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
+			ieiSystem.POST("/instances/:id/restart", ieiSystemHandler.RestartInstance)
 			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
 			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
 			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)
@@ -462,6 +463,7 @@ func main() {
 		instances.Use(middleware.SetUserInfo(userRepo))
 		{
 			instances.GET("", instanceHandler.ListInstances)
+			instances.GET("/summary", instanceHandler.GetInstanceSummary)
 			instances.POST("", instanceHandler.CreateInstance)
 			instances.POST("/batch/lite", instanceHandler.BatchCreateLiteInstances)
 			instances.POST("/batch/delete", instanceHandler.BatchDeleteLiteInstances)

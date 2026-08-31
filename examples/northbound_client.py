@@ -80,8 +80,16 @@ def env_positive_int(name: str, fallback: int) -> int:
     return value if value > 0 else fallback
 
 
-def instance_collection_path() -> str:
-    """Return the stable collection path for every supported runtime."""
+def instance_collection_path(instance_type: str = "", instance_mode: str = "") -> str:
+    """Resolve the collection without exposing mode in the request body."""
+    normalized_type = instance_type.strip().lower()
+    normalized_mode = (instance_mode or os.getenv("NORTHBOUND_INSTANCE_MODE", "lite")).strip().lower()
+    if normalized_type == "workbuddy":
+        return "/lite-instances"
+    if normalized_mode == "pro":
+        return "/pro-instances"
+    if normalized_mode != "lite":
+        raise ValueError("NORTHBOUND_INSTANCE_MODE must be lite or pro")
     return "/lite-instances"
 
 
@@ -486,7 +494,7 @@ def run(command: str) -> None:
         )
         operation, headers = client.authenticated_request(
             "POST",
-            instance_collection_path(),
+            instance_collection_path(instance_type),
             body=payload,
             headers={"Idempotency-Key": idempotency_key},
         )

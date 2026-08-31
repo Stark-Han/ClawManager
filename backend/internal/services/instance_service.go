@@ -48,6 +48,7 @@ type InstanceService interface {
 type InstanceOwnerService interface {
 	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
+	GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 }
 
@@ -55,6 +56,13 @@ type InstanceOwnerService interface {
 // view after an IEI SSO session has been validated.
 type IEISystemInstanceService interface {
 	GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error)
+}
+
+// InstanceQueryService exposes filtered caller-scoped listing and dashboard
+// aggregation without widening the lifecycle-oriented InstanceService.
+type InstanceQueryService interface {
+	GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error)
+	GetSummaryByUserID(userID int) (*models.InstanceSummary, error)
 }
 
 func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error {
@@ -80,6 +88,9 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 			return fmt.Errorf("invalid desktop stream profile")
 		}
 		if err := validateWindowsWorkbuddyRequest(requests[idx]); err != nil {
+			return err
+		}
+		if err := validateCreateInstanceDiskGB(requests[idx], resolveCreateInstanceMode(requests[idx])); err != nil {
 			return err
 		}
 	}
@@ -197,7 +208,7 @@ type CreateInstanceRequest struct {
 	DesktopStreamProfile    string              `json:"desktop_stream_profile,omitempty" validate:"omitempty,oneof=low standard high"`
 	CPUCores                float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB                int                 `json:"memory_gb" validate:"required,min=1,max=128"`
-	DiskGB                  int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
+	DiskGB                  int                 `json:"disk_gb" validate:"required,min=5,max=1000"`
 	GPUEnabled              bool                `json:"gpu_enabled"`
 	GPUCount                int                 `json:"gpu_count" validate:"min=0,max=4"`
 	OSType                  string              `json:"os_type" validate:"required"`
@@ -398,6 +409,9 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	}
 
 	instanceMode := resolveCreateInstanceMode(req)
+	if err := validateCreateInstanceDiskGB(req, instanceMode); err != nil {
+		return nil, err
+	}
 	if err := validateWindowsWorkbuddyRequest(req); err != nil {
 		return nil, err
 	}
@@ -502,7 +516,11 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 		runtimeType = modeRuntimeType
 	}
 	if (req.ImageRegistry == nil || strings.TrimSpace(*req.ImageRegistry) == "") && (req.ImageTag == nil || strings.TrimSpace(*req.ImageTag) == "") {
-		if selection, ok := runtimeImageOverride(req.Type); ok {
+		selection, ok := runtimeImageOverride(req.Type)
+		if modeRuntimeType != "" {
+			selection, ok = RuntimeImageForBackend(req.Type, modeRuntimeType)
+		}
+		if ok {
 			image := selection.Image
 			req.ImageRegistry = &image
 			req.ImageTag = nil
@@ -1008,6 +1026,31 @@ func (s *instanceService) GetByUserID(userID int, offset, limit int) ([]models.I
 	return instances, total, nil
 }
 
+func (s *instanceService) GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support filtered queries")
+	}
+	instances, err := repo.GetFilteredByUserID(userID, filter, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountFilteredByUserID(userID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+func (s *instanceService) GetSummaryByUserID(userID int) (*models.InstanceSummary, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, fmt.Errorf("instance repository does not support summary queries")
+	}
+	return repo.SummarizeByUserID(userID)
+}
+
 // GetLiteByUserIDAndOwner returns only the caller's Lite instances whose owner
 // matches exactly. Owner is normalized before it reaches the repository.
 func (s *instanceService) GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
@@ -1052,9 +1095,30 @@ func (s *instanceService) GetWorkbuddyProByUserIDAndOwner(userID int, owner stri
 	return instances, total, nil
 }
 
-// GetNorthboundByUserIDAndOwner returns the unified collection exposed by the
-// legacy /lite-instances northbound path: managed Lite runtimes plus Linux
-// WorkBuddy Pro. Mode selection remains an internal provisioning concern.
+func (s *instanceService) GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	normalized, err := NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, err
+	}
+	repo, ok := s.instanceRepo.(repository.InstanceOwnerRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support owner filtering")
+	}
+	instances, err := repo.GetProByUserIDAndOwner(userID, normalized, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountProByUserIDAndOwner(userID, normalized)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+// GetNorthboundByUserIDAndOwner returns the compatibility unified collection
+// exposed by /lite-instances: managed Lite runtimes plus every Pro runtime
+// supported by the northbound contract.
 func (s *instanceService) GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
 	normalized, err := NormalizeInstanceOwner(owner)
 	if err != nil {
@@ -2982,6 +3046,24 @@ func modeForExistingInstance(instance *models.Instance) string {
 func instanceModeUsesDedicatedResources(mode string) bool {
 	normalized, ok := NormalizeInstanceMode(mode)
 	return ok && normalized == InstanceModePro
+}
+
+func validateCreateInstanceDiskGB(req CreateInstanceRequest, mode string) error {
+	normalizedMode, ok := NormalizeInstanceMode(mode)
+	if !ok {
+		return fmt.Errorf("unsupported instance mode %q", mode)
+	}
+	minimum := DefaultLiteDiskGB
+	if normalizedMode == InstanceModePro {
+		minimum = MinimumProDiskGB
+	}
+	if req.DiskGB < minimum {
+		return fmt.Errorf("%s disk must be at least %dGB", normalizedMode, minimum)
+	}
+	if req.DiskGB > 1000 {
+		return fmt.Errorf("disk must not exceed 1000GB")
+	}
+	return nil
 }
 
 func (s *instanceService) enforceInstanceModeLimits(ctx context.Context, mode string, cpuCores float64, memoryGB, storageGB, gpuCount int) error {

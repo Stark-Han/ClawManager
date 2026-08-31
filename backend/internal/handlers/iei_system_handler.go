@@ -155,6 +155,38 @@ func (h *IEISystemHandler) GetInstance(c *gin.Context) {
 	})
 }
 
+// RestartInstance restarts an IEI-owned instance through the existing runtime
+// lifecycle service. The dedicated IEI session and exact owner match are
+// required; the normal user JWT handler must not be reused for this surface.
+func (h *IEISystemHandler) RestartInstance(c *gin.Context) {
+	h.noStore(c)
+	session, ok := h.requireSession(c)
+	if !ok {
+		return
+	}
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
+	if !ok {
+		return
+	}
+
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if status != "running" {
+		utils.Error(c, http.StatusConflict, "Instance is not running")
+		return
+	}
+	if err := h.instances.Restart(instance.ID); err != nil {
+		// Runtime lifecycle errors are operational failures. Do not expose
+		// Kubernetes resource names or internal endpoints on this public portal.
+		utils.Error(c, http.StatusServiceUnavailable, "Unable to restart instance")
+		return
+	}
+
+	utils.Success(c, http.StatusAccepted, "Instance restart submitted", gin.H{
+		"instance_id": instance.ID,
+		"status":      "restarting",
+	})
+}
+
 func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 	h.noStore(c)
 	session, ok := h.requireSession(c)
@@ -342,8 +374,17 @@ func (h *IEISystemHandler) ownedSupportedInstance(instance *models.Instance, own
 			return false
 		}
 	}
-	return mode == services.InstanceModePro && typeName == "workbuddy" &&
-		strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	if mode != services.InstanceModePro {
+		return false
+	}
+	switch typeName {
+	case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, services.RuntimeTypeOpenCode:
+		return true
+	case "workbuddy":
+		return strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	default:
+		return false
+	}
 }
 
 func newIEIInstanceView(instance *models.Instance) ieiInstanceView {

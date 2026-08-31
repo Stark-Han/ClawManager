@@ -9,7 +9,11 @@ import { useAuth } from "../../contexts/AuthContext";
 import { instanceService } from "../../services/instanceService";
 import { skillHubService } from "../../services/skillHubService";
 import { userService } from "../../services/userService";
-import { INSTANCE_TYPES, PRESET_CONFIGS } from "../../types/instance";
+import {
+  DEFAULT_LITE_DISK_GB,
+  INSTANCE_TYPES,
+  PRESET_CONFIGS,
+} from "../../types/instance";
 import type { CreateInstanceRequest, InstanceMode } from "../../types/instance";
 import type { Instance } from "../../types/instance";
 import type { OpenClawConfigCompilePreview } from "../../types/openclawConfig";
@@ -588,7 +592,7 @@ const CreateInstancePage: React.FC = () => {
     mode: "lite",
     cpu_cores: 2,
     memory_gb: 4,
-    disk_gb: 20,
+    disk_gb: DEFAULT_LITE_DISK_GB,
     os_type: "openclaw",
     os_version: "latest",
     gpu_enabled: false,
@@ -1029,7 +1033,7 @@ const CreateInstancePage: React.FC = () => {
           : PRESET_CONFIGS.small.memory_gb,
         disk_gb: usesDedicatedResources
           ? formData.disk_gb
-          : PRESET_CONFIGS.small.disk_gb,
+          : DEFAULT_LITE_DISK_GB,
         gpu_enabled: usesDedicatedResources ? formData.gpu_enabled : false,
         gpu_count: usesDedicatedResources ? formData.gpu_count : 0,
         desktop_stream_profile:

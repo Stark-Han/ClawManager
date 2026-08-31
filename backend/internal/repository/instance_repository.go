@@ -47,11 +47,13 @@ type InstanceOwnerRepository interface {
 	CountLiteByUserIDAndOwner(userID int, owner string) (int, error)
 	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
 	CountWorkbuddyProByUserIDAndOwner(userID int, owner string) (int, error)
+	GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
+	CountProByUserIDAndOwner(userID int, owner string) (int, error)
 }
 
-// NorthboundInstanceOwnerRepository exposes the unified, owner-scoped view
-// used by the canonical northbound instance collection. It includes only the
-// four managed Lite runtimes and Linux WorkBuddy Pro.
+// NorthboundInstanceOwnerRepository exposes the compatibility unified,
+// owner-scoped view used by /lite-instances. It includes managed Lite runtimes
+// and every Pro runtime supported by the northbound contract.
 type NorthboundInstanceOwnerRepository interface {
 	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error)
 	CountNorthboundByUserIDAndOwner(userID int, owner string) (int, error)
@@ -63,6 +65,15 @@ type NorthboundInstanceOwnerRepository interface {
 type IEISystemInstanceRepository interface {
 	GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, error)
 	CountSupportedByOwnerEmail(owner string) (int, error)
+}
+
+// InstanceQueryRepository is the optional filtered-list and aggregation
+// capability used by the user workspace. It is kept separate from
+// InstanceRepository so unrelated repository test doubles remain small.
+type InstanceQueryRepository interface {
+	GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, error)
+	CountFilteredByUserID(userID int, filter models.InstanceListFilter) (int, error)
+	SummarizeByUserID(userID int) (*models.InstanceSummary, error)
 }
 
 // instanceRepository implements InstanceRepository
@@ -266,6 +277,90 @@ func (r *instanceRepository) CountByUserID(userID int) (int, error) {
 	return int(count), nil
 }
 
+func (r *instanceRepository) filteredByUserID(userID int, filter models.InstanceListFilter) db.Result {
+	result := r.sess.Collection("instances").Find(db.Cond{"user_id": userID})
+	if value := strings.ToLower(strings.TrimSpace(filter.Type)); value != "" {
+		result = result.And(db.Cond{"type": value})
+	}
+	if value := strings.ToLower(strings.TrimSpace(filter.InstanceMode)); value != "" {
+		result = result.And(db.Cond{"instance_mode": value})
+	}
+	if value := strings.ToLower(strings.TrimSpace(filter.Status)); value != "" {
+		result = result.And(db.Cond{"status": value})
+	} else {
+		switch strings.ToLower(strings.TrimSpace(filter.Availability)) {
+		case "available":
+			result = result.And(db.Cond{"status": "running"})
+		case "starting":
+			result = result.And(db.Cond{"status": "creating"})
+		case "unavailable":
+			result = result.And(db.Cond{"status IN": []string{"stopped", "error", "deleting"}})
+		}
+	}
+	if value := strings.ToLower(strings.TrimSpace(filter.Query)); value != "" {
+		pattern := "%" + value + "%"
+		result = result.And(`(
+			LOWER(name) LIKE ? OR LOWER(type) LIKE ? OR LOWER(instance_mode) LIKE ? OR
+			EXISTS (
+				SELECT 1
+				FROM team_members tm
+				JOIN teams t ON t.id = tm.team_id
+				WHERE tm.instance_id = instances.id
+				  AND (LOWER(t.name) LIKE ? OR LOWER(tm.display_name) LIKE ? OR LOWER(tm.member_key) LIKE ? OR LOWER(tm.role) LIKE ?)
+			)
+		)`, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	return result
+}
+
+func (r *instanceRepository) GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	if err := r.filteredByUserID(userID, filter).OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances); err != nil {
+		return nil, fmt.Errorf("failed to get filtered instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountFilteredByUserID(userID int, filter models.InstanceListFilter) (int, error) {
+	count, err := r.filteredByUserID(userID, filter).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count filtered instances: %w", err)
+	}
+	return int(count), nil
+}
+
+func (r *instanceRepository) SummarizeByUserID(userID int) (*models.InstanceSummary, error) {
+	summary := &models.InstanceSummary{}
+	row, err := r.sess.SQL().QueryRow(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'creating' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'deleting' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(disk_gb), 0)
+		FROM instances
+		WHERE user_id = ?
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query instance summary: %w", err)
+	}
+	err = row.Scan(
+		&summary.Total,
+		&summary.Running,
+		&summary.Creating,
+		&summary.Stopped,
+		&summary.Error,
+		&summary.Deleting,
+		&summary.AllocatedStorageGB,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to summarize instances: %w", err)
+	}
+	return summary, nil
+}
+
 // GetLiteByUserIDAndOwner gets Lite instances for an authenticated user and
 // exact owner. The owner column uses a binary collation so comparisons are
 // case-sensitive and deterministic.
@@ -325,6 +420,34 @@ func (r *instanceRepository) CountWorkbuddyProByUserIDAndOwner(userID int, owner
 	return int(count), nil
 }
 
+func supportedNorthboundProOwnerInstances(userID int, owner string) db.LogicalExpr {
+	return db.And(
+		db.Cond{"user_id": userID, "owner": owner, "instance_mode": "pro"},
+		db.Or(
+			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode"}},
+			db.Cond{"type": "workbuddy", "runtime_variant": "linux"},
+		),
+	)
+}
+
+func (r *instanceRepository) GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, error) {
+	var instances []models.Instance
+	err := r.sess.Collection("instances").Find(supportedNorthboundProOwnerInstances(userID, owner)).
+		OrderBy("-created_at", "-id").Offset(offset).Limit(limit).All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get owner Pro instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) CountProByUserIDAndOwner(userID int, owner string) (int, error) {
+	count, err := r.sess.Collection("instances").Find(supportedNorthboundProOwnerInstances(userID, owner)).Count()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count owner Pro instances: %w", err)
+	}
+	return int(count), nil
+}
+
 func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr {
 	return db.And(
 		db.Cond{"user_id": userID, "owner": owner},
@@ -337,6 +460,10 @@ func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr 
 				"instance_mode":   "pro",
 				"type":            "workbuddy",
 				"runtime_variant": "linux",
+			},
+			db.Cond{
+				"instance_mode": "pro",
+				"type IN":       []string{"openclaw", "hermes", "opencode"},
 			},
 		),
 	)
@@ -372,6 +499,10 @@ func supportedIEIOwnerInstances(owner string) db.LogicalExpr {
 				"instance_mode":   "pro",
 				"type":            "workbuddy",
 				"runtime_variant": "linux",
+			},
+			db.Cond{
+				"instance_mode": "pro",
+				"type IN":       []string{"openclaw", "hermes", "opencode"},
 			},
 		),
 	)
@@ -520,7 +651,11 @@ func (r *instanceRepository) UpdateRuntimeState(ctx context.Context, id int, sta
 		UPDATE instances
 		SET status = ?, runtime_generation = ?, runtime_error_message = ?, updated_at = ?
 		WHERE id = ? AND runtime_generation <= ?
-	`, status, generation, message, time.Now().UTC(), id, generation)
+		  AND (
+			status <> ? OR runtime_generation <> ? OR
+			NOT (runtime_error_message <=> ?)
+		  )
+	`, status, generation, message, time.Now().UTC(), id, generation, status, generation, message)
 	if err != nil {
 		return fmt.Errorf("failed to update instance runtime state: %w", err)
 	}

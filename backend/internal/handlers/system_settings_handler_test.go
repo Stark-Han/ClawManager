@@ -38,6 +38,10 @@ func (s *recordingSystemImageSettingService) GetRuntimeImage(string) (services.R
 	return services.RuntimeImageConfig{}, false
 }
 
+func (s *recordingSystemImageSettingService) GetRuntimeImageForRuntimeType(string, string) (services.RuntimeImageConfig, bool) {
+	return services.RuntimeImageConfig{}, false
+}
+
 func (s *recordingSystemImageSettingService) GetRuntimeImageForImage(string, string) (services.RuntimeImageConfig, bool) {
 	return services.RuntimeImageConfig{}, false
 }

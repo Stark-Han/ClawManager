@@ -7,8 +7,17 @@ import northbound_client
 
 
 class NorthboundInstanceCollectionTest(unittest.TestCase):
-    def test_uses_one_collection_for_every_runtime(self) -> None:
-        self.assertEqual(northbound_client.instance_collection_path(), "/lite-instances")
+    def test_uses_pro_collection_for_supported_non_workbuddy_pro_runtime(self) -> None:
+        self.assertEqual(
+            northbound_client.instance_collection_path("opencode", "pro"),
+            "/pro-instances",
+        )
+
+    def test_keeps_workbuddy_on_canonical_lite_compatibility_collection(self) -> None:
+        self.assertEqual(
+            northbound_client.instance_collection_path("workbuddy", "pro"),
+            "/lite-instances",
+        )
 
 
 class NorthboundLoginTransportTest(unittest.TestCase):
