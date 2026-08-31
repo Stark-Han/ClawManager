@@ -1300,7 +1300,7 @@ spec:
             - name: IEISYSTEM_SSO_TOKEN_TTL
               value: "30s"
             - name: IEISYSTEM_SESSION_TTL
-              value: "30m"
+              value: "24h"
             - name: IEISYSTEM_SSO_TIMEZONE
               value: "Asia/Shanghai"
             - name: NORTHBOUND_CORE_TLS_CERT_FILE

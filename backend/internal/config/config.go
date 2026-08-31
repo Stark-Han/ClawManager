@@ -294,7 +294,7 @@ func Load() (*Config, error) {
 		IEISystem: IEISystemConfig{
 			Enabled:      getEnvBool("IEISYSTEM_SSO_ENABLED", false),
 			TokenTTL:     getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", 24*time.Hour),
-			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 30*time.Minute),
+			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 24*time.Hour),
 			Timezone:     getEnv("IEISYSTEM_SSO_TIMEZONE", "Asia/Shanghai"),
 			CookieSecure: getEnvBool("IEISYSTEM_COOKIE_SECURE", true),
 		},

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
 import { getIEIRuntimePresentation } from "../../lib/ieiRuntimeCatalog";
 import {
   ieiSystemService,
@@ -178,6 +179,14 @@ export default function IEISystemListInstancesPage() {
     initialized.current = true;
     void initialize();
   }, [initialize]);
+
+  const renewSession = useCallback(async () => {
+    setSession(await ieiSystemService.refreshSession());
+  }, []);
+  useExpiringResourceRenewal({
+    expiresAt: session?.expires_at,
+    renew: renewSession,
+  });
 
   useEffect(() => installNoReferrerPolicy(), []);
 

@@ -99,6 +99,28 @@ func (h *IEISystemHandler) GetSession(c *gin.Context) {
 	})
 }
 
+// RefreshSession renews a still-valid ClawManager portal session. IEI is only
+// involved in the initial external-token exchange; active browser sessions are
+// maintained locally after that trust boundary has been crossed.
+func (h *IEISystemHandler) RefreshSession(c *gin.Context) {
+	h.noStore(c)
+	session, ok := h.requireSession(c)
+	if !ok {
+		return
+	}
+	renewed, err := h.sso.RenewSession(session.Token)
+	if err != nil {
+		h.clearSessionCookie(c)
+		utils.Error(c, http.StatusUnauthorized, "IEI system session is invalid or expired")
+		return
+	}
+	h.setSessionCookie(c, renewed.Token, renewed.ExpiresAt)
+	utils.Success(c, http.StatusOK, "IEI system session renewed", gin.H{
+		"owner":      renewed.Email,
+		"expires_at": renewed.ExpiresAt,
+	})
+}
+
 func (h *IEISystemHandler) DeleteSession(c *gin.Context) {
 	h.noStore(c)
 	h.clearSessionCookie(c)

@@ -214,6 +214,10 @@ const server = http.createServer((request, response) => {
   if (request.method === "GET" && pathname === "/api/v1/ieisystem/session") {
     return json(response, 200, { owner, expires_at: new Date(now.getTime() + 3_600_000).toISOString() });
   }
+  if (request.method === "POST" && pathname === "/api/v1/ieisystem/session/refresh") {
+    response.setHeader("Set-Cookie", "iei_system_session=refreshed; Path=/; HttpOnly; SameSite=Lax");
+    return json(response, 200, { owner, expires_at: new Date(now.getTime() + 3_600_000).toISOString() });
+  }
   if (request.method === "DELETE" && pathname === "/api/v1/ieisystem/session") {
     return json(response, 200, null);
   }
