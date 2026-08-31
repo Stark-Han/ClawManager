@@ -169,20 +169,14 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		targetURL.RawQuery = queryParams.Encode()
 	}
 
-	// OpenCode uses a long-lived SSE stream at /global/event to initialize and
-	// keep its session UI in sync. Giving that request the normal five-minute
-	// HTTP proxy deadline delays all events until the connection is closed and
-	// leaves the Lite portal as an empty shell.
-	proxyCtx := ctx
-	cancel := func() {}
-	if !isOpenCodeEventStreamRequest(opencodeLite, bootstrapPath) {
-		proxyCtx, cancel = context.WithTimeout(ctx, 5*time.Minute)
-	}
-	defer cancel()
+	// Agent UIs use SSE, streaming responses, and long-running HTTP calls such
+	// as DeepSeek Harness /api/respond. Keep every proxied request attached to
+	// the browser's request context instead of imposing an unrelated hard
+	// deadline. Client disconnects still cancel the upstream request.
 
 	var bootstrapSetCookies []string
 	if hermesLite && shouldBootstrapHermesDashboardSession(r, bootstrapPath) && strings.TrimSpace(managedGatewayToken) != "" {
-		if cookies, bootErr := s.bootstrapHermesDashboardSession(proxyCtx, targetURL, instanceID, managedGatewayToken, r); bootErr == nil {
+		if cookies, bootErr := s.bootstrapHermesDashboardSession(ctx, targetURL, instanceID, managedGatewayToken, r); bootErr == nil {
 			bootstrapSetCookies = cookies
 		}
 	}
@@ -205,7 +199,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		return nil
 	}
 
-	proxyReq, err := http.NewRequestWithContext(proxyCtx, r.Method, targetURL.String(), r.Body)
+	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL.String(), r.Body)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy request: %w", err)
 	}
@@ -341,10 +335,6 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	}
 
 	return nil
-}
-
-func isOpenCodeEventStreamRequest(opencodeLite bool, targetPath string) bool {
-	return opencodeLite && strings.TrimSpace(targetPath) == "/global/event"
 }
 
 func copyEventStream(w http.ResponseWriter, body io.Reader) error {

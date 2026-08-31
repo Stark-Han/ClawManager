@@ -62,6 +62,11 @@ export const ieiSystemService = {
     return response.data.data;
   },
 
+  async refreshSession(): Promise<IEISystemSession> {
+    const response = await ieiAPI.post("/session/refresh");
+    return response.data.data;
+  },
+
   async clearSession(): Promise<void> {
     await ieiAPI.delete("/session");
   },

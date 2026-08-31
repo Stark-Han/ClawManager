@@ -104,6 +104,17 @@ func (s *IEISSOService) ExchangeExternalToken(rawToken string) (*IEISession, err
 	return s.issueSession(email)
 }
 
+// RenewSession extends a valid ClawManager-owned IEI portal session without
+// consulting IEI again. The session ID is preserved so instance capabilities
+// bound to the active browser session remain valid while they are rotated.
+func (s *IEISSOService) RenewSession(rawToken string) (*IEISession, error) {
+	current, err := s.ValidateSession(rawToken)
+	if err != nil {
+		return nil, err
+	}
+	return s.issueSessionWithID(current.Email, current.SessionID)
+}
+
 func (s *IEISSOService) validateExternalToken(rawToken string) (string, error) {
 	// URL query parsing converts an unescaped '+' to a space. Accepting that
 	// representation keeps compatibility with the platform's example URL while
@@ -170,13 +181,16 @@ func removePKCS7Padding(value []byte, blockSize int) ([]byte, error) {
 }
 
 func (s *IEISSOService) issueSession(email string) (*IEISession, error) {
-	now := s.now()
-	expiresAt := now.Add(s.cfg.SessionTTL)
 	randomID := make([]byte, 24)
 	if _, err := rand.Read(randomID); err != nil {
 		return nil, fmt.Errorf("generate IEI session id: %w", err)
 	}
-	sessionID := hex.EncodeToString(randomID)
+	return s.issueSessionWithID(email, hex.EncodeToString(randomID))
+}
+
+func (s *IEISSOService) issueSessionWithID(email, sessionID string) (*IEISession, error) {
+	now := s.now()
+	expiresAt := now.Add(s.cfg.SessionTTL)
 	claims := ieiSessionClaims{
 		Email:     email,
 		SessionID: sessionID,

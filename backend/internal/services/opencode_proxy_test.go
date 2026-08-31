@@ -1,8 +1,11 @@
 package services
 
 import (
+	"context"
 	"encoding/base64"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -155,14 +158,34 @@ func TestShouldRewriteHTMLForProxyOpenCodeLite(t *testing.T) {
 	}
 }
 
-func TestIsOpenCodeEventStreamRequest(t *testing.T) {
-	if !isOpenCodeEventStreamRequest(true, "/global/event") {
-		t.Fatal("expected OpenCode Lite global event stream to bypass the HTTP timeout")
+type proxyRoundTripper func(*http.Request) (*http.Response, error)
+
+func (roundTrip proxyRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func TestAgentProxyRequestDoesNotAddHardDeadline(t *testing.T) {
+	service, token := newDeepSeekHarnessV2ProxyTestService(t, "http://127.0.0.1:43210", 91, "gateway-token")
+	deadlineSeen := true
+	service.httpClient = &http.Client{Transport: proxyRoundTripper(func(request *http.Request) (*http.Response, error) {
+		_, deadlineSeen = request.Context().Deadline()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    request,
+		}, nil
+	})}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/instances/91/proxy/api/respond", strings.NewReader("{}"))
+	recorder := httptest.NewRecorder()
+	if err := service.ProxyRequest(context.Background(), 91, token.Token, recorder, request); err != nil {
+		t.Fatalf("ProxyRequest() error = %v", err)
 	}
-	if isOpenCodeEventStreamRequest(false, "/global/event") {
-		t.Fatal("non-Lite requests must keep the standard HTTP timeout")
+	if deadlineSeen {
+		t.Fatal("agent proxy added a hard deadline instead of following the browser request lifetime")
 	}
-	if isOpenCodeEventStreamRequest(true, "/api/health") {
-		t.Fatal("non-event OpenCode requests must keep the standard HTTP timeout")
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
+		t.Fatalf("proxy response = %d/%q", recorder.Code, recorder.Body.String())
 	}
 }
