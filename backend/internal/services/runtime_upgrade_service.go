@@ -73,6 +73,7 @@ type runtimeUpgradeCandidate struct {
 	RuntimePodID  *int64
 	GatewayID     string
 	Generation    int
+	BindingState  string
 	WorkspacePath string
 	TeamID        *int
 	TeamMemberID  *int
@@ -744,7 +745,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 	}
 	rows, err := s.sess.SQL().QueryContext(ctx, `
 		SELECT i.id, i.user_id, i.workspace_path,
-		       b.runtime_pod_id, b.gateway_id, b.generation,
+		       b.runtime_pod_id, b.gateway_id, b.generation, b.state,
 		       tm.id, tm.team_id, tm.member_key, tm.role, tm.runtime_type, tm.availability, tm.status
 		FROM instances i
 		LEFT JOIN instance_runtime_bindings b ON b.instance_id = i.id
@@ -768,9 +769,10 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 		var podID sql.NullInt64
 		var gatewayID sql.NullString
 		var generation sql.NullInt64
+		var bindingState sql.NullString
 		var memberID, teamID sql.NullInt64
 		var memberKey, role, runtimeType, availability, status sql.NullString
-		if err := rows.Scan(&instanceID, &userID, &workspace, &podID, &gatewayID, &generation, &memberID, &teamID, &memberKey, &role, &runtimeType, &availability, &status); err != nil {
+		if err := rows.Scan(&instanceID, &userID, &workspace, &podID, &gatewayID, &generation, &bindingState, &memberID, &teamID, &memberKey, &role, &runtimeType, &availability, &status); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		if _, duplicate := seen[instanceID]; duplicate {
@@ -789,7 +791,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 		if _, err := os.Lstat(actual); err != nil {
 			blockers = append(blockers, fmt.Sprintf("instance %d workspace is unavailable: %v", instanceID, err))
 		}
-		candidate := runtimeUpgradeCandidate{InstanceID: instanceID, UserID: userID, GatewayID: strings.TrimSpace(gatewayID.String), Generation: int(generation.Int64), WorkspacePath: actual, MemberKey: memberKey.String, Role: role.String, RuntimeType: runtimeType.String, Availability: availability.String, MemberStatus: status.String}
+		candidate := runtimeUpgradeCandidate{InstanceID: instanceID, UserID: userID, GatewayID: strings.TrimSpace(gatewayID.String), Generation: int(generation.Int64), BindingState: strings.ToLower(strings.TrimSpace(bindingState.String)), WorkspacePath: actual, MemberKey: memberKey.String, Role: role.String, RuntimeType: runtimeType.String, Availability: availability.String, MemberStatus: status.String}
 		if podID.Valid {
 			value := podID.Int64
 			candidate.RuntimePodID = &value
@@ -934,6 +936,9 @@ func (s *RuntimeUpgradeService) inspectTeamConsistency(ctx context.Context, team
 
 func (s *RuntimeUpgradeService) stopCandidateGateway(ctx context.Context, candidate runtimeUpgradeCandidate) error {
 	if candidate.GatewayID == "" {
+		if candidate.RuntimePodID != nil && candidate.BindingState != "running" {
+			return s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID)
+		}
 		return nil
 	}
 	if candidate.AgentEndpoint == "" || s.agent == nil {
@@ -952,12 +957,16 @@ func (s *RuntimeUpgradeService) stopCandidateGateway(ctx context.Context, candid
 		}
 	}
 	if candidate.RuntimePodID != nil {
-		deleted, err := s.bindings.DeleteRunningByInstanceIDGenerationAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID, candidate.Generation)
-		if err != nil {
-			return fmt.Errorf("release stopped runtime binding: %w", err)
-		}
-		if !deleted {
-			return fmt.Errorf("stopped gateway binding changed concurrently")
+		if candidate.BindingState == "running" {
+			deleted, err := s.bindings.DeleteRunningByInstanceIDGenerationAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID, candidate.Generation)
+			if err != nil {
+				return fmt.Errorf("release stopped runtime binding: %w", err)
+			}
+			if !deleted {
+				return fmt.Errorf("stopped gateway binding changed concurrently")
+			}
+		} else if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID); err != nil {
+			return fmt.Errorf("release inactive runtime binding: %w", err)
 		}
 	}
 	return nil
@@ -1449,6 +1458,7 @@ func runtimeUpgradeFingerprint(target string, candidates []runtimeUpgradeCandida
 		Member     string
 		Role       string
 		Generation int
+		Binding    string
 	}
 	values := make([]fingerprintCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -1456,7 +1466,7 @@ func runtimeUpgradeFingerprint(target string, candidates []runtimeUpgradeCandida
 		if candidate.TeamID != nil {
 			teamID = *candidate.TeamID
 		}
-		values = append(values, fingerprintCandidate{candidate.InstanceID, candidate.UserID, filepath.Clean(candidate.WorkspacePath), teamID, candidate.MemberKey, candidate.Role, candidate.Generation})
+		values = append(values, fingerprintCandidate{candidate.InstanceID, candidate.UserID, filepath.Clean(candidate.WorkspacePath), teamID, candidate.MemberKey, candidate.Role, candidate.Generation, candidate.BindingState})
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i].InstanceID < values[j].InstanceID })
 	payload, _ := json.Marshal(map[string]any{"target": strings.TrimSpace(target), "candidates": values, "sources": sourceImages})
