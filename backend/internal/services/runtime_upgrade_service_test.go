@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"clawreef/internal/models"
 )
 
 func TestImageDigestFromReferenceRequiresImmutableSHA256(t *testing.T) {
@@ -20,6 +22,42 @@ func TestImageDigestFromReferenceRequiresImmutableSHA256(t *testing.T) {
 		if got := imageDigestFromReference(invalid); got != "" {
 			t.Fatalf("invalid reference %q produced %q", invalid, got)
 		}
+	}
+}
+
+func TestImmutableRuntimeImagePinsTagToObservedDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	got, err := immutableRuntimeImage("10.130.14.23:5000/agentsruntime/openclaw-lite:legacy", digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "10.130.14.23:5000/agentsruntime/openclaw-lite@" + digest
+	if got != want {
+		t.Fatalf("immutable image = %q, want %q", got, want)
+	}
+	if _, err := immutableRuntimeImage("registry/openclaw:legacy", ""); err == nil {
+		t.Fatal("missing source digest was accepted")
+	}
+}
+
+func TestLiteClassificationHonorsExplicitInstanceMode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mode    string
+		backend string
+		want    bool
+	}{
+		{name: "lite gateway", mode: InstanceModeLite, backend: RuntimeBackendGateway, want: true},
+		{name: "pro desktop", mode: InstanceModePro, backend: RuntimeBackendDesktop, want: false},
+		{name: "explicit pro wins over conflicting gateway", mode: InstanceModePro, backend: RuntimeBackendGateway, want: false},
+		{name: "legacy gateway fallback", mode: "", backend: RuntimeBackendGateway, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := &models.Instance{InstanceMode: test.mode, RuntimeType: test.backend}
+			if got := isLiteRuntimeInstance(instance); got != test.want {
+				t.Fatalf("isLiteRuntimeInstance() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

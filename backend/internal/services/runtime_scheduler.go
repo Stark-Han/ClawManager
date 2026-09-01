@@ -278,7 +278,7 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		return err
 	}
 	currentPods := s.currentRuntimePods(allPods, time.Now().UTC())
-	if runtimePodsAlreadyAtImage(currentPods, rollout.RuntimeType, rollout.TargetImageRef) {
+	if runtimePodsAlreadyAtImage(currentPods, rollout.RuntimeType, rollout.TargetImageRef) && !(rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil) {
 		finishedAt := time.Now().UTC()
 		return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", &startedAt, &finishedAt, nil)
 	}
@@ -391,7 +391,23 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		name      string
 	}
 	refs := map[deploymentRef]struct{}{}
+	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
+		var sources map[string]string
+		if rollout.SourceImagesJSON == nil || json.Unmarshal([]byte(*rollout.SourceImagesJSON), &sources) != nil || len(sources) == 0 {
+			return fmt.Errorf("OpenClaw data-safe rollout has no immutable deployment inventory")
+		}
+		for key := range sources {
+			parts := strings.SplitN(key, "/", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+				return fmt.Errorf("invalid OpenClaw deployment inventory entry %q", key)
+			}
+			refs[deploymentRef{namespace: parts[0], name: parts[1]}] = struct{}{}
+		}
+	}
 	for _, pod := range pods {
+		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
+			continue
+		}
 		if pod.RuntimeType != rollout.RuntimeType {
 			continue
 		}
@@ -438,6 +454,7 @@ func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeTyp
 			NodeName:       pod.NodeName,
 			DeploymentName: pod.DeploymentName,
 			ImageRef:       pod.ImageRef,
+			ImageDigest:    stringPtrOrNil(pod.ImageDigest),
 			State:          runtimeDeploymentFallbackState(pod.State),
 			Capacity:       s.maxGatewaysPerPod,
 			UsedSlots:      0,

@@ -106,8 +106,8 @@ func usesRuntimeGateway(instance *models.Instance) bool {
 	if strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendGateway) {
 		return true
 	}
-	if mode, ok := services.NormalizeInstanceMode(instance.InstanceMode); ok && mode == services.InstanceModeLite {
-		return true
+	if mode, ok := services.NormalizeInstanceMode(instance.InstanceMode); ok {
+		return mode == services.InstanceModeLite
 	}
 	return false
 }

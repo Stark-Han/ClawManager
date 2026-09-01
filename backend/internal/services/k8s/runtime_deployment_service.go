@@ -55,6 +55,7 @@ type RuntimeDeploymentPod struct {
 	PodIP          *string
 	NodeName       *string
 	ImageRef       string
+	ImageDigest    string
 	State          string
 }
 
@@ -396,11 +397,32 @@ func (s *runtimeDeploymentService) ListPods(ctx context.Context, namespace, runt
 				PodIP:          stringPtrIfNotEmpty(pod.Status.PodIP),
 				NodeName:       stringPtrIfNotEmpty(pod.Spec.NodeName),
 				ImageRef:       image,
+				ImageDigest:    runtimeContainerImageID(pod.Status.ContainerStatuses),
 				State:          runtimeK8sPodState(pod),
 			})
 		}
 	}
 	return pods, nil
+}
+
+func runtimeContainerImageID(statuses []corev1.ContainerStatus) string {
+	for _, status := range statuses {
+		if status.Name == "runtime" {
+			return normalizeRuntimeImageID(status.ImageID)
+		}
+	}
+	if len(statuses) == 1 {
+		return normalizeRuntimeImageID(statuses[0].ImageID)
+	}
+	return ""
+}
+
+func normalizeRuntimeImageID(value string) string {
+	value = strings.TrimSpace(value)
+	if index := strings.LastIndex(value, "sha256:"); index >= 0 {
+		return value[index:]
+	}
+	return ""
 }
 
 func runtimeContainerImage(containers []corev1.Container) string {

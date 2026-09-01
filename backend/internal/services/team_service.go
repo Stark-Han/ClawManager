@@ -1974,6 +1974,10 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode task envelope: %w", err)
 	}
+	// Close the dispatch-to-XADD race with runtime-upgrade maintenance.
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return nil, err
+	}
 	streamID, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, member.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
 		"team_id":    strconv.Itoa(team.ID),
@@ -2001,6 +2005,13 @@ func (s *teamService) requireTeamDispatchAvailable(ctx context.Context, team *mo
 	bus, err := s.redisBusForTeam(ctx, team)
 	if err != nil {
 		return err
+	}
+	return s.requireTeamRedisDeliveryAvailable(ctx, team, bus)
+}
+
+func (s *teamService) requireTeamRedisDeliveryAvailable(ctx context.Context, team *models.Team, bus *redisBus) error {
+	if team == nil || bus == nil {
+		return fmt.Errorf("team and Redis bus are required")
 	}
 	raw, exists, err := bus.Get(ctx, teamMaintenanceKey(team.ID))
 	if err != nil {
@@ -3614,6 +3625,9 @@ func (s *teamService) deliverTeamEventOutbox(team *models.Team, bus *redisBus, o
 	if team == nil || bus == nil || outbox == nil || strings.TrimSpace(outbox.Destination) == "" {
 		return fmt.Errorf("team, redis bus and outbox destination are required")
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return err
+	}
 	payload := map[string]interface{}{}
 	if err := json.Unmarshal([]byte(outbox.PayloadJSON), &payload); err != nil {
 		return fmt.Errorf("decode Team outbox payload %d: %w", outbox.ID, err)
@@ -4654,6 +4668,9 @@ func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redi
 	if err != nil {
 		return err
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return err
+	}
 	s.publishTeamRootWorkflowState(bus, task)
 	_, err = bus.XAdd(context.Background(), teamInboxKey(team.ID, leader.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
@@ -5098,6 +5115,9 @@ func (s *teamService) dispatchAssignmentStatusCheck(team *models.Team, bus *redi
 	}
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
+		return err
+	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
 		return err
 	}
 	_, err = bus.XAdd(context.Background(), teamInboxKey(team.ID, owner.MemberKey), map[string]string{
@@ -9970,6 +9990,9 @@ func (s *teamService) dispatchMemberTargetResolutionReviewToInbox(team *models.T
 		fmt.Printf("Warning: failed to encode member target-resolution reminder for Team %d task %d: %v\n", team.ID, task.ID, err)
 		return
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return
+	}
 	if _, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, member.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
 		"team_id":    strconv.Itoa(team.ID),
@@ -10039,6 +10062,9 @@ func (s *teamService) dispatchLeaderMediatedRecoveryRequestToInbox(team *models.
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
 		fmt.Printf("Warning: failed to encode Leader recovery notification for Team %d task %d: %v\n", team.ID, task.ID, err)
+		return
+	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
 		return
 	}
 	if _, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, leaderKey), map[string]string{

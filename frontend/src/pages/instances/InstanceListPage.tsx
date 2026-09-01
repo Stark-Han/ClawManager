@@ -133,7 +133,10 @@ function modeClass(mode: Instance["instance_mode"]) {
 }
 
 function isLiteInstance(instance: Instance) {
-  return instance.instance_mode === "lite" || instance.runtime_type === "gateway";
+  if (instance.instance_mode === "lite" || instance.instance_mode === "pro") {
+    return instance.instance_mode === "lite";
+  }
+  return instance.runtime_type === "gateway";
 }
 
 function formatBytes(value?: number) {

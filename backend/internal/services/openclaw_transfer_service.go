@@ -379,8 +379,8 @@ func isLiteRuntimeInstance(instance *models.Instance) bool {
 	if instance == nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(instance.InstanceMode), InstanceModeLite) {
-		return true
+	if mode, ok := NormalizeInstanceMode(instance.InstanceMode); ok {
+		return mode == InstanceModeLite
 	}
 	return strings.EqualFold(strings.TrimSpace(instance.RuntimeType), RuntimeBackendGateway)
 }

@@ -317,6 +317,7 @@ func main() {
 				cfg.Runtime.SchedulerTick,
 				runtimeSchedulerOptions...,
 			)
+			runtimeUpgradeService.SetDeploymentInventoryProvider(runtimeScheduler)
 			log.Printf("runtime scheduler initialized")
 		}
 	} else {

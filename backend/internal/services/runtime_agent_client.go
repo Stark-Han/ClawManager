@@ -34,6 +34,7 @@ type RuntimeUpgradeAgentClient interface {
 	CreateWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotRequest) (*RuntimeAgentWorkspaceSnapshot, error)
 	VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error
 	RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error)
+	MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error)
 }
 
 type RuntimeAgentWorkspaceRequest struct {
@@ -44,6 +45,8 @@ type RuntimeAgentWorkspaceRequest struct {
 	Generation      int    `json:"generation"`
 	LeaseToken      string `json:"lease_token,omitempty"`
 	OfficialDBCheck bool   `json:"official_database_check,omitempty"`
+	UID             int    `json:"uid,omitempty"`
+	GID             int    `json:"gid,omitempty"`
 }
 
 type RuntimeAgentWriterLeaseRequest struct {
@@ -90,6 +93,13 @@ type RuntimeAgentRestoreResponse struct {
 	WorkspacePath  string `json:"workspace_path"`
 	PreservedPath  string `json:"preserved_path"`
 	SnapshotSHA256 string `json:"snapshot_sha256"`
+}
+
+type RuntimeAgentSessionSQLiteMigration struct {
+	InstanceID   int       `json:"instance_id"`
+	Status       string    `json:"status"`
+	OutputSHA256 string    `json:"output_sha256"`
+	CompletedAt  time.Time `json:"completed_at"`
 }
 
 type RuntimeAgentGatewayState struct {
@@ -227,6 +237,14 @@ func (c *runtimeAgentHTTPClient) VerifyWorkspaceSnapshot(ctx context.Context, en
 func (c *runtimeAgentHTTPClient) RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error) {
 	var response RuntimeAgentRestoreResponse
 	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/restore", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
+	var response RuntimeAgentSessionSQLiteMigration
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/migrate", req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
