@@ -437,9 +437,14 @@ func TestRuntimeDeploymentServiceListPodsReturnsRuntimeDeploymentPods(t *testing
 				Type:   corev1.PodReady,
 				Status: corev1.ConditionTrue,
 			}},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "runtime", ImageID: "docker-pullable://registry/openclaw-lite@sha256:" + strings.Repeat("a", 64)}},
 		},
 	}
-	client := fake.NewSimpleClientset(deployment, pod)
+	evicted := pod.DeepCopy()
+	evicted.Name = "openclaw-runtime-old-evicted"
+	evicted.Status.Phase = corev1.PodFailed
+	evicted.Status.Reason = "Evicted"
+	client := fake.NewSimpleClientset(deployment, pod, evicted)
 	service := NewRuntimeDeploymentService(client)
 
 	pods, err := service.ListPods(context.Background(), "runtime-system", "openclaw")
@@ -455,6 +460,9 @@ func TestRuntimeDeploymentServiceListPodsReturnsRuntimeDeploymentPods(t *testing
 	}
 	if got.ImageRef != "registry/openclaw-lite:final2" {
 		t.Fatalf("image = %q, want registry/openclaw-lite:final2", got.ImageRef)
+	}
+	if got.ImageDigest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("image digest = %q", got.ImageDigest)
 	}
 	if got.State != "ready" {
 		t.Fatalf("state = %q, want ready", got.State)

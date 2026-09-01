@@ -385,6 +385,12 @@ func (s *runtimeDeploymentService) ListPods(ctx context.Context, namespace, runt
 		}
 		deploymentImage := runtimeContainerImage(deployment.Spec.Template.Spec.Containers)
 		for _, pod := range podList.Items {
+			// Deployment selectors also match retained Failed/Evicted pods from
+			// old ReplicaSets. They are audit history, not the live source image
+			// inventory used for a data-safe rollback decision.
+			if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+				continue
+			}
 			image := runtimeContainerImage(pod.Spec.Containers)
 			if image == "" {
 				image = deploymentImage
