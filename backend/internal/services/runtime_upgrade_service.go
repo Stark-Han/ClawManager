@@ -160,6 +160,11 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	}
 	result.Warnings = append(result.Warnings, warnings...)
 	result.Blockers = append(result.Blockers, blockers...)
+	for _, candidate := range candidates {
+		if err := validateRuntimeWorkspaceSQLite(candidate.WorkspacePath); err != nil {
+			result.Blockers = append(result.Blockers, fmt.Sprintf("instance %d workspace database preflight: %v", candidate.InstanceID, err))
+		}
+	}
 	if len(sourceImages) == 0 {
 		result.Blockers = append(result.Blockers, "no current OpenClaw deployment image is available for rollback")
 	}
@@ -1284,17 +1289,9 @@ func inspectRuntimeWorkspace(root string) (runtimeWorkspaceInventory, error) {
 			return err
 		}
 		fmt.Fprintf(manifest, "%s|file|%o|%d|%x\n", filepath.ToSlash(rel), info.Mode().Perm(), info.Size(), fileHash.Sum(nil))
-		lower := strings.ToLower(info.Name())
-		if strings.HasSuffix(lower, ".sqlite") || strings.HasSuffix(lower, ".sqlite3") || strings.HasSuffix(lower, ".db") {
+		if isSQLiteMainDatabase(info.Name()) {
 			inventory.SQLiteFileCount++
-			dbFile, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			header := make([]byte, 16)
-			_, readErr := io.ReadFull(dbFile, header)
-			_ = dbFile.Close()
-			if readErr != nil || string(header) != "SQLite format 3\x00" {
+			if err := validateSQLiteHeader(path); err != nil {
 				return fmt.Errorf("SQLite header check failed for %s", filepath.ToSlash(rel))
 			}
 		}
@@ -1306,6 +1303,54 @@ func inspectRuntimeWorkspace(root string) (runtimeWorkspaceInventory, error) {
 	inventory.SQLiteHeaderValid = true
 	inventory.ManifestSHA256 = hex.EncodeToString(manifest.Sum(nil))
 	return inventory, nil
+}
+
+func validateRuntimeWorkspaceSQLite(root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info == nil || !info.Mode().IsRegular() || !isSQLiteMainDatabase(info.Name()) {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if err := validateSQLiteHeader(path); err != nil {
+			return fmt.Errorf("SQLite header check failed for %s", filepath.ToSlash(rel))
+		}
+		return nil
+	})
+}
+
+func isSQLiteMainDatabase(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, suffix := range []string{".sqlite-wal", ".sqlite-shm", ".sqlite-journal", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal", ".db-wal", ".db-shm", ".db-journal"} {
+		if strings.HasSuffix(lower, suffix) {
+			return false
+		}
+	}
+	for _, suffix := range []string{".lock.sqlite", ".lock.sqlite3", ".lock.db"} {
+		if strings.HasSuffix(lower, suffix) {
+			return false
+		}
+	}
+	return strings.HasSuffix(lower, ".sqlite") || strings.HasSuffix(lower, ".sqlite3") || strings.HasSuffix(lower, ".db")
+}
+
+func validateSQLiteHeader(path string) error {
+	dbFile, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	header := make([]byte, 16)
+	_, readErr := io.ReadFull(dbFile, header)
+	closeErr := dbFile.Close()
+	if readErr != nil || closeErr != nil || string(header) != "SQLite format 3\x00" {
+		return errors.Join(readErr, closeErr, fmt.Errorf("invalid SQLite header"))
+	}
+	return nil
 }
 
 func (s *RuntimeUpgradeService) setTeamMaintenance(ctx context.Context, teamIDs map[int]struct{}, rolloutID int64, enabled bool) error {

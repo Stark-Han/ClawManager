@@ -74,6 +74,13 @@ func TestLocalUpgradeSnapshotPreservesOpenClawWorkspaceBytes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, ".openclaw", "sessions", "sessions.sqlite"), validSQLite, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	lockPath := filepath.Join(workspace, ".openclaw", "tmp", "openclaw-200075", "device-identity.98ce393a.lock.sqlite")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	service := &RuntimeUpgradeService{workspaceRoot: root}
 	ref, inventory, err := service.createLocalSnapshot(77, runtimeUpgradeCandidate{InstanceID: 123, UserID: 45, WorkspacePath: workspace})
@@ -98,7 +105,7 @@ func TestLocalUpgradeSnapshotPreservesOpenClawWorkspaceBytes(t *testing.T) {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	foundSettings, foundSQLite := false, false
+	foundSettings, foundSQLite, foundLock := false, false, false
 	for {
 		header, err := tr.Next()
 		if err != nil {
@@ -112,13 +119,62 @@ func TestLocalUpgradeSnapshotPreservesOpenClawWorkspaceBytes(t *testing.T) {
 			foundSettings = true
 		case ".openclaw/sessions/sessions.sqlite":
 			foundSQLite = true
+		case ".openclaw/tmp/openclaw-200075/device-identity.98ce393a.lock.sqlite":
+			foundLock = true
 		}
 	}
-	if !foundSettings || !foundSQLite {
-		t.Fatalf("snapshot entries settings=%v sqlite=%v", foundSettings, foundSQLite)
+	if !foundSettings || !foundSQLite || !foundLock {
+		t.Fatalf("snapshot entries settings=%v sqlite=%v lock=%v", foundSettings, foundSQLite, foundLock)
 	}
 	if _, err := os.Stat(workspace); err != nil {
 		t.Fatalf("snapshot modified active workspace: %v", err)
+	}
+}
+
+func TestSQLiteMainDatabaseClassification(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "sessions.sqlite", want: true},
+		{name: "state.SQLITE3", want: true},
+		{name: "cache.db", want: true},
+		{name: "device-identity.98ce393a.lock.sqlite", want: false},
+		{name: "sessions.sqlite-wal", want: false},
+		{name: "sessions.sqlite-shm", want: false},
+		{name: "sessions.sqlite-journal", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isSQLiteMainDatabase(test.name); got != test.want {
+				t.Fatalf("isSQLiteMainDatabase(%q) = %v, want %v", test.name, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeWorkspaceSQLitePreflightIgnoresLockAndCompanionFiles(t *testing.T) {
+	root := t.TempDir()
+	validSQLite := append([]byte("SQLite format 3\x00"), make([]byte, 64)...)
+	for name, data := range map[string][]byte{
+		"sessions.sqlite":                  validSQLite,
+		"device-identity.test.lock.sqlite": nil,
+		"sessions.sqlite-wal":              []byte("wal bytes"),
+		"sessions.sqlite-shm":              []byte("shm bytes"),
+		"sessions.sqlite-journal":          []byte("journal bytes"),
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateRuntimeWorkspaceSQLite(root); err != nil {
+		t.Fatalf("preflight rejected SQLite companion file: %v", err)
+	}
+	inventory, err := inspectRuntimeWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.FileCount != 5 || inventory.SQLiteFileCount != 1 {
+		t.Fatalf("inventory = %#v", inventory)
 	}
 }
 
