@@ -341,8 +341,9 @@ func TestOpenClawConfigPlanForTeamMemberFiltersOnlyWorkers(t *testing.T) {
 	service := &teamService{openClawConfigPlanner: planner}
 
 	leaderPlan, err := service.openClawConfigPlanForTeamMember(7, plannedTeamMember{
-		IsLeader: true,
-		Request:  CreateTeamMemberRequest{OpenClawConfigPlan: originalPlan},
+		IsLeader:    true,
+		RuntimeType: RuntimeTypeOpenClaw,
+		Request:     CreateTeamMemberRequest{OpenClawConfigPlan: originalPlan},
 	})
 	if err != nil {
 		t.Fatalf("leader plan returned error: %v", err)
@@ -355,8 +356,9 @@ func TestOpenClawConfigPlanForTeamMemberFiltersOnlyWorkers(t *testing.T) {
 	}
 
 	workerPlan, err := service.openClawConfigPlanForTeamMember(7, plannedTeamMember{
-		IsLeader: false,
-		Request:  CreateTeamMemberRequest{OpenClawConfigPlan: originalPlan},
+		IsLeader:    false,
+		RuntimeType: RuntimeTypeOpenClaw,
+		Request:     CreateTeamMemberRequest{OpenClawConfigPlan: originalPlan},
 	})
 	if err != nil {
 		t.Fatalf("worker plan returned error: %v", err)
@@ -366,6 +368,19 @@ func TestOpenClawConfigPlanForTeamMemberFiltersOnlyWorkers(t *testing.T) {
 	}
 	if planner.calls != 1 || planner.userID != 7 || planner.plan != originalPlan {
 		t.Fatalf("unexpected planner call: %#v", planner)
+	}
+	hermesPlan, err := service.openClawConfigPlanForTeamMember(7, plannedTeamMember{
+		RuntimeType: RuntimeTypeHermes,
+		Request:     CreateTeamMemberRequest{OpenClawConfigPlan: originalPlan},
+	})
+	if err != nil {
+		t.Fatalf("Hermes plan returned error: %v", err)
+	}
+	if hermesPlan != nil {
+		t.Fatal("Hermes member must never receive an OpenClaw config plan")
+	}
+	if planner.calls != 1 {
+		t.Fatalf("Hermes plan unexpectedly called OpenClaw planner: %d", planner.calls)
 	}
 }
 

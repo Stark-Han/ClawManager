@@ -26,6 +26,79 @@ type RuntimeAgentClient interface {
 	ResyncInstanceSkills(ctx context.Context, endpoint string, instanceID int, mode string) error
 }
 
+type RuntimeUpgradeAgentClient interface {
+	GatewayState(ctx context.Context, endpoint, gatewayID string) (*RuntimeAgentGatewayState, error)
+	AcquireWriterLease(ctx context.Context, endpoint string, req RuntimeAgentWriterLeaseRequest) error
+	ReleaseWriterLease(ctx context.Context, endpoint string, req RuntimeAgentWriterLeaseRequest) error
+	PreflightWorkspace(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentWorkspacePreflight, error)
+	CreateWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotRequest) (*RuntimeAgentWorkspaceSnapshot, error)
+	VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error
+	RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error)
+}
+
+type RuntimeAgentWorkspaceRequest struct {
+	RolloutID       string `json:"rollout_id"`
+	SnapshotID      string `json:"snapshot_id,omitempty"`
+	UserID          int    `json:"user_id"`
+	InstanceID      int    `json:"instance_id"`
+	Generation      int    `json:"generation"`
+	LeaseToken      string `json:"lease_token,omitempty"`
+	OfficialDBCheck bool   `json:"official_database_check,omitempty"`
+}
+
+type RuntimeAgentWriterLeaseRequest struct {
+	RuntimeAgentWorkspaceRequest
+	Token      string `json:"token"`
+	TTLSeconds int    `json:"ttl_seconds"`
+}
+
+type RuntimeAgentWorkspacePreflight struct {
+	WorkspacePath  string `json:"workspace_path"`
+	FileCount      int64  `json:"file_count"`
+	DirectoryCount int64  `json:"directory_count"`
+	SymlinkCount   int64  `json:"symlink_count"`
+	TotalBytes     int64  `json:"total_bytes"`
+	AvailableBytes uint64 `json:"available_bytes"`
+	DatabaseFiles  []struct {
+		RelativePath string `json:"relative_path"`
+		SQLiteHeader bool   `json:"sqlite_header"`
+		OfficialOK   bool   `json:"official_ok"`
+	} `json:"database_files"`
+}
+
+type RuntimeAgentSnapshotRequest struct {
+	RuntimeAgentWorkspaceRequest
+}
+
+type RuntimeAgentWorkspaceSnapshot struct {
+	SnapshotID    string `json:"snapshot_id"`
+	ArchivePath   string `json:"archive_path"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	ArchiveBytes  int64  `json:"archive_bytes"`
+	TotalBytes    int64  `json:"total_bytes"`
+}
+
+type RuntimeAgentSnapshotVerifyRequest struct {
+	RuntimeAgentWorkspaceRequest
+}
+
+type RuntimeAgentRestoreRequest struct {
+	RuntimeAgentSnapshotVerifyRequest
+}
+
+type RuntimeAgentRestoreResponse struct {
+	WorkspacePath  string `json:"workspace_path"`
+	PreservedPath  string `json:"preserved_path"`
+	SnapshotSHA256 string `json:"snapshot_sha256"`
+}
+
+type RuntimeAgentGatewayState struct {
+	GatewayID  string `json:"gateway_id"`
+	InstanceID int    `json:"instance_id"`
+	Generation int    `json:"generation"`
+	State      string `json:"state"`
+}
+
 type RuntimeAgentPortRange struct {
 	Start int `json:"start"`
 	End   int `json:"end"`
@@ -113,6 +186,50 @@ func (c *runtimeAgentHTTPClient) ResyncInstanceSkills(ctx context.Context, endpo
 		"trigger":     "manual",
 	}
 	return c.do(ctx, http.MethodPost, endpoint, "/v1/skills/resync", body, nil)
+}
+
+func (c *runtimeAgentHTTPClient) GatewayState(ctx context.Context, endpoint, gatewayID string) (*RuntimeAgentGatewayState, error) {
+	var response RuntimeAgentGatewayState
+	if err := c.do(ctx, http.MethodGet, endpoint, "/v1/gateways/"+url.PathEscape(gatewayID), nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) AcquireWriterLease(ctx context.Context, endpoint string, req RuntimeAgentWriterLeaseRequest) error {
+	return c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/writer-leases/acquire", req, nil)
+}
+
+func (c *runtimeAgentHTTPClient) ReleaseWriterLease(ctx context.Context, endpoint string, req RuntimeAgentWriterLeaseRequest) error {
+	return c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/writer-leases/release", req, nil)
+}
+
+func (c *runtimeAgentHTTPClient) PreflightWorkspace(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentWorkspacePreflight, error) {
+	var response RuntimeAgentWorkspacePreflight
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/preflight", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) CreateWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotRequest) (*RuntimeAgentWorkspaceSnapshot, error) {
+	var response RuntimeAgentWorkspaceSnapshot
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/snapshots", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error {
+	return c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/snapshots/verify", req, nil)
+}
+
+func (c *runtimeAgentHTTPClient) RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error) {
+	var response RuntimeAgentRestoreResponse
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/restore", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *runtimeAgentHTTPClient) do(ctx context.Context, method, endpoint, path string, body any, out any) error {

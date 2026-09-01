@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,21 +39,27 @@ type runtimeAgentPodIdentity struct {
 }
 
 type runtimeAgentRegisterRequest struct {
-	RuntimeType    string          `json:"runtime_type" binding:"required"`
-	Namespace      string          `json:"namespace" binding:"required"`
-	PodName        string          `json:"pod_name" binding:"required"`
-	PodUID         *string         `json:"pod_uid,omitempty"`
-	PodIP          *string         `json:"pod_ip,omitempty"`
-	NodeName       *string         `json:"node_name,omitempty"`
-	DeploymentName string          `json:"deployment_name" binding:"required"`
-	ImageRef       string          `json:"image_ref" binding:"required"`
-	AgentEndpoint  *string         `json:"agent_endpoint,omitempty"`
-	State          string          `json:"state"`
-	Capacity       int             `json:"capacity"`
-	UsedSlots      int             `json:"used_slots"`
-	Draining       bool            `json:"draining"`
-	Metrics        json.RawMessage `json:"metrics,omitempty"`
-	ReportedAt     *time.Time      `json:"reported_at,omitempty"`
+	RuntimeType       string          `json:"runtime_type" binding:"required"`
+	Namespace         string          `json:"namespace" binding:"required"`
+	PodName           string          `json:"pod_name" binding:"required"`
+	PodUID            *string         `json:"pod_uid,omitempty"`
+	PodIP             *string         `json:"pod_ip,omitempty"`
+	NodeName          *string         `json:"node_name,omitempty"`
+	DeploymentName    string          `json:"deployment_name" binding:"required"`
+	ImageRef          string          `json:"image_ref" binding:"required"`
+	OpenClawVersion   string          `json:"openclaw_version,omitempty"`
+	ProtocolVersion   string          `json:"protocol_version,omitempty"`
+	TeamPluginVersion string          `json:"team_plugin_version,omitempty"`
+	SessionStore      string          `json:"session_store,omitempty"`
+	ImageDigest       string          `json:"image_digest,omitempty"`
+	Capabilities      []string        `json:"capabilities,omitempty"`
+	AgentEndpoint     *string         `json:"agent_endpoint,omitempty"`
+	State             string          `json:"state"`
+	Capacity          int             `json:"capacity"`
+	UsedSlots         int             `json:"used_slots"`
+	Draining          bool            `json:"draining"`
+	Metrics           json.RawMessage `json:"metrics,omitempty"`
+	ReportedAt        *time.Time      `json:"reported_at,omitempty"`
 }
 
 type runtimeAgentHeartbeatRequest struct {
@@ -133,27 +140,43 @@ func (h *RuntimeAgentHandler) Register(c *gin.Context) {
 		raw := string(req.Metrics)
 		metricsJSON = &raw
 	}
+	var capabilitiesJSON *string
+	if len(req.Capabilities) > 0 {
+		raw, err := json.Marshal(normalizeRuntimeCapabilities(req.Capabilities))
+		if err != nil {
+			utils.Error(c, http.StatusBadRequest, "capabilities must be valid")
+			return
+		}
+		encoded := string(raw)
+		capabilitiesJSON = &encoded
+	}
 	pod := &models.RuntimePod{
-		RuntimeType:     runtimeType,
-		Namespace:       strings.TrimSpace(req.Namespace),
-		PodName:         strings.TrimSpace(req.PodName),
-		PodUID:          trimStringPtr(req.PodUID),
-		PodIP:           trimStringPtr(req.PodIP),
-		NodeName:        trimStringPtr(req.NodeName),
-		DeploymentName:  strings.TrimSpace(req.DeploymentName),
-		ImageRef:        strings.TrimSpace(req.ImageRef),
-		AgentEndpoint:   trimStringPtr(req.AgentEndpoint),
-		State:           state,
-		Capacity:        capacity,
-		UsedSlots:       req.UsedSlots,
-		Draining:        req.Draining,
-		MetricsJSON:     metricsJSON,
-		LastSeenAt:      &lastSeen,
-		CPUMillisUsed:   0,
-		MemoryBytesUsed: 0,
-		DiskBytesUsed:   0,
-		NetworkRXBytes:  0,
-		NetworkTXBytes:  0,
+		RuntimeType:          runtimeType,
+		Namespace:            strings.TrimSpace(req.Namespace),
+		PodName:              strings.TrimSpace(req.PodName),
+		PodUID:               trimStringPtr(req.PodUID),
+		PodIP:                trimStringPtr(req.PodIP),
+		NodeName:             trimStringPtr(req.NodeName),
+		DeploymentName:       strings.TrimSpace(req.DeploymentName),
+		ImageRef:             strings.TrimSpace(req.ImageRef),
+		OpenClawVersion:      trimStringValuePtr(req.OpenClawVersion),
+		AgentProtocolVersion: trimStringValuePtr(req.ProtocolVersion),
+		TeamPluginVersion:    trimStringValuePtr(req.TeamPluginVersion),
+		SessionStore:         trimStringValuePtr(req.SessionStore),
+		ImageDigest:          trimStringValuePtr(req.ImageDigest),
+		CapabilitiesJSON:     capabilitiesJSON,
+		AgentEndpoint:        trimStringPtr(req.AgentEndpoint),
+		State:                state,
+		Capacity:             capacity,
+		UsedSlots:            req.UsedSlots,
+		Draining:             req.Draining,
+		MetricsJSON:          metricsJSON,
+		LastSeenAt:           &lastSeen,
+		CPUMillisUsed:        0,
+		MemoryBytesUsed:      0,
+		DiskBytesUsed:        0,
+		NetworkRXBytes:       0,
+		NetworkTXBytes:       0,
 	}
 	if err := h.podRepo.UpsertFromAgent(c.Request.Context(), pod); err != nil {
 		utils.HandleError(c, err)
@@ -420,4 +443,26 @@ func trimStringPtr(value *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+func trimStringValuePtr(value string) *string {
+	return trimStringPtr(&value)
+}
+
+func normalizeRuntimeCapabilities(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }

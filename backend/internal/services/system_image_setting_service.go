@@ -40,7 +40,7 @@ var supportedSystemImageTypes = map[string]string{
 }
 
 var defaultSystemImageSettings = map[string]string{
-	"openclaw":                 "ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest",
+	"openclaw":                 "ghcr.io/yuan-lab-llm/agentsruntime/openclaw:2026.8.1",
 	RuntimeTypeDeepSeekHarness: "ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness:latest",
 	"ubuntu":                   "lscr.io/linuxserver/webtop:ubuntu-xfce",
 	"webtop":                   "lscr.io/linuxserver/webtop:ubuntu-xfce",
@@ -60,7 +60,7 @@ var defaultSystemImageRuntimeVariants = map[string]string{
 }
 
 var defaultGatewaySystemImageSettings = map[string]string{
-	"openclaw":                 "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest",
+	"openclaw":                 "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1",
 	RuntimeTypeDeepSeekHarness: "ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness-lite:latest",
 	"ubuntu":                   "ubuntu:22.04",
 	"webtop":                   "ubuntu:22.04",

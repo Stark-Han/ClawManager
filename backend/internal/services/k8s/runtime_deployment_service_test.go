@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -146,6 +147,7 @@ func TestBuildRuntimeDeploymentInjectsAgentV2Environment(t *testing.T) {
 	requireEnv(t, container, "CLAWMANAGER_BACKEND_URL", "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001")
 	requireEnv(t, container, "CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", "runtime-hermes")
 	requireEnv(t, container, "CLAWMANAGER_RUNTIME_IMAGE_REF", "registry/hermes:v2")
+	requireEnv(t, container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", "")
 	requireEnv(t, container, "RUNTIME_WORKSPACE_ROOT", "/workspaces")
 	requireEnv(t, container, "RUNTIME_AGENT_LISTEN_ADDR", "0.0.0.0:19090")
 	requireEnv(t, container, "RUNTIME_AGENT_PUBLIC_PORT", "19090")
@@ -159,6 +161,13 @@ func TestBuildRuntimeDeploymentInjectsAgentV2Environment(t *testing.T) {
 	requireEnvFieldRef(t, container, "POD_NAMESPACE", "metadata.namespace")
 	requireEnvFieldRef(t, container, "POD_IP", "status.podIP")
 	requireEnvFieldRef(t, container, "NODE_NAME", "spec.nodeName")
+}
+
+func TestRuntimeDeploymentReportsImmutableImageDigest(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	image := "registry/openclaw@sha256:" + digest
+	deployment := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "runtime-openclaw", Namespace: "runtime-system", RuntimeType: "openclaw", Image: image, Replicas: 1})
+	requireEnv(t, deployment.Spec.Template.Spec.Containers[0], "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", "sha256:"+digest)
 }
 
 func TestRuntimeDeploymentServiceEnsureCreatesAndUpdates(t *testing.T) {

@@ -44,7 +44,7 @@ func TestRuntimeAgentHandlerRegisterUsesConfiguredCapacity(t *testing.T) {
 	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{
 		AgentReportToken:  "secret",
 		MaxGatewaysPerPod: 33,
-}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
+	}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
 
 	router := gin.New()
 	router.POST("/api/v1/runtime-agent/register", handler.Register)
@@ -55,6 +55,12 @@ func TestRuntimeAgentHandlerRegisterUsesConfiguredCapacity(t *testing.T) {
 		"pod_name": "openclaw-runtime-test",
 		"deployment_name": "openclaw-runtime",
 		"image_ref": "registry/openclaw:v1",
+		"openclaw_version": "2026.8.1",
+		"protocol_version": "2",
+		"team_plugin_version": "0.3.0",
+		"session_store": "sqlite",
+		"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"capabilities": ["redis-team.group-hooks-v1", "openclaw.workspace.snapshot-v1", "redis-team.group-hooks-v1"],
 		"agent_endpoint": "http://10.0.0.1:19090",
 		"state": "ready",
 		"capacity": 10,
@@ -76,6 +82,12 @@ func TestRuntimeAgentHandlerRegisterUsesConfiguredCapacity(t *testing.T) {
 	if pod.Capacity != 33 {
 		t.Fatalf("stored capacity = %d, want configured capacity 33", pod.Capacity)
 	}
+	if pod.OpenClawVersion == nil || *pod.OpenClawVersion != "2026.8.1" || pod.SessionStore == nil || *pod.SessionStore != "sqlite" {
+		t.Fatalf("runtime capability identity was not persisted: %#v", pod)
+	}
+	if got := pod.Capabilities(); !reflect.DeepEqual(got, []string{"openclaw.workspace.snapshot-v1", "redis-team.group-hooks-v1"}) {
+		t.Fatalf("capabilities = %#v", got)
+	}
 	if events.lastType != "runtime_pod_state" {
 		t.Fatalf("event type = %q, want runtime_pod_state", events.lastType)
 	}
@@ -95,7 +107,7 @@ func TestRuntimeAgentHandlerHeartbeatUsesConfiguredCapacity(t *testing.T) {
 	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{
 		AgentReportToken:  "secret",
 		MaxGatewaysPerPod: 44,
-}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
+	}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
 
 	router := gin.New()
 	router.POST("/api/v1/runtime-agent/heartbeat", handler.Heartbeat)

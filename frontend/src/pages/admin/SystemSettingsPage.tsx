@@ -8,6 +8,7 @@ import {
   type SystemImageSetting,
 } from '../../services/systemSettingsService';
 import { runtimePoolService } from '../../services/runtimePoolService';
+import type { RuntimeUpgradePreflightResult } from '../../types/runtimePool';
 import type { RuntimePod, RuntimeType } from '../../types/runtimePool';
 
 type ImageRuntimeType = 'desktop' | 'gateway';
@@ -27,7 +28,7 @@ const LITE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     instance_type: 'openclaw',
     runtime_type: 'gateway',
     display_name: 'OpenClaw Lite',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1',
   },
   {
     instance_type: 'hermes',
@@ -54,7 +55,7 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     instance_type: 'openclaw',
     runtime_type: 'desktop',
     display_name: 'OpenClaw Pro',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:2026.8.1',
   },
   {
     instance_type: 'hermes',
@@ -273,9 +274,10 @@ const SystemSettingsPage: React.FC = () => {
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
   const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
-  const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(1);
+  const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(0);
   const [rolloutSaving, setRolloutSaving] = useState(false);
   const [rolloutError, setRolloutError] = useState<string | null>(null);
+  const [rolloutPreflight, setRolloutPreflight] = useState<RuntimeUpgradePreflightResult | null>(null);
 
   const liteCards = useMemo(
     () => LITE_RUNTIME_CARDS.map((definition) =>
@@ -480,6 +482,8 @@ const SystemSettingsPage: React.FC = () => {
     setRolloutRuntimeType(runtimeType);
     setRolloutImage(nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
     setRolloutError(null);
+    setRolloutPreflight(null);
+    setRolloutMaxUnavailable(runtimeType === 'openclaw' ? 0 : 1);
   };
 
   const startRollout = async () => {
@@ -491,12 +495,28 @@ const SystemSettingsPage: React.FC = () => {
     try {
       setRolloutSaving(true);
       setRolloutError(null);
+      if (rolloutRuntimeType === 'openclaw' && !rolloutPreflight) {
+        const preflight = await runtimePoolService.preflightOpenClawRollout({
+          target_image_ref: rolloutImage.trim(),
+          batch_size: Math.max(1, rolloutBatchSize),
+          max_unavailable: 0,
+          auto_rollback: true,
+        });
+        setRolloutPreflight(preflight);
+        if (!preflight.passed) {
+          setRolloutError(preflight.blockers.join('；'));
+        }
+        return;
+      }
       await runtimePoolService.startRollout({
         runtime_type: rolloutRuntimeType,
         target_image_ref: rolloutImage.trim(),
         batch_size: Math.max(1, rolloutBatchSize),
-        max_unavailable: Math.max(1, rolloutMaxUnavailable),
+        max_unavailable: rolloutRuntimeType === 'openclaw' ? 0 : Math.max(1, rolloutMaxUnavailable),
+        preflight_id: rolloutPreflight?.rollout.preflight_id,
+        auto_rollback: true,
       });
+      setRolloutPreflight(null);
       setRolloutImage(rolloutCard?.image.trim() || rolloutImage.trim());
       void refreshRolloutCurrentImage(rolloutRuntimeType);
       window.setTimeout(() => {
@@ -635,7 +655,7 @@ const SystemSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={rolloutImage}
-                onChange={(event) => setRolloutImage(event.target.value)}
+                onChange={(event) => { setRolloutImage(event.target.value); setRolloutPreflight(null); setRolloutError(null); }}
                 className="app-input mt-1 block w-full"
                 placeholder={rolloutCard?.default_image}
               />
@@ -646,7 +666,7 @@ const SystemSettingsPage: React.FC = () => {
                 type="number"
                 min={1}
                 value={rolloutBatchSize}
-                onChange={(event) => setRolloutBatchSize(Number(event.target.value) || 1)}
+                onChange={(event) => { setRolloutBatchSize(Number(event.target.value) || 1); setRolloutPreflight(null); }}
                 className="app-input mt-1 block w-full"
               />
             </div>
@@ -654,9 +674,10 @@ const SystemSettingsPage: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.rolloutUnavailable')}</label>
               <input
                 type="number"
-                min={1}
+                min={rolloutRuntimeType === 'openclaw' ? 0 : 1}
                 value={rolloutMaxUnavailable}
-                onChange={(event) => setRolloutMaxUnavailable(Number(event.target.value) || 1)}
+                onChange={(event) => { setRolloutMaxUnavailable(Number(event.target.value) || 0); setRolloutPreflight(null); }}
+                disabled={rolloutRuntimeType === 'openclaw'}
                 className="app-input mt-1 block w-full"
               />
             </div>
@@ -667,12 +688,31 @@ const SystemSettingsPage: React.FC = () => {
               className="app-button-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Rocket className="h-4 w-4" />
-              {rolloutSaving ? t('systemSettingsPage.rolloutStarting') : t('systemSettingsPage.startRollout')}
+              {rolloutSaving
+                ? t('systemSettingsPage.rolloutStarting')
+                : rolloutRuntimeType === 'openclaw' && rolloutPreflight?.passed
+                  ? '确认执行（自动回退）'
+                  : rolloutRuntimeType === 'openclaw'
+                    ? '执行升级预检'
+                    : t('systemSettingsPage.startRollout')}
             </button>
           </div>
           {rolloutError && (
             <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {rolloutError}
+            </div>
+          )}
+          {rolloutPreflight && (
+            <div className={`mt-4 rounded-md border px-4 py-3 text-sm ${rolloutPreflight.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+              <div className="font-medium">
+                {rolloutPreflight.passed ? '预检通过，可确认执行' : '预检未通过，未修改 Runtime 或用户数据'}
+              </div>
+              <div className="mt-1">
+                实例 {rolloutPreflight.instance_count} 个，Team {rolloutPreflight.team_count} 个，OpenClaw Team 成员 {rolloutPreflight.openclaw_team_member_count} 个，Hermes 成员 {rolloutPreflight.hermes_team_member_count} 个（Hermes 不升级）。
+              </div>
+              {rolloutPreflight.warnings.length > 0 && <div className="mt-2">提示：{rolloutPreflight.warnings.join('；')}</div>}
+              {rolloutPreflight.blockers.length > 0 && <div className="mt-2">阻断：{rolloutPreflight.blockers.join('；')}</div>}
+              <div className="mt-2 font-mono text-xs break-all">审计指纹：{rolloutPreflight.rollout.plan_fingerprint}</div>
             </div>
           )}
         </section>

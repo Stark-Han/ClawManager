@@ -1325,6 +1325,9 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 
 func (s *teamService) openClawConfigPlanForTeamMember(userID int, memberPlan plannedTeamMember) (*OpenClawConfigPlan, error) {
 	plan := memberPlan.Request.OpenClawConfigPlan
+	if !strings.EqualFold(strings.TrimSpace(memberPlan.RuntimeType), RuntimeTypeOpenClaw) {
+		return nil, nil
+	}
 	if plan == nil || memberPlan.IsLeader || s.openClawConfigPlanner == nil {
 		return plan, nil
 	}
@@ -1844,6 +1847,9 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireTeamDispatchAvailable(context.Background(), team); err != nil {
+		return nil, err
+	}
 	memberKey := strings.TrimSpace(req.TargetMemberID)
 	if memberKey == "" {
 		members, err := s.repo.ListMembersByTeamID(teamID)
@@ -1986,6 +1992,62 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		return nil, err
 	}
 	return teamTaskPayload(*task)
+}
+
+func (s *teamService) requireTeamDispatchAvailable(ctx context.Context, team *models.Team) error {
+	if team == nil {
+		return fmt.Errorf("team is required")
+	}
+	bus, err := s.redisBusForTeam(ctx, team)
+	if err != nil {
+		return err
+	}
+	raw, exists, err := bus.Get(ctx, teamMaintenanceKey(team.ID))
+	if err != nil {
+		return fmt.Errorf("check Team maintenance state: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	var state struct {
+		Enabled   bool `json:"enabled"`
+		RolloutID any  `json:"rolloutId"`
+	}
+	if json.Unmarshal([]byte(raw), &state) == nil && state.Enabled {
+		return fmt.Errorf("Team is temporarily drained for OpenClaw runtime upgrade; no task data was changed")
+	}
+	if value := strings.ToLower(strings.TrimSpace(raw)); value == "1" || value == "true" || value == "on" {
+		return fmt.Errorf("Team is temporarily drained for OpenClaw runtime upgrade; no task data was changed")
+	}
+	return nil
+}
+
+func (s *teamService) SetRuntimeUpgradeMaintenance(ctx context.Context, teamIDs []int, rolloutID int64, enabled bool) error {
+	for _, teamID := range teamIDs {
+		team, err := s.repo.GetTeamByID(teamID)
+		if err != nil {
+			return err
+		}
+		if team == nil {
+			return fmt.Errorf("Team %d not found", teamID)
+		}
+		bus, err := s.redisBusForTeam(ctx, team)
+		if err != nil {
+			return err
+		}
+		key := teamMaintenanceKey(teamID)
+		if enabled {
+			value, _ := json.Marshal(map[string]any{"enabled": true, "rolloutId": rolloutID, "reason": "openclaw_runtime_upgrade", "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)})
+			// Upgrade maintenance is fail-closed. It is removed only after
+			// postflight or a verified rollback, never by an elapsed TTL.
+			if err := bus.Set(ctx, key, string(value), 0); err != nil {
+				return err
+			}
+		} else if err := bus.Del(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *teamService) enrichBootstrapTaskPayload(userID int, team *models.Team, payload map[string]interface{}) error {
@@ -14667,6 +14729,10 @@ func normalizeTeamRedisKeyPart(value string) string {
 
 func teamPresenceKey(teamID int) string {
 	return fmt.Sprintf("claw:team:%d:presence", teamID)
+}
+
+func teamMaintenanceKey(teamID int) string {
+	return fmt.Sprintf("claw:team:%d:maintenance", teamID)
 }
 
 func teamDLQKey(teamID int) string {

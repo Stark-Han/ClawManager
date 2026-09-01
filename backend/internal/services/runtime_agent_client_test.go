@@ -261,6 +261,41 @@ func TestRuntimeAgentClientDeleteGatewayReturnsNotFoundSentinel(t *testing.T) {
 	}
 }
 
+func TestRuntimeUpgradeAgentClientWriterLeaseContract(t *testing.T) {
+	var paths []string
+	var bodies []RuntimeAgentWriterLeaseRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		var body RuntimeAgentWriterLeaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, ok := NewRuntimeAgentClientWithHTTPClient("token", server.Client()).(RuntimeUpgradeAgentClient)
+	if !ok {
+		t.Fatal("HTTP Runtime Agent client does not implement the upgrade contract")
+	}
+	req := RuntimeAgentWriterLeaseRequest{
+		RuntimeAgentWorkspaceRequest: RuntimeAgentWorkspaceRequest{RolloutID: "rollout-1", SnapshotID: "snapshot-1", UserID: 7, InstanceID: 19, Generation: 3, LeaseToken: "lease-1"},
+		Token:                        "lease-1", TTLSeconds: 3600,
+	}
+	if err := client.AcquireWriterLease(context.Background(), server.URL, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReleaseWriterLease(context.Background(), server.URL, req); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 || paths[0] != "/v1/openclaw/writer-leases/acquire" || paths[1] != "/v1/openclaw/writer-leases/release" {
+		t.Fatalf("writer lease paths = %#v", paths)
+	}
+	if len(bodies) != 2 || bodies[0].LeaseToken != "lease-1" || bodies[0].TTLSeconds != 3600 {
+		t.Fatalf("writer lease bodies = %#v", bodies)
+	}
+}
+
 func runtimeAgentIntPtr(v int) *int {
 	return &v
 }

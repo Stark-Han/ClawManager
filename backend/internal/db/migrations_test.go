@@ -49,6 +49,32 @@ func TestMigration023IsEmbedded(t *testing.T) {
 	}
 }
 
+func TestOpenClaw81UpgradeMigrationsAreEmbeddedAndDataSafe(t *testing.T) {
+	safety, err := embeddedMigrations.ReadFile("migrations/058_add_openclaw_runtime_upgrade_safety.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	safetySQL := string(safety)
+	for _, contract := range []string{"runtime_upgrade_items", "runtime_upgrade_audits", "preflight_id", "capabilities_json", "rollback_status"} {
+		if !strings.Contains(safetySQL, contract) {
+			t.Fatalf("migration 058 missing %q", contract)
+		}
+	}
+	pin, err := embeddedMigrations.ReadFile("migrations/059_pin_openclaw_2026_8_1_images.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinSQL := string(pin)
+	if !strings.Contains(pinSQL, "2026.8.1") || !strings.Contains(pinSQL, "image IN") {
+		t.Fatal("migration 059 must update only known previous defaults to 2026.8.1")
+	}
+	for _, destructive := range []string{"DROP TABLE", "TRUNCATE", "DELETE FROM instances", "DELETE FROM runtime_pods"} {
+		if strings.Contains(strings.ToUpper(safetySQL+pinSQL), destructive) {
+			t.Fatalf("OpenClaw upgrade migration contains destructive statement %q", destructive)
+		}
+	}
+}
+
 func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {
 	raw, err := embeddedMigrations.ReadFile("migrations/034_update_lite_default_images.sql")
 	if err != nil {

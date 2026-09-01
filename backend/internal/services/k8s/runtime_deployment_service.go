@@ -166,6 +166,7 @@ func buildRuntimeAgentEnv(spec RuntimeDeploymentSpec, workspaceRoot string, gate
 		{Name: "CLAWMANAGER_BACKEND_URL", Value: runtimeBackendURL(spec)},
 		{Name: "CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", Value: spec.Name},
 		{Name: "CLAWMANAGER_RUNTIME_IMAGE_REF", Value: spec.Image},
+		{Name: "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", Value: runtimeImageDigest(spec.Image)},
 		{Name: "CLAWMANAGER_AGENT_PORT", Value: "19090"},
 		{Name: "CLAWMANAGER_GATEWAY_PORT_START", Value: strconv.Itoa(gatewayPortStart)},
 		{Name: "CLAWMANAGER_GATEWAY_PORT_END", Value: strconv.Itoa(gatewayPortEnd)},
@@ -325,10 +326,11 @@ func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, 
 		container := &updated.Spec.Template.Spec.Containers[containerIndex]
 		container.Image = image
 		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_REF", image)
+		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", runtimeImageDigest(image))
 
 		updated.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
 		updated.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{
-			MaxUnavailable: intOrStringPtr(positiveRolloutInt(maxUnavailable)),
+			MaxUnavailable: intOrStringPtr(nonNegativeRolloutInt(maxUnavailable)),
 			MaxSurge:       intOrStringPtr(positiveRolloutInt(maxSurge)),
 		}
 
@@ -460,9 +462,34 @@ func upsertEnvVar(container *corev1.Container, name, value string) {
 	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
+func runtimeImageDigest(image string) string {
+	marker := "@sha256:"
+	index := strings.LastIndex(strings.TrimSpace(image), marker)
+	if index < 0 {
+		return ""
+	}
+	digest := strings.TrimSpace(image)[index+1:]
+	if len(digest) != len("sha256:")+64 {
+		return ""
+	}
+	for _, char := range strings.TrimPrefix(digest, "sha256:") {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+			return ""
+		}
+	}
+	return strings.ToLower(digest)
+}
+
 func positiveRolloutInt(value int) int {
 	if value <= 0 {
 		return 1
+	}
+	return value
+}
+
+func nonNegativeRolloutInt(value int) int {
+	if value < 0 {
+		return 0
 	}
 	return value
 }

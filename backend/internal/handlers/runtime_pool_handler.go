@@ -22,6 +22,7 @@ type RuntimePoolHandler struct {
 	rolloutRepo repository.RuntimeRolloutRepository
 	scheduler   *services.RuntimeScheduler
 	events      runtimeEventPublisher
+	upgrade     *services.RuntimeUpgradeService
 }
 
 const (
@@ -34,11 +35,72 @@ type startRuntimeRolloutRequest struct {
 	TargetImageRef string `json:"target_image_ref" binding:"required"`
 	BatchSize      int    `json:"batch_size"`
 	MaxUnavailable int    `json:"max_unavailable"`
+	PreflightID    string `json:"preflight_id"`
+	AutoRollback   *bool  `json:"auto_rollback,omitempty"`
+}
+
+type runtimeUpgradePreflightRequest struct {
+	TargetImageRef string `json:"target_image_ref" binding:"required"`
+	BatchSize      int    `json:"batch_size"`
+	MaxUnavailable int    `json:"max_unavailable"`
+	AutoRollback   *bool  `json:"auto_rollback,omitempty"`
 }
 
 type runtimePoolPodListItem struct {
 	models.RuntimePod
-	AgentReported bool `json:"agent_reported"`
+	AgentReported bool     `json:"agent_reported"`
+	Capabilities  []string `json:"capabilities"`
+}
+
+func (h *RuntimePoolHandler) SetUpgradeService(service *services.RuntimeUpgradeService) {
+	h.upgrade = service
+}
+
+func (h *RuntimePoolHandler) PreflightOpenClawRollout(c *gin.Context) {
+	if h.upgrade == nil {
+		utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")
+		return
+	}
+	var req runtimeUpgradePreflightRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ValidationError(c, err)
+		return
+	}
+	autoRollback := true
+	if req.AutoRollback != nil {
+		autoRollback = *req.AutoRollback
+	}
+	result, err := h.upgrade.Preflight(c.Request.Context(), services.RuntimeUpgradePreflightRequest{
+		TargetImageRef: strings.TrimSpace(req.TargetImageRef), BatchSize: req.BatchSize,
+		MaxUnavailable: req.MaxUnavailable, AutoRollback: autoRollback, ActorUserID: currentUserIDPtr(c),
+	})
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "OpenClaw runtime rollout preflight completed", result)
+}
+
+func (h *RuntimePoolHandler) GetRollout(c *gin.Context) {
+	if h.upgrade == nil {
+		utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(c.Param("id")), 10, 64)
+	if err != nil || id <= 0 {
+		utils.Error(c, http.StatusBadRequest, "invalid rollout id")
+		return
+	}
+	details, err := h.upgrade.Details(c.Request.Context(), id)
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	if details == nil {
+		utils.Error(c, http.StatusNotFound, "runtime rollout not found")
+		return
+	}
+	utils.Success(c, http.StatusOK, "Runtime rollout retrieved successfully", details)
 }
 
 func NewRuntimePoolHandler(
@@ -145,13 +207,35 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		maxUnavailable = 1
 	}
 	startedBy := currentUserIDPtr(c)
+	if runtimeType == services.RuntimeTypeOpenClaw {
+		if h.upgrade == nil {
+			utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")
+			return
+		}
+		rollout, err := h.upgrade.ConfirmPreflight(c.Request.Context(), req.PreflightID, targetImage, startedBy)
+		if err != nil {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		if h.scheduler != nil {
+			if err := h.scheduler.StartRollout(c.Request.Context(), rollout.ID); err != nil {
+				utils.HandleError(c, err)
+				return
+			}
+		}
+		h.publish(c.Request.Context(), "runtime_rollout", map[string]any{"rollout_id": rollout.ID, "runtime_type": rollout.RuntimeType, "target_image_ref": rollout.TargetImageRef, "status": rollout.Status, "phase": rollout.Phase})
+		utils.Success(c, http.StatusCreated, "Runtime rollout created successfully", gin.H{"rollout": rollout})
+		return
+	}
 	rollout := &models.RuntimeRollout{
 		RuntimeType:    runtimeType,
 		TargetImageRef: targetImage,
 		Status:         "pending",
+		Phase:          "requested",
 		BatchSize:      batchSize,
 		MaxUnavailable: maxUnavailable,
 		StartedBy:      startedBy,
+		AutoRollback:   req.AutoRollback == nil || *req.AutoRollback,
 	}
 	if err := h.rolloutRepo.Create(c.Request.Context(), rollout); err != nil {
 		utils.HandleError(c, err)
@@ -212,6 +296,7 @@ func runtimePoolPodListItems(pods []models.RuntimePod, agentReported bool) []run
 		items = append(items, runtimePoolPodListItem{
 			RuntimePod:    pod,
 			AgentReported: agentReported,
+			Capabilities:  pod.Capabilities(),
 		})
 	}
 	return items
@@ -234,6 +319,7 @@ func mergeRuntimePoolDeploymentPods(items []runtimePoolPodListItem, deploymentPo
 		items = append(items, runtimePoolPodListItem{
 			RuntimePod:    pod,
 			AgentReported: false,
+			Capabilities:  pod.Capabilities(),
 		})
 	}
 	return items

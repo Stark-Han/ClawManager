@@ -280,6 +280,10 @@ func main() {
 	var runtimeSchedulerCancel context.CancelFunc
 	var runtimeSchedulerMu sync.Mutex
 	var runtimeScheduler *services.RuntimeScheduler
+	runtimeUpgradeService := services.NewRuntimeUpgradeService(database, rolloutRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot, cfg.Runtime.RedisURL)
+	if controller, ok := teamService.(services.TeamUpgradeMaintenanceController); ok {
+		runtimeUpgradeService.SetTeamMaintenanceController(controller)
+	}
 	if cfg.Runtime.SchedulerEnabled {
 		k8sClient := k8s.GetClient()
 		if k8sClient == nil || k8sClient.Clientset == nil {
@@ -294,6 +298,7 @@ func main() {
 				services.WithRuntimeSchedulerHeartbeatTimeout(cfg.Runtime.HeartbeatTimeout),
 				services.WithRuntimeSchedulerMaxGatewaysPerPod(cfg.Runtime.MaxGatewaysPerPod),
 				services.WithRuntimeSchedulerGatewayStartInFlightLimit(cfg.Runtime.GatewayStartInFlightLimit),
+				services.WithRuntimeUpgradeService(runtimeUpgradeService),
 			}
 			if gatewayEnvProvider, ok := instanceService.(interface {
 				BuildGatewayEnv(*models.Instance) (map[string]string, error)
@@ -318,6 +323,7 @@ func main() {
 		log.Printf("runtime scheduler disabled by configuration")
 	}
 	runtimePoolHandler := handlers.NewRuntimePoolHandler(runtimePodRepo, bindingRepo, rolloutRepo, runtimeScheduler, runtimeEvents)
+	runtimePoolHandler.SetUpgradeService(runtimeUpgradeService)
 	workbuddyPrewarmController := k8s.NewWorkbuddyPrewarmController()
 
 	leaderCtx, leaderCancel := context.WithCancel(context.Background())
@@ -543,6 +549,8 @@ func main() {
 			adminRuntime.GET("/runtime-pods/:id/gateways", runtimePoolHandler.GetPodGateways)
 			adminRuntime.POST("/runtime-pods/:id/drain", runtimePoolHandler.DrainPod)
 			adminRuntime.POST("/runtime-rollouts", runtimePoolHandler.StartRollout)
+			adminRuntime.POST("/runtime-rollouts/preflight", runtimePoolHandler.PreflightOpenClawRollout)
+			adminRuntime.GET("/runtime-rollouts/:id", runtimePoolHandler.GetRollout)
 		}
 
 		teams := api.Group("/teams")

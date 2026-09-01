@@ -13,6 +13,12 @@ export interface RuntimePod {
   node_name?: string;
   deployment_name: string;
   image_ref: string;
+  openclaw_version?: string;
+  agent_protocol_version?: string;
+  team_plugin_version?: string;
+  session_store?: string;
+  image_digest?: string;
+  capabilities: string[];
   state: "pending" | "ready" | "draining" | "unhealthy" | "deleted" | string;
   used_slots: number;
   capacity: number;
@@ -47,4 +53,33 @@ export interface StartRuntimeRolloutRequest {
   target_image_ref: string;
   batch_size: number;
   max_unavailable: number;
+  preflight_id?: string;
+  auto_rollback?: boolean;
+}
+
+export interface RuntimeRollout {
+  id: number;
+  runtime_type: RuntimeType;
+  target_image_ref: string;
+  target_image_digest?: string;
+  status: string;
+  phase: string;
+  preflight_id?: string;
+  plan_fingerprint?: string;
+  auto_rollback: boolean;
+  rollback_status?: string;
+  rollback_error?: string;
+  error_message?: string;
+}
+
+export interface RuntimeUpgradePreflightResult {
+  rollout: RuntimeRollout;
+  passed: boolean;
+  blockers: string[];
+  warnings: string[];
+  instance_count: number;
+  team_count: number;
+  openclaw_team_member_count: number;
+  hermes_team_member_count: number;
+  required_capabilities: string[];
 }

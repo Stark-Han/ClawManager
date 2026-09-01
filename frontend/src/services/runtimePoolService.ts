@@ -4,6 +4,7 @@ import type {
   RuntimePod,
   RuntimeType,
   StartRuntimeRolloutRequest,
+  RuntimeUpgradePreflightResult,
 } from "../types/runtimePool";
 
 export const runtimePoolService = {
@@ -25,5 +26,10 @@ export const runtimePoolService = {
 
   async startRollout(data: StartRuntimeRolloutRequest): Promise<void> {
     await api.post("/admin/runtime-rollouts", data);
+  },
+
+  async preflightOpenClawRollout(data: Omit<StartRuntimeRolloutRequest, "runtime_type" | "preflight_id">): Promise<RuntimeUpgradePreflightResult> {
+    const response = await api.post("/admin/runtime-rollouts/preflight", data);
+    return response.data.data;
   },
 };
