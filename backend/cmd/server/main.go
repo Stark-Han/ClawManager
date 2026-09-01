@@ -116,6 +116,7 @@ func main() {
 	services.SetRuntimeImageSettingsProvider(systemImageSettingService)
 	services.SetOpenClawTransferRuntimeRepositories(instanceRepo, bindingRepo, runtimePodRepo)
 	runtimeAgentClient := services.NewRuntimeAgentClient(cfg.Runtime.AgentControlToken)
+	runtimeUpgradeService := services.NewRuntimeUpgradeService(database, rolloutRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot, cfg.Runtime.RedisURL)
 	instanceService := services.NewInstanceService(
 		instanceRepo,
 		quotaRepo,
@@ -123,6 +124,7 @@ func main() {
 		openClawConfigService,
 		services.WithPrivilegedInstancePods(cfg.Kubernetes.Runtime.Pod.Privileged),
 		services.WithV2RuntimeLifecycle(runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot),
+		services.WithRuntimeUpgradeDeletionGuard(runtimeUpgradeService),
 	)
 	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	var northboundCoreServer *http.Server
@@ -280,7 +282,6 @@ func main() {
 	var runtimeSchedulerCancel context.CancelFunc
 	var runtimeSchedulerMu sync.Mutex
 	var runtimeScheduler *services.RuntimeScheduler
-	runtimeUpgradeService := services.NewRuntimeUpgradeService(database, rolloutRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot, cfg.Runtime.RedisURL)
 	if controller, ok := teamService.(services.TeamUpgradeMaintenanceController); ok {
 		runtimeUpgradeService.SetTeamMaintenanceController(controller)
 	}
@@ -335,6 +336,11 @@ func main() {
 		syncService.Start()
 		materializeWorker.Start()
 		teamService.StartBackground(ctx)
+		if reconciler, ok := instanceService.(interface {
+			RunPendingDeletionReconciler(context.Context, time.Duration)
+		}); ok {
+			go reconciler.RunPendingDeletionReconciler(ctx, 30*time.Second)
+		}
 		if northboundOperationWorker != nil {
 			northboundOperationWorker.Start(ctx)
 		}

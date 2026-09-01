@@ -102,6 +102,7 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
   },
 };
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
+const IMMUTABLE_IMAGE_REFERENCE = /@sha256:[a-fA-F0-9]{64}$/;
 const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
 // Keep the saved Windows image setting intact so it can be restored later,
 // but do not expose it in the image configuration page while Linux WorkBuddy
@@ -270,7 +271,7 @@ const SystemSettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
   const [rolloutRuntimeType, setRolloutRuntimeType] = useState<RuntimeType>('openclaw');
-  const [rolloutImage, setRolloutImage] = useState(LITE_RUNTIME_CARDS[0].image);
+  const [rolloutImage, setRolloutImage] = useState('');
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
   const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
@@ -314,7 +315,11 @@ const SystemSettingsPage: React.FC = () => {
         const nextRolloutCard = nextCards.find(
           (card) => card.instance_type === rolloutRuntimeType && card.runtime_type === 'gateway',
         );
-        setRolloutImage(nextRolloutCard?.image.trim() || LITE_RUNTIME_CARDS[0].image);
+        setRolloutImage(
+          rolloutRuntimeType === 'openclaw'
+            ? ''
+            : nextRolloutCard?.image.trim() || '',
+        );
       } catch (error: unknown) {
         setPageError(getErrorMessage(error, t('systemSettingsPage.loadFailed')));
       } finally {
@@ -480,7 +485,9 @@ const SystemSettingsPage: React.FC = () => {
   const handleRolloutRuntimeTypeChange = (runtimeType: RuntimeType) => {
     const nextCard = liteCards.find((card) => card.instance_type === runtimeType);
     setRolloutRuntimeType(runtimeType);
-    setRolloutImage(nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
+    setRolloutImage(runtimeType === 'openclaw'
+      ? ''
+      : nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
     setRolloutError(null);
     setRolloutPreflight(null);
     setRolloutMaxUnavailable(runtimeType === 'openclaw' ? 0 : 1);
@@ -489,6 +496,10 @@ const SystemSettingsPage: React.FC = () => {
   const startRollout = async () => {
     if (!rolloutImage.trim()) {
       setRolloutError(t('systemSettingsPage.rolloutTargetRequired'));
+      return;
+    }
+    if (rolloutRuntimeType === 'openclaw' && !IMMUTABLE_IMAGE_REFERENCE.test(rolloutImage.trim())) {
+      setRolloutError(t('systemSettingsPage.rolloutImmutableTargetRequired'));
       return;
     }
 
@@ -657,8 +668,15 @@ const SystemSettingsPage: React.FC = () => {
                 value={rolloutImage}
                 onChange={(event) => { setRolloutImage(event.target.value); setRolloutPreflight(null); setRolloutError(null); }}
                 className="app-input mt-1 block w-full"
-                placeholder={rolloutCard?.default_image}
+                placeholder={rolloutRuntimeType === 'openclaw'
+                  ? 'registry/repository@sha256:<64 hex>'
+                  : rolloutCard?.default_image}
               />
+              {rolloutRuntimeType === 'openclaw' && (
+                <p className="mt-1 text-xs text-slate-500">
+                  {t('systemSettingsPage.rolloutImmutableTargetHelp')}
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.rolloutBatch')}</label>

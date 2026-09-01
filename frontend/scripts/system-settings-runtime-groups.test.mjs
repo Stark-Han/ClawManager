@@ -42,10 +42,10 @@ assert(
   "System settings page must map Lite to gateway and Pro to desktop.",
 );
 assert(
-  pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest") &&
+  pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1") &&
     pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest") &&
     pageSource.includes("ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
-  "System settings page must use the Lite default runtime images.",
+  "System settings page must pin OpenClaw Lite 2026.8.1 and keep the other Lite defaults.",
 );
 assert(
   pageSource.includes("addProCustomCard"),
@@ -74,6 +74,13 @@ assert(
 assert(
   !pageSource.includes("RUNTIME_TYPE_OPTIONS"),
   "System settings page must not expose the legacy Shell/Desktop selector.",
+);
+assert(
+  pageSource.includes("IMMUTABLE_IMAGE_REFERENCE") &&
+    pageSource.includes("rolloutImmutableTargetRequired") &&
+    pageSource.includes("rolloutImmutableTargetHelp") &&
+    pageSource.includes("rolloutRuntimeType === 'openclaw'\n            ? ''"),
+  "OpenClaw rollout must start empty and reject mutable image tags before preflight.",
 );
 
 console.log("System settings runtime grouping source contract is valid.");

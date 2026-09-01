@@ -274,6 +274,7 @@ type teamService struct {
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	mu                    sync.Mutex
+	deletionMu            sync.Mutex
 	running               bool
 	wg                    sync.WaitGroup
 	consumers             map[int]struct{}
@@ -416,6 +417,7 @@ func (s *teamService) StopBackground() {
 func (s *teamService) consumerScanLoop(ctx context.Context) {
 	defer s.wg.Done()
 
+	s.resumePendingTeamDeletions()
 	s.ensureConsumersForActiveTeams(ctx)
 
 	ticker := time.NewTicker(teamConsumerScanInterval)
@@ -426,7 +428,67 @@ func (s *teamService) consumerScanLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.resumePendingTeamDeletions()
 			s.ensureConsumersForActiveTeams(ctx)
+		}
+	}
+}
+
+func (s *teamService) resumePendingTeamDeletions() {
+	repo, ok := s.repo.(repository.PendingTeamDeletionRepository)
+	if !ok {
+		return
+	}
+	teams, err := repo.ListTeamsByStatus(models.TeamStatusDeleting)
+	if err != nil {
+		fmt.Printf("Warning: failed to list pending Team deletions: %v\n", err)
+		return
+	}
+	teamIDs := make(map[int]struct{}, len(teams))
+	for idx := range teams {
+		team := teams[idx]
+		teamIDs[team.ID] = struct{}{}
+		if err := s.DeleteTeam(team.UserID, team.ID); err != nil {
+			fmt.Printf("Warning: failed to resume Team %d deletion: %v\n", team.ID, err)
+		}
+	}
+	members, err := repo.ListMembersByStatus(models.TeamMemberStatusDeleting)
+	if err != nil {
+		fmt.Printf("Warning: failed to list pending Team member deletions: %v\n", err)
+		return
+	}
+	for idx := range members {
+		member := members[idx]
+		if _, deletingTeam := teamIDs[member.TeamID]; deletingTeam {
+			continue
+		}
+		team, err := s.repo.GetTeamByID(member.TeamID)
+		if err != nil || team == nil {
+			fmt.Printf("Warning: failed to load Team %d for pending member %s deletion: %v\n", member.TeamID, member.MemberKey, err)
+			continue
+		}
+		if team.Status == models.TeamStatusDeleted {
+			if member.InstanceID != nil && *member.InstanceID > 0 {
+				if err := s.instanceService.Delete(*member.InstanceID); err != nil {
+					fmt.Printf("Warning: failed to resume deleted Team %d member %s instance deletion: %v\n", team.ID, member.MemberKey, err)
+					continue
+				}
+				member.InstanceID = nil
+			}
+			member.Status = models.TeamMemberStatusDeleted
+			member.CurrentTaskID = nil
+			member.UpdatedAt = time.Now().UTC()
+			if err := s.repo.UpdateMember(&member); err != nil {
+				fmt.Printf("Warning: failed to finish deleted Team %d member %s deletion: %v\n", team.ID, member.MemberKey, err)
+			}
+			continue
+		}
+		if isTeamLeaderRole(member.Role) {
+			fmt.Printf("Warning: refusing to resume standalone leader %s deletion for active Team %d\n", member.MemberKey, team.ID)
+			continue
+		}
+		if err := s.DeleteMember(team.UserID, team.ID, strconv.Itoa(member.ID)); err != nil {
+			fmt.Printf("Warning: failed to resume Team %d member %s deletion: %v\n", team.ID, member.MemberKey, err)
 		}
 	}
 }
@@ -3295,12 +3357,29 @@ func buildTeamRuntimePrompt(rawPrompt string, memberContext map[string]string) s
 }
 
 func (s *teamService) DeleteTeam(userID, teamID int) error {
+	s.deletionMu.Lock()
+	defer s.deletionMu.Unlock()
 	team, err := s.requireOwnedTeam(userID, teamID)
 	if err != nil {
 		return err
 	}
 	if team.Status == models.TeamStatusDeleted {
 		return nil
+	}
+	members, err := s.repo.ListMembersByTeamID(teamID)
+	if err != nil {
+		return err
+	}
+	if validator, ok := s.instanceService.(interface{ ValidateDelete(int) error }); ok {
+		for idx := range members {
+			member := members[idx]
+			if member.Status == models.TeamMemberStatusDeleted || member.InstanceID == nil || *member.InstanceID <= 0 {
+				continue
+			}
+			if err := validator.ValidateDelete(*member.InstanceID); err != nil {
+				return fmt.Errorf("cannot delete Team %d while member %s instance %d is protected: %w", teamID, member.MemberKey, *member.InstanceID, err)
+			}
+		}
 	}
 
 	now := time.Now().UTC()
@@ -3310,10 +3389,6 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 		return err
 	}
 
-	members, err := s.repo.ListMembersByTeamID(teamID)
-	if err != nil {
-		return err
-	}
 	for idx := range members {
 		member := members[idx]
 		if member.Status == models.TeamMemberStatusDeleted {
@@ -3321,16 +3396,21 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 		}
 		member.Status = models.TeamMemberStatusDeleting
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			return fmt.Errorf("failed to mark Team %d member %s deleting: %w", teamID, member.MemberKey, err)
+		}
 		if member.InstanceID != nil && *member.InstanceID > 0 {
 			if err := s.instanceService.Delete(*member.InstanceID); err != nil {
-				fmt.Printf("Warning: failed to delete Team %d member %s instance %d: %v\n", teamID, member.MemberKey, *member.InstanceID, err)
+				return fmt.Errorf("failed to delete Team %d member %s instance %d: %w", teamID, member.MemberKey, *member.InstanceID, err)
 			}
+			member.InstanceID = nil
 		}
 		member.Status = models.TeamMemberStatusDeleted
 		member.CurrentTaskID = nil
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			return fmt.Errorf("failed to mark Team %d member %s deleted: %w", teamID, member.MemberKey, err)
+		}
 	}
 
 	ctx := context.Background()
@@ -3353,6 +3433,8 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 }
 
 func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
+	s.deletionMu.Lock()
+	defer s.deletionMu.Unlock()
 	team, err := s.requireOwnedTeam(userID, teamID)
 	if err != nil {
 		return err
@@ -3373,6 +3455,13 @@ func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
 	if isTeamLeaderRole(member.Role) {
 		return fmt.Errorf("team leader cannot be deleted before assigning a new leader")
 	}
+	if member.InstanceID != nil && *member.InstanceID > 0 {
+		if validator, ok := s.instanceService.(interface{ ValidateDelete(int) error }); ok {
+			if err := validator.ValidateDelete(*member.InstanceID); err != nil {
+				return fmt.Errorf("cannot delete Team %d member %s instance %d: %w", teamID, member.MemberKey, *member.InstanceID, err)
+			}
+		}
+	}
 
 	now := time.Now().UTC()
 	member.Status = models.TeamMemberStatusDeleting
@@ -3384,6 +3473,7 @@ func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
 		if err := s.instanceService.Delete(*member.InstanceID); err != nil {
 			return err
 		}
+		member.InstanceID = nil
 	}
 	member.Status = models.TeamMemberStatusDeleted
 	member.CurrentTaskID = nil
@@ -13076,15 +13166,25 @@ func (s *teamService) rollbackTeamCreation(userID int, team *models.Team, cause 
 	}
 	for idx := range members {
 		member := members[idx]
+		member.Status = models.TeamMemberStatusDeleting
+		member.UpdatedAt = time.Now().UTC()
+		if err := s.repo.UpdateMember(&member); err != nil {
+			fmt.Printf("Warning: failed to mark Team %d member %s deleting during create rollback: %v\n", team.ID, member.MemberKey, err)
+			continue
+		}
 		if member.InstanceID != nil && *member.InstanceID > 0 {
 			if err := s.instanceService.Delete(*member.InstanceID); err != nil {
 				fmt.Printf("Warning: failed to delete Team %d member %s instance %d during create rollback: %v\n", team.ID, member.MemberKey, *member.InstanceID, err)
+				continue
 			}
+			member.InstanceID = nil
 		}
 		member.Status = models.TeamMemberStatusDeleted
 		member.CurrentTaskID = nil
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			fmt.Printf("Warning: failed to mark Team %d member %s deleted during create rollback: %v\n", team.ID, member.MemberKey, err)
+		}
 	}
 	ctx := context.Background()
 	if strings.TrimSpace(derefTeamString(team.TeamTokenSecretName)) != "" {

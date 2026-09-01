@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -275,6 +276,7 @@ type instanceService struct {
 	runtimePodRepo        repository.RuntimePodRepository
 	bindingRepo           repository.InstanceRuntimeBindingRepository
 	agentClient           RuntimeAgentClient
+	runtimeUpgradeGuard   RuntimeUpgradeDeletionGuard
 	workspaceRoot         string
 	podService            *k8s.PodService
 	deploymentService     *k8s.InstanceDeploymentService
@@ -282,6 +284,8 @@ type instanceService struct {
 	serviceService        *k8s.ServiceService
 	networkPolicyService  *k8s.NetworkPolicyService
 	secretService         *k8s.SecretService
+	deletionMu            sync.Mutex
+	deletionsInFlight     map[int]struct{}
 }
 
 const (
@@ -311,6 +315,10 @@ type gatewayModelInjection struct {
 
 type InstanceServiceOption func(*instanceService)
 
+type RuntimeUpgradeDeletionGuard interface {
+	ValidateInstanceDeletion(ctx context.Context, instanceID int) error
+}
+
 func WithPrivilegedInstancePods(allowed bool) InstanceServiceOption {
 	return func(s *instanceService) {
 		s.allowPrivilegedPods = allowed
@@ -328,6 +336,12 @@ func WithV2RuntimeLifecycle(runtimePodRepo repository.RuntimePodRepository, bind
 	}
 }
 
+func WithRuntimeUpgradeDeletionGuard(guard RuntimeUpgradeDeletionGuard) InstanceServiceOption {
+	return func(s *instanceService) {
+		s.runtimeUpgradeGuard = guard
+	}
+}
+
 // NewInstanceService creates a new instance service
 func NewInstanceService(instanceRepo repository.InstanceRepository, quotaRepo repository.QuotaRepository, llmModelRepo repository.LLMModelRepository, openClawConfigService OpenClawConfigService, options ...InstanceServiceOption) InstanceService {
 	service := &instanceService{
@@ -342,6 +356,7 @@ func NewInstanceService(instanceRepo repository.InstanceRepository, quotaRepo re
 		serviceService:        k8s.NewServiceService(),
 		networkPolicyService:  k8s.NewNetworkPolicyService(),
 		secretService:         k8s.NewSecretService(),
+		deletionsInFlight:     make(map[int]struct{}),
 	}
 	for _, option := range options {
 		if option != nil {
@@ -2319,8 +2334,15 @@ func (s *instanceService) Delete(instanceID int) error {
 	if instance == nil {
 		return fmt.Errorf("instance not found")
 	}
+	if err := s.ValidateDelete(instanceID); err != nil {
+		return err
+	}
 
 	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		if !s.beginDeletion(instanceID) {
+			return fmt.Errorf("instance %d deletion is already in progress", instanceID)
+		}
+		defer s.finishDeletion(instanceID)
 		return s.deleteV2Instance(context.Background(), instance)
 	}
 
@@ -2336,8 +2358,107 @@ func (s *instanceService) Delete(instanceID int) error {
 		GetHub().BroadcastInstanceStatus(instance.UserID, instance)
 	}
 
-	go s.completeDeletion(instance.UserID, instance.ID)
+	s.scheduleLegacyDeletion(instance.UserID, instance.ID)
 
+	return nil
+}
+
+func (s *instanceService) beginDeletion(instanceID int) bool {
+	s.deletionMu.Lock()
+	defer s.deletionMu.Unlock()
+	if s.deletionsInFlight == nil {
+		s.deletionsInFlight = make(map[int]struct{})
+	}
+	if _, exists := s.deletionsInFlight[instanceID]; exists {
+		return false
+	}
+	s.deletionsInFlight[instanceID] = struct{}{}
+	return true
+}
+
+func (s *instanceService) finishDeletion(instanceID int) {
+	s.deletionMu.Lock()
+	delete(s.deletionsInFlight, instanceID)
+	s.deletionMu.Unlock()
+}
+
+func (s *instanceService) scheduleLegacyDeletion(userID, instanceID int) {
+	if !s.beginDeletion(instanceID) {
+		return
+	}
+	go func() {
+		defer s.finishDeletion(instanceID)
+		s.completeDeletion(userID, instanceID)
+	}()
+}
+
+// ResumePendingDeletions retries only instances already marked deleting. It
+// never selects running or stopped instances and therefore cannot create new
+// deletion intent. Active data-safe rollouts remain protected by the same
+// fail-closed guard used by the HTTP and Team deletion paths.
+func (s *instanceService) ResumePendingDeletions(ctx context.Context) (int, error) {
+	repo, ok := s.instanceRepo.(repository.PendingInstanceDeletionRepository)
+	if !ok {
+		return 0, nil
+	}
+	instances, err := repo.GetByStatus(ctx, "deleting", 0)
+	if err != nil {
+		return 0, err
+	}
+	retried := 0
+	var failures []string
+	for idx := range instances {
+		instanceID := instances[idx].ID
+		if err := s.Delete(instanceID); err != nil {
+			failures = append(failures, fmt.Sprintf("instance %d: %v", instanceID, err))
+			continue
+		}
+		retried++
+	}
+	if len(failures) > 0 {
+		return retried, fmt.Errorf("pending instance deletion retry failed: %s", strings.Join(failures, "; "))
+	}
+	return retried, nil
+}
+
+// RunPendingDeletionReconciler resumes explicit, partially completed deletes
+// immediately after leader election and periodically thereafter.
+func (s *instanceService) RunPendingDeletionReconciler(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	run := func() {
+		retried, err := s.ResumePendingDeletions(ctx)
+		if err != nil {
+			fmt.Printf("Warning: pending instance deletion reconciliation: %v\n", err)
+			return
+		}
+		if retried > 0 {
+			fmt.Printf("Retried %d pending instance deletion(s)\n", retried)
+		}
+	}
+	run()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}
+
+// ValidateDelete performs the non-mutating lifecycle checks shared by direct
+// instance deletion and Team deletion preflight.
+func (s *instanceService) ValidateDelete(instanceID int) error {
+	if s.runtimeUpgradeGuard == nil {
+		return nil
+	}
+	if err := s.runtimeUpgradeGuard.ValidateInstanceDeletion(context.Background(), instanceID); err != nil {
+		return err
+	}
 	return nil
 }
 

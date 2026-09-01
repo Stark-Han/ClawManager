@@ -696,8 +696,12 @@ func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int
 }
 
 func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, instanceID int) bool {
+	return s.ValidateInstanceDeletion(ctx, instanceID) != nil
+}
+
+func (s *RuntimeUpgradeService) ValidateInstanceDeletion(ctx context.Context, instanceID int) error {
 	if s == nil || s.sess == nil || instanceID <= 0 {
-		return false
+		return fmt.Errorf("runtime upgrade deletion guard is unavailable")
 	}
 	var count int
 	row, err := s.sess.SQL().QueryRowContext(ctx, `
@@ -712,7 +716,13 @@ func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, instanceID 
 	if err == nil {
 		err = row.Scan(&count)
 	}
-	return err == nil && count > 0
+	if err != nil {
+		return fmt.Errorf("check active runtime rollout for instance %d: %w", instanceID, err)
+	}
+	if count > 0 {
+		return fmt.Errorf("instance %d is held by an active data-safe runtime rollout", instanceID)
+	}
+	return nil
 }
 
 func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtimeUpgradeCandidate, map[string]string, []string, []string, error) {
@@ -756,6 +766,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 		LEFT JOIN instance_runtime_bindings b ON b.instance_id = i.id
 		LEFT JOIN team_members tm ON tm.instance_id = i.id AND tm.status NOT IN ('deleted','deleting')
 		WHERE LOWER(TRIM(i.type)) = 'openclaw'
+		  AND LOWER(TRIM(i.status)) <> 'deleting'
 		  AND (CASE
 		    WHEN LOWER(TRIM(i.instance_mode)) IN ('lite','pro') THEN LOWER(TRIM(i.instance_mode))
 		    WHEN LOWER(TRIM(i.runtime_type)) = 'gateway' THEN 'lite'

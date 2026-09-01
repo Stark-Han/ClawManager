@@ -2,10 +2,13 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -8629,20 +8632,186 @@ func TestCreateRootCoordinationRecoveryPersistsHiddenEventAndOutbox(t *testing.T
 	}
 }
 
+type teamDeletionInstanceServiceStub struct {
+	InstanceService
+	validateErr     error
+	validateErrByID map[int]error
+	validateCalls   []int
+	deleteErr       error
+	deleteCalls     []int
+}
+
+func (s *teamDeletionInstanceServiceStub) ValidateDelete(instanceID int) error {
+	s.validateCalls = append(s.validateCalls, instanceID)
+	if err := s.validateErrByID[instanceID]; err != nil {
+		return err
+	}
+	return s.validateErr
+}
+
+func (s *teamDeletionInstanceServiceStub) Delete(instanceID int) error {
+	s.deleteCalls = append(s.deleteCalls, instanceID)
+	return s.deleteErr
+}
+
+func TestDeleteMemberValidatesRuntimeUpgradeBeforeChangingMemberState(t *testing.T) {
+	instanceID := 901
+	team := &models.Team{ID: 71, UserID: 45, Status: models.TeamStatusRunning}
+	member := &models.TeamMember{
+		ID:         81,
+		TeamID:     team.ID,
+		UserID:     team.UserID,
+		InstanceID: &instanceID,
+		MemberKey:  "worker-a",
+		Role:       "worker",
+		Status:     models.TeamMemberStatusIdle,
+	}
+	repo := &teamRepositoryStub{
+		teamsByID:   map[int]*models.Team{team.ID: team},
+		membersByID: map[int]*models.TeamMember{member.ID: member},
+	}
+	instances := &teamDeletionInstanceServiceStub{validateErr: errors.New("active rollout")}
+	service := &teamService{repo: repo, instanceService: instances}
+
+	err := service.DeleteMember(team.UserID, team.ID, strconv.Itoa(member.ID))
+	if err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("DeleteMember error = %v, want active rollout rejection", err)
+	}
+	if member.Status != models.TeamMemberStatusIdle || len(repo.updatedMembers) != 0 {
+		t.Fatalf("member mutated before validation: status=%q updates=%#v", member.Status, repo.updatedMembers)
+	}
+	if !reflect.DeepEqual(instances.validateCalls, []int{instanceID}) || len(instances.deleteCalls) != 0 {
+		t.Fatalf("validate calls=%#v delete calls=%#v", instances.validateCalls, instances.deleteCalls)
+	}
+}
+
+func TestDeleteTeamValidatesEveryMemberBeforeChangingTeamState(t *testing.T) {
+	firstInstanceID := 911
+	secondInstanceID := 912
+	team := &models.Team{ID: 73, UserID: 45, Status: models.TeamStatusRunning}
+	first := &models.TeamMember{ID: 83, TeamID: team.ID, UserID: team.UserID, InstanceID: &firstInstanceID, MemberKey: "leader", Role: "leader", Status: models.TeamMemberStatusIdle}
+	second := &models.TeamMember{ID: 84, TeamID: team.ID, UserID: team.UserID, InstanceID: &secondInstanceID, MemberKey: "worker", Role: "worker", Status: models.TeamMemberStatusIdle}
+	repo := &teamRepositoryStub{
+		teamsByID:   map[int]*models.Team{team.ID: team},
+		membersByID: map[int]*models.TeamMember{first.ID: first, second.ID: second},
+	}
+	instances := &teamDeletionInstanceServiceStub{validateErrByID: map[int]error{secondInstanceID: errors.New("active rollout")}}
+	service := &teamService{repo: repo, instanceService: instances}
+
+	err := service.DeleteTeam(team.UserID, team.ID)
+	if err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("DeleteTeam error = %v, want active rollout rejection", err)
+	}
+	if team.Status != models.TeamStatusRunning || repo.updatedTeam != nil || len(repo.updatedMembers) != 0 {
+		t.Fatalf("Team mutated before all members passed validation: team=%#v member updates=%#v", repo.updatedTeam, repo.updatedMembers)
+	}
+	if len(instances.deleteCalls) != 0 {
+		t.Fatalf("delete calls = %#v, want none", instances.deleteCalls)
+	}
+}
+
+func TestDeleteMemberClearsInstanceReferenceAfterSuccessfulDelete(t *testing.T) {
+	instanceID := 902
+	team := &models.Team{ID: 72, UserID: 45, Status: models.TeamStatusRunning}
+	member := &models.TeamMember{
+		ID:         82,
+		TeamID:     team.ID,
+		UserID:     team.UserID,
+		InstanceID: &instanceID,
+		MemberKey:  "worker-b",
+		Role:       "worker",
+		Status:     models.TeamMemberStatusIdle,
+	}
+	repo := &teamRepositoryStub{
+		teamsByID:                map[int]*models.Team{team.ID: team},
+		membersByID:              map[int]*models.TeamMember{member.ID: member},
+		updateMemberErrForStatus: models.TeamMemberStatusDeleted,
+	}
+	instances := &teamDeletionInstanceServiceStub{}
+	service := &teamService{repo: repo, instanceService: instances}
+
+	err := service.DeleteMember(team.UserID, team.ID, strconv.Itoa(member.ID))
+	if err == nil || !strings.Contains(err.Error(), "forced member update failure") {
+		t.Fatalf("DeleteMember error = %v, want forced terminal update failure", err)
+	}
+	if !reflect.DeepEqual(instances.deleteCalls, []int{instanceID}) {
+		t.Fatalf("delete calls = %#v, want [%d]", instances.deleteCalls, instanceID)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusDeleted || repo.updatedMember.InstanceID != nil {
+		t.Fatalf("terminal member update retained a stale instance reference: %#v", repo.updatedMember)
+	}
+}
+
+type pendingDeletionTeamRepositoryStub struct {
+	*teamRepositoryStub
+}
+
+func (s *pendingDeletionTeamRepositoryStub) ListTeamsByStatus(status string) ([]models.Team, error) {
+	result := make([]models.Team, 0)
+	for _, team := range s.teamsByID {
+		if team != nil && team.Status == status {
+			result = append(result, *team)
+		}
+	}
+	return result, nil
+}
+
+func (s *pendingDeletionTeamRepositoryStub) ListMembersByStatus(status string) ([]models.TeamMember, error) {
+	result := make([]models.TeamMember, 0)
+	for _, member := range s.membersByID {
+		if member != nil && member.Status == status {
+			result = append(result, *member)
+		}
+	}
+	return result, nil
+}
+
+func TestPendingDeletionReconcilerFinishesDeletedTeamMember(t *testing.T) {
+	instanceID := 921
+	team := &models.Team{ID: 74, UserID: 45, Status: models.TeamStatusDeleted}
+	member := &models.TeamMember{
+		ID:         85,
+		TeamID:     team.ID,
+		UserID:     team.UserID,
+		InstanceID: &instanceID,
+		MemberKey:  "worker-c",
+		Role:       "worker",
+		Status:     models.TeamMemberStatusDeleting,
+	}
+	baseRepo := &teamRepositoryStub{
+		teamsByID:   map[int]*models.Team{team.ID: team},
+		membersByID: map[int]*models.TeamMember{member.ID: member},
+	}
+	repo := &pendingDeletionTeamRepositoryStub{teamRepositoryStub: baseRepo}
+	instances := &teamDeletionInstanceServiceStub{}
+	service := &teamService{repo: repo, instanceService: instances}
+
+	service.resumePendingTeamDeletions()
+
+	if !reflect.DeepEqual(instances.deleteCalls, []int{instanceID}) {
+		t.Fatalf("delete calls = %#v, want [%d]", instances.deleteCalls, instanceID)
+	}
+	if baseRepo.updatedMember == nil || baseRepo.updatedMember.Status != models.TeamMemberStatusDeleted || baseRepo.updatedMember.InstanceID != nil {
+		t.Fatalf("pending deleted-Team member did not converge: %#v", baseRepo.updatedMember)
+	}
+}
+
 type teamRepositoryStub struct {
-	mu               sync.Mutex
-	teamsByID        map[int]*models.Team
-	membersByID      map[int]*models.TeamMember
-	membersByKey     map[string]*models.TeamMember
-	tasksByID        map[int]*models.TeamTask
-	tasksByMessageID map[string]*models.TeamTask
-	createdEvents    []models.TeamEvent
-	workItems        []models.TeamWorkItem
-	workflowPhases   []models.TeamWorkflowPhase
-	outboxRows       []models.TeamEventOutbox
-	updatedTask      *models.TeamTask
-	updatedMember    *models.TeamMember
-	updatedTeam      *models.Team
+	mu                       sync.Mutex
+	teamsByID                map[int]*models.Team
+	membersByID              map[int]*models.TeamMember
+	membersByKey             map[string]*models.TeamMember
+	tasksByID                map[int]*models.TeamTask
+	tasksByMessageID         map[string]*models.TeamTask
+	createdEvents            []models.TeamEvent
+	workItems                []models.TeamWorkItem
+	workflowPhases           []models.TeamWorkflowPhase
+	outboxRows               []models.TeamEventOutbox
+	updatedTask              *models.TeamTask
+	updatedMember            *models.TeamMember
+	updatedMembers           []models.TeamMember
+	updateMemberErrForStatus string
+	updatedTeam              *models.Team
 }
 
 type teamOpenClawConfigPlannerStub struct {
@@ -8689,6 +8858,10 @@ func (s *teamRepositoryStub) CreateMember(member *models.TeamMember) error { ret
 func (s *teamRepositoryStub) UpdateMember(member *models.TeamMember) error {
 	clone := *member
 	s.updatedMember = &clone
+	s.updatedMembers = append(s.updatedMembers, clone)
+	if s.updateMemberErrForStatus != "" && clone.Status == s.updateMemberErrForStatus {
+		return errors.New("forced member update failure")
+	}
 	return nil
 }
 func (s *teamRepositoryStub) GetMemberByID(id int) (*models.TeamMember, error) {

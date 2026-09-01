@@ -73,6 +73,19 @@ func TestOpenClaw81UpgradeMigrationsAreEmbeddedAndDataSafe(t *testing.T) {
 			t.Fatalf("OpenClaw upgrade migration contains destructive statement %q", destructive)
 		}
 	}
+	release, err := embeddedMigrations.ReadFile("migrations/060_allow_terminal_runtime_upgrade_instance_deletion.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSQL := string(release)
+	if !strings.Contains(releaseSQL, "DROP FOREIGN KEY fk_runtime_upgrade_item_instance") {
+		t.Fatal("migration 060 must release only the historical instance deletion blocker")
+	}
+	for _, destructive := range []string{"DELETE FROM", "DROP TABLE", "TRUNCATE"} {
+		if strings.Contains(strings.ToUpper(releaseSQL), destructive) {
+			t.Fatalf("migration 060 must preserve audit and user rows; found %q", destructive)
+		}
+	}
 }
 
 func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {

@@ -895,11 +895,12 @@ func TestInstanceServiceDeleteV2KeepsInstanceAndBindingWhenAgentDeleteFails(t *t
 		State:        "running",
 		Generation:   2,
 	}
+	agent := &fakeRuntimeAgentClient{deleteErr: errors.New("agent delete failed")}
 	service := &instanceService{
 		instanceRepo:   instanceRepo,
 		runtimePodRepo: podRepo,
 		bindingRepo:    bindingRepo,
-		agentClient:    &fakeRuntimeAgentClient{deleteErr: errors.New("agent delete failed")},
+		agentClient:    agent,
 	}
 
 	err := service.Delete(190)
@@ -917,6 +918,92 @@ func TestInstanceServiceDeleteV2KeepsInstanceAndBindingWhenAgentDeleteFails(t *t
 	}
 	if bindingRepo.deleteAndReleaseCalls[190] != 0 {
 		t.Fatalf("delete and release calls = %d, want 0", bindingRepo.deleteAndReleaseCalls[190])
+	}
+
+	agent.deleteErr = nil
+	retried, err := service.ResumePendingDeletions(context.Background())
+	if err != nil {
+		t.Fatalf("ResumePendingDeletions returned error after agent recovery: %v", err)
+	}
+	if retried != 1 || instanceRepo.byID[190] != nil || bindingRepo.bindings[190] != nil {
+		t.Fatalf("pending deletion did not recover: retried=%d instance=%#v binding=%#v", retried, instanceRepo.byID[190], bindingRepo.bindings[190])
+	}
+}
+
+type runtimeUpgradeDeletionGuardStub struct {
+	err   error
+	calls []int
+}
+
+func (g *runtimeUpgradeDeletionGuardStub) ValidateInstanceDeletion(_ context.Context, instanceID int) error {
+	g.calls = append(g.calls, instanceID)
+	return g.err
+}
+
+func TestInstanceServiceDeleteV2ChecksUpgradeGuardBeforeMutation(t *testing.T) {
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[191] = &models.Instance{
+		ID:          191,
+		UserID:      45,
+		Type:        "openclaw",
+		RuntimeType: "gateway",
+		Status:      "running",
+	}
+	guard := &runtimeUpgradeDeletionGuardStub{err: errors.New("active rollout")}
+	service := &instanceService{
+		instanceRepo:        instanceRepo,
+		runtimeUpgradeGuard: guard,
+		deletionsInFlight:   map[int]struct{}{},
+	}
+
+	err := service.Delete(191)
+	if err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("Delete error = %v, want active rollout rejection", err)
+	}
+	if got := instanceRepo.byID[191].Status; got != "running" {
+		t.Fatalf("instance status = %q, want running", got)
+	}
+	if len(instanceRepo.deleted) != 0 {
+		t.Fatalf("deleted instances = %#v, want none", instanceRepo.deleted)
+	}
+	if !reflect.DeepEqual(guard.calls, []int{191}) {
+		t.Fatalf("guard calls = %#v, want [191]", guard.calls)
+	}
+}
+
+func TestInstanceServiceResumePendingDeletionsOnlyRetriesExplicitDeletingRows(t *testing.T) {
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[192] = &models.Instance{
+		ID:          192,
+		UserID:      45,
+		Type:        "openclaw",
+		RuntimeType: "gateway",
+		Status:      "deleting",
+	}
+	instanceRepo.byID[193] = &models.Instance{
+		ID:          193,
+		UserID:      45,
+		Type:        "openclaw",
+		RuntimeType: "gateway",
+		Status:      "running",
+	}
+	service := &instanceService{
+		instanceRepo:      instanceRepo,
+		deletionsInFlight: map[int]struct{}{},
+	}
+
+	retried, err := service.ResumePendingDeletions(context.Background())
+	if err != nil {
+		t.Fatalf("ResumePendingDeletions returned error: %v", err)
+	}
+	if retried != 1 {
+		t.Fatalf("retried = %d, want 1", retried)
+	}
+	if instanceRepo.byID[192] != nil {
+		t.Fatal("deleting instance was not removed")
+	}
+	if instanceRepo.byID[193] == nil || instanceRepo.byID[193].Status != "running" {
+		t.Fatal("running instance was changed by deletion reconciliation")
 	}
 }
 
@@ -1164,6 +1251,16 @@ func (r *v2LifecycleInstanceRepo) GetByAgentBootstrapToken(string) (*models.Inst
 
 func (r *v2LifecycleInstanceRepo) GetAll(offset, limit int) ([]models.Instance, error) {
 	return nil, nil
+}
+
+func (r *v2LifecycleInstanceRepo) GetByStatus(_ context.Context, status string, limit int) ([]models.Instance, error) {
+	instances := make([]models.Instance, 0)
+	for _, instance := range r.byID {
+		if instance.Status == status {
+			instances = append(instances, *instance)
+		}
+	}
+	return instances, nil
 }
 
 func (r *v2LifecycleInstanceRepo) CountAll() (int, error) { return len(r.byID), nil }

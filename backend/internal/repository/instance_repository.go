@@ -76,6 +76,14 @@ type InstanceQueryRepository interface {
 	SummarizeByUserID(userID int) (*models.InstanceSummary, error)
 }
 
+// PendingInstanceDeletionRepository is an optional lifecycle capability used
+// by the leader-only deletion reconciler. Keeping it separate avoids widening
+// every InstanceRepository test double and limits retries to rows that already
+// record an explicit user deletion intent.
+type PendingInstanceDeletionRepository interface {
+	GetByStatus(ctx context.Context, status string, limit int) ([]models.Instance, error)
+}
+
 // instanceRepository implements InstanceRepository
 type instanceRepository struct {
 	sess db.Session
@@ -246,6 +254,23 @@ func (r *instanceRepository) GetAll(offset, limit int) ([]models.Instance, error
 	err := r.sess.Collection("instances").Find().Offset(offset).Limit(limit).All(&instances)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all instances: %w", err)
+	}
+	return instances, nil
+}
+
+func (r *instanceRepository) GetByStatus(ctx context.Context, status string, limit int) ([]models.Instance, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		return nil, fmt.Errorf("instance status is required")
+	}
+	var instances []models.Instance
+	result := r.sess.Collection("instances").Find(db.Cond{"status": status}).OrderBy("id")
+	if limit > 0 {
+		result = result.Limit(limit)
+	}
+	err := result.All(&instances)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instances by status: %w", err)
 	}
 	return instances, nil
 }

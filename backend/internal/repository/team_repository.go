@@ -59,6 +59,13 @@ type TeamRepository interface {
 	MarkEventOutboxFailed(id int, availableAt time.Time, cause string) error
 }
 
+// PendingTeamDeletionRepository is an optional lifecycle capability for
+// resuming deletions that already recorded explicit user intent.
+type PendingTeamDeletionRepository interface {
+	ListTeamsByStatus(status string) ([]models.Team, error)
+	ListMembersByStatus(status string) ([]models.TeamMember, error)
+}
+
 type teamRepository struct {
 	sess db.Session
 }
@@ -141,6 +148,18 @@ func (r *teamRepository) ListActiveTeams() ([]models.Team, error) {
 	return teams, nil
 }
 
+func (r *teamRepository) ListTeamsByStatus(status string) ([]models.Team, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		return nil, fmt.Errorf("team status is required")
+	}
+	var teams []models.Team
+	if err := r.sess.Collection("teams").Find(db.Cond{"status": status}).OrderBy("id").All(&teams); err != nil {
+		return nil, fmt.Errorf("failed to list teams by status: %w", err)
+	}
+	return teams, nil
+}
+
 func (r *teamRepository) CountTeamsByUserID(userID int) (int, error) {
 	count, err := r.sess.Collection("teams").Find(db.Cond{"user_id": userID}).Count()
 	if err != nil {
@@ -169,6 +188,18 @@ func (r *teamRepository) UpdateMember(member *models.TeamMember) error {
 		return fmt.Errorf("failed to update team member: %w", err)
 	}
 	return nil
+}
+
+func (r *teamRepository) ListMembersByStatus(status string) ([]models.TeamMember, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		return nil, fmt.Errorf("team member status is required")
+	}
+	var members []models.TeamMember
+	if err := r.sess.Collection("team_members").Find(db.Cond{"status": status}).OrderBy("id").All(&members); err != nil {
+		return nil, fmt.Errorf("failed to list team members by status: %w", err)
+	}
+	return members, nil
 }
 
 func (r *teamRepository) GetMemberByID(id int) (*models.TeamMember, error) {

@@ -2269,6 +2269,10 @@ export const translations: Record<Locale, TranslationTree> = {
       startRollout: "Start rolling upgrade",
       rolloutStarting: "Starting",
       rolloutTargetRequired: "Target gateway image is required.",
+      rolloutImmutableTargetRequired:
+        "OpenClaw requires an immutable registry digest: registry/repository@sha256:<64 hex>. Tags are not accepted.",
+      rolloutImmutableTargetHelp:
+        "For a data-safe OpenClaw rollback, paste the pushed image digest (@sha256:...), not a mutable tag.",
       rolloutFailed: "Failed to start rolling upgrade",
       liteRuntimeTitle: "Lite runtime",
       liteRuntimeSubtitle:
@@ -3858,6 +3862,10 @@ export const translations: Record<Locale, TranslationTree> = {
       startRollout: "启动滚动升级",
       rolloutStarting: "启动中",
       rolloutTargetRequired: "目标 gateway 镜像为必填项。",
+      rolloutImmutableTargetRequired:
+        "OpenClaw 必须填写不可变镜像摘要：registry/repository@sha256:<64位十六进制>，不接受 tag。",
+      rolloutImmutableTargetHelp:
+        "为保证 OpenClaw 可安全回退，请粘贴已推送镜像的 @sha256 摘要，不要填写可变 tag。",
       rolloutFailed: "启动滚动升级失败",
       liteRuntimeTitle: "Lite 运行时",
       liteRuntimeSubtitle: "gateway 模式，固定支持 OpenClaw Lite 与 Hermes Lite。",
