@@ -27,12 +27,13 @@ const (
 )
 
 type CoreService struct {
-	repo           *repository.NorthboundRepository
-	users          repository.UserRepository
-	instances      coreInstanceService
-	externalAccess shareLinkService
-	config         config.NorthboundConfig
-	audit          repository.AuditEventRepository
+	repo            *repository.NorthboundRepository
+	users           repository.UserRepository
+	instances       coreInstanceService
+	externalAccess  shareLinkService
+	config          config.NorthboundConfig
+	audit           repository.AuditEventRepository
+	runtimeSettings RuntimeSettingsProvider
 }
 
 type coreInstanceService interface {
@@ -47,8 +48,19 @@ type shareLinkService interface {
 	ResetPassword(ctx context.Context, instanceID, createdBy int) (*services.PasswordExternalAccessResult, error)
 }
 
-func NewCoreService(repo *repository.NorthboundRepository, users repository.UserRepository, instances services.InstanceService, externalAccess services.InstanceExternalAccessService, cfg config.NorthboundConfig) *CoreService {
-	return &CoreService{repo: repo, users: users, instances: instances, externalAccess: externalAccess, config: cfg}
+func NewCoreService(repo *repository.NorthboundRepository, users repository.UserRepository, instances services.InstanceService, externalAccess services.InstanceExternalAccessService, cfg config.NorthboundConfig, providers ...RuntimeSettingsProvider) *CoreService {
+	service := &CoreService{repo: repo, users: users, instances: instances, externalAccess: externalAccess, config: cfg}
+	if len(providers) > 0 {
+		service.runtimeSettings = providers[0]
+	}
+	return service
+}
+
+func (s *CoreService) settings() *models.NorthboundAdminSettings {
+	if s.runtimeSettings != nil {
+		return s.runtimeSettings.Current()
+	}
+	return defaultRuntimeSettings(s.config)
 }
 
 func (s *CoreService) ValidatePrincipal(principal Principal) error {
@@ -99,6 +111,9 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 	req.Owner = owner
 	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid instance request", nil)
+	}
+	if !allowedType(s.settings().AllowedLiteTypes, req.Type) {
+		return nil, false, apiError(422, "RUNTIME_DISABLED", "This Lite runtime is disabled by policy", nil)
 	}
 	if req.Description != nil && len(*req.Description) > 2000 {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
@@ -176,6 +191,9 @@ func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string
 	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundProType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", nil)
 	}
+	if !allowedType(s.settings().AllowedProTypes, req.Type) {
+		return nil, false, apiError(422, "RUNTIME_DISABLED", "This Pro runtime is disabled by policy", nil)
+	}
 	if req.Description != nil && len(*req.Description) > 2000 {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
 	}
@@ -227,7 +245,7 @@ func (s *CoreService) submitCreateOperation(
 	if err != nil {
 		return nil, false, err
 	}
-	if pending >= 5 {
+	if pending >= s.settings().MaxPendingOperations {
 		return nil, false, apiError(429, "RATE_LIMITED", pendingMessage, nil)
 	}
 	operationID, err := randomToken("op_", 18)
@@ -558,17 +576,17 @@ func (w *OperationWorker) Stop() {
 }
 
 func (w *OperationWorker) loop(ctx context.Context) {
-	tick := w.service.config.OperationTick
-	if tick <= 0 {
-		tick = time.Second
-	}
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
 	for {
+		tick := time.Duration(w.service.settings().OperationTickMilliseconds) * time.Millisecond
+		if tick <= 0 {
+			tick = time.Second
+		}
+		timer := time.NewTimer(tick)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			w.processOne(ctx)
 		}
 	}
@@ -580,7 +598,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 		return
 	}
 	now := time.Now().UTC()
-	lease := w.service.config.OperationLease
+	lease := time.Duration(w.service.settings().OperationLeaseSeconds) * time.Second
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
@@ -592,7 +610,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	if item == nil {
 		return
 	}
-	createRequest, auditPrefix, err := operationCreateRequest(item)
+	createRequest, auditPrefix, err := w.service.operationCreateRequest(item)
 	if err != nil {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
 		return
@@ -609,7 +627,7 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 		return
 	}
 	code, message, retryable := classifyCreateError(createErr, createRequest.InstanceMode)
-	maxAttempts := w.service.config.OperationMaxAttempts
+	maxAttempts := w.service.settings().OperationMaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 5
 	}
@@ -630,6 +648,14 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 }
 
 func operationCreateRequest(item *models.NorthboundOperation) (services.CreateInstanceRequest, string, error) {
+	return operationCreateRequestWithSettings(item, nil)
+}
+
+func (s *CoreService) operationCreateRequest(item *models.NorthboundOperation) (services.CreateInstanceRequest, string, error) {
+	return operationCreateRequestWithSettings(item, s.settings())
+}
+
+func operationCreateRequestWithSettings(item *models.NorthboundOperation, settings *models.NorthboundAdminSettings) (services.CreateInstanceRequest, string, error) {
 	if item == nil {
 		return services.CreateInstanceRequest{}, "", errors.New("operation is required")
 	}
@@ -640,10 +666,10 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 			return services.CreateInstanceRequest{}, "", err
 		}
 		if strings.EqualFold(strings.TrimSpace(request.Type), "workbuddy") {
-			createRequest, err := proCreateRequest(item, CreateProInstanceRequest(request))
+			createRequest, err := proCreateRequestWithSettings(item, CreateProInstanceRequest(request), settings)
 			return createRequest, "northbound.pro.create", err
 		}
-		return liteCreateRequest(item, request), "northbound.lite.create", nil
+		return liteCreateRequestWithSettings(item, request, settings), "northbound.lite.create", nil
 	case OperationTypeProInstance:
 		var request CreateProInstanceRequest
 		if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
@@ -652,7 +678,7 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 		if !isSupportedNorthboundProType(request.Type) {
 			return services.CreateInstanceRequest{}, "", errors.New("unsupported Pro instance type")
 		}
-		createRequest, err := proCreateRequest(item, request)
+		createRequest, err := proCreateRequestWithSettings(item, request, settings)
 		return createRequest, "northbound.pro.create", err
 	default:
 		return services.CreateInstanceRequest{}, "", fmt.Errorf("unsupported operation type %q", item.OperationType)
@@ -660,6 +686,16 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 }
 
 func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInstanceRequest) services.CreateInstanceRequest {
+	return liteCreateRequestWithSettings(item, request, nil)
+}
+
+func liteCreateRequestWithSettings(item *models.NorthboundOperation, request CreateLiteInstanceRequest, settings *models.NorthboundAdminSettings) services.CreateInstanceRequest {
+	cpu, memory, disk := float64(2), 4, services.DefaultLiteDiskGB
+	if settings != nil {
+		cpu = settings.LiteCPUCores
+		memory = settings.LiteMemoryGB
+		disk = settings.LiteDiskGB
+	}
 	return services.CreateInstanceRequest{
 		Name:                    request.Name,
 		Owner:                   &request.Owner,
@@ -668,9 +704,9 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 		Mode:                    services.InstanceModeLite,
 		InstanceMode:            services.InstanceModeLite,
 		RuntimeType:             services.RuntimeBackendGateway,
-		CPUCores:                2,
-		MemoryGB:                4,
-		DiskGB:                  services.DefaultLiteDiskGB,
+		CPUCores:                cpu,
+		MemoryGB:                memory,
+		DiskGB:                  disk,
 		GPUEnabled:              false,
 		GPUCount:                0,
 		OSType:                  request.Type,
@@ -680,8 +716,18 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 }
 
 func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanceRequest) (services.CreateInstanceRequest, error) {
+	return proCreateRequestWithSettings(item, request, nil)
+}
+
+func proCreateRequestWithSettings(item *models.NorthboundOperation, request CreateProInstanceRequest, settings *models.NorthboundAdminSettings) (services.CreateInstanceRequest, error) {
 	instanceType := strings.ToLower(strings.TrimSpace(request.Type))
 	if instanceType == "workbuddy" {
+		cpu, memory, disk := float64(northboundWorkbuddyCPUCores), northboundWorkbuddyMemoryGB, northboundWorkbuddyDiskGB
+		if settings != nil {
+			cpu = settings.WorkBuddyProCPUCores
+			memory = settings.WorkBuddyProMemoryGB
+			disk = settings.WorkBuddyProDiskGB
+		}
 		image := services.LinuxWorkbuddyImage()
 		return services.CreateInstanceRequest{
 			Name:                    request.Name,
@@ -692,9 +738,9 @@ func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanc
 			Mode:                    services.InstanceModePro,
 			InstanceMode:            services.InstanceModePro,
 			RuntimeType:             services.RuntimeBackendDesktop,
-			CPUCores:                northboundWorkbuddyCPUCores,
-			MemoryGB:                northboundWorkbuddyMemoryGB,
-			DiskGB:                  northboundWorkbuddyDiskGB,
+			CPUCores:                cpu,
+			MemoryGB:                memory,
+			DiskGB:                  disk,
 			GPUEnabled:              false,
 			GPUCount:                0,
 			OSType:                  "workbuddy",
@@ -711,6 +757,12 @@ func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanc
 		return services.CreateInstanceRequest{}, fmt.Errorf("enabled Pro image is not configured for %s", instanceType)
 	}
 	image := strings.TrimSpace(imageConfig.Image)
+	cpu, memory, disk := float64(northboundProCPUCores), northboundProMemoryGB, northboundProDiskGB
+	if settings != nil {
+		cpu = settings.ProCPUCores
+		memory = settings.ProMemoryGB
+		disk = settings.ProDiskGB
+	}
 	return services.CreateInstanceRequest{
 		Name:                    request.Name,
 		Owner:                   &request.Owner,
@@ -720,9 +772,9 @@ func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanc
 		Mode:                    services.InstanceModePro,
 		InstanceMode:            services.InstanceModePro,
 		RuntimeType:             services.RuntimeBackendDesktop,
-		CPUCores:                northboundProCPUCores,
-		MemoryGB:                northboundProMemoryGB,
-		DiskGB:                  northboundProDiskGB,
+		CPUCores:                cpu,
+		MemoryGB:                memory,
+		DiskGB:                  disk,
 		GPUEnabled:              false,
 		GPUCount:                0,
 		OSType:                  instanceType,

@@ -41,13 +41,14 @@ func main() {
 	}
 	defer db.Close()
 	repo := repository.NewNorthboundRepository(database)
+	runtimeSettings := northbound.NewDatabaseRuntimeSettings(repo, cfg.Northbound)
 	users := repository.NewUserRepository(database)
 	auditRepo := repository.NewAuditEventRepositoryExistingTable(database)
 	decryptor, err := northbound.LoadJWEDecryptor(cfg.Northbound.JWEPrivateKeyFile, cfg.Northbound.JWEKeyID)
 	if err != nil {
 		log.Fatalf("initialize JWE: %v", err)
 	}
-	authService, err := northbound.NewAuthService(repo, users, cfg.Northbound, decryptor)
+	authService, err := northbound.NewAuthService(repo, users, cfg.Northbound, decryptor, runtimeSettings)
 	if err != nil {
 		log.Fatalf("initialize northbound authentication: %v", err)
 	}
@@ -55,6 +56,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("initialize northbound Core client: %v", err)
 	}
+	coreClient.UseRuntimeSettings(runtimeSettings)
 	serverCertificate, err := tls.LoadX509KeyPair(cfg.Northbound.GatewayTLSCertFile, cfg.Northbound.GatewayTLSKeyFile)
 	if err != nil {
 		log.Fatalf("initialize northbound gateway TLS: %v", err)
@@ -66,7 +68,7 @@ func main() {
 		log.Fatalf("configure northbound trusted proxies: %v", err)
 	}
 	router.Use(gin.Recovery(), northbound.RequestContext(), northbound.AuditRequests(auditRepo), northbound.RejectSuspiciousRequest(), northbound.BodyLimit(64<<10))
-	northbound.RegisterGatewayRoutes(router, northbound.NewAuthHandler(authService), coreClient)
+	northbound.RegisterGatewayRoutes(router, northbound.NewAuthHandler(authService), coreClient, runtimeSettings)
 	router.NoRoute(northbound.NotFound)
 	router.NoMethod(northbound.NotFound)
 

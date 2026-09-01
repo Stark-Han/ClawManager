@@ -13,13 +13,21 @@ import (
 	"time"
 
 	"clawreef/internal/config"
+	"clawreef/internal/models"
 	"github.com/gin-gonic/gin"
 )
 
 type CoreClient struct {
-	baseURL        *url.URL
-	client         *http.Client
-	internalSecret string
+	baseURL         *url.URL
+	client          *http.Client
+	internalSecret  string
+	runtimeSettings RuntimeSettingsProvider
+}
+
+func (c *CoreClient) UseRuntimeSettings(provider RuntimeSettingsProvider) {
+	if c != nil {
+		c.runtimeSettings = provider
+	}
 }
 
 func NewCoreClient(cfg config.NorthboundConfig) (*CoreClient, error) {
@@ -44,7 +52,20 @@ func NewCoreClient(cfg config.NorthboundConfig) (*CoreClient, error) {
 	}, nil
 }
 
+func (c *CoreClient) SetTimeout(timeout time.Duration) {
+	if c != nil && c.client != nil && timeout > 0 {
+		c.client.Timeout = timeout
+	}
+}
+
 func (c *CoreClient) Forward(ginContext *gin.Context, principal Principal) error {
+	client := *c.client
+	if c.runtimeSettings != nil {
+		timeout := time.Duration(c.runtimeSettings.Current().CoreRequestTimeoutSeconds) * time.Second
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+	}
 	path := ginContext.Request.URL.Path
 	const publicPrefix = "/api/northbound/v1"
 	if !strings.HasPrefix(path, publicPrefix) {
@@ -74,7 +95,7 @@ func (c *CoreClient) Forward(ginContext *gin.Context, principal Principal) error
 	if key := strings.TrimSpace(ginContext.GetHeader("Idempotency-Key")); key != "" {
 		request.Header.Set("Idempotency-Key", key)
 	}
-	response, err := c.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return apiError(503, "DEPENDENCY_UNAVAILABLE", "Northbound Core is unavailable", err)
 	}
@@ -109,7 +130,11 @@ func NewFixedWindowLimiter(limit int, window time.Duration) *FixedWindowLimiter 
 }
 
 func (l *FixedWindowLimiter) Allow(key string) bool {
-	if l == nil || l.limit <= 0 || l.window <= 0 {
+	return l.AllowLimit(key, l.limit)
+}
+
+func (l *FixedWindowLimiter) AllowLimit(key string, limit int) bool {
+	if l == nil || limit <= 0 || l.window <= 0 {
 		return true
 	}
 	now := time.Now().UTC()
@@ -119,7 +144,7 @@ func (l *FixedWindowLimiter) Allow(key string) bool {
 	if entry.window.IsZero() || now.Sub(entry.window) >= l.window {
 		entry = fixedWindowEntry{window: now, count: 0}
 	}
-	if entry.count >= l.limit {
+	if entry.count >= limit {
 		l.entries[key] = entry
 		return false
 	}
@@ -133,6 +158,30 @@ func (l *FixedWindowLimiter) Allow(key string) bool {
 		}
 	}
 	return true
+}
+
+func DynamicRateLimit(limiter *FixedWindowLimiter, provider RuntimeSettingsProvider, limit func(*models.NorthboundAdminSettings) int, key func(*gin.Context) string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		settings := provider.Current()
+		if !limiter.AllowLimit(key(c), limit(settings)) {
+			c.Header("Retry-After", "60")
+			writeError(c, apiError(429, "RATE_LIMITED", "Too many requests", nil))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func NorthboundEnabled(provider RuntimeSettingsProvider) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if provider != nil && !provider.Current().APIEnabled {
+			writeError(c, apiError(http.StatusServiceUnavailable, "NORTHBOUND_DISABLED", "Northbound API is disabled by an administrator", nil))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func RateLimit(limiter *FixedWindowLimiter, key func(*gin.Context) string) gin.HandlerFunc {
@@ -226,7 +275,11 @@ func NotFound(c *gin.Context) {
 	writeError(c, apiError(http.StatusNotFound, "NOT_FOUND", "Not found", nil))
 }
 
-func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClient) {
+func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClient, providers ...RuntimeSettingsProvider) {
+	var provider RuntimeSettingsProvider
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
 	challengeLimiter := NewFixedWindowLimiter(10, time.Minute)
 	loginLimiter := NewFixedWindowLimiter(5, time.Minute)
 	createLimiter := NewFixedWindowLimiter(10, time.Minute)
@@ -234,9 +287,18 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 	queryLimiter := NewFixedWindowLimiter(120, time.Minute)
 
 	api := router.Group("/api/northbound/v1")
+	if provider != nil {
+		api.Use(NorthboundEnabled(provider))
+	}
 	authGroup := api.Group("/auth")
-	authGroup.POST("/challenge", RateLimit(challengeLimiter, func(c *gin.Context) string { return c.ClientIP() }), auth.Challenge)
-	authGroup.POST("/login", BodyLimit(32<<10), RateLimit(loginLimiter, func(c *gin.Context) string { return c.ClientIP() }), auth.Login)
+	challengeRate := RateLimit(challengeLimiter, func(c *gin.Context) string { return c.ClientIP() })
+	loginRate := RateLimit(loginLimiter, func(c *gin.Context) string { return c.ClientIP() })
+	if provider != nil {
+		challengeRate = DynamicRateLimit(challengeLimiter, provider, func(s *models.NorthboundAdminSettings) int { return s.ChallengeRatePerMinute }, func(c *gin.Context) string { return c.ClientIP() })
+		loginRate = DynamicRateLimit(loginLimiter, provider, func(s *models.NorthboundAdminSettings) int { return s.LoginRatePerMinute }, func(c *gin.Context) string { return c.ClientIP() })
+	}
+	authGroup.POST("/challenge", challengeRate, auth.Challenge)
+	authGroup.POST("/login", BodyLimit(32<<10), loginRate, auth.Login)
 	authGroup.POST("/refresh", auth.Refresh)
 	authenticatedAuth := authGroup.Group("")
 	authenticatedAuth.Use(auth.Middleware())
@@ -245,24 +307,28 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 
 	resources := api.Group("")
 	resources.Use(auth.Middleware())
-	resources.POST("/lite-instances", RequireScope(ScopeLiteCreate), RateLimit(createLimiter, func(c *gin.Context) string {
+	createRate := RateLimit(createLimiter, func(c *gin.Context) string {
 		principal := currentPrincipal(c)
 		if principal == nil {
 			return c.ClientIP()
 		}
 		return strconv.Itoa(principal.UserID)
-	}), func(c *gin.Context) {
+	})
+	if provider != nil {
+		createRate = DynamicRateLimit(createLimiter, provider, func(s *models.NorthboundAdminSettings) int { return s.CreateRatePerMinute }, func(c *gin.Context) string {
+			principal := currentPrincipal(c)
+			if principal == nil {
+				return c.ClientIP()
+			}
+			return strconv.Itoa(principal.UserID)
+		})
+	}
+	resources.POST("/lite-instances", RequireScope(ScopeLiteCreate), createRate, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
 		}
 	})
-	resources.POST("/pro-instances", RequireScope(ScopeProCreate), RateLimit(createLimiter, func(c *gin.Context) string {
-		principal := currentPrincipal(c)
-		if principal == nil {
-			return c.ClientIP()
-		}
-		return strconv.Itoa(principal.UserID)
-	}), func(c *gin.Context) {
+	resources.POST("/pro-instances", RequireScope(ScopeProCreate), createRate, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
 		}
@@ -274,6 +340,15 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 		}
 		return strconv.Itoa(principal.UserID)
 	})
+	if provider != nil {
+		queryRateLimit = DynamicRateLimit(queryLimiter, provider, func(s *models.NorthboundAdminSettings) int { return s.QueryRatePerMinute }, func(c *gin.Context) string {
+			principal := currentPrincipal(c)
+			if principal == nil {
+				return c.ClientIP()
+			}
+			return strconv.Itoa(principal.UserID)
+		})
+	}
 	resources.GET("/lite-instances", RequireScope(ScopeLiteRead), queryRateLimit, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
@@ -301,6 +376,15 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 		}
 		return strconv.Itoa(principal.UserID)
 	})
+	if provider != nil {
+		shareMutationRateLimit = DynamicRateLimit(shareMutationLimiter, provider, func(s *models.NorthboundAdminSettings) int { return s.ShareRatePerMinute }, func(c *gin.Context) string {
+			principal := currentPrincipal(c)
+			if principal == nil {
+				return c.ClientIP()
+			}
+			return strconv.Itoa(principal.UserID)
+		})
+	}
 	resources.POST("/lite-instances/:id/external-access/password", RequireScope(ScopeShareLinkManage), shareMutationRateLimit, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)

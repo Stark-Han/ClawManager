@@ -24,6 +24,7 @@ import AdminSecurityScannerConfigPage from '../pages/admin/security/AdminSecurit
 import RiskRulesPage from '../pages/admin/RiskRulesPage';
 import ModelManagementPage from '../pages/admin/ModelManagementPage';
 import SystemSettingsPage from '../pages/admin/SystemSettingsPage';
+import NorthboundSettingsPage from '../pages/admin/NorthboundSettingsPage';
 import RuntimePodsPage from '../pages/admin/RuntimePodsPage';
 import UserSettingsPage from '../pages/settings/UserSettingsPage';
 import OpenClawConfigCenterPage from '../pages/openclaw/OpenClawConfigCenterPage';
@@ -490,6 +491,14 @@ function AppRoutes() {
         }
       />
       <Route
+		path="/admin/northbound"
+		element={
+		  <AdminRoute>
+			<NorthboundSettingsPage />
+		  </AdminRoute>
+		}
+	  />
+	  <Route
         path="/admin/settings"
         element={
           <AdminRoute>

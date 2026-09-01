@@ -82,6 +82,7 @@ func main() {
 	securityScanRepo := repository.NewSecurityScanRepository(database)
 	instanceExternalAccessRepo := repository.NewInstanceExternalAccessRepository(database)
 	northboundRepo := repository.NewNorthboundRepository(database)
+	northboundRuntimeSettings := northbound.NewDatabaseRuntimeSettings(northboundRepo, cfg.Northbound)
 
 	if repaired, repairErr := services.RepairSeededAdminPassword(userRepo); repairErr != nil {
 		log.Printf("Warning: failed to repair seeded admin password: %v", repairErr)
@@ -134,7 +135,7 @@ func main() {
 		if len(cfg.Northbound.InternalJWTSecret) < 32 {
 			log.Fatal("Failed to initialize northbound Core: NORTHBOUND_INTERNAL_JWT_SECRET must contain at least 32 bytes")
 		}
-		coreService := northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound)
+		coreService := northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound, northboundRuntimeSettings)
 		coreService.SetAuditRepository(auditEventRepo)
 		northboundOperationWorker = northbound.NewOperationWorker(coreService, cfg.Runtime.BackendReplicaID)
 		coreHandler := northbound.NewCoreHandler(coreService, cfg.Northbound.InternalJWTSecret)
@@ -216,6 +217,12 @@ func main() {
 	instanceHandler.SetIEISSOService(ieiSSOService)
 	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
 	systemSettingsHandler := handlers.NewSystemSettingsHandler(systemImageSettingService)
+	var northboundController services.NorthboundClusterController
+	if k8s.GetClient() != nil && k8s.GetClient().Clientset != nil {
+		northboundController = services.NewKubernetesNorthboundController(k8s.GetClient())
+	}
+	northboundAdminService := services.NewNorthboundAdminService(northboundRepo, userRepo, northboundController)
+	northboundAdminHandler := handlers.NewNorthboundAdminHandler(northboundAdminService)
 	llmModelHandler := handlers.NewLLMModelHandler(llmModelService)
 	aiGatewayHandler := handlers.NewAIGatewayHandler(aiGatewayService, instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	customTeamTemplateHandler := handlers.NewCustomTeamTemplateHandler(customTeamTemplateService)
@@ -662,6 +669,21 @@ func main() {
 			adminSystemSettings.PUT("/images", systemSettingsHandler.UpsertSystemImageSetting)
 			adminSystemSettings.DELETE("/images/:instanceType", systemSettingsHandler.DeleteSystemImageSetting)
 			adminSystemSettings.GET("/cluster-resources", clusterResourceHandler.GetOverview)
+		}
+
+		northboundSettings := api.Group("/admin/northbound")
+		northboundSettings.Use(middleware.Auth())
+		northboundSettings.Use(middleware.SetUserInfo(userRepo))
+		northboundSettings.Use(middleware.NewAdminAuth(userRepo))
+		{
+			northboundSettings.GET("", northboundAdminHandler.Overview)
+			northboundSettings.PUT("/settings", northboundAdminHandler.SaveSettings)
+			northboundSettings.PUT("/callers", northboundAdminHandler.SaveCaller)
+			northboundSettings.PUT("/external-node-port", northboundAdminHandler.SetExternalNodePort)
+			northboundSettings.GET("/certificate/ca", northboundAdminHandler.DownloadCA)
+			northboundSettings.GET("/certificate/prepared-ca", northboundAdminHandler.DownloadPreparedCA)
+			northboundSettings.POST("/certificate/prepare", northboundAdminHandler.PrepareCertificate)
+			northboundSettings.POST("/certificate/activate", northboundAdminHandler.ActivateCertificate)
 		}
 
 		adminModels := api.Group("/admin/models")

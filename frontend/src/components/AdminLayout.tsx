@@ -9,6 +9,7 @@ import {
   Home,
   LogOut,
   Monitor,
+  Network,
   Server,
   Settings,
   Shield,
@@ -51,6 +52,7 @@ const AdminLayout: React.FC<AdminLayoutProps> = ({ children, title = '' }) => {
     { path: '/admin/users', label: t('nav.users'), icon: Users },
     { path: '/admin/instances', label: t('nav.instances'), icon: Monitor },
     { path: '/admin/runtime-pods', label: t('nav.runtime'), icon: Server },
+    { path: '/admin/northbound', label: '北向接口', icon: Network },
     {
       path: '/admin/secplane',
       label: t('nav.secplane'),
