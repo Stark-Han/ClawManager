@@ -844,6 +844,8 @@ metadata:
   namespace: clawmanager-system
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: mysql
@@ -858,11 +860,12 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "--innodb-use-native-aio=0"
+            - "--max-connections=800"
             - "--log-bin=binlog"
             - "--server-id=1"
             - "--gtid-mode=ON"
             - "--enforce-gtid-consistency=ON"
-            - "--binlog-expire-logs-seconds=604800"
+            - "--binlog-expire-logs-seconds=259200"
             - "--max-binlog-size=134217728"
           ports:
             - containerPort: 3306
@@ -1185,7 +1188,7 @@ spec:
       serviceAccountName: clawmanager-app
       containers:
         - name: clawmanager-app
-          image: 10.130.15.40:5000/clawmanager-app@sha256:8d898566fe94dd81aed26212526cb59b62e753efb1e129cf6fcbe6c51eab1493
+          image: 10.130.15.40:5000/clawmanager@sha256:0fe32d900babed48ea224a1043d140a28335db9220c108128b8fb2f47b8c34de
           imagePullPolicy: IfNotPresent
           ports:
             - name: https
@@ -1212,6 +1215,14 @@ spec:
                   key: mysql-password
             - name: DB_NAME
               value: "clawmanager"
+            - name: DB_MAX_OPEN_CONNS
+              value: "150"
+            - name: DB_MAX_IDLE_CONNS
+              value: "50"
+            - name: DB_CONN_MAX_LIFETIME
+              value: "30m"
+            - name: DB_CONN_MAX_IDLE_TIME
+              value: "5m"
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -1339,6 +1350,8 @@ spec:
               value: "100"
             - name: RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT
               value: "100"
+            - name: SKILL_REPORT_PERSISTENCE_ENABLED
+              value: "false"
             - name: RUNTIME_GATEWAY_PORT_START
               value: "20000"
             - name: RUNTIME_GATEWAY_PORT_END
