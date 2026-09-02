@@ -12,6 +12,7 @@ interface InstanceServiceFrameProps {
   instanceName: string;
   instanceType?: string;
   availability: InstanceAvailability;
+  reloadToken?: number;
   workspaceVisible?: boolean;
   onWorkspaceVisibilityChange?: (visible: boolean) => void;
 }
@@ -44,6 +45,7 @@ export function InstanceServiceFrame({
   instanceName,
   instanceType,
   availability,
+  reloadToken = 0,
   workspaceVisible,
   onWorkspaceVisibilityChange,
 }: InstanceServiceFrameProps) {
@@ -65,6 +67,7 @@ export function InstanceServiceFrame({
   } = useInstanceDesktopAccess({
     instanceId,
     isRunning: isAvailable,
+    reloadOnAccessRefresh: normalizedType === "deepseek-harness",
     resolveEmbedUrl,
     failedMessage: "Failed to open instance service",
   });
@@ -234,7 +237,11 @@ export function InstanceServiceFrame({
 
   return renderFrameShell(
       <iframe
-        key={isHermes ? `hermes-${instanceId}` : `frame-${instanceId}`}
+        key={
+          isHermes
+            ? `hermes-${instanceId}-${reloadToken}`
+            : `frame-${instanceId}-${reloadToken}`
+        }
         title={`${instanceName} service`}
         src={frameSrc}
         className="min-h-0 w-full flex-1 border-0 bg-white"

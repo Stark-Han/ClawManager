@@ -3,6 +3,7 @@ import { ArrowLeft, Maximize2, Minimize2, RefreshCw, RotateCw, ShieldAlert } fro
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
+import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
 import { useRuntimeCertificateTrust } from "../../hooks/useRuntimeCertificateTrust";
 import { prepareOpenClawControlUIStorage } from "../../lib/openclawControlStorage";
 import {
@@ -39,6 +40,20 @@ function wait(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+async function refreshDedicatedRuntimeCookie(accessURL: string) {
+  const target = new URL(resolveEmbedUrl(accessURL), window.location.href);
+  if (target.origin === window.location.origin || !target.searchParams.has("token")) return;
+  target.pathname = "/__clawmanager_access_refresh";
+  target.hash = "";
+  await window.fetch(target.toString(), {
+    method: "GET",
+    credentials: "include",
+    mode: "no-cors",
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+  });
+}
+
 export default function IEISystemInstancePage() {
   const { id = "" } = useParams<{ id: string }>();
   const instanceID = Number(id);
@@ -56,6 +71,7 @@ export default function IEISystemInstancePage() {
   const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
@@ -90,6 +106,24 @@ export default function IEISystemInstancePage() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [openInstance]);
+
+  const renewAccess = useCallback(async () => {
+    await ieiSystemService.refreshSession();
+    const nextAccess = await ieiSystemService.generateAccess(instanceID);
+    await refreshDedicatedRuntimeCookie(nextAccess.access_url);
+    if (!mountedRef.current) return;
+    // Updating the iframe URL would reload the running agent UI. The fresh
+    // cookie is installed in the background, so keep the existing src while
+    // advancing the local expiry and access metadata.
+    setAccess((current) =>
+      current ? { ...nextAccess, access_url: current.access_url } : nextAccess,
+    );
+  }, [instanceID]);
+
+  useExpiringResourceRenewal({
+    expiresAt: access?.expires_at,
+    renew: renewAccess,
+  });
 
   useEffect(() => {
     const existing = document.querySelector<HTMLMetaElement>('meta[name="referrer"]');

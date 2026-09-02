@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clawreef/internal/aigateway"
+	"clawreef/internal/buildinfo"
 	"clawreef/internal/config"
 	"clawreef/internal/db"
 	"clawreef/internal/handlers"
@@ -28,6 +29,9 @@ import (
 )
 
 func main() {
+	build := buildinfo.Current()
+	log.Printf("Starting ClawManager version=%s commit=%s build_time=%s", build.Version, build.Commit, build.BuildTime)
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
@@ -123,6 +127,7 @@ func main() {
 		openClawConfigService,
 		services.WithPrivilegedInstancePods(cfg.Kubernetes.Runtime.Pod.Privileged),
 		services.WithV2RuntimeLifecycle(runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot),
+		services.WithExpandedLLMModelCatalog(llmModelService),
 	)
 	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	var northboundCoreServer *http.Server
@@ -191,10 +196,21 @@ func main() {
 	)
 	services.ConfigureSkillRuntimeSync(skillService, bindingRepo, runtimePodRepo, runtimeAgentClient)
 	securityScanService := services.NewSecurityScanService(securityScanRepo, skillRepo, objectStorageService, skillScannerClient)
-	aiGatewayService := aigateway.NewService(llmModelRepo, modelInvocationService, auditEventService, costRecordService, riskDetectionService, riskHitService, chatSessionService, chatMessageService)
+	aiGatewayService := aigateway.NewService(
+		llmModelRepo,
+		modelInvocationService,
+		auditEventService,
+		costRecordService,
+		riskDetectionService,
+		riskHitService,
+		chatSessionService,
+		chatMessageService,
+		aigateway.WithExpandedLLMModelCatalog(llmModelService),
+	)
 	customTeamTemplateService := teamtemplate.NewService(customTeamTemplateRepo, aiGatewayService)
 
 	// Initialize handlers
+	versionHandler := handlers.NewVersionHandler()
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, quotaService)
 	instanceHandler := handlers.NewInstanceHandler(
@@ -391,10 +407,15 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
+		// Build information is intentionally public so operators can identify the
+		// running control-plane version even when authentication is unavailable.
+		api.GET("/version", versionHandler.Get)
+
 		ieiSystem := api.Group("/ieisystem")
 		{
 			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
 			ieiSystem.GET("/session", ieiSystemHandler.GetSession)
+			ieiSystem.POST("/session/refresh", ieiSystemHandler.RefreshSession)
 			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
 			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)

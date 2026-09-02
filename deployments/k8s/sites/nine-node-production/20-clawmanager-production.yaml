@@ -1185,7 +1185,7 @@ spec:
       serviceAccountName: clawmanager-app
       containers:
         - name: clawmanager-app
-          image: 10.130.15.40:5000/clawmanager-app:browser-https-20260825-3d9308c
+          image: 10.130.15.40:5000/clawmanager-app@sha256:8d898566fe94dd81aed26212526cb59b62e753efb1e129cf6fcbe6c51eab1493
           imagePullPolicy: IfNotPresent
           ports:
             - name: https
@@ -1300,7 +1300,7 @@ spec:
             - name: IEISYSTEM_SSO_TOKEN_TTL
               value: "30s"
             - name: IEISYSTEM_SESSION_TTL
-              value: "30m"
+              value: "24h"
             - name: IEISYSTEM_SSO_TIMEZONE
               value: "Asia/Shanghai"
             - name: NORTHBOUND_CORE_TLS_CERT_FILE

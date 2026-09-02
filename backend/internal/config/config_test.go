@@ -78,6 +78,18 @@ func TestLoadNorthboundDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadIEISystemSessionDefaultsToOneDay(t *testing.T) {
+	t.Setenv("IEISYSTEM_SESSION_TTL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got, want := cfg.IEISystem.SessionTTL, 24*time.Hour; got != want {
+		t.Fatalf("IEI system session TTL = %s, want %s", got, want)
+	}
+}
+
 func TestLoadStorageProfileDefaultsDisableHostPathFallback(t *testing.T) {
 	for _, key := range []string{
 		"CLAWMANAGER_STORAGE_PROFILE",

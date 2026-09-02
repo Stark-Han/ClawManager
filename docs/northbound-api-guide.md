@@ -509,7 +509,7 @@ owner 取解密后的邮箱并按邮箱语义进行不区分大小写的匹配�
 | `IEISYSTEM_SSO_IV` | 必填，严格 16 个 UTF-8 字节；当前约定为 `CLAWMANAGETOKENS`。 |
 | `IEISYSTEM_SSO_TOKEN_TTL` | 默认 `24h`，必须大于 0 且不超过 `24h`。 |
 | `IEISYSTEM_SESSION_SECRET` | 必填，至少 32 个 UTF-8 字节，且不得与北向 JWT 密钥复用。 |
-| `IEISYSTEM_SESSION_TTL` | 默认 `30m`，必须大于 0 且不超过 `24h`。 |
+| `IEISYSTEM_SESSION_TTL` | 默认 `24h`，必须大于 0 且不超过 `24h`；有效会话可由 ClawManager 在用户持续访问期间本地续期，无需再次请求 IEI。 |
 | `IEISYSTEM_SSO_TIMEZONE` | 默认 `Asia/Shanghai`。 |
 | `IEISYSTEM_COOKIE_SECURE` | HTTPS 环境必须为 `true`，默认 `true`。仅本地 HTTP 调试可设为 `false`。 |
 
