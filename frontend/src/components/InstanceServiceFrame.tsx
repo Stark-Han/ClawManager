@@ -12,6 +12,7 @@ interface InstanceServiceFrameProps {
   instanceName: string;
   instanceType?: string;
   availability: InstanceAvailability;
+  reloadToken?: number;
   openCodeInitialDirectory?: string;
   workspaceVisible?: boolean;
   onWorkspaceVisibilityChange?: (visible: boolean) => void;
@@ -81,6 +82,7 @@ export function InstanceServiceFrame({
   instanceName,
   instanceType,
   availability,
+  reloadToken = 0,
   openCodeInitialDirectory,
   workspaceVisible,
   onWorkspaceVisibilityChange,

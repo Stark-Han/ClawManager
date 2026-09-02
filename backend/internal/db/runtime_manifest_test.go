@@ -68,7 +68,9 @@ func TestNineNodeProductionDatabaseLoadControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read production manifest: %v", err)
 	}
-	text := string(raw)
+	// Keep the deployment assertion portable across Git checkouts that use
+	// either LF or CRLF line endings.
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	for _, want := range []string{
 		`--max-connections=800`,
 		`--binlog-expire-logs-seconds=259200`,

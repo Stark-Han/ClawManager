@@ -429,6 +429,44 @@ const InstanceDetailPage: React.FC = () => {
   const liteBottomRef = useRef<HTMLDivElement>(null);
   const bottomPanelExpandedRef = useRef(false);
   const restartMenuRef = useRef<HTMLDivElement>(null);
+  const restartNoticeTimerRef = useRef<number | null>(null);
+
+  const cancelRestartNoticeTimer = useCallback(() => {
+    if (restartNoticeTimerRef.current !== null) {
+      window.clearTimeout(restartNoticeTimerRef.current);
+      restartNoticeTimerRef.current = null;
+    }
+  }, []);
+
+  const dismissRestartNotice = useCallback(() => {
+    cancelRestartNoticeTimer();
+    setActionMessage(null);
+  }, [cancelRestartNoticeTimer]);
+
+  const showRestartNotice = useCallback(
+    (message: string) => {
+      cancelRestartNoticeTimer();
+      setActionMessage(message);
+    },
+    [cancelRestartNoticeTimer],
+  );
+
+  const markRestartSubmitted = useCallback(
+    (message: string) => {
+      showRestartNotice(message);
+      restartNoticeTimerRef.current = window.setTimeout(() => {
+        restartNoticeTimerRef.current = null;
+        setActionMessage((current) => (current === message ? null : current));
+      }, RESTART_NOTICE_AUTO_DISMISS_MS);
+      setServiceFrameReloadToken((current) => current + 1);
+    },
+    [showRestartNotice],
+  );
+
+  useEffect(() => {
+    return () => cancelRestartNoticeTimer();
+  }, [cancelRestartNoticeTimer]);
+
   const openCodeInitialDirectory = (() => {
     if (instance?.type !== "opencode" || instance.instance_mode !== "lite") {
       return undefined;
