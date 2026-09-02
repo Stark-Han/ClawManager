@@ -136,13 +136,28 @@ func (h *CoreHandler) SubmitLiteRestart(c *gin.Context) {
 	h.submitLifecycle(c, ScopeLiteRestart, "lite", "restart")
 }
 func (h *CoreHandler) SubmitLiteReset(c *gin.Context) {
+	if !requireResetDataLossConfirmation(c) {
+		return
+	}
 	h.submitLifecycle(c, ScopeLiteReset, "lite", "reset")
 }
 func (h *CoreHandler) SubmitProRestart(c *gin.Context) {
 	h.submitLifecycle(c, ScopeProRestart, "pro", "restart")
 }
 func (h *CoreHandler) SubmitProReset(c *gin.Context) {
+	if !requireResetDataLossConfirmation(c) {
+		return
+	}
 	h.submitLifecycle(c, ScopeProReset, "pro", "reset")
+}
+
+func requireResetDataLossConfirmation(c *gin.Context) bool {
+	var request ConfirmInstanceResetRequest
+	if err := c.ShouldBindJSON(&request); err != nil || !request.ConfirmDataLoss {
+		writeError(c, apiError(http.StatusBadRequest, "RESET_CONFIRMATION_REQUIRED", "Reset permanently deletes all instance data; set confirm_data_loss to true", err))
+		return false
+	}
+	return true
 }
 
 func (h *CoreHandler) submitLifecycle(c *gin.Context, requiredScope, mode, action string) {

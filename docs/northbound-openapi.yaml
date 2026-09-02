@@ -223,8 +223,8 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/northbound/v1/lite-instances/{id}/reset:
     post:
-      summary: Rebuild a Lite runtime while retaining its workspace
-      description: Recreates only the ephemeral gateway binding. The instance record and existing workspace path are retained.
+      summary: Factory-reset a Lite instance and permanently erase its workspace
+      description: Stops the gateway, permanently erases the instance workspace and instance-local runtime state, rotates credentials, and creates a fresh gateway. The instance ID and metadata are retained. Back up required data before calling this operation.
       operationId: resetLiteInstance
       security: [{ bearerAuth: [] }]
       parameters:
@@ -232,7 +232,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
       requestBody:
         required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/EmptyRequest" } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/ConfirmInstanceReset" } } }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -350,8 +350,8 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/northbound/v1/pro-instances/{id}/reset:
     post:
-      summary: Rebuild a Pro runtime while retaining its instance record and PVC
-      description: Deletes and recreates only the runtime Deployment. The operation verifies the exact Bound PVC before and after recreation and never invokes instance deletion or PVC cleanup.
+      summary: Factory-reset a Pro instance and permanently replace its PVC
+      description: Stops the Deployment, permanently deletes the old PVC and instance-local runtime state, creates and verifies a fresh PVC, rotates credentials, and starts a fresh Deployment. The instance ID and metadata are retained. Back up required data before calling this operation.
       operationId: resetProInstance
       security: [{ bearerAuth: [] }]
       parameters:
@@ -359,7 +359,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
       requestBody:
         required: true
-        content: { application/json: { schema: { $ref: "#/components/schemas/EmptyRequest" } } }
+        content: { application/json: { schema: { $ref: "#/components/schemas/ConfirmInstanceReset" } } }
       responses:
         "202": { $ref: "#/components/responses/OperationAccepted" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -603,6 +603,15 @@ components:
       type: object
       additionalProperties: false
       maxProperties: 0
+    ConfirmInstanceReset:
+      type: object
+      additionalProperties: false
+      required: [confirm_data_loss]
+      properties:
+        confirm_data_loss:
+          type: boolean
+          const: true
+          description: Must be true. Reset permanently deletes the instance workspace and cannot be undone without a separate backup.
     EnableShareLinkPassword:
       type: object
       additionalProperties: false

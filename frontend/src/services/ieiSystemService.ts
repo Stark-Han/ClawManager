@@ -106,7 +106,7 @@ export const ieiSystemService = {
   async resetInstance(id: number, idempotencyKey = lifecycleIdempotencyKey()): Promise<IEISystemLifecycleOperation> {
     const response = await ieiAPI.post(
       `/instances/${id}/reset`,
-      undefined,
+      { confirm_data_loss: true },
       { headers: { "Idempotency-Key": idempotencyKey } },
     );
     return response.data.data.operation;

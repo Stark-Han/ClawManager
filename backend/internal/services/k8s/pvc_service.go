@@ -920,6 +920,125 @@ func (s *PVCService) GetPVCByName(ctx context.Context, userID int, pvcName strin
 	return pvc, nil
 }
 
+// WaitForPVCDeleted prevents a factory reset from accidentally reusing a PVC
+// that Kubernetes is still terminating under the old instance data.
+func (s *PVCService) WaitForPVCDeleted(ctx context.Context, userID int, pvcName string, timeout time.Duration) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return fmt.Errorf("PVC name is required")
+	}
+	if timeout <= 0 {
+		timeout = s.pvcBindTimeout()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	namespace := s.client.GetNamespace(userID)
+	for {
+		_, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(waitCtx, pvcName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed waiting for PVC %s deletion: %w", pvcName, err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("timed out waiting for PVC %s deletion: %w", pvcName, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// WaitForPVDeleted confirms that the storage provisioner has removed the old
+// backing volume before a factory reset is reported as having erased data.
+func (s *PVCService) WaitForPVDeleted(ctx context.Context, pvName string, timeout time.Duration) error {
+	if s == nil || s.client == nil || s.client.Clientset == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	pvName = strings.TrimSpace(pvName)
+	if pvName == "" {
+		return fmt.Errorf("PV name is required")
+	}
+	if timeout <= 0 {
+		timeout = s.pvcBindTimeout()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := s.client.Clientset.CoreV1().PersistentVolumes().Get(waitCtx, pvName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed waiting for PV %s deletion: %w", pvName, err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("timed out waiting for PV %s deletion: %w", pvName, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// WaitForPVCBoundByName waits for the replacement claim created during a
+// factory reset and returns the exact bound PVC for UID verification.
+func (s *PVCService) WaitForPVCBoundByName(ctx context.Context, userID int, pvcName string, timeout time.Duration) (*corev1.PersistentVolumeClaim, error) {
+	if s == nil || s.client == nil {
+		return nil, fmt.Errorf("k8s client not initialized")
+	}
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return nil, fmt.Errorf("PVC name is required")
+	}
+	if timeout <= 0 {
+		timeout = s.pvcBindTimeout()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		pvc, err := s.GetPVCByName(waitCtx, userID, pvcName)
+		if err == nil && pvc.Status.Phase == corev1.ClaimBound && strings.TrimSpace(pvc.Spec.VolumeName) != "" {
+			return pvc, nil
+		}
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, err
+		}
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("timed out waiting for PVC %s to bind: %w", pvcName, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// ValidatePVCDataDeletionPolicy fails before a destructive reset when deleting
+// the claim would intentionally retain the backing volume and its user data.
+func (s *PVCService) ValidatePVCDataDeletionPolicy(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	if s == nil || s.client == nil || s.client.Clientset == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	if pvc == nil || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		return fmt.Errorf("bound PVC is required")
+	}
+	pv, err := s.client.Clientset.CoreV1().PersistentVolumes().Get(ctx, strings.TrimSpace(pvc.Spec.VolumeName), metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to inspect backing PV %s: %w", pvc.Spec.VolumeName, err)
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		return fmt.Errorf("backing PV %s uses reclaim policy %s; factory reset cannot guarantee data deletion", pv.Name, pv.Spec.PersistentVolumeReclaimPolicy)
+	}
+	return nil
+}
+
 func (s *PVCService) NodeSelectorForPVC(ctx context.Context, userID, instanceID int, storageClass string) (map[string]string, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("k8s client not initialized")

@@ -797,11 +797,14 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 	}
 	actionErr := w.runLifecycleActionWithLease(ctx, item, action)
 	if actionErr != nil {
-		// Lifecycle operations are not retried automatically. A failed reset may
-		// have already rebuilt an ephemeral workload; an automatic retry would
-		// add risk without improving data safety. The same idempotency key returns
-		// this terminal result and a caller must explicitly submit a new request.
-		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", "Instance lifecycle operation failed; persistent workspace was retained", time.Now().UTC())
+		// Lifecycle operations are not retried automatically. A failed factory
+		// reset may already have erased persistent data, so the error must never
+		// imply that the old workspace was retained.
+		message := "Instance lifecycle operation failed"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance factory reset failed; original data may already have been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", message, time.Now().UTC())
 		item.Status = "failed"
 		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &request.InstanceID, "LIFECYCLE_FAILED")
 		return
@@ -842,7 +845,11 @@ func (w *OperationWorker) finishOrContinueLifecycle(ctx context.Context, item *m
 		return
 	}
 	if instanceStatus == "error" || instanceStatus == "deleting" {
-		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", "Instance did not recover; persistent workspace was retained", now)
+		message := "Instance did not recover"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance did not recover after factory reset; original data may already have been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", message, now)
 		item.Status = "failed"
 		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &instanceID, "LIFECYCLE_FAILED")
 		return
@@ -852,7 +859,11 @@ func (w *OperationWorker) finishOrContinueLifecycle(ctx context.Context, item *m
 		if recorder, ok := w.service.instances.(services.InstanceLifecycleFailureService); ok {
 			_ = recorder.MarkLifecycleFailure(instanceID)
 		}
-		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_TIMEOUT", "Instance did not become ready in time; persistent workspace was retained", now)
+		message := "Instance did not become ready in time; persistent workspace was retained"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance did not become ready in time after factory reset; original data has already been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_TIMEOUT", message, now)
 		item.Status = "failed"
 		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "timed out"), &instanceID, "LIFECYCLE_TIMEOUT")
 		return

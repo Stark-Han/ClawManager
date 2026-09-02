@@ -230,10 +230,8 @@ func (h *IEISystemHandler) RestartInstance(c *gin.Context) {
 	h.submitLifecycle(c, session, instance, "restart")
 }
 
-// ResetInstance rebuilds an IEI-owned runtime while retaining its instance
-// record and persistent workspace. The reset capability is intentionally
-// exposed through a narrower interface so cleanup/delete paths cannot be used
-// accidentally by this public portal endpoint.
+// ResetInstance factory-resets an IEI-owned runtime. The instance identity is
+// retained, but its runtime workspace and instance-local state are destroyed.
 func (h *IEISystemHandler) ResetInstance(c *gin.Context) {
 	h.noStore(c)
 	session, ok := h.requireSession(c)
@@ -248,6 +246,11 @@ func (h *IEISystemHandler) ResetInstance(c *gin.Context) {
 	status := strings.ToLower(strings.TrimSpace(instance.Status))
 	if status != "running" && status != "stopped" && status != "error" {
 		utils.Error(c, http.StatusConflict, "Instance cannot be reset while a lifecycle operation is in progress")
+		return
+	}
+	var request northbound.ConfirmInstanceResetRequest
+	if err := c.ShouldBindJSON(&request); err != nil || !request.ConfirmDataLoss {
+		utils.Error(c, http.StatusBadRequest, "Reset permanently deletes all instance data; set confirm_data_loss to true")
 		return
 	}
 	h.submitLifecycle(c, session, instance, "reset")

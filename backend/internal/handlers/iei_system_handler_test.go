@@ -180,8 +180,20 @@ func TestIEISystemResetRequiresOwnerAndAcceptsRecoverableStates(t *testing.T) {
 	router.POST("/api/v1/ieisystem/instances/:id/reset", handler.ResetInstance)
 	cookie := exchangeIEITestSession(t, router, cfg, owner)
 
+	unconfirmed := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/reset", nil)
+	unconfirmed.AddCookie(cookie)
+	unconfirmedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(unconfirmedRecorder, unconfirmed)
+	if unconfirmedRecorder.Code != http.StatusBadRequest || !strings.Contains(unconfirmedRecorder.Body.String(), "confirm_data_loss") {
+		t.Fatalf("unconfirmed reset status/body = %d/%s", unconfirmedRecorder.Code, unconfirmedRecorder.Body.String())
+	}
+	if len(lifecycle.calls) != 0 {
+		t.Fatalf("unconfirmed reset submitted lifecycle call: %v", lifecycle.calls)
+	}
+
 	for _, id := range []int{1, 2} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/"+strconv.Itoa(id)+"/reset", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/"+strconv.Itoa(id)+"/reset", bytes.NewBufferString(`{"confirm_data_loss":true}`))
+		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(cookie)
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, req)

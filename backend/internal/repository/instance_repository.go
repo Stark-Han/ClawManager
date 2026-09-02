@@ -73,6 +73,13 @@ type InstanceLifecycleStatusRepository interface {
 	ClaimLifecycleStatus(ctx context.Context, id int, allowedStatuses []string, targetStatus string) (bool, error)
 }
 
+// InstanceFactoryResetRepository clears only instance-local runtime state. It
+// deliberately preserves the instance row, audit history, usage history and
+// backups so a factory reset cannot broaden into account or record deletion.
+type InstanceFactoryResetRepository interface {
+	ResetInstanceRuntimeData(ctx context.Context, id int) error
+}
+
 // InstanceQueryRepository is the optional filtered-list and aggregation
 // capability used by the user workspace. It is kept separate from
 // InstanceRepository so unrelated repository test doubles remain small.
@@ -747,6 +754,49 @@ func (r *instanceRepository) UpdateWorkspaceUsage(ctx context.Context, id int, u
 		return fmt.Errorf("failed to update instance workspace usage: %w", err)
 	}
 	return nil
+}
+
+func (r *instanceRepository) ResetInstanceRuntimeData(ctx context.Context, id int) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid instance id")
+	}
+	return r.sess.TxContext(ctx, func(tx db.Session) error {
+		// These rows describe the old runtime only. Global Skill Hub records,
+		// backups, usage history, workspace audits and the instance identity are
+		// intentionally outside this list.
+		for _, table := range []string{
+			"skill_package_materialize_jobs",
+			"instance_skills",
+			"instance_commands",
+			"instance_desired_state",
+			"instance_runtime_status",
+			"instance_agents",
+			"instance_config_revisions",
+			"instance_external_access",
+			"instance_gateway_token_aliases",
+		} {
+			if _, err := tx.SQL().ExecContext(ctx, "DELETE FROM "+table+" WHERE instance_id = ?", id); err != nil {
+				return fmt.Errorf("failed to clear %s for instance factory reset: %w", table, err)
+			}
+		}
+		if _, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET workspace_usage_bytes = 0,
+			    runtime_error_message = NULL,
+			    pod_name = NULL,
+			    pod_namespace = NULL,
+			    pod_ip = NULL,
+			    access_url = NULL,
+			    access_token = NULL,
+			    agent_bootstrap_token = NULL,
+			    stopped_at = NULL,
+			    updated_at = ?
+			WHERE id = ?
+		`, time.Now().UTC(), id); err != nil {
+			return fmt.Errorf("failed to reset instance runtime fields: %w", err)
+		}
+		return nil
+	}, nil)
 }
 
 // Update updates an instance

@@ -553,10 +553,11 @@ def run(command: str) -> None:
         idempotency_key = os.getenv(
             "NORTHBOUND_IDEMPOTENCY_KEY", f"demo-{action}-{uuid.uuid4()}"
         )
+        body = {"confirm_data_loss": True} if action == "reset" else {}
         operation, headers = client.authenticated_request(
             "POST",
             f"{instance_collection_path()}/{instance_id}/{action}",
-            body={},
+            body=body,
             headers={"Idempotency-Key": idempotency_key},
         )
         result = {

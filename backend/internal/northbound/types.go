@@ -123,6 +123,13 @@ type InstanceLifecycleRequest struct {
 	InstanceID int `json:"instance_id"`
 }
 
+// ConfirmInstanceResetRequest makes the destructive reset contract explicit.
+// Older clients that submit an empty body must fail closed instead of silently
+// changing from the former data-preserving reset behavior.
+type ConfirmInstanceResetRequest struct {
+	ConfirmDataLoss bool `json:"confirm_data_loss"`
+}
+
 type EnableShareLinkPasswordRequest struct {
 	ExpiresMode     string     `json:"expires_mode,omitempty" binding:"omitempty,oneof=preset custom permanent"`
 	ExpiresPreset   string     `json:"expires_preset,omitempty" binding:"omitempty,oneof=1h 24h 7d 30d"`

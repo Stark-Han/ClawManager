@@ -374,7 +374,12 @@ export default function IEISystemListInstancesPage() {
     if (!["running", "stopped", "error"].includes(status)) return;
     if (
       !window.confirm(
-        `确认重置实例“${selectedInstance.name}”？\n\n建议优先使用“重启实例”。重置会删除并重建运行环境，操作期间无法进入实例；实例记录和工作区数据将保留。`,
+        `重置实例“${selectedInstance.name}”将永久删除其中的全部文件、配置、技能、任务和会话。\n\n系统不会自动备份，请先下载需要保留的数据。是否继续？`,
+      )
+    ) return;
+    if (
+      !window.confirm(
+        `最后确认：重置成功后，实例“${selectedInstance.name}”的原数据无法恢复。\n\n确定清空全部数据并重新初始化实例吗？`,
       )
     ) return;
     const instanceID = selectedInstance.id;
@@ -668,7 +673,7 @@ export default function IEISystemListInstancesPage() {
                       selectedLifecyclePending ||
                       !["running", "stopped", "error"].includes(selectedInstance.status.toLowerCase())
                     }
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-5 text-sm font-semibold text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <RefreshCw className={`h-4 w-4 ${selectedLifecyclePending && selectedOperation?.action === "reset" ? "animate-spin" : ""}`} />
                     重置实例

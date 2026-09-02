@@ -63,9 +63,9 @@
 | GET | `/pro-instances?owner=...` | `pro-instances:read` | 返回 OpenClaw、Hermes、OpenCode、DeepSeek Harness 和 Linux WorkBuddy Pro |
 | GET | `/pro-instances/{id}` | `pro-instances:read` | 查询一个受支持的 Pro 实例 |
 | POST | `/lite-instances/{id}/restart` | `lite-instances:restart` | 异步重启运行中的 Lite；WorkBuddy 兼容入口也适用 |
-| POST | `/lite-instances/{id}/reset` | `lite-instances:reset` | 异步重建 Lite gateway，保留实例记录和工作区 |
+| POST | `/lite-instances/{id}/reset` | `lite-instances:reset` | 恢复出厂：保留实例记录，永久清空工作区并重建 Lite gateway；必须显式确认数据删除 |
 | POST | `/pro-instances/{id}/restart` | `pro-instances:restart` | 异步重启运行中的 Pro，保留 PVC |
-| POST | `/pro-instances/{id}/reset` | `pro-instances:reset` | 异步重建 Pro Deployment，保留实例记录和原 PVC |
+| POST | `/pro-instances/{id}/reset` | `pro-instances:reset` | 恢复出厂：保留实例记录，永久删除原 PVC并创建全新 Pro Deployment；必须显式确认数据删除 |
 | GET | `/operations/{id}` | create 或 read | 查询异步操作状态 |
 | POST | `/lite-instances/{id}/external-access/password` | `lite-instances:share-link:manage` | 启用密码模式 ShareLink 并生成 URL/密码 |
 | POST | `/lite-instances/{id}/external-access/share-link/reset` | `lite-instances:share-link:reset` | 重置 ShareLink URL |
@@ -82,7 +82,7 @@ Scope 含义：
 | `pro-instances:create` | 通过 `/pro-instances` 创建受支持的独立 Pro Runtime。 |
 | `pro-instances:read` | 按 owner 查询受支持的 Pro Runtime 和单个实例。 |
 | `lite-instances:restart` / `pro-instances:restart` | 重启运行中的对应模式实例。 |
-| `lite-instances:reset` / `pro-instances:reset` | 重建对应模式的临时运行时，保留持久工作区。 |
+| `lite-instances:reset` / `pro-instances:reset` | 恢复出厂并永久删除对应实例的持久工作区；请求必须包含 `{"confirm_data_loss":true}`。 |
 | `lite-instances:share-link:manage` | 为当前用户自己的受支持实例显式启用密码模式 ShareLink；会生成并返回敏感凭据。 |
 | `lite-instances:share-link:reset` | 重置已经启用的 ShareLink URL 或密码；不能首次启用，也不能修改有效期或 Workspace 权限。 |
 
@@ -805,7 +805,8 @@ python examples/northbound_client.py list
 python examples/northbound_client.py get
 
 # 重启或重置实例；通过 NORTHBOUND_INSTANCE_MODE 选择 lite/pro 路径
-# 两个命令都会轮询异步 Operation；重置保留工作区数据
+# 两个命令都会轮询异步 Operation；重启保留数据，重置会永久删除全部实例数据
+# reset-instance 会显式发送 confirm_data_loss=true，执行前请先完成独立备份
 python examples/northbound_client.py restart-instance
 python examples/northbound_client.py reset-instance
 
