@@ -14,35 +14,21 @@ import (
 )
 
 type AgentHandler struct {
-	agentService           services.InstanceAgentService
-	commandService         services.InstanceCommandService
-	runtimeStatusService   services.InstanceRuntimeStatusService
-	configRevisionService  services.InstanceConfigRevisionService
-	skillService           services.SkillService
-	skillReportPersistence bool
+	agentService          services.InstanceAgentService
+	commandService        services.InstanceCommandService
+	runtimeStatusService  services.InstanceRuntimeStatusService
+	configRevisionService services.InstanceConfigRevisionService
+	skillService          services.SkillService
 }
 
-type AgentHandlerOption func(*AgentHandler)
-
-func WithAgentSkillReportPersistence(enabled bool) AgentHandlerOption {
-	return func(handler *AgentHandler) {
-		handler.skillReportPersistence = enabled
+func NewAgentHandler(agentService services.InstanceAgentService, commandService services.InstanceCommandService, runtimeStatusService services.InstanceRuntimeStatusService, configRevisionService services.InstanceConfigRevisionService, skillService services.SkillService) *AgentHandler {
+	return &AgentHandler{
+		agentService:          agentService,
+		commandService:        commandService,
+		runtimeStatusService:  runtimeStatusService,
+		configRevisionService: configRevisionService,
+		skillService:          skillService,
 	}
-}
-
-func NewAgentHandler(agentService services.InstanceAgentService, commandService services.InstanceCommandService, runtimeStatusService services.InstanceRuntimeStatusService, configRevisionService services.InstanceConfigRevisionService, skillService services.SkillService, opts ...AgentHandlerOption) *AgentHandler {
-	handler := &AgentHandler{
-		agentService:           agentService,
-		commandService:         commandService,
-		runtimeStatusService:   runtimeStatusService,
-		configRevisionService:  configRevisionService,
-		skillService:           skillService,
-		skillReportPersistence: true,
-	}
-	for _, opt := range opts {
-		opt(handler)
-	}
-	return handler
 }
 
 func (h *AgentHandler) Register(c *gin.Context) {
@@ -207,10 +193,6 @@ func (h *AgentHandler) ReportSkillInventory(c *gin.Context) {
 	}
 	if strings.TrimSpace(req.AgentID) != "" && strings.TrimSpace(req.AgentID) != session.Agent.AgentID {
 		utils.Error(c, http.StatusForbidden, "Agent ID does not match session")
-		return
-	}
-	if !h.skillReportPersistence {
-		utils.Success(c, http.StatusOK, "Agent skill inventory report accepted without persistence", gin.H{"persisted": false})
 		return
 	}
 	if err := h.skillService.SyncAgentSkills(session.Instance.ID, req); err != nil {

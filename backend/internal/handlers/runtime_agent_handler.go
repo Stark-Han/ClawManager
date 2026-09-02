@@ -353,10 +353,6 @@ func (h *RuntimeAgentHandler) ReportSkills(c *gin.Context) {
 		utils.ValidationError(c, err)
 		return
 	}
-	if !h.cfg.SkillReportPersistence {
-		utils.Success(c, http.StatusOK, "Runtime agent skills report accepted without persistence", gin.H{"persisted": false})
-		return
-	}
 	if h.skillService != nil {
 		if err := h.skillService.SyncRuntimeAgentSkillsReport(payload); err != nil {
 			utils.HandleError(c, err)

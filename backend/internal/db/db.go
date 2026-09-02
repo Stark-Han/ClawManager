@@ -60,21 +60,6 @@ func connect(cfg config.DatabaseConfig) (db.Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
-	maxOpenConns := cfg.MaxOpenConns
-	if maxOpenConns < 0 {
-		maxOpenConns = 0
-	}
-	maxIdleConns := cfg.MaxIdleConns
-	if maxIdleConns < 0 {
-		maxIdleConns = 0
-	}
-	if maxOpenConns > 0 && maxIdleConns > maxOpenConns {
-		maxIdleConns = maxOpenConns
-	}
-	session.SetMaxOpenConns(maxOpenConns)
-	session.SetMaxIdleConns(maxIdleConns)
-	session.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-	session.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
 	if _, err := session.SQL().Exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"); err != nil {
 		_ = session.Close()
 		return nil, fmt.Errorf("failed to configure database connection charset: %w", err)

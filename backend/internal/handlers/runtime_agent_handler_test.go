@@ -12,20 +12,9 @@ import (
 	"clawreef/internal/config"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
-	"clawreef/internal/services"
 
 	"github.com/gin-gonic/gin"
 )
-
-type runtimeAgentHandlerSkillService struct {
-	services.SkillService
-	runtimeSyncCalls int
-}
-
-func (s *runtimeAgentHandlerSkillService) SyncRuntimeAgentSkillsReport(map[string]any) error {
-	s.runtimeSyncCalls++
-	return nil
-}
 
 func TestRuntimeAgentHandlerRejectsInvalidToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -48,34 +37,6 @@ func TestRuntimeAgentHandlerRejectsInvalidToken(t *testing.T) {
 	}
 }
 
-func TestRuntimeAgentSkillsReportCanAcknowledgeWithoutPersistence(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	skillService := &runtimeAgentHandlerSkillService{}
-	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{
-		AgentReportToken:       "secret",
-		SkillReportPersistence: false,
-	}, &runtimeAgentHandlerPodRepo{}, &runtimeAgentHandlerBindingRepo{}, nil, &runtimeAgentHandlerEvents{}, skillService)
-
-	router := gin.New()
-	router.POST("/api/v1/runtime-agent/skills/report", handler.ReportSkills)
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/runtime-agent/skills/report",
-		bytes.NewBufferString(`{"mode":"full","instances":[]}`),
-	)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ClawManager-Agent-Token", "secret")
-	router.ServeHTTP(recorder, req)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s, want 200", recorder.Code, recorder.Body.String())
-	}
-	if skillService.runtimeSyncCalls != 0 {
-		t.Fatalf("SyncRuntimeAgentSkillsReport calls = %d, want 0", skillService.runtimeSyncCalls)
-	}
-}
-
 func TestRuntimeAgentHandlerRegisterUsesConfiguredCapacity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	podRepo := &runtimeAgentHandlerPodRepo{}
@@ -83,7 +44,7 @@ func TestRuntimeAgentHandlerRegisterUsesConfiguredCapacity(t *testing.T) {
 	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{
 		AgentReportToken:  "secret",
 		MaxGatewaysPerPod: 33,
-	}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
+}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
 
 	router := gin.New()
 	router.POST("/api/v1/runtime-agent/register", handler.Register)
@@ -134,7 +95,7 @@ func TestRuntimeAgentHandlerHeartbeatUsesConfiguredCapacity(t *testing.T) {
 	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{
 		AgentReportToken:  "secret",
 		MaxGatewaysPerPod: 44,
-	}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
+}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, events, nil)
 
 	router := gin.New()
 	router.POST("/api/v1/runtime-agent/heartbeat", handler.Heartbeat)
