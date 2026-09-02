@@ -215,7 +215,7 @@ func withInstanceProxyEnv(instanceType string, instanceID int, env map[string]st
 
 func usesWebtopImage(instanceType string) bool {
 	switch instanceType {
-	case "ubuntu", "webtop", "hermes", "openclaw", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness:
+	case "ubuntu", "webtop", "hermes", "openclaw", "opencode", "workbuddy", RuntimeTypeDeepSeekHarness, RuntimeTypeClaudeCode:
 		return true
 	default:
 		return false
