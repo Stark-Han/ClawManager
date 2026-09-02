@@ -339,6 +339,42 @@ func (r *NorthboundRepository) GetOperationByIdempotency(userID int, operationTy
 	return &item, nil
 }
 
+// GetLatestLifecycleOperation returns the newest restart/reset operation for an
+// instance. Lifecycle rows carry instance_id from the moment they are queued,
+// so callers can recover progress after a browser refresh or an API retry.
+func (r *NorthboundRepository) GetLatestLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
+	var item models.NorthboundOperation
+	err := r.sess.Collection(item.TableName()).Find(db.Cond{
+		"user_id":           userID,
+		"instance_id":       instanceID,
+		"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
+	}).OrderBy("-id").One(&item)
+	if err != nil {
+		if err == db.ErrNoMoreRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get latest lifecycle operation: %w", err)
+	}
+	return &item, nil
+}
+
+func (r *NorthboundRepository) GetActiveLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
+	var item models.NorthboundOperation
+	err := r.sess.Collection(item.TableName()).Find(db.Cond{
+		"user_id":           userID,
+		"instance_id":       instanceID,
+		"status IN":         []string{"queued", "processing"},
+		"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
+	}).OrderBy("-id").One(&item)
+	if err != nil {
+		if err == db.ErrNoMoreRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get active lifecycle operation: %w", err)
+	}
+	return &item, nil
+}
+
 func (r *NorthboundRepository) CountPendingOperationsByUser(userID int) (int, error) {
 	count, err := r.sess.Collection("northbound_operations").Find(db.Cond{
 		"user_id":   userID,
@@ -415,6 +451,22 @@ func (r *NorthboundRepository) RequeueOperation(ctx context.Context, operationID
 	`, code, message, availableAt, now, operationID)
 	if err != nil {
 		return fmt.Errorf("failed to requeue northbound operation: %w", err)
+	}
+	return nil
+}
+
+func (r *NorthboundRepository) RenewOperationLease(ctx context.Context, operationID, leaseOwner string, leaseUntil, now time.Time) error {
+	result, err := r.sess.SQL().ExecContext(ctx, `
+		UPDATE northbound_operations
+		SET lease_expires_at = ?, updated_at = ?
+		WHERE operation_id = ? AND status = 'processing' AND lease_owner = ?
+	`, leaseUntil, now, operationID, leaseOwner)
+	if err != nil {
+		return fmt.Errorf("failed to renew northbound operation lease: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return fmt.Errorf("northbound operation lease is no longer owned")
 	}
 	return nil
 }

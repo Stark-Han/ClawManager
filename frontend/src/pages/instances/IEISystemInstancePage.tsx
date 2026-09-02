@@ -173,18 +173,22 @@ export default function IEISystemInstancePage() {
     else void element.requestFullscreen().catch(() => undefined);
   };
 
-  const waitForRestartRecovery = useCallback(async () => {
+  const waitForRestartRecovery = useCallback(async (operationID: string) => {
     const deadline = Date.now() + restartTimeoutMs;
     while (Date.now() < deadline) {
       await wait(restartPollIntervalMs);
       if (!mountedRef.current) return;
 
+      const operation = await ieiSystemService.getLifecycleOperation(instanceID, operationID);
+      if (operation.status === "failed") {
+        throw new Error(operation.error_message || "实例重启失败，工作区数据已保留。");
+      }
       const nextInstance = await ieiSystemService.getInstance(instanceID);
       if (!mountedRef.current) return;
       setInstance(nextInstance);
 
       const status = nextInstance.status.trim().toLowerCase();
-      if (status === "running") {
+      if (operation.status === "succeeded" && status === "running") {
         const nextAccess = await ieiSystemService.generateAccess(instanceID);
         if (!mountedRef.current) return;
         setAccess(nextAccess);
@@ -205,8 +209,8 @@ export default function IEISystemInstancePage() {
     setRestartError(null);
     setRestartNotice("正在重启实例，服务会短暂中断，恢复后将自动重新连接。");
     try {
-      await ieiSystemService.restartInstance(instance.id);
-      await waitForRestartRecovery();
+      const operation = await ieiSystemService.restartInstance(instance.id);
+      await waitForRestartRecovery(operation.operation_id);
       if (mountedRef.current) {
         setRestartNotice("实例已完成重启并重新连接。");
       }

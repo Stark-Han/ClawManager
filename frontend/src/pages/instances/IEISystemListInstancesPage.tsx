@@ -18,6 +18,7 @@ import { getIEIRuntimePresentation } from "../../lib/ieiRuntimeCatalog";
 import {
   ieiSystemService,
   type IEISystemInstance,
+  type IEISystemLifecycleOperation,
   type IEISystemSession,
 } from "../../services/ieiSystemService";
 
@@ -101,6 +102,21 @@ function errorMessage(error: unknown) {
   return "无法加载实例，请稍后重试。";
 }
 
+function newIdempotencyKey() {
+  if (typeof crypto.randomUUID === "function") return `iei-${crypto.randomUUID()}`;
+  return `iei-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function operationIsPending(
+  operation: IEISystemLifecycleOperation | undefined,
+  instanceStatus: string | undefined,
+) {
+  if (!operation) return false;
+  const operationStatus = operation.status.toLowerCase();
+  if (["queued", "processing"].includes(operationStatus)) return true;
+  return operationStatus === "succeeded" && instanceStatus?.toLowerCase() === "creating";
+}
+
 function installNoReferrerPolicy() {
   const existing = document.querySelector<HTMLMetaElement>('meta[name="referrer"]');
   const previous = existing?.content;
@@ -136,8 +152,10 @@ export default function IEISystemListInstancesPage() {
   const [runtimeFilter, setRuntimeFilter] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [lifecycleAction, setLifecycleAction] = useState<"restart" | "reset" | null>(null);
-  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleOperations, setLifecycleOperations] = useState<
+    Record<number, IEISystemLifecycleOperation>
+  >({});
+  const [lifecycleErrors, setLifecycleErrors] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const loadInstances = useCallback(async () => {
@@ -222,6 +240,94 @@ export default function IEISystemListInstancesPage() {
   const selectedRuntime = selectedInstance
     ? getIEIRuntimePresentation(selectedInstance.type)
     : null;
+  const selectedOperation = selectedInstance
+    ? lifecycleOperations[selectedInstance.id]
+    : undefined;
+  const selectedLifecyclePending = selectedInstance
+    ? operationIsPending(selectedOperation, selectedInstance.status)
+    : false;
+  const selectedLifecycleError = selectedInstance
+    ? lifecycleErrors[selectedInstance.id]
+    : undefined;
+
+  const selectedInstanceID = selectedInstance?.id;
+  const selectedInstanceStatus = selectedInstance?.status;
+  useEffect(() => {
+    if (!selectedInstanceID) return;
+    let cancelled = false;
+    void ieiSystemService
+      .getLatestLifecycleOperation(selectedInstanceID)
+      .then((operation) => {
+        if (cancelled || !operation) return;
+        const relevant = operationIsPending(operation, selectedInstanceStatus) || operation.status === "failed";
+        if (!relevant) return;
+        setLifecycleOperations((current) => ({ ...current, [selectedInstanceID]: operation }));
+        if (operation.status === "failed") {
+          setLifecycleErrors((current) => ({
+            ...current,
+            [selectedInstanceID]: operation.error_message || "实例操作失败，工作区数据已保留。",
+          }));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedInstanceID, selectedInstanceStatus]);
+
+  const pendingLifecycleOperations = useMemo(
+    () => Object.values(lifecycleOperations).filter((operation) => {
+      const instance = instances.find((item) => item.id === operation.instance_id);
+      return operationIsPending(operation, instance?.status);
+    }),
+    [instances, lifecycleOperations],
+  );
+  const pendingLifecycleSignature = pendingLifecycleOperations
+    .map((operation) => `${operation.instance_id}:${operation.operation_id}:${operation.status}`)
+    .sort()
+    .join("|");
+  const pendingLifecycleOperationsRef = useRef(pendingLifecycleOperations);
+  pendingLifecycleOperationsRef.current = pendingLifecycleOperations;
+
+  useEffect(() => {
+    const pending = pendingLifecycleOperationsRef.current;
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    const refresh = async () => {
+      const results = await Promise.allSettled(
+        pending.map((operation) =>
+          ieiSystemService.getLifecycleOperation(operation.instance_id!, operation.operation_id),
+        ),
+      );
+      if (cancelled) return;
+      setLifecycleOperations((current) => {
+        const next = { ...current };
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            next[pending[index].instance_id!] = result.value;
+          }
+        });
+        return next;
+      });
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled" && result.value.status === "failed") {
+          const instanceID = pending[index].instance_id!;
+          setLifecycleErrors((current) => ({
+            ...current,
+            [instanceID]: result.value.error_message || "实例操作失败，工作区数据已保留。",
+          }));
+        }
+      });
+      await loadInstances().catch(() => undefined);
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pendingLifecycleSignature, loadInstances]);
   const handleLogout = async () => {
     await ieiSystemService.clearSession().catch(() => undefined);
     setSession(null);
@@ -231,37 +337,41 @@ export default function IEISystemListInstancesPage() {
   };
 
   const handleRestart = async () => {
-    if (!selectedInstance || selectedInstance.status.toLowerCase() !== "running") return;
+    if (!selectedInstance || selectedLifecyclePending || selectedInstance.status.toLowerCase() !== "running") return;
     if (!window.confirm(`确认重启实例“${selectedInstance.name}”？工作区数据会保留。`)) return;
-    setLifecycleAction("restart");
-    setLifecycleError(null);
+    const instanceID = selectedInstance.id;
+    setLifecycleErrors((current) => {
+      const next = { ...current };
+      delete next[instanceID];
+      return next;
+    });
     try {
-      await ieiSystemService.restartInstance(selectedInstance.id);
+      const operation = await ieiSystemService.restartInstance(instanceID, newIdempotencyKey());
+      setLifecycleOperations((current) => ({ ...current, [instanceID]: operation }));
       await loadInstances();
     } catch (actionError) {
-      setLifecycleError(errorMessage(actionError));
-    } finally {
-      setLifecycleAction(null);
+      setLifecycleErrors((current) => ({ ...current, [instanceID]: errorMessage(actionError) }));
     }
   };
 
   const handleReset = async () => {
-    if (!selectedInstance) return;
+    if (!selectedInstance || selectedLifecyclePending) return;
     const status = selectedInstance.status.toLowerCase();
     if (!["running", "stopped", "error"].includes(status)) return;
-    const confirmation = window.prompt(
-      `重置会删除并重建运行时，但保留实例记录和工作区数据。请输入实例名确认：\n${selectedInstance.name}`,
-    );
-    if (confirmation !== selectedInstance.name) return;
-    setLifecycleAction("reset");
-    setLifecycleError(null);
+    if (!window.confirm(`建议优先使用“重启实例”。只有重启无法恢复时才重置“${selectedInstance.name}”。是否继续？`)) return;
+    if (!window.confirm(`再次确认重置“${selectedInstance.name}”？运行时会被删除并重建，实例记录和工作区数据将保留。`)) return;
+    const instanceID = selectedInstance.id;
+    setLifecycleErrors((current) => {
+      const next = { ...current };
+      delete next[instanceID];
+      return next;
+    });
     try {
-      await ieiSystemService.resetInstance(selectedInstance.id);
+      const operation = await ieiSystemService.resetInstance(instanceID, newIdempotencyKey());
+      setLifecycleOperations((current) => ({ ...current, [instanceID]: operation }));
       await loadInstances();
     } catch (actionError) {
-      setLifecycleError(errorMessage(actionError));
-    } finally {
-      setLifecycleAction(null);
+      setLifecycleErrors((current) => ({ ...current, [instanceID]: errorMessage(actionError) }));
     }
   };
 
@@ -492,9 +602,14 @@ export default function IEISystemListInstancesPage() {
                 <h2 className="text-base font-bold text-[#14213a]">运行时说明</h2>
               </div>
               <div className="flex-1 overflow-y-auto p-6">
-                {lifecycleError ? (
+                {selectedLifecycleError ? (
                   <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                    {lifecycleError}
+                    {selectedLifecycleError}
+                  </div>
+                ) : null}
+                {selectedLifecyclePending ? (
+                  <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                    正在{selectedOperation?.action === "reset" ? "重置" : "重启"}实例。页面会持续同步状态，期间无法进入该实例。
                   </div>
                 ) : null}
                 <div className="flex flex-col gap-5 border-b border-slate-100 pb-6 sm:flex-row sm:items-center">
@@ -529,30 +644,41 @@ export default function IEISystemListInstancesPage() {
                     type="button"
                     onClick={() => void handleReset()}
                     disabled={
-                      lifecycleAction !== null ||
+                      selectedLifecyclePending ||
                       !["running", "stopped", "error"].includes(selectedInstance.status.toLowerCase())
                     }
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border-2 border-sky-500 bg-white px-5 text-sm font-semibold text-sky-600 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <RefreshCw className={`h-4 w-4 ${lifecycleAction === "reset" ? "animate-spin" : ""}`} />
+                    <RefreshCw className={`h-4 w-4 ${selectedLifecyclePending && selectedOperation?.action === "reset" ? "animate-spin" : ""}`} />
                     重置实例
                   </button>
                   <button
                     type="button"
                     onClick={() => void handleRestart()}
-                    disabled={lifecycleAction !== null || selectedInstance.status.toLowerCase() !== "running"}
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border-2 border-red-500 bg-white px-5 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={selectedLifecyclePending || selectedInstance.status.toLowerCase() !== "running"}
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <Power className={`h-4 w-4 ${lifecycleAction === "restart" ? "animate-pulse" : ""}`} />
-                    重启实例
+                    <Power className={`h-4 w-4 ${selectedLifecyclePending && selectedOperation?.action === "restart" ? "animate-pulse" : ""}`} />
+                    重启实例（推荐）
                   </button>
-                  <Link
-                    to={`/ieisystem/instances/${selectedInstance.id}`}
-                    className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-700 to-blue-600 px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(37,99,235,0.22)] transition hover:-translate-y-0.5 hover:from-blue-800 hover:to-blue-700"
-                  >
-                    进入实例
-                    <ArrowRight className="h-4 w-4" />
-                  </Link>
+                  {selectedLifecyclePending || selectedInstance.status.toLowerCase() !== "running" ? (
+                    <button
+                      type="button"
+                      disabled
+                      className="inline-flex h-12 shrink-0 cursor-not-allowed items-center justify-center gap-2 rounded-lg bg-slate-300 px-6 text-sm font-semibold text-white"
+                    >
+                      进入实例
+                      <ArrowRight className="h-4 w-4" />
+                    </button>
+                  ) : (
+                    <Link
+                      to={`/ieisystem/instances/${selectedInstance.id}`}
+                      className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-700 to-blue-600 px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(37,99,235,0.22)] transition hover:-translate-y-0.5 hover:from-blue-800 hover:to-blue-700"
+                    >
+                      进入实例
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
+                  )}
                   </div>
                 </div>
 

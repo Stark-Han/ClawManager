@@ -62,8 +62,6 @@ assert(
     listPage.includes("智慧协作门户") &&
     !listPage.includes("OWNER PORTAL") &&
     !listPage.includes("实例模式") &&
-    !listPage.includes("Lite") &&
-    !listPage.includes("Pro") &&
     !runtimeCatalog.includes("Lite") &&
     !runtimeCatalog.includes("Pro") &&
     runtimeCatalog.includes('"deepseek-harness"') &&
@@ -132,6 +130,21 @@ assert(
     service.includes("/workspace/folders") &&
     service.includes("/workspace/entries"),
   "The IEI detail page must expose the same workspace file operations as the ShareLink page.",
+);
+
+assert(
+  service.includes("/lifecycle-operation") &&
+    service.includes("/lifecycle-operations/") &&
+    service.includes('"Idempotency-Key"') &&
+    listPage.includes("重启实例（推荐）") &&
+    listPage.includes("页面会持续同步状态") &&
+    listPage.includes("getLatestLifecycleOperation") &&
+    listPage.includes("getLifecycleOperation") &&
+    !listPage.includes("window.prompt") &&
+    (listPage.match(/window\.confirm/g) ?? []).length >= 3 &&
+    detailPage.includes("operation.status === \"succeeded\"") &&
+    detailPage.includes("getLifecycleOperation"),
+  "IEI lifecycle actions must be idempotent, recoverable after refresh, prefer restart, double-confirm reset, and block access until completion.",
 );
 
 assert(

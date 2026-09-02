@@ -2123,6 +2123,13 @@ type InstanceResetService interface {
 	Reset(instanceID int) error
 }
 
+// InstanceLifecycleFailureService lets an asynchronous lifecycle worker turn a
+// stale creating state into a recoverable error without deleting any runtime
+// resource or persistent data.
+type InstanceLifecycleFailureService interface {
+	MarkLifecycleFailure(instanceID int) error
+}
+
 // Reset rebuilds only the ephemeral runtime while preserving the instance
 // record and its managed persistent storage. It must never call Delete or the
 // broad Kubernetes cleanup service because those paths intentionally remove
@@ -2249,6 +2256,21 @@ func (s *instanceService) markResetError(instanceID int) {
 	instance.UpdatedAt = time.Now()
 	_ = s.instanceRepo.Update(instance)
 	GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+}
+
+func (s *instanceService) MarkLifecycleFailure(instanceID int) error {
+	claimer, ok := s.instanceRepo.(repository.InstanceLifecycleStatusRepository)
+	if !ok {
+		return fmt.Errorf("instance repository does not support safe lifecycle transitions")
+	}
+	changed, err := claimer.ClaimLifecycleStatus(context.Background(), instanceID, []string{"creating"}, "error")
+	if err != nil || !changed {
+		return err
+	}
+	if instance, getErr := s.instanceRepo.GetByID(instanceID); getErr == nil && instance != nil {
+		GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+	}
+	return nil
 }
 
 // GetEnvironmentOverrideNames returns sorted configured names without exposing

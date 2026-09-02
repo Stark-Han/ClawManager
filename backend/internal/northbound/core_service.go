@@ -24,6 +24,9 @@ const (
 	northboundProCPUCores       = 4
 	northboundProMemoryGB       = 8
 	northboundProDiskGB         = 50
+	lifecycleReadyTimeout       = 5 * time.Minute
+	lifecycleReadyPollInterval  = 2 * time.Second
+	lifecycleWaitingCode        = "LIFECYCLE_WAITING"
 )
 
 type CoreService struct {
@@ -263,6 +266,16 @@ func (s *CoreService) SubmitLifecycle(principal Principal, idempotencyKey string
 	if operationType == "" {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid lifecycle action", nil)
 	}
+	active, err := s.repo.GetActiveLifecycleOperation(principal.UserID, instanceID)
+	if err != nil {
+		return nil, false, err
+	}
+	if active != nil {
+		if active.OperationType == operationType {
+			return active, true, nil
+		}
+		return nil, false, apiError(409, "LIFECYCLE_IN_PROGRESS", "Another lifecycle operation is already in progress", nil)
+	}
 	status := strings.ToLower(strings.TrimSpace(instance.Status))
 	if action == "restart" && status != "running" {
 		return nil, false, apiError(409, "INVALID_INSTANCE_STATE", "Instance is not running", nil)
@@ -325,6 +338,10 @@ func (s *CoreService) submitCreateOperation(
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+	if lifecycleRequest, ok := request.(InstanceLifecycleRequest); ok && lifecycleRequest.InstanceID > 0 {
+		instanceID := lifecycleRequest.InstanceID
+		item.InstanceID = &instanceID
+	}
 	if err := s.repo.CreateOperation(item); err != nil {
 		existing, getErr := s.repo.GetOperationByIdempotency(principal.UserID, operationType, keyHash)
 		if getErr == nil && existing != nil {
@@ -344,6 +361,17 @@ func (s *CoreService) GetOperation(userID int, operationID string) (*models.Nort
 		return nil, err
 	}
 	if item == nil || item.UserID != userID {
+		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
+	}
+	return item, nil
+}
+
+func (s *CoreService) GetLatestLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
+	item, err := s.repo.GetLatestLifecycleOperation(userID, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if item != nil && item.UserID != userID {
 		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
 	}
 	return item, nil
@@ -737,6 +765,10 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 		return
 	}
 	currentStatus := strings.ToLower(strings.TrimSpace(current.Status))
+	if item.ErrorCode != nil && *item.ErrorCode == lifecycleWaitingCode {
+		w.finishOrContinueLifecycle(ctx, item, request.InstanceID, currentStatus, lifecycleAuditPrefix(item.OperationType))
+		return
+	}
 	if (item.OperationType == OperationTypeLiteRestart || item.OperationType == OperationTypeProRestart) && currentStatus != "running" {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance is not running", time.Now().UTC())
 		return
@@ -746,23 +778,24 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 		return
 	}
 	var (
-		actionErr   error
+		action      func() error
 		auditPrefix string
 	)
 	switch item.OperationType {
 	case OperationTypeLiteRestart:
 		auditPrefix = "northbound.lite.restart"
-		actionErr = restartInstance(w.service.instances, request.InstanceID)
+		action = func() error { return restartInstance(w.service.instances, request.InstanceID) }
 	case OperationTypeProRestart:
 		auditPrefix = "northbound.pro.restart"
-		actionErr = restartInstance(w.service.instances, request.InstanceID)
+		action = func() error { return restartInstance(w.service.instances, request.InstanceID) }
 	case OperationTypeLiteReset:
 		auditPrefix = "northbound.lite.reset"
-		actionErr = resetInstance(w.service.instances, request.InstanceID)
+		action = func() error { return resetInstance(w.service.instances, request.InstanceID) }
 	case OperationTypeProReset:
 		auditPrefix = "northbound.pro.reset"
-		actionErr = resetInstance(w.service.instances, request.InstanceID)
+		action = func() error { return resetInstance(w.service.instances, request.InstanceID) }
 	}
+	actionErr := w.runLifecycleActionWithLease(ctx, item, action)
 	if actionErr != nil {
 		// Lifecycle operations are not retried automatically. A failed reset may
 		// have already rebuilt an ephemeral workload; an automatic retry would
@@ -773,13 +806,89 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &request.InstanceID, "LIFECYCLE_FAILED")
 		return
 	}
-	if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, request.InstanceID, time.Now().UTC()); err != nil {
-		log.Printf("northbound operation %s completion failed: %v", item.OperationID, err)
+	refreshed, refreshErr := w.service.instances.GetByID(request.InstanceID)
+	if refreshErr != nil || refreshed == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INSTANCE_NOT_FOUND", "Instance not found after lifecycle operation", time.Now().UTC())
 		return
 	}
-	item.Status = "succeeded"
-	item.InstanceID = &request.InstanceID
-	w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &request.InstanceID, "")
+	w.finishOrContinueLifecycle(ctx, item, request.InstanceID, strings.ToLower(strings.TrimSpace(refreshed.Status)), auditPrefix)
+}
+
+func lifecycleAuditPrefix(operationType string) string {
+	switch operationType {
+	case OperationTypeLiteRestart:
+		return "northbound.lite.restart"
+	case OperationTypeProRestart:
+		return "northbound.pro.restart"
+	case OperationTypeLiteReset:
+		return "northbound.lite.reset"
+	case OperationTypeProReset:
+		return "northbound.pro.reset"
+	default:
+		return "northbound.lifecycle"
+	}
+}
+
+func (w *OperationWorker) finishOrContinueLifecycle(ctx context.Context, item *models.NorthboundOperation, instanceID int, instanceStatus, auditPrefix string) {
+	now := time.Now().UTC()
+	if instanceStatus == "running" {
+		if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, instanceID, now); err != nil {
+			log.Printf("northbound operation %s completion failed: %v", item.OperationID, err)
+			return
+		}
+		item.Status = "succeeded"
+		item.InstanceID = &instanceID
+		w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &instanceID, "")
+		return
+	}
+	if instanceStatus == "error" || instanceStatus == "deleting" {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", "Instance did not recover; persistent workspace was retained", now)
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &instanceID, "LIFECYCLE_FAILED")
+		return
+	}
+	startedAt := item.StartedAt
+	if startedAt != nil && now.Sub(*startedAt) >= lifecycleReadyTimeout {
+		if recorder, ok := w.service.instances.(services.InstanceLifecycleFailureService); ok {
+			_ = recorder.MarkLifecycleFailure(instanceID)
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_TIMEOUT", "Instance did not become ready in time; persistent workspace was retained", now)
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "timed out"), &instanceID, "LIFECYCLE_TIMEOUT")
+		return
+	}
+	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, lifecycleWaitingCode, "Waiting for the instance runtime to become ready", now.Add(lifecycleReadyPollInterval), now)
+}
+
+func (w *OperationWorker) runLifecycleActionWithLease(ctx context.Context, item *models.NorthboundOperation, action func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- action() }()
+	lease := time.Duration(w.service.settings().OperationLeaseSeconds) * time.Second
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	interval := lease / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-result:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if item.LeaseOwner == nil {
+				continue
+			}
+			now := time.Now().UTC()
+			if err := w.service.repo.RenewOperationLease(ctx, item.OperationID, *item.LeaseOwner, now.Add(lease), now); err != nil {
+				log.Printf("northbound lifecycle operation %s lease renewal failed: %v", item.OperationID, err)
+			}
+		}
+	}
 }
 
 func restartInstance(instances coreInstanceService, instanceID int) error {

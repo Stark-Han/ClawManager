@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 
 	"clawreef/internal/config"
 	"clawreef/internal/models"
+	"clawreef/internal/northbound"
 	"clawreef/internal/services"
 
 	"github.com/gin-gonic/gin"
@@ -29,6 +31,52 @@ type fakeIEIInstanceService struct {
 	restartErr     error
 	resetCalls     []int
 	resetErr       error
+}
+
+type fakeIEILifecycleCall struct {
+	UserID     int
+	InstanceID int
+	Mode       string
+	Action     string
+}
+
+type fakeIEILifecycleService struct {
+	calls      []fakeIEILifecycleCall
+	submitErr  error
+	operations map[string]*models.NorthboundOperation
+}
+
+func (s *fakeIEILifecycleService) SubmitLifecycle(principal northbound.Principal, _ string, instanceID int, mode, action string) (*models.NorthboundOperation, bool, error) {
+	if s.submitErr != nil {
+		return nil, false, s.submitErr
+	}
+	s.calls = append(s.calls, fakeIEILifecycleCall{UserID: principal.UserID, InstanceID: instanceID, Mode: mode, Action: action})
+	operationID := fmt.Sprintf("op_test_%d", len(s.calls))
+	operationType := mode + "_instance_" + action
+	now := time.Now().UTC()
+	item := &models.NorthboundOperation{OperationID: operationID, UserID: principal.UserID, OperationType: operationType, Status: "queued", InstanceID: &instanceID, CreatedAt: now, UpdatedAt: now}
+	if s.operations == nil {
+		s.operations = map[string]*models.NorthboundOperation{}
+	}
+	s.operations[operationID] = item
+	return item, false, nil
+}
+
+func (s *fakeIEILifecycleService) GetOperation(userID int, operationID string) (*models.NorthboundOperation, error) {
+	item := s.operations[operationID]
+	if item == nil || item.UserID != userID {
+		return nil, &northbound.APIError{Status: http.StatusNotFound, Code: "OPERATION_NOT_FOUND", Message: "Operation not found"}
+	}
+	return item, nil
+}
+
+func (s *fakeIEILifecycleService) GetLatestLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
+	for _, item := range s.operations {
+		if item.UserID == userID && item.InstanceID != nil && *item.InstanceID == instanceID {
+			return item, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *fakeIEIInstanceService) GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
@@ -63,15 +111,16 @@ func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
 			3: {ID: 3, UserID: 10, Owner: &owner, Name: "Stopped Pro", Type: "workbuddy", RuntimeType: "desktop", RuntimeVariant: "linux", InstanceMode: "pro", Status: "stopped"},
 		}},
 	}
-	handler := NewIEISystemHandler(cfg, sso, instanceService, nil)
+	lifecycle := &fakeIEILifecycleService{}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, nil, lifecycle)
 	router := gin.New()
 	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
 	router.POST("/api/v1/ieisystem/instances/:id/restart", handler.RestartInstance)
 
 	unauthenticated := httptest.NewRecorder()
 	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil))
-	if unauthenticated.Code != http.StatusUnauthorized || len(instanceService.restartCalls) != 0 {
-		t.Fatalf("unauthenticated restart status/calls = %d/%v", unauthenticated.Code, instanceService.restartCalls)
+	if unauthenticated.Code != http.StatusUnauthorized || len(lifecycle.calls) != 0 {
+		t.Fatalf("unauthenticated restart status/calls = %d/%v", unauthenticated.Code, lifecycle.calls)
 	}
 
 	sessionCookie := exchangeIEITestSession(t, router, cfg, owner)
@@ -79,27 +128,27 @@ func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
 	wrongOwner.AddCookie(sessionCookie)
 	wrongOwnerRecorder := httptest.NewRecorder()
 	router.ServeHTTP(wrongOwnerRecorder, wrongOwner)
-	if wrongOwnerRecorder.Code != http.StatusNotFound || len(instanceService.restartCalls) != 0 {
-		t.Fatalf("wrong-owner restart status/calls = %d/%v", wrongOwnerRecorder.Code, instanceService.restartCalls)
+	if wrongOwnerRecorder.Code != http.StatusNotFound || len(lifecycle.calls) != 0 {
+		t.Fatalf("wrong-owner restart status/calls = %d/%v", wrongOwnerRecorder.Code, lifecycle.calls)
 	}
 
 	stopped := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/3/restart", nil)
 	stopped.AddCookie(sessionCookie)
 	stoppedRecorder := httptest.NewRecorder()
 	router.ServeHTTP(stoppedRecorder, stopped)
-	if stoppedRecorder.Code != http.StatusConflict || len(instanceService.restartCalls) != 0 {
-		t.Fatalf("stopped restart status/calls = %d/%v", stoppedRecorder.Code, instanceService.restartCalls)
+	if stoppedRecorder.Code != http.StatusConflict || len(lifecycle.calls) != 0 {
+		t.Fatalf("stopped restart status/calls = %d/%v", stoppedRecorder.Code, lifecycle.calls)
 	}
 
 	owned := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
 	owned.AddCookie(sessionCookie)
 	ownedRecorder := httptest.NewRecorder()
 	router.ServeHTTP(ownedRecorder, owned)
-	if ownedRecorder.Code != http.StatusAccepted || len(instanceService.restartCalls) != 1 || instanceService.restartCalls[0] != 1 {
-		t.Fatalf("owner restart status/calls = %d/%v, body = %s", ownedRecorder.Code, instanceService.restartCalls, ownedRecorder.Body.String())
+	if ownedRecorder.Code != http.StatusAccepted || len(lifecycle.calls) != 1 || lifecycle.calls[0].InstanceID != 1 || lifecycle.calls[0].Action != "restart" {
+		t.Fatalf("owner restart status/calls = %d/%v, body = %s", ownedRecorder.Code, lifecycle.calls, ownedRecorder.Body.String())
 	}
 
-	instanceService.restartErr = errors.New("kubernetes restart failed")
+	lifecycle.submitErr = errors.New("kubernetes restart failed")
 	serviceFailure := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
 	serviceFailure.AddCookie(sessionCookie)
 	serviceFailureRecorder := httptest.NewRecorder()
@@ -124,7 +173,8 @@ func TestIEISystemResetRequiresOwnerAndAcceptsRecoverableStates(t *testing.T) {
 		3: {ID: 3, UserID: 11, Owner: &other, Name: "Other Pro", Type: "deepseek-harness", RuntimeType: "desktop", InstanceMode: "pro", Status: "running"},
 		4: {ID: 4, UserID: 10, Owner: &owner, Name: "Creating", Type: "hermes", RuntimeType: "gateway", InstanceMode: "lite", Status: "creating"},
 	}}}
-	handler := NewIEISystemHandler(cfg, sso, instanceService, nil)
+	lifecycle := &fakeIEILifecycleService{}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, nil, lifecycle)
 	router := gin.New()
 	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
 	router.POST("/api/v1/ieisystem/instances/:id/reset", handler.ResetInstance)
@@ -139,8 +189,8 @@ func TestIEISystemResetRequiresOwnerAndAcceptsRecoverableStates(t *testing.T) {
 			t.Fatalf("reset %d status/body = %d/%s", id, recorder.Code, recorder.Body.String())
 		}
 	}
-	if len(instanceService.resetCalls) != 2 || instanceService.resetCalls[0] != 1 || instanceService.resetCalls[1] != 2 {
-		t.Fatalf("reset calls = %v", instanceService.resetCalls)
+	if len(lifecycle.calls) != 2 || lifecycle.calls[0].InstanceID != 1 || lifecycle.calls[0].Action != "reset" || lifecycle.calls[1].InstanceID != 2 {
+		t.Fatalf("reset calls = %v", lifecycle.calls)
 	}
 
 	for id, want := range map[int]int{3: http.StatusNotFound, 4: http.StatusConflict} {
@@ -150,6 +200,60 @@ func TestIEISystemResetRequiresOwnerAndAcceptsRecoverableStates(t *testing.T) {
 		router.ServeHTTP(recorder, req)
 		if recorder.Code != want {
 			t.Fatalf("reset %d status/body = %d/%s, want %d", id, recorder.Code, recorder.Body.String(), want)
+		}
+	}
+}
+
+func TestIEISystemLifecycleOperationCanBeRecoveredAfterRefresh(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := testIEIHandlerConfig()
+	sso, err := services.NewIEISSOService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner@example.com"
+	instanceService := &fakeIEIInstanceService{fakeWorkspaceHandlerInstanceService: &fakeWorkspaceHandlerInstanceService{instances: map[int]*models.Instance{
+		1: {ID: 1, UserID: 10, Owner: &owner, Name: "Owner Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+	}}}
+	lifecycle := &fakeIEILifecycleService{}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, nil, lifecycle)
+	router := gin.New()
+	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
+	router.POST("/api/v1/ieisystem/instances/:id/restart", handler.RestartInstance)
+	router.GET("/api/v1/ieisystem/instances/:id/lifecycle-operation", handler.GetLatestLifecycleOperation)
+	router.GET("/api/v1/ieisystem/instances/:id/lifecycle-operations/:operationID", handler.GetLifecycleOperation)
+	cookie := exchangeIEITestSession(t, router, cfg, owner)
+
+	submit := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
+	submit.AddCookie(cookie)
+	submit.Header.Set("Idempotency-Key", "browser-retry-key")
+	submitRecorder := httptest.NewRecorder()
+	router.ServeHTTP(submitRecorder, submit)
+	if submitRecorder.Code != http.StatusAccepted {
+		t.Fatalf("submit status/body = %d/%s", submitRecorder.Code, submitRecorder.Body.String())
+	}
+	var submitted struct {
+		Data struct {
+			Operation ieiLifecycleOperationView `json:"operation"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(submitRecorder.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted.Data.Operation.OperationID == "" || submitted.Data.Operation.Action != "restart" {
+		t.Fatalf("unexpected submitted operation: %#v", submitted.Data.Operation)
+	}
+
+	for _, path := range []string{
+		"/api/v1/ieisystem/instances/1/lifecycle-operation",
+		"/api/v1/ieisystem/instances/1/lifecycle-operations/" + submitted.Data.Operation.OperationID,
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.AddCookie(cookie)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), submitted.Data.Operation.OperationID) {
+			t.Fatalf("operation status %s = %d/%s", path, recorder.Code, recorder.Body.String())
 		}
 	}
 }

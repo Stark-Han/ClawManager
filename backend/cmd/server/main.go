@@ -132,6 +132,7 @@ func main() {
 	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	var northboundCoreServer *http.Server
 	var northboundOperationWorker *northbound.OperationWorker
+	var northboundCoreService *northbound.CoreService
 	if cfg.Northbound.Enabled {
 		coreTLSConfig, tlsErr := northbound.CoreTLSConfig(cfg.Northbound)
 		if tlsErr != nil {
@@ -140,10 +141,10 @@ func main() {
 		if len(cfg.Northbound.InternalJWTSecret) < 32 {
 			log.Fatal("Failed to initialize northbound Core: NORTHBOUND_INTERNAL_JWT_SECRET must contain at least 32 bytes")
 		}
-		coreService := northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound, northboundRuntimeSettings)
-		coreService.SetAuditRepository(auditEventRepo)
-		northboundOperationWorker = northbound.NewOperationWorker(coreService, cfg.Runtime.BackendReplicaID)
-		coreHandler := northbound.NewCoreHandler(coreService, cfg.Northbound.InternalJWTSecret)
+		northboundCoreService = northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound, northboundRuntimeSettings)
+		northboundCoreService.SetAuditRepository(auditEventRepo)
+		northboundOperationWorker = northbound.NewOperationWorker(northboundCoreService, cfg.Runtime.BackendReplicaID)
+		coreHandler := northbound.NewCoreHandler(northboundCoreService, cfg.Northbound.InternalJWTSecret)
 		coreRouter := gin.New()
 		_ = coreRouter.SetTrustedProxies(nil)
 		coreRouter.Use(gin.Logger(), gin.Recovery(), northbound.RequestContext(), northbound.BodyLimit(64<<10))
@@ -232,6 +233,9 @@ func main() {
 	}
 	instanceHandler.SetIEISSOService(ieiSSOService)
 	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
+	if northboundCoreService != nil {
+		ieiSystemHandler.SetLifecycleService(northboundCoreService)
+	}
 	systemSettingsHandler := handlers.NewSystemSettingsHandler(systemImageSettingService)
 	var northboundController services.NorthboundClusterController
 	if k8s.GetClient() != nil && k8s.GetClient().Clientset != nil {
@@ -421,6 +425,8 @@ func main() {
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
 			ieiSystem.POST("/instances/:id/restart", ieiSystemHandler.RestartInstance)
 			ieiSystem.POST("/instances/:id/reset", ieiSystemHandler.ResetInstance)
+			ieiSystem.GET("/instances/:id/lifecycle-operation", ieiSystemHandler.GetLatestLifecycleOperation)
+			ieiSystem.GET("/instances/:id/lifecycle-operations/:operationID", ieiSystemHandler.GetLifecycleOperation)
 			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
 			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
 			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)
