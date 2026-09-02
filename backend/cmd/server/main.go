@@ -262,7 +262,17 @@ func main() {
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)
 	skillHubHandler := handlers.NewSkillHubHandler(skillService, instanceService)
 	securityHandler := handlers.NewSecurityHandler(securityScanService)
-	agentHandler := handlers.NewAgentHandler(instanceAgentService, instanceCommandService, instanceRuntimeStatusService, instanceConfigRevisionService, skillService)
+	agentHandler := handlers.NewAgentHandler(
+		instanceAgentService,
+		instanceCommandService,
+		instanceRuntimeStatusService,
+		instanceConfigRevisionService,
+		skillService,
+		handlers.WithAgentSkillReportPersistence(cfg.Runtime.SkillReportPersistence),
+	)
+	if !cfg.Runtime.SkillReportPersistence {
+		log.Printf("skill inventory report persistence is disabled; reports will be acknowledged without database synchronization")
+	}
 	teamHandler := handlers.NewTeamHandler(teamService)
 	workspaceFileHandler := handlers.NewWorkspaceFileHandler(instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	workspaceFileHandler.SetSkillRepository(skillRepo)
