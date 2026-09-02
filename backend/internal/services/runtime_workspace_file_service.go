@@ -155,10 +155,42 @@ func (s *runtimeWorkspaceFileService) OpenPreview(ctx context.Context, scope Wor
 	return file, contentType, size, nil
 }
 
-func (s *runtimeWorkspaceFileService) OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*os.File, string, int64, error) {
-	relative, entry, err := s.statFile(ctx, scope, relativePath)
+func (s *runtimeWorkspaceFileService) OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (io.ReadCloser, string, int64, error) {
+	relative, entry, err := s.statEntry(ctx, scope, relativePath)
 	if err != nil {
 		return nil, "", 0, err
+	}
+	if entry.IsDir {
+		if relative == "" {
+			return nil, "", 0, ErrWorkspaceFileExpected
+		}
+		file, err := os.CreateTemp("", "clawmanager-runtime-workspace-*.zip")
+		if err != nil {
+			return nil, "", 0, err
+		}
+		cleanup := func() {
+			name := file.Name()
+			_ = file.Close()
+			_ = os.Remove(name)
+		}
+		if err := s.run(ctx, scope, []string{"python3", "-c", runtimeWorkspaceStreamDirectoryScript, runtimeWorkspaceBase(scope), relative}, nil, file); err != nil {
+			cleanup()
+			return nil, "", 0, err
+		}
+		stat, err := file.Stat()
+		if err != nil {
+			cleanup()
+			return nil, "", 0, err
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			cleanup()
+			return nil, "", 0, err
+		}
+		if err := s.recordAudit(ctx, scope, "download", relative, stat.Size()); err != nil {
+			cleanup()
+			return nil, "", 0, err
+		}
+		return &workspaceTemporaryDownload{File: file, path: file.Name()}, entry.Name + ".zip", stat.Size(), nil
 	}
 	file, filename, size, err := s.openRemoteFile(ctx, scope, relative, true)
 	if err != nil {
@@ -167,7 +199,7 @@ func (s *runtimeWorkspaceFileService) OpenDownload(ctx context.Context, scope Wo
 	if filename == "" {
 		filename = entry.Name
 	}
-	return file, filename, size, nil
+	return &workspaceTemporaryDownload{File: file, path: file.Name()}, filename, size, nil
 }
 
 func (s *runtimeWorkspaceFileService) Upload(ctx context.Context, scope WorkspaceFileScope, relativeDir string, filename string, reader io.Reader, size int64) (*WorkspaceEntry, error) {
@@ -264,12 +296,23 @@ func (s *runtimeWorkspaceFileService) Delete(ctx context.Context, scope Workspac
 }
 
 func (s *runtimeWorkspaceFileService) statFile(ctx context.Context, scope WorkspaceFileScope, relativePath string) (string, WorkspaceEntry, error) {
+	relative, entry, err := s.statEntry(ctx, scope, relativePath)
+	if err != nil {
+		return "", WorkspaceEntry{}, err
+	}
+	if entry.IsDir {
+		return "", WorkspaceEntry{}, ErrWorkspaceFileExpected
+	}
+	return relative, entry, nil
+}
+
+func (s *runtimeWorkspaceFileService) statEntry(ctx context.Context, scope WorkspaceFileScope, relativePath string) (string, WorkspaceEntry, error) {
 	relative, err := cleanWorkspaceRelativePath(relativePath)
 	if err != nil {
 		return "", WorkspaceEntry{}, err
 	}
 	var payload runtimeWorkspaceEntryPayload
-	if err := s.runJSON(ctx, scope, []string{"python3", "-c", runtimeWorkspaceStatFileScript, runtimeWorkspaceBase(scope), relative}, nil, &payload); err != nil {
+	if err := s.runJSON(ctx, scope, []string{"python3", "-c", runtimeWorkspaceStatEntryScript, runtimeWorkspaceBase(scope), relative}, nil, &payload); err != nil {
 		return "", WorkspaceEntry{}, err
 	}
 	entry := runtimeWorkspaceEntryFromPayload(payload)
@@ -406,7 +449,7 @@ func runtimeWorkspaceEntryFromPayload(payload runtimeWorkspaceEntryPayload) Work
 		Size:         payload.Size,
 		ModifiedAt:   payload.ModifiedAt.UTC(),
 		Previewable:  workspaceEntryPreviewable(payload.Name, payload.Size, isDir),
-		Downloadable: !isDir,
+		Downloadable: true,
 	}
 }
 
@@ -459,6 +502,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import zipfile
 
 ERR_PREFIX = "CLAW_WORKSPACE_ERR:"
 
@@ -564,11 +608,9 @@ for entry in os.scandir(target):
 json_out({"entries": entries})
 `
 
-var runtimeWorkspaceStatFileScript = runtimeWorkspacePythonPrelude + `
+var runtimeWorkspaceStatEntryScript = runtimeWorkspacePythonPrelude + `
 base = safe_base(sys.argv[1])
 rel, target = target_for(base, sys.argv[2] if len(sys.argv) > 2 else "")
-if not os.path.isfile(target):
-    fail("file_required", rel)
 json_out(entry_payload(base, rel, target))
 `
 
@@ -579,6 +621,37 @@ if not os.path.isfile(target):
     fail("file_required", rel)
 with open(target, "rb") as source:
     shutil.copyfileobj(source, sys.stdout.buffer)
+`
+
+var runtimeWorkspaceStreamDirectoryScript = runtimeWorkspacePythonPrelude + `
+base = safe_base(sys.argv[1])
+rel, target = target_for(base, sys.argv[2] if len(sys.argv) > 2 else "")
+if not rel or not os.path.isdir(target):
+    fail("dir_required", rel)
+root_name = os.path.basename(target.rstrip(os.sep)) or "workspace"
+with zipfile.ZipFile(sys.stdout.buffer, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+    archive.writestr(root_name.rstrip("/") + "/", b"")
+    for current, directories, files in os.walk(target, topdown=True, followlinks=False):
+        if not is_subpath(base, os.path.realpath(current)):
+            fail("escape", current)
+        directories[:] = [
+            name for name in directories
+            if name != ".tmp"
+            and not name.startswith(".tmp-skill-")
+            and not os.path.islink(os.path.join(current, name))
+        ]
+        current_rel = os.path.relpath(current, target)
+        archive_dir = root_name if current_rel == "." else root_name + "/" + current_rel.replace(os.sep, "/")
+        for directory in directories:
+            archive.writestr((archive_dir + "/" + directory).rstrip("/") + "/", b"")
+        for name in files:
+            source = os.path.join(current, name)
+            if os.path.islink(source):
+                continue
+            real = os.path.realpath(source)
+            if not is_subpath(base, real) or not os.path.isfile(real):
+                continue
+            archive.write(real, archive_dir + "/" + name)
 `
 
 var runtimeWorkspaceUploadScript = runtimeWorkspacePythonPrelude + `

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
@@ -66,7 +67,7 @@ type WorkspaceFileService interface {
 	List(ctx context.Context, scope WorkspaceFileScope, relativePath string) ([]WorkspaceEntry, error)
 	Preview(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*WorkspacePreview, error)
 	OpenPreview(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*os.File, string, int64, error)
-	OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*os.File, string, int64, error)
+	OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (io.ReadCloser, string, int64, error)
 	Upload(ctx context.Context, scope WorkspaceFileScope, relativeDir string, filename string, reader io.Reader, size int64) (*WorkspaceEntry, error)
 	Mkdir(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*WorkspaceEntry, error)
 	Rename(ctx context.Context, scope WorkspaceFileScope, oldPath, newPath string) (*WorkspaceEntry, error)
@@ -218,10 +219,42 @@ func (s *workspaceFileService) openPreviewableFile(ctx context.Context, scope Wo
 	return file, info, contentType, nil
 }
 
-func (s *workspaceFileService) OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*os.File, string, int64, error) {
-	resolved, file, info, err := s.openExistingFile(ctx, scope, relativePath)
+func (s *workspaceFileService) OpenDownload(ctx context.Context, scope WorkspaceFileScope, relativePath string) (io.ReadCloser, string, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", 0, err
+	}
+	resolved, err := ResolveWorkspacePath(scope.WorkspacePath, relativePath, false)
 	if err != nil {
 		return nil, "", 0, err
+	}
+	root, err := openWorkspaceRoot(scope.WorkspacePath)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer root.Close()
+	file, err := root.Open(workspaceRootName(resolved.RelativePath))
+	if err != nil {
+		return nil, "", 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, "", 0, err
+	}
+	if info.IsDir() {
+		file.Close()
+		if resolved.RelativePath == "" {
+			return nil, "", 0, ErrWorkspaceFileExpected
+		}
+		archive, size, archiveErr := openWorkspaceDirectoryArchive(ctx, root, resolved.RelativePath, info)
+		if archiveErr != nil {
+			return nil, "", 0, archiveErr
+		}
+		if err := s.recordAudit(ctx, scope, "download", resolved.RelativePath, size); err != nil {
+			archive.Close()
+			return nil, "", 0, err
+		}
+		return archive, info.Name() + ".zip", size, nil
 	}
 	action := "download"
 	if strings.HasPrefix(strings.TrimSpace(scope.AuditActionPrefix), "llm_") {
@@ -232,6 +265,136 @@ func (s *workspaceFileService) OpenDownload(ctx context.Context, scope Workspace
 		return nil, "", 0, err
 	}
 	return file, info.Name(), info.Size(), nil
+}
+
+type workspaceTemporaryDownload struct {
+	*os.File
+	path string
+}
+
+func (f *workspaceTemporaryDownload) Close() error {
+	closeErr := f.File.Close()
+	removeErr := os.Remove(f.path)
+	if closeErr != nil {
+		return closeErr
+	}
+	if removeErr != nil && !os.IsNotExist(removeErr) {
+		return removeErr
+	}
+	return nil
+}
+
+func openWorkspaceDirectoryArchive(ctx context.Context, root *os.Root, relativePath string, info os.FileInfo) (io.ReadCloser, int64, error) {
+	temp, err := os.CreateTemp("", "clawmanager-workspace-*.zip")
+	if err != nil {
+		return nil, 0, err
+	}
+	cleanup := func() {
+		name := temp.Name()
+		_ = temp.Close()
+		_ = os.Remove(name)
+	}
+	archive := zip.NewWriter(temp)
+	archiveRoot := info.Name()
+	if _, err := archive.CreateHeader(&zip.FileHeader{
+		Name:     archiveRoot + "/",
+		Method:   zip.Store,
+		Modified: info.ModTime(),
+	}); err != nil {
+		_ = archive.Close()
+		cleanup()
+		return nil, 0, err
+	}
+	if err := appendWorkspaceDirectoryToArchive(ctx, root, relativePath, archiveRoot, archive); err != nil {
+		_ = archive.Close()
+		cleanup()
+		return nil, 0, err
+	}
+	if err := archive.Close(); err != nil {
+		cleanup()
+		return nil, 0, err
+	}
+	stat, err := temp.Stat()
+	if err != nil {
+		cleanup()
+		return nil, 0, err
+	}
+	if _, err := temp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, 0, err
+	}
+	return &workspaceTemporaryDownload{File: temp, path: temp.Name()}, stat.Size(), nil
+}
+
+func appendWorkspaceDirectoryToArchive(ctx context.Context, root *os.Root, relativePath, archivePath string, archive *zip.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir, err := root.Open(workspaceRootName(relativePath))
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if isWorkspaceTransientEntry(entry.Name()) || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		childRelative := joinWorkspaceRelative(relativePath, entry.Name())
+		childArchivePath := path.Join(archivePath, entry.Name())
+		if info.IsDir() {
+			if _, err := archive.CreateHeader(&zip.FileHeader{
+				Name:     childArchivePath + "/",
+				Method:   zip.Store,
+				Modified: info.ModTime(),
+			}); err != nil {
+				return err
+			}
+			if err := appendWorkspaceDirectoryToArchive(ctx, root, childRelative, childArchivePath, archive); err != nil {
+				return err
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = childArchivePath
+		header.Method = zip.Deflate
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		file, err := root.Open(workspaceRootName(childRelative))
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(writer, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 func (s *workspaceFileService) Upload(ctx context.Context, scope WorkspaceFileScope, relativeDir string, filename string, reader io.Reader, size int64) (*WorkspaceEntry, error) {
@@ -475,7 +638,7 @@ func buildWorkspaceEntry(relativePath string, info os.FileInfo) WorkspaceEntry {
 		Size:         info.Size(),
 		ModifiedAt:   info.ModTime().UTC(),
 		Previewable:  workspaceEntryPreviewable(info.Name(), info.Size(), isDir),
-		Downloadable: !isDir,
+		Downloadable: true,
 	}
 }
 

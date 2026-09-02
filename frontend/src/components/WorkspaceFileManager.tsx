@@ -515,7 +515,8 @@ export function WorkspaceFileManager({
   const handleDownload = (entry: WorkspaceEntry) => {
     void runAction(`download:${entry.path}`, async () => {
       const blob = await service.downloadBlob(instanceId, entry.path);
-      downloadBlob(blob, entry.name || fileName(entry.path));
+      const name = entry.name || fileName(entry.path);
+      downloadBlob(blob, entry.is_dir ? `${name}.zip` : name);
     });
   };
 
@@ -710,7 +711,7 @@ export function WorkspaceFileManager({
                             <Eye className="h-4 w-4" />
                           </button>
                         )}
-                        {!entry.is_dir && entry.downloadable && (
+                        {entry.downloadable && (
                           <button
                             type="button"
                             className="cm-icon-button h-8 w-8"

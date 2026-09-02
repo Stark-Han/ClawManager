@@ -38,6 +38,7 @@ function statusClass(status: string) {
       return "border-emerald-200 bg-emerald-50 text-emerald-700";
     case "creating":
     case "resetting":
+    case "restarting":
       return "border-amber-200 bg-amber-50 text-amber-700";
     case "error":
       return "border-red-200 bg-red-50 text-red-700";
@@ -54,6 +55,8 @@ function statusLabel(status: string) {
       return "创建中";
     case "resetting":
       return "重置中";
+    case "restarting":
+      return "重启中";
     case "stopped":
       return "已停止";
     case "error":
@@ -115,6 +118,14 @@ function operationIsPending(
   const operationStatus = operation.status.toLowerCase();
   if (["queued", "processing"].includes(operationStatus)) return true;
   return operationStatus === "succeeded" && instanceStatus?.toLowerCase() === "creating";
+}
+
+function lifecycleDisplayStatus(
+  instance: IEISystemInstance,
+  operation: IEISystemLifecycleOperation | undefined,
+) {
+  if (!operationIsPending(operation, instance.status)) return instance.status;
+  return operation?.action === "reset" ? "resetting" : "restarting";
 }
 
 function installNoReferrerPolicy() {
@@ -246,6 +257,9 @@ export default function IEISystemListInstancesPage() {
   const selectedLifecyclePending = selectedInstance
     ? operationIsPending(selectedOperation, selectedInstance.status)
     : false;
+  const selectedDisplayStatus = selectedInstance
+    ? lifecycleDisplayStatus(selectedInstance, selectedOperation)
+    : "";
   const selectedLifecycleError = selectedInstance
     ? lifecycleErrors[selectedInstance.id]
     : undefined;
@@ -358,8 +372,11 @@ export default function IEISystemListInstancesPage() {
     if (!selectedInstance || selectedLifecyclePending) return;
     const status = selectedInstance.status.toLowerCase();
     if (!["running", "stopped", "error"].includes(status)) return;
-    if (!window.confirm(`建议优先使用“重启实例”。只有重启无法恢复时才重置“${selectedInstance.name}”。是否继续？`)) return;
-    if (!window.confirm(`再次确认重置“${selectedInstance.name}”？运行时会被删除并重建，实例记录和工作区数据将保留。`)) return;
+    if (
+      !window.confirm(
+        `确认重置实例“${selectedInstance.name}”？\n\n建议优先使用“重启实例”。重置会删除并重建运行环境，操作期间无法进入实例；实例记录和工作区数据将保留。`,
+      )
+    ) return;
     const instanceID = selectedInstance.id;
     setLifecycleErrors((current) => {
       const next = { ...current };
@@ -553,6 +570,10 @@ export default function IEISystemListInstancesPage() {
                   visibleInstances.map((instance) => {
                     const runtime = getIEIRuntimePresentation(instance.type);
                     const selected = instance.id === selectedInstance.id;
+                    const displayStatus = lifecycleDisplayStatus(
+                      instance,
+                      lifecycleOperations[instance.id],
+                    );
                     return (
                       <button
                         key={instance.id}
@@ -576,9 +597,9 @@ export default function IEISystemListInstancesPage() {
                                 {instance.name}
                               </h3>
                               <span
-                                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass(instance.status)}`}
+                                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass(displayStatus)}`}
                               >
-                                {statusLabel(instance.status)}
+                                {statusLabel(displayStatus)}
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
@@ -624,9 +645,9 @@ export default function IEISystemListInstancesPage() {
                         {selectedInstance.name}
                       </h1>
                       <span
-                        className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(selectedInstance.status)}`}
+                        className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${statusClass(selectedDisplayStatus)}`}
                       >
-                        {statusLabel(selectedInstance.status)}
+                        {statusLabel(selectedDisplayStatus)}
                       </span>
                     </div>
                     <p className="mt-2 text-base text-slate-500">
@@ -656,7 +677,7 @@ export default function IEISystemListInstancesPage() {
                     type="button"
                     onClick={() => void handleRestart()}
                     disabled={selectedLifecyclePending || selectedInstance.status.toLowerCase() !== "running"}
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-5 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Power className={`h-4 w-4 ${selectedLifecyclePending && selectedOperation?.action === "restart" ? "animate-pulse" : ""}`} />
                     重启实例（推荐）

@@ -141,15 +141,20 @@ assert(
     listPage.includes("getLatestLifecycleOperation") &&
     listPage.includes("getLifecycleOperation") &&
     !listPage.includes("window.prompt") &&
-    (listPage.match(/window\.confirm/g) ?? []).length >= 3 &&
+    (listPage.match(/window\.confirm/g) ?? []).length === 2 &&
+    listPage.includes("重置会删除并重建运行环境") &&
+    listPage.includes("lifecycleDisplayStatus") &&
+    listPage.includes('return operation?.action === "reset" ? "resetting" : "restarting"') &&
     detailPage.includes("operation.status === \"succeeded\"") &&
     detailPage.includes("getLifecycleOperation"),
-  "IEI lifecycle actions must be idempotent, recoverable after refresh, prefer restart, double-confirm reset, and block access until completion.",
+  "IEI lifecycle actions must be idempotent, recoverable after refresh, prefer restart, clearly confirm reset once, and block access until completion.",
 );
 
 assert(
   workspaceManager.includes("useI18n") &&
     workspaceManager.includes("localeOverride") &&
+    workspaceManager.includes("entry.downloadable &&") &&
+    workspaceManager.includes("entry.is_dir ? `${name}.zip` : name") &&
     workspaceManager.includes('translateLabel("workspaceFileManager.workspace")') &&
     workspaceManager.includes('translateLabel("workspaceFileManager.name")') &&
     workspaceManager.includes('translateLabel("workspaceFileManager.size")') &&
