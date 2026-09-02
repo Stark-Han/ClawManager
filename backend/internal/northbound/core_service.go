@@ -27,6 +27,8 @@ const (
 	lifecycleReadyTimeout       = 5 * time.Minute
 	lifecycleReadyPollInterval  = 2 * time.Second
 	lifecycleWaitingCode        = "LIFECYCLE_WAITING"
+	lifecycleReplacementWaiting = "RESET_REPLACEMENT_WAITING"
+	lifecycleCleanupWarningCode = "OLD_INSTANCE_CLEANUP_PENDING"
 )
 
 type CoreService struct {
@@ -361,6 +363,20 @@ func (s *CoreService) GetOperation(userID int, operationID string) (*models.Nort
 		return nil, err
 	}
 	if item == nil || item.UserID != userID {
+		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
+	}
+	return item, nil
+}
+
+// GetOperationForSession is used by the IEI portal while a replacement reset
+// changes instance identity and ownership. The operation remains bound to the
+// exact server-derived IEI session, so it cannot be enumerated across owners.
+func (s *CoreService) GetOperationForSession(operationID, sessionID string) (*models.NorthboundOperation, error) {
+	item, err := s.repo.GetOperationByID(strings.TrimSpace(operationID))
+	if err != nil {
+		return nil, err
+	}
+	if item == nil || item.SessionID != strings.TrimSpace(sessionID) {
 		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
 	}
 	return item, nil
@@ -753,6 +769,14 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
 		return
 	}
+	// Replacement reset records switch instance_id from the source to the new
+	// instance while retaining the immutable source id in request_payload. Resume
+	// them before loading the source: the source row may already have been safely
+	// deleted if the worker stopped between cleanup and operation completion.
+	if isResetOperation(item.OperationType) && item.ErrorCode != nil && *item.ErrorCode == lifecycleReplacementWaiting {
+		w.finishOrContinueReplacementReset(ctx, item, request.InstanceID)
+		return
+	}
 	var current *models.Instance
 	var currentErr error
 	if item.OperationType == OperationTypeProRestart || item.OperationType == OperationTypeProReset {
@@ -775,6 +799,31 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 	}
 	if (item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset) && currentStatus != "running" && currentStatus != "stopped" && currentStatus != "error" {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance lifecycle operation is already in progress", time.Now().UTC())
+		return
+	}
+	if isResetOperation(item.OperationType) {
+		replacer, ok := w.service.instances.(services.InstanceReplacementResetService)
+		if !ok {
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_UNAVAILABLE", "Safe replacement reset is unavailable; original instance was not changed", time.Now().UTC())
+			return
+		}
+		replacement, createErr := replacer.CreateResetReplacement(request.InstanceID, item.OperationID)
+		if createErr != nil || replacement == nil {
+			message := "Unable to create a clean replacement; original instance and data were not deleted"
+			if createErr != nil {
+				log.Printf("northbound replacement reset %s create failed: %v", item.OperationID, createErr)
+			}
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_CREATE_FAILED", message, time.Now().UTC())
+			item.Status = "failed"
+			w.service.auditOperation(item, lifecycleAuditPrefix(item.OperationType)+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "replacement create failed; source retained"), &request.InstanceID, "RESET_REPLACEMENT_CREATE_FAILED")
+			return
+		}
+		now := time.Now().UTC()
+		if err := w.service.repo.RequeueReplacementOperation(ctx, item.OperationID, replacement.ID, lifecycleReplacementWaiting, "Waiting for clean replacement runtime to become ready", now.Add(lifecycleReadyPollInterval), now); err != nil {
+			log.Printf("northbound replacement reset %s could not persist replacement %d: %v", item.OperationID, replacement.ID, err)
+			_ = replacer.DiscardResetReplacement(replacement.ID)
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_TRACKING_FAILED", "Unable to track the clean replacement; original instance and data were not deleted", time.Now().UTC())
+		}
 		return
 	}
 	var (
@@ -815,6 +864,62 @@ func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.Nor
 		return
 	}
 	w.finishOrContinueLifecycle(ctx, item, request.InstanceID, strings.ToLower(strings.TrimSpace(refreshed.Status)), auditPrefix)
+}
+
+func isResetOperation(operationType string) bool {
+	return operationType == OperationTypeLiteReset || operationType == OperationTypeProReset
+}
+
+func (w *OperationWorker) finishOrContinueReplacementReset(ctx context.Context, item *models.NorthboundOperation, sourceInstanceID int) {
+	replacer, ok := w.service.instances.(services.InstanceReplacementResetService)
+	if !ok || item.InstanceID == nil || *item.InstanceID <= 0 || *item.InstanceID == sourceInstanceID {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_INVALID", "Safe replacement state is invalid; original instance and data were not deleted", time.Now().UTC())
+		return
+	}
+	replacementID := *item.InstanceID
+	replacement, err := w.service.instances.GetByID(replacementID)
+	if err != nil || replacement == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_NOT_FOUND", "Clean replacement was not found; original instance and data were not deleted", time.Now().UTC())
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(replacement.Status))
+	now := time.Now().UTC()
+	if status == "running" {
+		cleanupPending, warning, finalizeErr := replacer.FinalizeResetReplacement(sourceInstanceID, replacementID)
+		if finalizeErr != nil {
+			log.Printf("northbound replacement reset %s cutover failed: %v", item.OperationID, finalizeErr)
+			_ = replacer.DiscardResetReplacement(replacementID)
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_CUTOVER_FAILED", "Unable to activate the clean replacement; original instance and data were not deleted", now)
+			return
+		}
+		if cleanupPending {
+			if strings.TrimSpace(warning) == "" {
+				warning = "New instance is ready; old instance cleanup requires administrator attention"
+			}
+			_ = w.service.repo.MarkOperationSucceededWithWarning(ctx, item.OperationID, replacementID, lifecycleCleanupWarningCode, warning, now)
+		} else {
+			_ = w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, replacementID, now)
+		}
+		item.Status = "succeeded"
+		item.InstanceID = &replacementID
+		w.service.auditOperation(item, lifecycleAuditPrefix(item.OperationType)+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "replacement activated"), &replacementID, "")
+		return
+	}
+
+	failed := status == "error" || status == "deleting" || status == "stopped"
+	timedOut := item.StartedAt != nil && now.Sub(*item.StartedAt) >= lifecycleReadyTimeout
+	if failed || timedOut {
+		if discardErr := replacer.DiscardResetReplacement(replacementID); discardErr != nil {
+			log.Printf("northbound replacement reset %s staging cleanup failed: %v", item.OperationID, discardErr)
+		}
+		code := "RESET_REPLACEMENT_FAILED"
+		if timedOut {
+			code = "RESET_REPLACEMENT_TIMEOUT"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, code, "Clean replacement did not become ready; original instance and data were not deleted", now)
+		return
+	}
+	_ = w.service.repo.RequeueReplacementOperation(ctx, item.OperationID, replacementID, lifecycleReplacementWaiting, "Waiting for clean replacement runtime to become ready", now.Add(lifecycleReadyPollInterval), now)
 }
 
 func lifecycleAuditPrefix(operationType string) string {

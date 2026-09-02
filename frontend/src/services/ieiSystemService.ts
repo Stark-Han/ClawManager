@@ -117,10 +117,8 @@ export const ieiSystemService = {
     return response.data.data.operation ?? null;
   },
 
-  async getLifecycleOperation(id: number, operationID: string): Promise<IEISystemLifecycleOperation> {
-    const response = await ieiAPI.get(
-      `/instances/${id}/lifecycle-operations/${encodeURIComponent(operationID)}`,
-    );
+  async getLifecycleOperation(operationID: string): Promise<IEISystemLifecycleOperation> {
+    const response = await ieiAPI.get(`/lifecycle-operations/${encodeURIComponent(operationID)}`);
     return response.data.data.operation;
   },
 

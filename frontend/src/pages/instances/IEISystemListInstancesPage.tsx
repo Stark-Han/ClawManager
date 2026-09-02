@@ -154,6 +154,11 @@ function formatTime(value?: string) {
   }).format(new Date(value));
 }
 
+function selectedInstanceIDFromURL() {
+  const value = Number(new URLSearchParams(window.location.search).get("selected_instance_id"));
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 export default function IEISystemListInstancesPage() {
   const initialized = useRef(false);
   const [session, setSession] = useState<IEISystemSession | null>(null);
@@ -167,9 +172,10 @@ export default function IEISystemListInstancesPage() {
     Record<number, IEISystemLifecycleOperation>
   >({});
   const [lifecycleErrors, setLifecycleErrors] = useState<Record<number, string>>({});
+  const [lifecycleWarnings, setLifecycleWarnings] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
 
-  const loadInstances = useCallback(async () => {
+  const loadInstances = useCallback(async (preferredID?: number | null) => {
     const first = await ieiSystemService.listInstances(1, PAGE_SIZE);
     const items = [...(first.instances ?? [])];
     const pages = Math.ceil(first.total / PAGE_SIZE);
@@ -178,11 +184,12 @@ export default function IEISystemListInstancesPage() {
       items.push(...(next.instances ?? []));
     }
     setInstances(items);
-    setSelectedID((current) =>
-      current && items.some((instance) => instance.id === current)
-        ? current
-        : (items[0]?.id ?? null),
-    );
+    setSelectedID((current) => {
+      const candidate = preferredID ?? current;
+      return candidate && items.some((instance) => instance.id === candidate)
+        ? candidate
+        : (items[0]?.id ?? null);
+    });
   }, []);
 
   const initialize = useCallback(async () => {
@@ -191,14 +198,21 @@ export default function IEISystemListInstancesPage() {
     try {
       const params = new URLSearchParams(window.location.search);
       const token = params.get("token")?.trim();
+      const preferredID = selectedInstanceIDFromURL();
       if (token) {
-        window.history.replaceState({}, "", `${window.location.pathname}${window.location.hash}`);
+        params.delete("token");
+        const queryString = params.toString();
+        window.history.replaceState(
+          {},
+          "",
+          `${window.location.pathname}${queryString ? `?${queryString}` : ""}${window.location.hash}`,
+        );
       }
       const nextSession = token
         ? await ieiSystemService.exchangeSession(token)
         : await ieiSystemService.getSession();
       setSession(nextSession);
-      await loadInstances();
+      await loadInstances(preferredID);
     } catch (loadError) {
       setSession(null);
       setInstances([]);
@@ -224,6 +238,20 @@ export default function IEISystemListInstancesPage() {
   });
 
   useEffect(() => installNoReferrerPolicy(), []);
+
+  useEffect(() => {
+    if (!initialized.current) return;
+    const params = new URLSearchParams(window.location.search);
+    if (selectedID) params.set("selected_instance_id", String(selectedID));
+    else params.delete("selected_instance_id");
+    params.delete("token");
+    const queryString = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${queryString ? `?${queryString}` : ""}${window.location.hash}`,
+    );
+  }, [selectedID]);
 
   const runtimeOptions = useMemo(() => {
     const types = [...new Set(instances.map((instance) => instance.type.trim().toLowerCase()))];
@@ -263,6 +291,9 @@ export default function IEISystemListInstancesPage() {
   const selectedLifecycleError = selectedInstance
     ? lifecycleErrors[selectedInstance.id]
     : undefined;
+  const selectedLifecycleWarning = selectedInstance
+    ? lifecycleWarnings[selectedInstance.id]
+    : undefined;
 
   const selectedInstanceID = selectedInstance?.id;
   const selectedInstanceStatus = selectedInstance?.status;
@@ -273,13 +304,21 @@ export default function IEISystemListInstancesPage() {
       .getLatestLifecycleOperation(selectedInstanceID)
       .then((operation) => {
         if (cancelled || !operation) return;
-        const relevant = operationIsPending(operation, selectedInstanceStatus) || operation.status === "failed";
+        const relevant = operationIsPending(operation, selectedInstanceStatus) ||
+          operation.status === "failed" ||
+          operation.error_code === "OLD_INSTANCE_CLEANUP_PENDING";
         if (!relevant) return;
         setLifecycleOperations((current) => ({ ...current, [selectedInstanceID]: operation }));
         if (operation.status === "failed") {
           setLifecycleErrors((current) => ({
             ...current,
             [selectedInstanceID]: operation.error_message || "实例操作失败，工作区数据已保留。",
+          }));
+        }
+        if (operation.error_code === "OLD_INSTANCE_CLEANUP_PENDING") {
+          setLifecycleWarnings((current) => ({
+            ...current,
+            [selectedInstanceID]: "新实例已可用；旧实例已从您的门户移除，后台正在等待管理员清理。",
           }));
         }
       })
@@ -290,14 +329,16 @@ export default function IEISystemListInstancesPage() {
   }, [selectedInstanceID, selectedInstanceStatus]);
 
   const pendingLifecycleOperations = useMemo(
-    () => Object.values(lifecycleOperations).filter((operation) => {
-      const instance = instances.find((item) => item.id === operation.instance_id);
-      return operationIsPending(operation, instance?.status);
-    }),
+    () => Object.entries(lifecycleOperations)
+      .map(([sourceID, operation]) => ({ sourceID: Number(sourceID), operation }))
+      .filter(({ sourceID, operation }) => {
+        const instance = instances.find((item) => item.id === sourceID);
+        return operationIsPending(operation, instance?.status);
+      }),
     [instances, lifecycleOperations],
   );
   const pendingLifecycleSignature = pendingLifecycleOperations
-    .map((operation) => `${operation.instance_id}:${operation.operation_id}:${operation.status}`)
+    .map(({ sourceID, operation }) => `${sourceID}:${operation.operation_id}:${operation.status}`)
     .sort()
     .join("|");
   const pendingLifecycleOperationsRef = useRef(pendingLifecycleOperations);
@@ -310,30 +351,53 @@ export default function IEISystemListInstancesPage() {
     let cancelled = false;
     const refresh = async () => {
       const results = await Promise.allSettled(
-        pending.map((operation) =>
-          ieiSystemService.getLifecycleOperation(operation.instance_id!, operation.operation_id),
-        ),
+        pending.map(({ operation }) => ieiSystemService.getLifecycleOperation(operation.operation_id)),
       );
       if (cancelled) return;
+      let preferredReplacementID: number | null = null;
       setLifecycleOperations((current) => {
         const next = { ...current };
         results.forEach((result, index) => {
           if (result.status === "fulfilled") {
-            next[pending[index].instance_id!] = result.value;
+            const sourceID = pending[index].sourceID;
+            const operation = result.value;
+            if (
+              operation.status === "succeeded" &&
+              operation.action === "reset" &&
+              operation.instance_id &&
+              operation.instance_id !== sourceID
+            ) {
+              delete next[sourceID];
+              next[operation.instance_id] = operation;
+              preferredReplacementID = operation.instance_id;
+            } else {
+              next[sourceID] = operation;
+            }
           }
         });
         return next;
       });
       results.forEach((result, index) => {
         if (result.status === "fulfilled" && result.value.status === "failed") {
-          const instanceID = pending[index].instance_id!;
+          const instanceID = pending[index].sourceID;
           setLifecycleErrors((current) => ({
             ...current,
             [instanceID]: result.value.error_message || "实例操作失败，工作区数据已保留。",
           }));
         }
+        if (
+          result.status === "fulfilled" &&
+          result.value.status === "succeeded" &&
+          result.value.error_code === "OLD_INSTANCE_CLEANUP_PENDING" &&
+          result.value.instance_id
+        ) {
+          setLifecycleWarnings((current) => ({
+            ...current,
+            [result.value.instance_id!]: "新实例已可用；旧实例已从您的门户移除，后台正在等待管理员清理。",
+          }));
+        }
       });
-      await loadInstances().catch(() => undefined);
+      await loadInstances(preferredReplacementID).catch(() => undefined);
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1500);
@@ -355,6 +419,11 @@ export default function IEISystemListInstancesPage() {
     if (!window.confirm(`确认重启实例“${selectedInstance.name}”？工作区数据会保留。`)) return;
     const instanceID = selectedInstance.id;
     setLifecycleErrors((current) => {
+      const next = { ...current };
+      delete next[instanceID];
+      return next;
+    });
+    setLifecycleWarnings((current) => {
       const next = { ...current };
       delete next[instanceID];
       return next;
@@ -384,6 +453,11 @@ export default function IEISystemListInstancesPage() {
     ) return;
     const instanceID = selectedInstance.id;
     setLifecycleErrors((current) => {
+      const next = { ...current };
+      delete next[instanceID];
+      return next;
+    });
+    setLifecycleWarnings((current) => {
       const next = { ...current };
       delete next[instanceID];
       return next;
@@ -631,6 +705,11 @@ export default function IEISystemListInstancesPage() {
                 {selectedLifecycleError ? (
                   <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                     {selectedLifecycleError}
+                  </div>
+                ) : null}
+                {selectedLifecycleWarning ? (
+                  <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {selectedLifecycleWarning}
                   </div>
                 ) : null}
                 {selectedLifecyclePending ? (

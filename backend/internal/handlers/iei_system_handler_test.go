@@ -54,7 +54,7 @@ func (s *fakeIEILifecycleService) SubmitLifecycle(principal northbound.Principal
 	operationID := fmt.Sprintf("op_test_%d", len(s.calls))
 	operationType := mode + "_instance_" + action
 	now := time.Now().UTC()
-	item := &models.NorthboundOperation{OperationID: operationID, UserID: principal.UserID, OperationType: operationType, Status: "queued", InstanceID: &instanceID, CreatedAt: now, UpdatedAt: now}
+	item := &models.NorthboundOperation{OperationID: operationID, UserID: principal.UserID, SessionID: principal.SessionID, OperationType: operationType, Status: "queued", InstanceID: &instanceID, CreatedAt: now, UpdatedAt: now}
 	if s.operations == nil {
 		s.operations = map[string]*models.NorthboundOperation{}
 	}
@@ -65,6 +65,14 @@ func (s *fakeIEILifecycleService) SubmitLifecycle(principal northbound.Principal
 func (s *fakeIEILifecycleService) GetOperation(userID int, operationID string) (*models.NorthboundOperation, error) {
 	item := s.operations[operationID]
 	if item == nil || item.UserID != userID {
+		return nil, &northbound.APIError{Status: http.StatusNotFound, Code: "OPERATION_NOT_FOUND", Message: "Operation not found"}
+	}
+	return item, nil
+}
+
+func (s *fakeIEILifecycleService) GetOperationForSession(operationID, sessionID string) (*models.NorthboundOperation, error) {
+	item := s.operations[operationID]
+	if item == nil || item.SessionID != sessionID {
 		return nil, &northbound.APIError{Status: http.StatusNotFound, Code: "OPERATION_NOT_FOUND", Message: "Operation not found"}
 	}
 	return item, nil
@@ -234,6 +242,7 @@ func TestIEISystemLifecycleOperationCanBeRecoveredAfterRefresh(t *testing.T) {
 	router.POST("/api/v1/ieisystem/instances/:id/restart", handler.RestartInstance)
 	router.GET("/api/v1/ieisystem/instances/:id/lifecycle-operation", handler.GetLatestLifecycleOperation)
 	router.GET("/api/v1/ieisystem/instances/:id/lifecycle-operations/:operationID", handler.GetLifecycleOperation)
+	router.GET("/api/v1/ieisystem/lifecycle-operations/:operationID", handler.GetSessionLifecycleOperation)
 	cookie := exchangeIEITestSession(t, router, cfg, owner)
 
 	submit := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
@@ -259,6 +268,7 @@ func TestIEISystemLifecycleOperationCanBeRecoveredAfterRefresh(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/ieisystem/instances/1/lifecycle-operation",
 		"/api/v1/ieisystem/instances/1/lifecycle-operations/" + submitted.Data.Operation.OperationID,
+		"/api/v1/ieisystem/lifecycle-operations/" + submitted.Data.Operation.OperationID,
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		request.AddCookie(cookie)

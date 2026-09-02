@@ -80,6 +80,13 @@ type InstanceFactoryResetRepository interface {
 	ResetInstanceRuntimeData(ctx context.Context, id int) error
 }
 
+// InstanceResetReplacementRepository atomically hands a healthy replacement
+// to the original owner while quarantining the source instance. It uses only
+// columns and tables that already exist in deployed installations.
+type InstanceResetReplacementRepository interface {
+	PromoteResetReplacement(ctx context.Context, sourceID, replacementID int, owner, name, quarantineOwner, quarantineName, reason string) error
+}
+
 // InstanceQueryRepository is the optional filtered-list and aggregation
 // capability used by the user workspace. It is kept separate from
 // InstanceRepository so unrelated repository test doubles remain small.
@@ -794,6 +801,61 @@ func (r *instanceRepository) ResetInstanceRuntimeData(ctx context.Context, id in
 			WHERE id = ?
 		`, time.Now().UTC(), id); err != nil {
 			return fmt.Errorf("failed to reset instance runtime fields: %w", err)
+		}
+		return nil
+	}, nil)
+}
+
+func (r *instanceRepository) PromoteResetReplacement(ctx context.Context, sourceID, replacementID int, owner, name, quarantineOwner, quarantineName, reason string) error {
+	if sourceID <= 0 || replacementID <= 0 || sourceID == replacementID {
+		return fmt.Errorf("invalid factory-reset replacement ids")
+	}
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	quarantineOwner = strings.TrimSpace(quarantineOwner)
+	quarantineName = strings.TrimSpace(quarantineName)
+	if owner == "" || name == "" || quarantineOwner == "" || quarantineName == "" {
+		return fmt.Errorf("invalid factory-reset replacement identity")
+	}
+	return r.sess.TxContext(ctx, func(tx db.Session) error {
+		now := time.Now().UTC()
+		oldResult, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET owner = ?, name = ?, status = 'stopped', runtime_error_message = ?,
+			    access_url = NULL, access_token = NULL, agent_bootstrap_token = NULL,
+			    pod_name = NULL, pod_namespace = NULL, pod_ip = NULL,
+			    stopped_at = ?, updated_at = ?
+			WHERE id = ?
+		`, quarantineOwner, quarantineName, reason, now, now, sourceID)
+		if err != nil {
+			return fmt.Errorf("failed to quarantine factory-reset source: %w", err)
+		}
+		if affected, affectedErr := oldResult.RowsAffected(); affectedErr != nil || affected != 1 {
+			if affectedErr != nil {
+				return fmt.Errorf("failed to inspect factory-reset source quarantine: %w", affectedErr)
+			}
+			return fmt.Errorf("factory-reset source instance not found")
+		}
+
+		newResult, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET owner = ?, name = ?, updated_at = ?
+			WHERE id = ? AND status = 'running'
+		`, owner, name, now, replacementID)
+		if err != nil {
+			return fmt.Errorf("failed to promote factory-reset replacement: %w", err)
+		}
+		if affected, affectedErr := newResult.RowsAffected(); affectedErr != nil || affected != 1 {
+			if affectedErr != nil {
+				return fmt.Errorf("failed to inspect factory-reset replacement promotion: %w", affectedErr)
+			}
+			return fmt.Errorf("factory-reset replacement is not running")
+		}
+
+		for _, table := range []string{"instance_external_access", "instance_gateway_token_aliases"} {
+			if _, err := tx.SQL().ExecContext(ctx, "DELETE FROM "+table+" WHERE instance_id = ?", sourceID); err != nil {
+				return fmt.Errorf("failed to revoke factory-reset source access in %s: %w", table, err)
+			}
 		}
 		return nil
 	}, nil)

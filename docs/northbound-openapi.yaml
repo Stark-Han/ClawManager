@@ -223,8 +223,8 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/northbound/v1/lite-instances/{id}/reset:
     post:
-      summary: Factory-reset a Lite instance and permanently erase its workspace
-      description: Stops the gateway, permanently erases the instance workspace and instance-local runtime state, rotates credentials, and creates a fresh gateway. The instance ID and metadata are retained. Back up required data before calling this operation.
+      summary: Replace a Lite instance with a clean instance and erase the old workspace
+      description: Creates and verifies a clean Lite instance first. Only after the replacement is running does the service revoke and erase the old instance. If replacement creation fails, the original instance and data are not changed. A successful operation returns the new instance ID in instance_id; callers must switch to it. Back up required data before calling this operation.
       operationId: resetLiteInstance
       security: [{ bearerAuth: [] }]
       parameters:
@@ -350,8 +350,8 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/northbound/v1/pro-instances/{id}/reset:
     post:
-      summary: Factory-reset a Pro instance and permanently replace its PVC
-      description: Stops the Deployment, permanently deletes the old PVC and instance-local runtime state, creates and verifies a fresh PVC, rotates credentials, and starts a fresh Deployment. The instance ID and metadata are retained. Back up required data before calling this operation.
+      summary: Replace a Pro instance with a clean instance and erase the old PVC
+      description: Creates and verifies a clean Pro instance and PVC first. Only after the replacement is running does the service revoke and erase the old instance and PVC. If replacement creation fails, the original instance and data are not changed. A successful operation returns the new instance ID in instance_id; callers must switch to it. Back up required data before calling this operation.
       operationId: resetProInstance
       security: [{ bearerAuth: [] }]
       parameters:

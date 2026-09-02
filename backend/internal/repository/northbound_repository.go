@@ -344,11 +344,18 @@ func (r *NorthboundRepository) GetOperationByIdempotency(userID int, operationTy
 // so callers can recover progress after a browser refresh or an API retry.
 func (r *NorthboundRepository) GetLatestLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
 	var item models.NorthboundOperation
-	err := r.sess.Collection(item.TableName()).Find(db.Cond{
-		"user_id":           userID,
-		"instance_id":       instanceID,
-		"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
-	}).OrderBy("-id").One(&item)
+	err := r.sess.Collection(item.TableName()).Find(db.And(
+		db.Cond{
+			"user_id":           userID,
+			"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
+		},
+		db.Or(
+			db.Cond{"instance_id": instanceID},
+			// Replacement reset changes operation.instance_id to the new
+			// instance while retaining the source in its immutable payload.
+			db.Cond{"request_payload": fmt.Sprintf(`{"instance_id":%d}`, instanceID)},
+		),
+	)).OrderBy("-id").One(&item)
 	if err != nil {
 		if err == db.ErrNoMoreRows {
 			return nil, nil
@@ -360,12 +367,17 @@ func (r *NorthboundRepository) GetLatestLifecycleOperation(userID, instanceID in
 
 func (r *NorthboundRepository) GetActiveLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
 	var item models.NorthboundOperation
-	err := r.sess.Collection(item.TableName()).Find(db.Cond{
-		"user_id":           userID,
-		"instance_id":       instanceID,
-		"status IN":         []string{"queued", "processing"},
-		"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
-	}).OrderBy("-id").One(&item)
+	err := r.sess.Collection(item.TableName()).Find(db.And(
+		db.Cond{
+			"user_id":           userID,
+			"status IN":         []string{"queued", "processing"},
+			"operation_type IN": []string{"lite_instance_restart", "lite_instance_reset", "pro_instance_restart", "pro_instance_reset"},
+		},
+		db.Or(
+			db.Cond{"instance_id": instanceID},
+			db.Cond{"request_payload": fmt.Sprintf(`{"instance_id":%d}`, instanceID)},
+		),
+	)).OrderBy("-id").One(&item)
 	if err != nil {
 		if err == db.ErrNoMoreRows {
 			return nil, nil
@@ -425,6 +437,35 @@ func (r *NorthboundRepository) MarkOperationSucceeded(ctx context.Context, opera
 	`, instanceID, now, now, operationID)
 	if err != nil {
 		return fmt.Errorf("failed to complete northbound operation: %w", err)
+	}
+	return nil
+}
+
+// RequeueReplacementOperation records the newly provisioned instance before
+// waiting for runtime health. Persisting the ID makes worker restarts
+// idempotent and lets clients follow the replacement rather than the source.
+func (r *NorthboundRepository) RequeueReplacementOperation(ctx context.Context, operationID string, replacementID int, code, message string, availableAt, now time.Time) error {
+	_, err := r.sess.SQL().ExecContext(ctx, `
+		UPDATE northbound_operations
+		SET status = 'queued', instance_id = ?, error_code = ?, error_message = ?,
+		    lease_owner = NULL, lease_expires_at = NULL, available_at = ?, updated_at = ?
+		WHERE operation_id = ?
+	`, replacementID, code, message, availableAt, now, operationID)
+	if err != nil {
+		return fmt.Errorf("failed to requeue replacement operation: %w", err)
+	}
+	return nil
+}
+
+func (r *NorthboundRepository) MarkOperationSucceededWithWarning(ctx context.Context, operationID string, instanceID int, code, message string, now time.Time) error {
+	_, err := r.sess.SQL().ExecContext(ctx, `
+		UPDATE northbound_operations
+		SET status = 'succeeded', instance_id = ?, error_code = ?, error_message = ?,
+		    lease_owner = NULL, lease_expires_at = NULL, finished_at = ?, updated_at = ?
+		WHERE operation_id = ?
+	`, instanceID, code, message, now, now, operationID)
+	if err != nil {
+		return fmt.Errorf("failed to complete northbound operation with warning: %w", err)
 	}
 	return nil
 }

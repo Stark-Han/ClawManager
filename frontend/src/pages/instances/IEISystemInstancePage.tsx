@@ -57,6 +57,9 @@ async function refreshDedicatedRuntimeCookie(accessURL: string) {
 export default function IEISystemInstancePage() {
   const { id = "" } = useParams<{ id: string }>();
   const instanceID = Number(id);
+  const listReturnURL = Number.isInteger(instanceID) && instanceID > 0
+    ? `/ieisystem/list-instances?selected_instance_id=${instanceID}`
+    : "/ieisystem/list-instances";
   const frameContainerRef = useRef<HTMLElement | null>(null);
   const [instance, setInstance] = useState<IEISystemInstance | null>(null);
   const [access, setAccess] = useState<IEISystemInstanceAccess | null>(null);
@@ -179,7 +182,7 @@ export default function IEISystemInstancePage() {
       await wait(restartPollIntervalMs);
       if (!mountedRef.current) return;
 
-      const operation = await ieiSystemService.getLifecycleOperation(instanceID, operationID);
+      const operation = await ieiSystemService.getLifecycleOperation(operationID);
       if (operation.status === "failed") {
         throw new Error(operation.error_message || "实例重启失败，工作区数据已保留。");
       }
@@ -240,7 +243,7 @@ export default function IEISystemInstancePage() {
           <h1 className="text-lg font-semibold text-slate-950">实例不可访问</h1>
           <p className="mt-2 text-sm leading-6 text-slate-600">{error ?? "访问验证未通过。"}</p>
           <div className="mt-5 flex justify-center gap-2">
-            <Link className="app-button-secondary" to="/ieisystem/list-instances">
+            <Link className="app-button-secondary" to={listReturnURL}>
               <ArrowLeft className="h-4 w-4" /> 返回列表
             </Link>
             <button type="button" className="app-button-primary" onClick={() => void openInstance()}>
@@ -258,7 +261,7 @@ export default function IEISystemInstancePage() {
     <main className="flex h-screen min-h-[560px] flex-col overflow-hidden bg-slate-100">
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4">
         <div className="flex min-w-0 items-center gap-3">
-          <Link className="cm-icon-button shrink-0" title="返回实例列表" to="/ieisystem/list-instances">
+          <Link className="cm-icon-button shrink-0" title="返回实例列表" to={listReturnURL}>
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <div className="min-w-0">
