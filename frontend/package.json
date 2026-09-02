@@ -7,6 +7,7 @@
     "dev": "vite --port 9002",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test:opencode-default-entry": "node scripts/opencode-default-entry.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

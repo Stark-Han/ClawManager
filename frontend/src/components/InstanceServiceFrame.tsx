@@ -12,6 +12,7 @@ interface InstanceServiceFrameProps {
   instanceName: string;
   instanceType?: string;
   availability: InstanceAvailability;
+  openCodeInitialDirectory?: string;
   workspaceVisible?: boolean;
   onWorkspaceVisibilityChange?: (visible: boolean) => void;
 }
@@ -39,11 +40,48 @@ interface PreparedFrame {
   src: string;
 }
 
+function encodeOpenCodeDirectory(directory: string) {
+  const bytes = new TextEncoder().encode(directory);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return window
+    .btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+}
+
+function openCodeNewSessionUrl(
+  entryUrl: string,
+  directory: string | undefined,
+) {
+  const normalizedDirectory = directory?.trim().replaceAll("\\", "/");
+  if (!normalizedDirectory?.startsWith("/")) {
+    return entryUrl;
+  }
+
+  try {
+    const parsed = new URL(entryUrl, window.location.href);
+    const directorySlug = encodeOpenCodeDirectory(normalizedDirectory);
+    const proxyOrOriginBase = parsed.pathname.endsWith("/")
+      ? parsed.pathname
+      : `${parsed.pathname}/`;
+    parsed.pathname = `${proxyOrOriginBase}${directorySlug}/session`;
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return entryUrl;
+  }
+}
+
 export function InstanceServiceFrame({
   instanceId,
   instanceName,
   instanceType,
   availability,
+  openCodeInitialDirectory,
   workspaceVisible,
   onWorkspaceVisibilityChange,
 }: InstanceServiceFrameProps) {
@@ -108,9 +146,13 @@ export function InstanceServiceFrame({
       src = prepareOpenClawControlUIStorage(instanceId, embedUrl);
     } else if (isHermes) {
       src = prepareHermesDashboardStorage(instanceId, embedUrl);
+    } else if (normalizedType === "opencode") {
+      // The root route is OpenCode's global landing page. Its directory-scoped
+      // /session route selects the managed project and opens a blank chat.
+      src = openCodeNewSessionUrl(embedUrl, openCodeInitialDirectory);
     }
     setPreparedFrame({ instanceId, embedUrl, src });
-  }, [embedUrl, instanceId, isHermes, normalizedType]);
+  }, [embedUrl, instanceId, isHermes, normalizedType, openCodeInitialDirectory]);
 
   useEffect(() => {
     if (!isHermes) {

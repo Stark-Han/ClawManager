@@ -26,6 +26,8 @@ var protectedManagedRuntimeEnvKeys = map[string]struct{}{
 	"OPENAI_API_BASE":                   {},
 	"OPENAI_API_KEY":                    {},
 	"OPENAI_MODEL":                      {},
+	"CLAWMANAGER_DEFAULT_PROJECT_PATH":          {},
+	"CLAWMANAGER_DEFAULT_PROJECT_RELATIVE_PATH": {},
 }
 
 func isLLMGovernanceStrictEnabled() bool {
