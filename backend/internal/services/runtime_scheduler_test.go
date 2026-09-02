@@ -70,6 +70,9 @@ func TestRuntimeSchedulerAssignsCreatingInstanceToReadyPod(t *testing.T) {
 		nil,
 		&fakeRuntimeDeploymentService{},
 		time.Second,
+		WithRuntimeSchedulerGatewayEnvBuilder(func(*models.Instance) (map[string]string, error) {
+			return map[string]string{"CLAWMANAGER_DEFAULT_PROJECT_RELATIVE_PATH": "starter"}, nil
+		}),
 	)
 
 	if err := scheduler.reconcile(ctx); err != nil {
@@ -85,6 +88,9 @@ func TestRuntimeSchedulerAssignsCreatingInstanceToReadyPod(t *testing.T) {
 	}
 	if req.req.WorkspacePath != "/workspaces/openclaw/user-45/instance-17" {
 		t.Fatalf("workspace path = %q", req.req.WorkspacePath)
+	}
+	if req.req.ProjectRelativePath != "starter" {
+		t.Fatalf("project relative path = %q, want starter", req.req.ProjectRelativePath)
 	}
 	if req.req.PortRange.Start != RuntimeGatewayPortStart || req.req.PortRange.End != RuntimeGatewayPortEnd {
 		t.Fatalf("port range = %+v", req.req.PortRange)

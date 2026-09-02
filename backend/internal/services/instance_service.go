@@ -43,6 +43,8 @@ type InstanceService interface {
 	ForceSyncInstance(instanceID int) error
 }
 
+const OpenCodeDefaultProjectRelativePath = "starter"
+
 // InstanceOwnerService is the owner-scoped listing capability used by the
 // northbound API and its authenticated portal page.
 type InstanceOwnerService interface {
@@ -1588,6 +1590,12 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 		// credentials as env references ensures the generated file does not embed
 		// a user-managed provider or a direct external API key.
 		env["OPENCODE_CONFIG_CONTENT"] = configContent
+		if strings.EqualFold(strings.TrimSpace(instance.InstanceMode), InstanceModeLite) {
+			env["CLAWMANAGER_DEFAULT_PROJECT_RELATIVE_PATH"] = OpenCodeDefaultProjectRelativePath
+			if instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != "" {
+				env["CLAWMANAGER_DEFAULT_PROJECT_PATH"] = path.Join(strings.TrimSpace(*instance.WorkspacePath), OpenCodeDefaultProjectRelativePath)
+			}
+		}
 	}
 	return env, nil
 }

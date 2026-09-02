@@ -429,43 +429,16 @@ const InstanceDetailPage: React.FC = () => {
   const liteBottomRef = useRef<HTMLDivElement>(null);
   const bottomPanelExpandedRef = useRef(false);
   const restartMenuRef = useRef<HTMLDivElement>(null);
-  const restartNoticeTimerRef = useRef<number | null>(null);
-
-  const cancelRestartNoticeTimer = useCallback(() => {
-    if (restartNoticeTimerRef.current !== null) {
-      window.clearTimeout(restartNoticeTimerRef.current);
-      restartNoticeTimerRef.current = null;
+  const openCodeInitialDirectory = (() => {
+    if (instance?.type !== "opencode" || instance.instance_mode !== "lite") {
+      return undefined;
     }
-  }, []);
-
-  const dismissRestartNotice = useCallback(() => {
-    cancelRestartNoticeTimer();
-    setActionMessage(null);
-  }, [cancelRestartNoticeTimer]);
-
-  const showRestartNotice = useCallback(
-    (message: string) => {
-      cancelRestartNoticeTimer();
-      setActionMessage(message);
-    },
-    [cancelRestartNoticeTimer],
-  );
-
-  const markRestartSubmitted = useCallback(
-    (message: string) => {
-      showRestartNotice(message);
-      restartNoticeTimerRef.current = window.setTimeout(() => {
-        restartNoticeTimerRef.current = null;
-        setActionMessage((current) => (current === message ? null : current));
-      }, RESTART_NOTICE_AUTO_DISMISS_MS);
-      setServiceFrameReloadToken((current) => current + 1);
-    },
-    [showRestartNotice],
-  );
-
-  useEffect(() => {
-    return () => cancelRestartNoticeTimer();
-  }, [cancelRestartNoticeTimer]);
+    const workspacePath = instance?.workspace_path?.trim().replaceAll("\\", "/");
+    if (!workspacePath?.startsWith("/")) {
+      return undefined;
+    }
+    return `${workspacePath.replace(/\/+$/gu, "")}/starter`;
+  })();
 
   const fetchMeta = useCallback(
     async (targetInstanceId: number, options?: { background?: boolean }) => {
@@ -1604,7 +1577,7 @@ const InstanceDetailPage: React.FC = () => {
               instanceName={instance.name}
               instanceType={instance.type}
               availability={availability}
-              reloadToken={serviceFrameReloadToken}
+              openCodeInitialDirectory={openCodeInitialDirectory}
               workspaceVisible={supportsWorkspace(instance) ? workspaceVisible : undefined}
               onWorkspaceVisibilityChange={supportsWorkspace(instance) ? setWorkspaceVisible : undefined}
             />
@@ -1612,7 +1585,15 @@ const InstanceDetailPage: React.FC = () => {
           {workspaceVisible &&
             (supportsWorkspace(instance) ? (
               <div className="h-full min-h-0 min-w-0">
-                <WorkspaceFileManager instanceId={instance.id} />
+                <WorkspaceFileManager
+                  instanceId={instance.id}
+                  initialPath={
+                    instance.type === "opencode" &&
+                    instance.instance_mode === "lite"
+                      ? "starter"
+                      : undefined
+                  }
+                />
               </div>
             ) : (
               <div className="cm-surface flex h-full min-h-[420px] items-center justify-center text-sm text-slate-500">

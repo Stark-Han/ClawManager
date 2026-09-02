@@ -169,6 +169,15 @@ func TestLinuxCodexProxyBehavior(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeProxyBehavior(t *testing.T) {
+	if !usesWebtopRuntime(RuntimeTypeClaudeCode, 3001) {
+		t.Fatal("Claude Code must use Webtop proxy behavior")
+	}
+	if !usesHTTPSUpstream(RuntimeTypeClaudeCode, 3001) {
+		t.Fatal("Claude Code must use HTTPS upstream on port 3001")
+	}
+}
+
 func TestLinuxWorkbuddyRetainsManagedRuntimeIntegration(t *testing.T) {
 	linux := &models.Instance{Type: "workbuddy", RuntimeVariant: WorkbuddyRuntimeLinux}
 	windows := &models.Instance{Type: "workbuddy", RuntimeVariant: WorkbuddyRuntimeWindows}
