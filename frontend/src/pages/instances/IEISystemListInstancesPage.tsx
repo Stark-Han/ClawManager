@@ -680,7 +680,7 @@ export default function IEISystemListInstancesPage() {
                     className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-5 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Power className={`h-4 w-4 ${selectedLifecyclePending && selectedOperation?.action === "restart" ? "animate-pulse" : ""}`} />
-                    重启实例（推荐）
+                    重启实例
                   </button>
                   {selectedLifecyclePending || selectedInstance.status.toLowerCase() !== "running" ? (
                     <button

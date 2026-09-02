@@ -136,7 +136,8 @@ assert(
   service.includes("/lifecycle-operation") &&
     service.includes("/lifecycle-operations/") &&
     service.includes('"Idempotency-Key"') &&
-    listPage.includes("重启实例（推荐）") &&
+    />\s*重启实例\s*<\/button>/.test(listPage) &&
+    !listPage.includes("重启实例（推荐）") &&
     listPage.includes("页面会持续同步状态") &&
     listPage.includes("getLatestLifecycleOperation") &&
     listPage.includes("getLifecycleOperation") &&
