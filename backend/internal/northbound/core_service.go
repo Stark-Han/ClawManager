@@ -173,6 +173,7 @@ func isSupportedNorthboundProType(instanceType string) bool {
 	case services.RuntimeTypeOpenClaw,
 		services.RuntimeTypeHermes,
 		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness,
 		"workbuddy":
 		return true
 	default:
@@ -212,6 +213,64 @@ func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string
 		OperationTypeProInstance,
 		"Too many unfinished Pro instance operations",
 	)
+}
+
+func (s *CoreService) SubmitLifecycle(principal Principal, idempotencyKey string, instanceID int, mode, action string) (*models.NorthboundOperation, bool, error) {
+	if instanceID <= 0 {
+		return nil, false, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	action = strings.ToLower(strings.TrimSpace(action))
+	var (
+		instance      *models.Instance
+		operationType string
+		err           error
+	)
+	switch mode {
+	case services.InstanceModeLite:
+		instance, err = s.GetInstance(principal.UserID, instanceID)
+		if err == nil && !strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModeLite) && !isWorkbuddyLinuxPro(instance) {
+			err = apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
+		}
+		if action == "restart" {
+			operationType = OperationTypeLiteRestart
+		} else if action == "reset" {
+			operationType = OperationTypeLiteReset
+		}
+	case services.InstanceModePro:
+		instance, err = s.GetProInstance(principal.UserID, instanceID)
+		if action == "restart" {
+			operationType = OperationTypeProRestart
+		} else if action == "reset" {
+			operationType = OperationTypeProReset
+		}
+		// WorkBuddy remains in the canonical Lite compatibility domain, matching
+		// its create behavior and preventing duplicate lifecycle operations when
+		// callers switch between the old and new collection paths.
+		if err == nil && isWorkbuddyLinuxPro(instance) {
+			if action == "restart" {
+				operationType = OperationTypeLiteRestart
+			} else if action == "reset" {
+				operationType = OperationTypeLiteReset
+			}
+		}
+	default:
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid instance mode", nil)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if operationType == "" {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid lifecycle action", nil)
+	}
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if action == "restart" && status != "running" {
+		return nil, false, apiError(409, "INVALID_INSTANCE_STATE", "Instance is not running", nil)
+	}
+	if action == "reset" && status != "running" && status != "stopped" && status != "error" {
+		return nil, false, apiError(409, "INVALID_INSTANCE_STATE", "Instance cannot be reset while a lifecycle operation is in progress", nil)
+	}
+	return s.submitCreateOperation(principal, idempotencyKey, InstanceLifecycleRequest{InstanceID: instanceID}, operationType, "Too many unfinished instance operations")
 }
 
 func (s *CoreService) submitCreateOperation(
@@ -610,6 +669,10 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	if item == nil {
 		return
 	}
+	if isLifecycleOperation(item.OperationType) {
+		w.processLifecycle(ctx, item)
+		return
+	}
 	createRequest, auditPrefix, err := w.service.operationCreateRequest(item)
 	if err != nil {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
@@ -645,6 +708,94 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, code, message, requeueAt.Add(delay), requeueAt)
 	item.Status = "queued"
 	w.service.auditOperation(item, auditPrefix+".retry", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "retry scheduled"), nil, code)
+}
+
+func isLifecycleOperation(operationType string) bool {
+	switch operationType {
+	case OperationTypeLiteRestart, OperationTypeLiteReset, OperationTypeProRestart, OperationTypeProReset:
+		return true
+	default:
+		return false
+	}
+}
+
+func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.NorthboundOperation) {
+	var request InstanceLifecycleRequest
+	if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil || request.InstanceID <= 0 {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
+		return
+	}
+	var current *models.Instance
+	var currentErr error
+	if item.OperationType == OperationTypeProRestart || item.OperationType == OperationTypeProReset {
+		current, currentErr = w.service.GetProInstance(item.UserID, request.InstanceID)
+	} else {
+		current, currentErr = w.service.GetInstance(item.UserID, request.InstanceID)
+	}
+	if currentErr != nil || current == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INSTANCE_NOT_FOUND", "Instance not found", time.Now().UTC())
+		return
+	}
+	currentStatus := strings.ToLower(strings.TrimSpace(current.Status))
+	if (item.OperationType == OperationTypeLiteRestart || item.OperationType == OperationTypeProRestart) && currentStatus != "running" {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance is not running", time.Now().UTC())
+		return
+	}
+	if (item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset) && currentStatus != "running" && currentStatus != "stopped" && currentStatus != "error" {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance lifecycle operation is already in progress", time.Now().UTC())
+		return
+	}
+	var (
+		actionErr   error
+		auditPrefix string
+	)
+	switch item.OperationType {
+	case OperationTypeLiteRestart:
+		auditPrefix = "northbound.lite.restart"
+		actionErr = restartInstance(w.service.instances, request.InstanceID)
+	case OperationTypeProRestart:
+		auditPrefix = "northbound.pro.restart"
+		actionErr = restartInstance(w.service.instances, request.InstanceID)
+	case OperationTypeLiteReset:
+		auditPrefix = "northbound.lite.reset"
+		actionErr = resetInstance(w.service.instances, request.InstanceID)
+	case OperationTypeProReset:
+		auditPrefix = "northbound.pro.reset"
+		actionErr = resetInstance(w.service.instances, request.InstanceID)
+	}
+	if actionErr != nil {
+		// Lifecycle operations are not retried automatically. A failed reset may
+		// have already rebuilt an ephemeral workload; an automatic retry would
+		// add risk without improving data safety. The same idempotency key returns
+		// this terminal result and a caller must explicitly submit a new request.
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", "Instance lifecycle operation failed; persistent workspace was retained", time.Now().UTC())
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &request.InstanceID, "LIFECYCLE_FAILED")
+		return
+	}
+	if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, request.InstanceID, time.Now().UTC()); err != nil {
+		log.Printf("northbound operation %s completion failed: %v", item.OperationID, err)
+		return
+	}
+	item.Status = "succeeded"
+	item.InstanceID = &request.InstanceID
+	w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &request.InstanceID, "")
+}
+
+func restartInstance(instances coreInstanceService, instanceID int) error {
+	restarter, ok := instances.(interface{ Restart(int) error })
+	if !ok {
+		return errors.New("instance restart service is unavailable")
+	}
+	return restarter.Restart(instanceID)
+}
+
+func resetInstance(instances coreInstanceService, instanceID int) error {
+	resetter, ok := instances.(services.InstanceResetService)
+	if !ok {
+		return errors.New("instance reset service is unavailable")
+	}
+	return resetter.Reset(instanceID)
 }
 
 func operationCreateRequest(item *models.NorthboundOperation) (services.CreateInstanceRequest, string, error) {

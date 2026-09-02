@@ -2116,6 +2116,141 @@ func (s *instanceService) Restart(instanceID int) error {
 	return nil
 }
 
+// InstanceResetService is deliberately separate from InstanceService so that
+// consumers must opt in to the destructive-looking rebuild operation. The
+// implementation preserves the instance record and its managed workspace PVC.
+type InstanceResetService interface {
+	Reset(instanceID int) error
+}
+
+// Reset rebuilds only the ephemeral runtime while preserving the instance
+// record and its managed persistent storage. It must never call Delete or the
+// broad Kubernetes cleanup service because those paths intentionally remove
+// PVCs and instance metadata.
+func (s *instanceService) Reset(instanceID int) error {
+	ctx := context.Background()
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to get instance: %w", err)
+	}
+	if instance == nil {
+		return fmt.Errorf("instance not found")
+	}
+
+	// A Lite instance is already an ephemeral gateway process inside a shared
+	// Runtime Pod. Restart deletes that gateway/binding, advances generation and
+	// lets the scheduler recreate it against the same workspace path.
+	if _, ok := v2RuntimeTypeForInstance(instance); ok {
+		if err := s.claimReset(instanceID); err != nil {
+			return err
+		}
+		if err := s.Restart(instanceID); err != nil {
+			s.markResetError(instanceID)
+			return err
+		}
+		return nil
+	}
+	if !instanceUsesDesktopRuntime(instance) {
+		return fmt.Errorf("runtime reset is supported only for managed Lite and Pro desktop instances")
+	}
+	if s.pvcService == nil || s.deploymentService == nil {
+		return fmt.Errorf("instance reset services are not configured")
+	}
+
+	pvcName := instancePVCName(instance, s.pvcService.GetClient())
+	pvc, err := s.pvcService.GetPVCByName(ctx, instance.UserID, pvcName)
+	if err != nil {
+		return fmt.Errorf("persistent workspace is unavailable; runtime was not changed: %w", err)
+	}
+	if pvc.Status.Phase != corev1.ClaimBound || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		return fmt.Errorf("persistent workspace is not bound; runtime was not changed")
+	}
+	pvcUID := pvc.UID
+	if err := s.claimReset(instanceID); err != nil {
+		return err
+	}
+
+	if err := s.deploymentService.DeleteDeployment(ctx, instance.UserID, instance.ID); err != nil {
+		s.markResetError(instanceID)
+		return fmt.Errorf("failed to delete runtime deployment: %w", err)
+	}
+	if err := s.deploymentService.WaitForDeploymentPodsDeleted(ctx, instance.UserID, instance.ID); err != nil {
+		s.markResetError(instanceID)
+		return fmt.Errorf("failed waiting for runtime pods to stop: %w", err)
+	}
+
+	// Re-check the exact claim before creating a replacement workload. A missing
+	// or replaced claim is a hard safety failure: do not start against a new or
+	// empty volume under the old instance identity.
+	currentPVC, err := s.pvcService.GetPVCByName(ctx, instance.UserID, pvcName)
+	if err != nil || currentPVC.UID != pvcUID || currentPVC.Status.Phase != corev1.ClaimBound {
+		message := "persistent workspace changed during reset; replacement runtime was not started"
+		instance.Status = "error"
+		instance.UpdatedAt = time.Now()
+		_ = s.instanceRepo.Update(instance)
+		return errors.New(message)
+	}
+
+	now := time.Now()
+	instance.Status = "stopped"
+	instance.StoppedAt = &now
+	instance.PodName = nil
+	instance.PodNamespace = nil
+	instance.PodIP = nil
+	instance.UpdatedAt = now
+	if err := s.instanceRepo.Update(instance); err != nil {
+		s.markResetError(instanceID)
+		return fmt.Errorf("failed to record stopped runtime during reset: %w", err)
+	}
+	GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+
+	if err := s.Start(instanceID); err != nil {
+		if refreshed, getErr := s.instanceRepo.GetByID(instanceID); getErr == nil && refreshed != nil {
+			refreshed.Status = "error"
+			refreshed.UpdatedAt = time.Now()
+			_ = s.instanceRepo.Update(refreshed)
+			GetHub().BroadcastInstanceStatus(refreshed.UserID, refreshed)
+		}
+		return fmt.Errorf("failed to recreate runtime; persistent workspace was retained: %w", err)
+	}
+
+	verifiedPVC, err := s.pvcService.GetPVCByName(ctx, instance.UserID, pvcName)
+	if err != nil || verifiedPVC.UID != pvcUID || verifiedPVC.Status.Phase != corev1.ClaimBound {
+		s.markResetError(instanceID)
+		return fmt.Errorf("persistent workspace verification failed after runtime recreation")
+	}
+	return nil
+}
+
+func (s *instanceService) claimReset(instanceID int) error {
+	claimer, ok := s.instanceRepo.(repository.InstanceLifecycleStatusRepository)
+	if !ok {
+		return fmt.Errorf("instance repository does not support safe lifecycle claims")
+	}
+	// Use the existing `creating` status as the short-lived lifecycle lock. The
+	// production schema defines status as an ENUM and intentionally does not
+	// require a schema migration merely to support reset.
+	claimed, err := claimer.ClaimLifecycleStatus(context.Background(), instanceID, []string{"running", "stopped", "error"}, "creating")
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("instance lifecycle operation is already in progress")
+	}
+	return nil
+}
+
+func (s *instanceService) markResetError(instanceID int) {
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil || instance == nil {
+		return
+	}
+	instance.Status = "error"
+	instance.UpdatedAt = time.Now()
+	_ = s.instanceRepo.Update(instance)
+	GetHub().BroadcastInstanceStatus(instance.UserID, instance)
+}
+
 // GetEnvironmentOverrideNames returns sorted configured names without exposing
 // stored values.
 func (s *instanceService) GetEnvironmentOverrideNames(instanceID int) ([]string, error) {

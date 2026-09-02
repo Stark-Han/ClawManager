@@ -333,6 +333,22 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 			writeError(c, err)
 		}
 	})
+	for _, route := range []struct {
+		path  string
+		scope string
+	}{
+		{"/lite-instances/:id/restart", ScopeLiteRestart},
+		{"/lite-instances/:id/reset", ScopeLiteReset},
+		{"/pro-instances/:id/restart", ScopeProRestart},
+		{"/pro-instances/:id/reset", ScopeProReset},
+	} {
+		route := route
+		resources.POST(route.path, RequireScope(route.scope), createRate, func(c *gin.Context) {
+			if err := core.Forward(c, *currentPrincipal(c)); err != nil {
+				writeError(c, err)
+			}
+		})
+	}
 	queryRateLimit := RateLimit(queryLimiter, func(c *gin.Context) string {
 		principal := currentPrincipal(c)
 		if principal == nil {
@@ -400,7 +416,7 @@ func RegisterGatewayRoutes(router *gin.Engine, auth *AuthHandler, core *CoreClie
 			writeError(c, err)
 		}
 	})
-	resources.GET("/operations/:id", RequireAnyScope(ScopeLiteCreate, ScopeLiteRead, ScopeProCreate, ScopeProRead), queryRateLimit, func(c *gin.Context) {
+	resources.GET("/operations/:id", RequireAnyScope(ScopeLiteCreate, ScopeLiteRead, ScopeProCreate, ScopeProRead, ScopeLiteRestart, ScopeLiteReset, ScopeProRestart, ScopeProReset), queryRateLimit, func(c *gin.Context) {
 		if err := core.Forward(c, *currentPrincipal(c)); err != nil {
 			writeError(c, err)
 		}

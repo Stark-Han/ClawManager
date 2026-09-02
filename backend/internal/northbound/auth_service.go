@@ -178,6 +178,10 @@ func (s *AuthService) Login(ctx context.Context, challengeID, compactJWE, source
 		ScopeLiteRead,
 		ScopeProCreate,
 		ScopeProRead,
+		ScopeLiteRestart,
+		ScopeLiteReset,
+		ScopeProRestart,
+		ScopeProReset,
 		ScopeShareLinkManage,
 		ScopeShareLinkReset,
 	}

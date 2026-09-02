@@ -209,6 +209,42 @@ func (h *IEISystemHandler) RestartInstance(c *gin.Context) {
 	})
 }
 
+// ResetInstance rebuilds an IEI-owned runtime while retaining its instance
+// record and persistent workspace. The reset capability is intentionally
+// exposed through a narrower interface so cleanup/delete paths cannot be used
+// accidentally by this public portal endpoint.
+func (h *IEISystemHandler) ResetInstance(c *gin.Context) {
+	h.noStore(c)
+	session, ok := h.requireSession(c)
+	if !ok {
+		return
+	}
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
+	if !ok {
+		return
+	}
+
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if status != "running" && status != "stopped" && status != "error" {
+		utils.Error(c, http.StatusConflict, "Instance cannot be reset while a lifecycle operation is in progress")
+		return
+	}
+	resetter, ok := h.instances.(services.InstanceResetService)
+	if !ok {
+		utils.Error(c, http.StatusServiceUnavailable, "Instance reset is unavailable")
+		return
+	}
+	if err := resetter.Reset(instance.ID); err != nil {
+		utils.Error(c, http.StatusServiceUnavailable, "Unable to reset instance; persistent workspace was retained")
+		return
+	}
+
+	utils.Success(c, http.StatusAccepted, "Instance reset submitted", gin.H{
+		"instance_id": instance.ID,
+		"status":      "resetting",
+	})
+}
+
 func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 	h.noStore(c)
 	session, ok := h.requireSession(c)
@@ -400,7 +436,7 @@ func (h *IEISystemHandler) ownedSupportedInstance(instance *models.Instance, own
 		return false
 	}
 	switch typeName {
-	case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, services.RuntimeTypeOpenCode:
+	case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, services.RuntimeTypeOpenCode, services.RuntimeTypeDeepSeekHarness:
 		return true
 	case "workbuddy":
 		return strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)

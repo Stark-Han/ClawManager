@@ -67,6 +67,12 @@ type IEISystemInstanceRepository interface {
 	CountSupportedByOwnerEmail(owner string) (int, error)
 }
 
+// InstanceLifecycleStatusRepository provides an atomic status transition used
+// to serialize reset operations across API replicas.
+type InstanceLifecycleStatusRepository interface {
+	ClaimLifecycleStatus(ctx context.Context, id int, allowedStatuses []string, targetStatus string) (bool, error)
+}
+
 // InstanceQueryRepository is the optional filtered-list and aggregation
 // capability used by the user workspace. It is kept separate from
 // InstanceRepository so unrelated repository test doubles remain small.
@@ -110,6 +116,31 @@ func (r *instanceRepository) GetByID(id int) (*models.Instance, error) {
 		return nil, fmt.Errorf("failed to get instance: %w", err)
 	}
 	return &instance, nil
+}
+
+func (r *instanceRepository) ClaimLifecycleStatus(ctx context.Context, id int, allowedStatuses []string, targetStatus string) (bool, error) {
+	if id <= 0 || len(allowedStatuses) == 0 || strings.TrimSpace(targetStatus) == "" {
+		return false, fmt.Errorf("invalid lifecycle status transition")
+	}
+	placeholders := make([]string, 0, len(allowedStatuses))
+	arguments := make([]any, 0, len(allowedStatuses)+3)
+	arguments = append(arguments, strings.TrimSpace(targetStatus), time.Now().UTC(), id)
+	for _, status := range allowedStatuses {
+		placeholders = append(placeholders, "?")
+		arguments = append(arguments, strings.ToLower(strings.TrimSpace(status)))
+	}
+	result, err := r.sess.SQL().ExecContext(ctx, `
+		UPDATE instances
+		SET status = ?, updated_at = ?
+		WHERE id = ? AND LOWER(status) IN (`+strings.Join(placeholders, ",")+`)`, arguments...)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim instance lifecycle status: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect instance lifecycle claim: %w", err)
+	}
+	return rows == 1, nil
 }
 
 // GetByProvisioningOperationID returns the instance created for a durable
@@ -424,7 +455,7 @@ func supportedNorthboundProOwnerInstances(userID int, owner string) db.LogicalEx
 	return db.And(
 		db.Cond{"user_id": userID, "owner": owner, "instance_mode": "pro"},
 		db.Or(
-			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode"}},
+			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode", "deepseek-harness"}},
 			db.Cond{"type": "workbuddy", "runtime_variant": "linux"},
 		),
 	)
@@ -463,7 +494,7 @@ func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr 
 			},
 			db.Cond{
 				"instance_mode": "pro",
-				"type IN":       []string{"openclaw", "hermes", "opencode"},
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
 			},
 		),
 	)
@@ -502,7 +533,7 @@ func supportedIEIOwnerInstances(owner string) db.LogicalExpr {
 			},
 			db.Cond{
 				"instance_mode": "pro",
-				"type IN":       []string{"openclaw", "hermes", "opencode"},
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
 			},
 		),
 	)

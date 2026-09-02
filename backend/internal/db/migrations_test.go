@@ -504,3 +504,20 @@ func TestMigration047AddsDeepSeekHarnessRuntimes(t *testing.T) {
 		}
 	}
 }
+
+func TestMigration058EnablesDeepSeekHarnessProWithoutOverwritingCustomPolicy(t *testing.T) {
+	raw, err := embeddedMigrations.ReadFile("migrations/058_enable_deepseek_harness_pro.sql")
+	if err != nil {
+		t.Fatalf("read migration 058: %v", err)
+	}
+	sql := string(raw)
+	for _, required := range []string{
+		"JSON_LENGTH(allowed_pro_types) = 4",
+		"JSON_CONTAINS(allowed_pro_types, JSON_QUOTE('openclaw'))",
+		"JSON_ARRAY_APPEND(allowed_pro_types, '$', 'deepseek-harness')",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration 058 must contain %s", required)
+		}
+	}
+}

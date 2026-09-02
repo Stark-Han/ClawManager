@@ -5,6 +5,7 @@ import {
   Box,
   CheckCircle2,
   LogOut,
+  Power,
   RefreshCw,
   Search,
   SlidersHorizontal,
@@ -35,6 +36,7 @@ function statusClass(status: string) {
     case "running":
       return "border-emerald-200 bg-emerald-50 text-emerald-700";
     case "creating":
+    case "resetting":
       return "border-amber-200 bg-amber-50 text-amber-700";
     case "error":
       return "border-red-200 bg-red-50 text-red-700";
@@ -49,6 +51,8 @@ function statusLabel(status: string) {
       return "运行中";
     case "creating":
       return "创建中";
+    case "resetting":
+      return "重置中";
     case "stopped":
       return "已停止";
     case "error":
@@ -132,6 +136,8 @@ export default function IEISystemListInstancesPage() {
   const [runtimeFilter, setRuntimeFilter] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [lifecycleAction, setLifecycleAction] = useState<"restart" | "reset" | null>(null);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadInstances = useCallback(async () => {
@@ -222,6 +228,41 @@ export default function IEISystemListInstancesPage() {
     setInstances([]);
     setSelectedID(null);
     setError("访问会话已退出，请从智慧协作平台重新进入。");
+  };
+
+  const handleRestart = async () => {
+    if (!selectedInstance || selectedInstance.status.toLowerCase() !== "running") return;
+    if (!window.confirm(`确认重启实例“${selectedInstance.name}”？工作区数据会保留。`)) return;
+    setLifecycleAction("restart");
+    setLifecycleError(null);
+    try {
+      await ieiSystemService.restartInstance(selectedInstance.id);
+      await loadInstances();
+    } catch (actionError) {
+      setLifecycleError(errorMessage(actionError));
+    } finally {
+      setLifecycleAction(null);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!selectedInstance) return;
+    const status = selectedInstance.status.toLowerCase();
+    if (!["running", "stopped", "error"].includes(status)) return;
+    const confirmation = window.prompt(
+      `重置会删除并重建运行时，但保留实例记录和工作区数据。请输入实例名确认：\n${selectedInstance.name}`,
+    );
+    if (confirmation !== selectedInstance.name) return;
+    setLifecycleAction("reset");
+    setLifecycleError(null);
+    try {
+      await ieiSystemService.resetInstance(selectedInstance.id);
+      await loadInstances();
+    } catch (actionError) {
+      setLifecycleError(errorMessage(actionError));
+    } finally {
+      setLifecycleAction(null);
+    }
   };
 
   return (
@@ -451,6 +492,11 @@ export default function IEISystemListInstancesPage() {
                 <h2 className="text-base font-bold text-[#14213a]">运行时说明</h2>
               </div>
               <div className="flex-1 overflow-y-auto p-6">
+                {lifecycleError ? (
+                  <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {lifecycleError}
+                  </div>
+                ) : null}
                 <div className="flex flex-col gap-5 border-b border-slate-100 pb-6 sm:flex-row sm:items-center">
                   <div
                     className={`flex h-24 w-24 shrink-0 items-center justify-center rounded-2xl border ${selectedRuntime.theme.border} ${selectedRuntime.theme.accentSoft} p-4`}
@@ -478,6 +524,28 @@ export default function IEISystemListInstancesPage() {
                       {selectedRuntime.category}
                     </p>
                   </div>
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleReset()}
+                    disabled={
+                      lifecycleAction !== null ||
+                      !["running", "stopped", "error"].includes(selectedInstance.status.toLowerCase())
+                    }
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border-2 border-sky-500 bg-white px-5 text-sm font-semibold text-sky-600 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${lifecycleAction === "reset" ? "animate-spin" : ""}`} />
+                    重置实例
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRestart()}
+                    disabled={lifecycleAction !== null || selectedInstance.status.toLowerCase() !== "running"}
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border-2 border-red-500 bg-white px-5 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Power className={`h-4 w-4 ${lifecycleAction === "restart" ? "animate-pulse" : ""}`} />
+                    重启实例
+                  </button>
                   <Link
                     to={`/ieisystem/instances/${selectedInstance.id}`}
                     className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-blue-700 to-blue-600 px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(37,99,235,0.22)] transition hover:-translate-y-0.5 hover:from-blue-800 hover:to-blue-700"
@@ -485,6 +553,7 @@ export default function IEISystemListInstancesPage() {
                     进入实例
                     <ArrowRight className="h-4 w-4" />
                   </Link>
+                  </div>
                 </div>
 
                 <div className={`mt-6 overflow-hidden rounded-2xl border ${selectedRuntime.theme.border}`}>

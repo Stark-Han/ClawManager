@@ -901,6 +901,25 @@ func (s *PVCService) GetPVC(ctx context.Context, userID, instanceID int) (*corev
 	return pvc, nil
 }
 
+// GetPVCByName retrieves the exact claim persisted on an instance record. This
+// matters for claimed prewarm/clone volumes whose name is not the legacy
+// instance-derived default.
+func (s *PVCService) GetPVCByName(ctx context.Context, userID int, pvcName string) (*corev1.PersistentVolumeClaim, error) {
+	if s == nil || s.client == nil {
+		return nil, fmt.Errorf("k8s client not initialized")
+	}
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return nil, fmt.Errorf("PVC name is required")
+	}
+	namespace := s.client.GetNamespace(userID)
+	pvc, err := s.client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
+	}
+	return pvc, nil
+}
+
 func (s *PVCService) NodeSelectorForPVC(ctx context.Context, userID, instanceID int, storageClass string) (map[string]string, error) {
 	if s == nil || s.client == nil {
 		return nil, fmt.Errorf("k8s client not initialized")

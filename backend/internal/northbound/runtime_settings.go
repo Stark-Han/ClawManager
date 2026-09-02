@@ -35,7 +35,7 @@ func defaultRuntimeSettings(cfg config.NorthboundConfig) *models.NorthboundAdmin
 		ShareRatePerMinute: 10, MaxPendingOperations: 5, OperationTickMilliseconds: durationMilliseconds(cfg.OperationTick, 1000),
 		OperationLeaseSeconds: durationSeconds(cfg.OperationLease, 30), OperationMaxAttempts: positiveOr(cfg.OperationMaxAttempts, 5),
 		AllowedLiteTypes: []string{"openclaw", "hermes", "opencode", "deepseek-harness", "workbuddy"},
-		AllowedProTypes:  []string{"openclaw", "hermes", "opencode", "workbuddy"},
+		AllowedProTypes:  []string{"openclaw", "hermes", "opencode", "deepseek-harness", "workbuddy"},
 		LiteCPUCores:     2, LiteMemoryGB: 4, LiteDiskGB: 5, ProCPUCores: 4, ProMemoryGB: 8, ProDiskGB: 50,
 		WorkBuddyProCPUCores: 4, WorkBuddyProMemoryGB: 8, WorkBuddyProDiskGB: 40,
 	}

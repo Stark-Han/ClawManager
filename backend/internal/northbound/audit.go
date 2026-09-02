@@ -94,6 +94,14 @@ func northboundEventType(method, route string) string {
 		return "northbound.lite.create"
 	case "POST /api/northbound/v1/pro-instances":
 		return "northbound.pro.create"
+	case "POST /api/northbound/v1/lite-instances/:id/restart":
+		return "northbound.lite.restart"
+	case "POST /api/northbound/v1/lite-instances/:id/reset":
+		return "northbound.lite.reset"
+	case "POST /api/northbound/v1/pro-instances/:id/restart":
+		return "northbound.pro.restart"
+	case "POST /api/northbound/v1/pro-instances/:id/reset":
+		return "northbound.pro.reset"
 	case "POST /api/northbound/v1/lite-instances/:id/external-access/password":
 		return "northbound.share_link.password_enabled"
 	case "POST /api/northbound/v1/lite-instances/:id/external-access/share-link/reset":
@@ -148,7 +156,7 @@ func operationInstanceMode(item *models.NorthboundOperation) string {
 	if item == nil {
 		return services.InstanceModeLite
 	}
-	if item.OperationType == OperationTypeProInstance {
+	if item.OperationType == OperationTypeProInstance || item.OperationType == OperationTypeProRestart || item.OperationType == OperationTypeProReset {
 		return services.InstanceModePro
 	}
 	if item.OperationType == OperationTypeLiteInstance {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,8 @@ type fakeIEIInstanceService struct {
 	ownerInstances []models.Instance
 	restartCalls   []int
 	restartErr     error
+	resetCalls     []int
+	resetErr       error
 }
 
 func (s *fakeIEIInstanceService) GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
@@ -37,6 +40,11 @@ func (s *fakeIEIInstanceService) GetSupportedByOwnerEmail(owner string, offset, 
 func (s *fakeIEIInstanceService) Restart(instanceID int) error {
 	s.restartCalls = append(s.restartCalls, instanceID)
 	return s.restartErr
+}
+
+func (s *fakeIEIInstanceService) Reset(instanceID int) error {
+	s.resetCalls = append(s.resetCalls, instanceID)
+	return s.resetErr
 }
 
 func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
@@ -98,6 +106,51 @@ func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
 	router.ServeHTTP(serviceFailureRecorder, serviceFailure)
 	if serviceFailureRecorder.Code != http.StatusServiceUnavailable || strings.Contains(serviceFailureRecorder.Body.String(), "kubernetes") {
 		t.Fatalf("restart failure status/body = %d/%s", serviceFailureRecorder.Code, serviceFailureRecorder.Body.String())
+	}
+}
+
+func TestIEISystemResetRequiresOwnerAndAcceptsRecoverableStates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := testIEIHandlerConfig()
+	sso, err := services.NewIEISSOService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner@example.com"
+	other := "other@example.com"
+	instanceService := &fakeIEIInstanceService{fakeWorkspaceHandlerInstanceService: &fakeWorkspaceHandlerInstanceService{instances: map[int]*models.Instance{
+		1: {ID: 1, UserID: 10, Owner: &owner, Name: "Owner Pro", Type: "deepseek-harness", RuntimeType: "desktop", InstanceMode: "pro", Status: "running"},
+		2: {ID: 2, UserID: 10, Owner: &owner, Name: "Owner Error", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "error"},
+		3: {ID: 3, UserID: 11, Owner: &other, Name: "Other Pro", Type: "deepseek-harness", RuntimeType: "desktop", InstanceMode: "pro", Status: "running"},
+		4: {ID: 4, UserID: 10, Owner: &owner, Name: "Creating", Type: "hermes", RuntimeType: "gateway", InstanceMode: "lite", Status: "creating"},
+	}}}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, nil)
+	router := gin.New()
+	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
+	router.POST("/api/v1/ieisystem/instances/:id/reset", handler.ResetInstance)
+	cookie := exchangeIEITestSession(t, router, cfg, owner)
+
+	for _, id := range []int{1, 2} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/"+strconv.Itoa(id)+"/reset", nil)
+		req.AddCookie(cookie)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("reset %d status/body = %d/%s", id, recorder.Code, recorder.Body.String())
+		}
+	}
+	if len(instanceService.resetCalls) != 2 || instanceService.resetCalls[0] != 1 || instanceService.resetCalls[1] != 2 {
+		t.Fatalf("reset calls = %v", instanceService.resetCalls)
+	}
+
+	for id, want := range map[int]int{3: http.StatusNotFound, 4: http.StatusConflict} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/"+strconv.Itoa(id)+"/reset", nil)
+		req.AddCookie(cookie)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		if recorder.Code != want {
+			t.Fatalf("reset %d status/body = %d/%s, want %d", id, recorder.Code, recorder.Body.String(), want)
+		}
 	}
 }
 

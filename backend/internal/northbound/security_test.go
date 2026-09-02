@@ -167,6 +167,10 @@ func TestJWELoginAuthenticatesExistingBcryptUser(t *testing.T) {
 	requiredScopes := map[string]bool{
 		ScopeProCreate:       false,
 		ScopeProRead:         false,
+		ScopeLiteRestart:     false,
+		ScopeLiteReset:       false,
+		ScopeProRestart:      false,
+		ScopeProReset:        false,
 		ScopeShareLinkReset:  false,
 		ScopeShareLinkManage: false,
 	}

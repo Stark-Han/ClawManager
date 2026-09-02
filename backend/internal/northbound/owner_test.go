@@ -65,14 +65,14 @@ func TestCoreServiceListsOnlyExactOwnerSupportedProInstances(t *testing.T) {
 		5: {ID: 5, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModePro, Name: "openclaw-pro"},
 		6: {ID: 6, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeHermes, InstanceMode: services.InstanceModePro, Name: "hermes-pro"},
 		7: {ID: 7, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenCode, InstanceMode: services.InstanceModePro, Name: "opencode-pro"},
-		8: {ID: 8, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeDeepSeekHarness, InstanceMode: services.InstanceModePro, Name: "unsupported-pro"},
+		8: {ID: 8, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeDeepSeekHarness, InstanceMode: services.InstanceModePro, Name: "deepseek-harness-pro"},
 	}}}
 
 	items, total, err := service.ListProInstances(7, " tenant-a ", 1, 20)
 	if err != nil {
 		t.Fatalf("ListProInstances returned error: %v", err)
 	}
-	if total != 4 || len(items) != 4 {
+	if total != 5 || len(items) != 5 {
 		t.Fatalf("unexpected owner-scoped Pro instances: total=%d items=%+v", total, items)
 	}
 	seen := map[int]bool{}
@@ -82,7 +82,7 @@ func TestCoreServiceListsOnlyExactOwnerSupportedProInstances(t *testing.T) {
 			t.Fatalf("unexpected Pro response: %+v", item)
 		}
 	}
-	for _, id := range []int{1, 5, 6, 7} {
+	for _, id := range []int{1, 5, 6, 7, 8} {
 		if !seen[id] {
 			t.Fatalf("supported Pro instance %d missing from response: %+v", id, items)
 		}
@@ -114,6 +114,7 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 		services.RuntimeTypeOpenClaw,
 		services.RuntimeTypeHermes,
 		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness,
 		services.RuntimeTypeDeepSeekHarness,
 	} {
 		if !isSupportedNorthboundType(instanceType) {
@@ -193,7 +194,7 @@ func TestProCreateRequestSupportsManagedDesktopRuntimes(t *testing.T) {
 			t.Fatalf("%s Pro request selected an invalid image: %v", instanceType, request.ImageRegistry)
 		}
 	}
-	for _, instanceType := range []string{services.RuntimeTypeDeepSeekHarness, "codex", "claude-code", "custom"} {
+	for _, instanceType := range []string{"codex", "claude-code", "custom"} {
 		if isSupportedNorthboundProType(instanceType) {
 			t.Fatalf("runtime %q must not be accepted by this Pro contract", instanceType)
 		}
@@ -206,18 +207,25 @@ func TestProCreateRequestUsesSavedClawManagerDesktopImage(t *testing.T) {
 			Image:       "10.130.15.40:5000/agentsruntime/opencode-pro:saved",
 			RuntimeType: services.RuntimeBackendDesktop,
 		},
+		"deepseek-harness:desktop": {
+			Image:       "10.130.15.40:5000/agentsruntime/deepseek-harness-pro:saved",
+			RuntimeType: services.RuntimeBackendDesktop,
+		},
 	}})
 	t.Cleanup(func() { services.SetRuntimeImageSettingsProvider(nil) })
 
-	request, err := proCreateRequest(
-		&models.NorthboundOperation{OperationID: "op_saved_image"},
-		CreateProInstanceRequest{Name: "opencode-pro", Owner: "tenant-a", Type: services.RuntimeTypeOpenCode},
-	)
-	if err != nil {
-		t.Fatalf("proCreateRequest returned error: %v", err)
-	}
-	if request.ImageRegistry == nil || *request.ImageRegistry != "10.130.15.40:5000/agentsruntime/opencode-pro:saved" {
-		t.Fatalf("northbound Pro request did not use the saved desktop image: %v", request.ImageRegistry)
+	for _, instanceType := range []string{services.RuntimeTypeOpenCode, services.RuntimeTypeDeepSeekHarness} {
+		request, err := proCreateRequest(
+			&models.NorthboundOperation{OperationID: "op_saved_image_" + instanceType},
+			CreateProInstanceRequest{Name: instanceType + "-pro", Owner: "tenant-a", Type: instanceType},
+		)
+		if err != nil {
+			t.Fatalf("proCreateRequest(%s) returned error: %v", instanceType, err)
+		}
+		want := "10.130.15.40:5000/agentsruntime/" + instanceType + "-pro:saved"
+		if request.ImageRegistry == nil || *request.ImageRegistry != want {
+			t.Fatalf("northbound %s Pro request did not use the saved desktop image: %v", instanceType, request.ImageRegistry)
+		}
 	}
 }
 
@@ -254,5 +262,31 @@ func TestOperationCreateRequestSelectsModeFromType(t *testing.T) {
 	})
 	if err != nil || openCodePro.InstanceMode != services.InstanceModePro || openCodePro.RuntimeType != services.RuntimeBackendDesktop {
 		t.Fatalf("unexpected OpenCode Pro operation request: request=%+v err=%v", openCodePro, err)
+	}
+}
+
+func TestLifecycleHelpersUseNarrowRestartAndResetCapabilities(t *testing.T) {
+	stub := &northboundInstanceStub{items: map[int]*models.Instance{}}
+	if err := restartInstance(stub, 41); err != nil {
+		t.Fatalf("restartInstance returned error: %v", err)
+	}
+	if err := resetInstance(stub, 42); err != nil {
+		t.Fatalf("resetInstance returned error: %v", err)
+	}
+	if len(stub.restartCalls) != 1 || stub.restartCalls[0] != 41 || len(stub.resetCalls) != 1 || stub.resetCalls[0] != 42 {
+		t.Fatalf("unexpected lifecycle calls: restart=%v reset=%v", stub.restartCalls, stub.resetCalls)
+	}
+}
+
+func TestLifecycleOperationModeIsPreservedForAudit(t *testing.T) {
+	for _, operationType := range []string{OperationTypeProRestart, OperationTypeProReset} {
+		if mode := operationInstanceMode(&models.NorthboundOperation{OperationType: operationType}); mode != services.InstanceModePro {
+			t.Fatalf("operation %s mode = %s, want pro", operationType, mode)
+		}
+	}
+	for _, operationType := range []string{OperationTypeLiteRestart, OperationTypeLiteReset} {
+		if mode := operationInstanceMode(&models.NorthboundOperation{OperationType: operationType}); mode != services.InstanceModeLite {
+			t.Fatalf("operation %s mode = %s, want lite", operationType, mode)
+		}
 	}
 }
