@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clawreef/internal/aigateway"
+	"clawreef/internal/buildinfo"
 	"clawreef/internal/config"
 	"clawreef/internal/db"
 	"clawreef/internal/handlers"
@@ -28,6 +29,9 @@ import (
 )
 
 func main() {
+	build := buildinfo.Current()
+	log.Printf("Starting ClawManager version=%s commit=%s build_time=%s", build.Version, build.Commit, build.BuildTime)
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
@@ -122,6 +126,7 @@ func main() {
 		openClawConfigService,
 		services.WithPrivilegedInstancePods(cfg.Kubernetes.Runtime.Pod.Privileged),
 		services.WithV2RuntimeLifecycle(runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot),
+		services.WithExpandedLLMModelCatalog(llmModelService),
 	)
 	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	var northboundCoreServer *http.Server
@@ -190,10 +195,21 @@ func main() {
 	)
 	services.ConfigureSkillRuntimeSync(skillService, bindingRepo, runtimePodRepo, runtimeAgentClient)
 	securityScanService := services.NewSecurityScanService(securityScanRepo, skillRepo, objectStorageService, skillScannerClient)
-	aiGatewayService := aigateway.NewService(llmModelRepo, modelInvocationService, auditEventService, costRecordService, riskDetectionService, riskHitService, chatSessionService, chatMessageService)
+	aiGatewayService := aigateway.NewService(
+		llmModelRepo,
+		modelInvocationService,
+		auditEventService,
+		costRecordService,
+		riskDetectionService,
+		riskHitService,
+		chatSessionService,
+		chatMessageService,
+		aigateway.WithExpandedLLMModelCatalog(llmModelService),
+	)
 	customTeamTemplateService := teamtemplate.NewService(customTeamTemplateRepo, aiGatewayService)
 
 	// Initialize handlers
+	versionHandler := handlers.NewVersionHandler()
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, quotaService)
 	instanceHandler := handlers.NewInstanceHandler(
@@ -246,7 +262,17 @@ func main() {
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)
 	skillHubHandler := handlers.NewSkillHubHandler(skillService, instanceService)
 	securityHandler := handlers.NewSecurityHandler(securityScanService)
-	agentHandler := handlers.NewAgentHandler(instanceAgentService, instanceCommandService, instanceRuntimeStatusService, instanceConfigRevisionService, skillService)
+	agentHandler := handlers.NewAgentHandler(
+		instanceAgentService,
+		instanceCommandService,
+		instanceRuntimeStatusService,
+		instanceConfigRevisionService,
+		skillService,
+		handlers.WithAgentSkillReportPersistence(cfg.Runtime.SkillReportPersistence),
+	)
+	if !cfg.Runtime.SkillReportPersistence {
+		log.Printf("skill inventory report persistence is disabled; reports will be acknowledged without database synchronization")
+	}
 	teamHandler := handlers.NewTeamHandler(teamService)
 	workspaceFileHandler := handlers.NewWorkspaceFileHandler(instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	workspaceFileHandler.SetSkillRepository(skillRepo)
@@ -384,13 +410,19 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
+		// Build information is intentionally public so operators can identify the
+		// running control-plane version even when authentication is unavailable.
+		api.GET("/version", versionHandler.Get)
+
 		ieiSystem := api.Group("/ieisystem")
 		{
 			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
 			ieiSystem.GET("/session", ieiSystemHandler.GetSession)
+			ieiSystem.POST("/session/refresh", ieiSystemHandler.RefreshSession)
 			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
 			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
+			ieiSystem.POST("/instances/:id/restart", ieiSystemHandler.RestartInstance)
 			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
 			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
 			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)
@@ -462,6 +494,7 @@ func main() {
 		instances.Use(middleware.SetUserInfo(userRepo))
 		{
 			instances.GET("", instanceHandler.ListInstances)
+			instances.GET("/summary", instanceHandler.GetInstanceSummary)
 			instances.POST("", instanceHandler.CreateInstance)
 			instances.POST("/batch/lite", instanceHandler.BatchCreateLiteInstances)
 			instances.POST("/batch/delete", instanceHandler.BatchDeleteLiteInstances)

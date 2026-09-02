@@ -18,6 +18,7 @@ var protectedManagedRuntimeEnvKeys = map[string]struct{}{
 	"CLAWMANAGER_LLM_BASE_URL":          {},
 	"CLAWMANAGER_LLM_API_KEY":           {},
 	"CLAWMANAGER_LLM_MODEL":             {},
+	"CLAWMANAGER_LLM_PROVIDER_MODELS":   {},
 	"CLAWMANAGER_LLM_REASONING":         {},
 	"CLAWMANAGER_LLM_REASONING_CONTROL": {},
 	"CLAWMANAGER_LLM_PROVIDER":          {},

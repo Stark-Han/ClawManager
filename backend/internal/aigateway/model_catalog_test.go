@@ -43,7 +43,7 @@ func TestAvailableAndRequestedModelsExpandProviderCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(available) != 3 || available[0].DisplayName != "qwen3.8" || available[2].DisplayName != "deepseek-v4-pro" {
+	if len(available) != 4 || available[0].DisplayName != "Auto" || available[1].DisplayName != "qwen3.8" || available[3].DisplayName != "deepseek-v4-pro" {
 		t.Fatalf("available models were not expanded: %#v", available)
 	}
 

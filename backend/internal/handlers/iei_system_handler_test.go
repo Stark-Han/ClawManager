@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,12 +24,81 @@ import (
 type fakeIEIInstanceService struct {
 	*fakeWorkspaceHandlerInstanceService
 	ownerInstances []models.Instance
+	restartCalls   []int
+	restartErr     error
 }
 
 func (s *fakeIEIInstanceService) GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error) {
 	start := min(offset, len(s.ownerInstances))
 	end := min(start+limit, len(s.ownerInstances))
 	return s.ownerInstances[start:end], len(s.ownerInstances), nil
+}
+
+func (s *fakeIEIInstanceService) Restart(instanceID int) error {
+	s.restartCalls = append(s.restartCalls, instanceID)
+	return s.restartErr
+}
+
+func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := testIEIHandlerConfig()
+	sso, err := services.NewIEISSOService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner@example.com"
+	other := "other@example.com"
+	instanceService := &fakeIEIInstanceService{
+		fakeWorkspaceHandlerInstanceService: &fakeWorkspaceHandlerInstanceService{instances: map[int]*models.Instance{
+			1: {ID: 1, UserID: 10, Owner: &owner, Name: "Owner Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+			2: {ID: 2, UserID: 11, Owner: &other, Name: "Other Lite", Type: "openclaw", RuntimeType: "gateway", InstanceMode: "lite", Status: "running"},
+			3: {ID: 3, UserID: 10, Owner: &owner, Name: "Stopped Pro", Type: "workbuddy", RuntimeType: "desktop", RuntimeVariant: "linux", InstanceMode: "pro", Status: "stopped"},
+		}},
+	}
+	handler := NewIEISystemHandler(cfg, sso, instanceService, nil)
+	router := gin.New()
+	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
+	router.POST("/api/v1/ieisystem/instances/:id/restart", handler.RestartInstance)
+
+	unauthenticated := httptest.NewRecorder()
+	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil))
+	if unauthenticated.Code != http.StatusUnauthorized || len(instanceService.restartCalls) != 0 {
+		t.Fatalf("unauthenticated restart status/calls = %d/%v", unauthenticated.Code, instanceService.restartCalls)
+	}
+
+	sessionCookie := exchangeIEITestSession(t, router, cfg, owner)
+	wrongOwner := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/2/restart", nil)
+	wrongOwner.AddCookie(sessionCookie)
+	wrongOwnerRecorder := httptest.NewRecorder()
+	router.ServeHTTP(wrongOwnerRecorder, wrongOwner)
+	if wrongOwnerRecorder.Code != http.StatusNotFound || len(instanceService.restartCalls) != 0 {
+		t.Fatalf("wrong-owner restart status/calls = %d/%v", wrongOwnerRecorder.Code, instanceService.restartCalls)
+	}
+
+	stopped := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/3/restart", nil)
+	stopped.AddCookie(sessionCookie)
+	stoppedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(stoppedRecorder, stopped)
+	if stoppedRecorder.Code != http.StatusConflict || len(instanceService.restartCalls) != 0 {
+		t.Fatalf("stopped restart status/calls = %d/%v", stoppedRecorder.Code, instanceService.restartCalls)
+	}
+
+	owned := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
+	owned.AddCookie(sessionCookie)
+	ownedRecorder := httptest.NewRecorder()
+	router.ServeHTTP(ownedRecorder, owned)
+	if ownedRecorder.Code != http.StatusAccepted || len(instanceService.restartCalls) != 1 || instanceService.restartCalls[0] != 1 {
+		t.Fatalf("owner restart status/calls = %d/%v, body = %s", ownedRecorder.Code, instanceService.restartCalls, ownedRecorder.Body.String())
+	}
+
+	instanceService.restartErr = errors.New("kubernetes restart failed")
+	serviceFailure := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
+	serviceFailure.AddCookie(sessionCookie)
+	serviceFailureRecorder := httptest.NewRecorder()
+	router.ServeHTTP(serviceFailureRecorder, serviceFailure)
+	if serviceFailureRecorder.Code != http.StatusServiceUnavailable || strings.Contains(serviceFailureRecorder.Body.String(), "kubernetes") {
+		t.Fatalf("restart failure status/body = %d/%s", serviceFailureRecorder.Code, serviceFailureRecorder.Body.String())
+	}
 }
 
 func TestIEISystemEndpointsRequireSessionAndHideWrongOwner(t *testing.T) {
@@ -98,6 +168,37 @@ func TestIEISystemEndpointsRequireSessionAndHideWrongOwner(t *testing.T) {
 	router.ServeHTTP(wrongOwnerRecorder, wrongOwnerRequest)
 	if wrongOwnerRecorder.Code != http.StatusNotFound {
 		t.Fatalf("wrong-owner detail status = %d, body = %s", wrongOwnerRecorder.Code, wrongOwnerRecorder.Body.String())
+	}
+}
+
+func TestIEISystemRefreshSessionUsesExistingLocalSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := testIEIHandlerConfig()
+	sso, err := services.NewIEISSOService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewIEISystemHandler(cfg, sso, &fakeIEIInstanceService{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/ieisystem/session", handler.ExchangeSession)
+	router.POST("/api/v1/ieisystem/session/refresh", handler.RefreshSession)
+
+	unauthenticated := httptest.NewRecorder()
+	router.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/session/refresh", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated refresh status = %d, body = %s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+
+	sessionCookie := exchangeIEITestSession(t, router, cfg, "owner@example.com")
+	refreshed := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/session/refresh", nil)
+	request.AddCookie(sessionCookie)
+	router.ServeHTTP(refreshed, request)
+	if refreshed.Code != http.StatusOK || !strings.Contains(refreshed.Body.String(), "owner@example.com") {
+		t.Fatalf("refresh status/body = %d/%s", refreshed.Code, refreshed.Body.String())
+	}
+	if !strings.Contains(refreshed.Header().Get("Set-Cookie"), ieiSystemSessionCookie+"=") {
+		t.Fatalf("refresh did not rotate the local session cookie: %s", refreshed.Header().Get("Set-Cookie"))
 	}
 }
 
@@ -298,6 +399,22 @@ func TestProxyAccessTokenRequiresMatchingIEISession(t *testing.T) {
 	if !strings.Contains(setCookie, "instance_access_76="+dedicatedAccess.Token) ||
 		!strings.Contains(setCookie, "Path=/") || !strings.Contains(setCookie, "SameSite=None") {
 		t.Fatalf("dedicated IEI access cookie was not promoted: %s", setCookie)
+	}
+	refreshContext, _ := dedicatedContext("deepseek-harness-76.runtime.example.test:30443", "", "")
+	refreshContext.Request.URL.Path = "/api/v1/instances/76/proxy" + dedicatedAccessRefreshPath
+	refreshContext.Request.Header.Set(dedicatedAccessRefreshHeader, dedicatedAccess.Token)
+	refreshToken, refreshOK := handler.proxyAccessToken(refreshContext, 76)
+	if !refreshOK || refreshToken != dedicatedAccess.Token {
+		t.Fatalf("dedicated access refresh header was rejected: %q/%v", refreshToken, refreshOK)
+	}
+	if !handler.isDedicatedAccessRefreshRequest(refreshContext, 76, refreshToken) {
+		t.Fatal("dedicated access refresh endpoint rejected a valid bound token")
+	}
+	wrongPathContext, _ := dedicatedContext("deepseek-harness-76.runtime.example.test:30443", "", "")
+	wrongPathContext.Request.URL.Path = "/api/v1/instances/76/proxy/not-refresh" + dedicatedAccessRefreshPath
+	wrongPathContext.Request.Header.Set(dedicatedAccessRefreshHeader, dedicatedAccess.Token)
+	if wrongPathToken, wrongPathOK := handler.proxyAccessToken(wrongPathContext, 76); wrongPathOK {
+		t.Fatalf("internal refresh header escaped its exact path: %q", wrongPathToken)
 	}
 }
 

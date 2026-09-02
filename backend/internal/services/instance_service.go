@@ -50,6 +50,7 @@ const OpenCodeDefaultProjectRelativePath = "starter"
 type InstanceOwnerService interface {
 	GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 	GetWorkbuddyProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
+	GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 	GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error)
 }
 
@@ -57,6 +58,13 @@ type InstanceOwnerService interface {
 // view after an IEI SSO session has been validated.
 type IEISystemInstanceService interface {
 	GetSupportedByOwnerEmail(owner string, offset, limit int) ([]models.Instance, int, error)
+}
+
+// InstanceQueryService exposes filtered caller-scoped listing and dashboard
+// aggregation without widening the lifecycle-oriented InstanceService.
+type InstanceQueryService interface {
+	GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error)
+	GetSummaryByUserID(userID int) (*models.InstanceSummary, error)
 }
 
 func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateInstanceRequest) error {
@@ -82,6 +90,9 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 			return fmt.Errorf("invalid desktop stream profile")
 		}
 		if err := validateWindowsWorkbuddyRequest(requests[idx]); err != nil {
+			return err
+		}
+		if err := validateCreateInstanceDiskGB(requests[idx], resolveCreateInstanceMode(requests[idx])); err != nil {
 			return err
 		}
 	}
@@ -199,7 +210,7 @@ type CreateInstanceRequest struct {
 	DesktopStreamProfile    string              `json:"desktop_stream_profile,omitempty" validate:"omitempty,oneof=low standard high"`
 	CPUCores                float64             `json:"cpu_cores" validate:"required,min=0.1,max=32"`
 	MemoryGB                int                 `json:"memory_gb" validate:"required,min=1,max=128"`
-	DiskGB                  int                 `json:"disk_gb" validate:"required,min=10,max=1000"`
+	DiskGB                  int                 `json:"disk_gb" validate:"required,min=5,max=1000"`
 	GPUEnabled              bool                `json:"gpu_enabled"`
 	GPUCount                int                 `json:"gpu_count" validate:"min=0,max=4"`
 	OSType                  string              `json:"os_type" validate:"required"`
@@ -261,6 +272,7 @@ type instanceService struct {
 	instanceRepo          repository.InstanceRepository
 	quotaRepo             repository.QuotaRepository
 	llmModelRepo          repository.LLMModelRepository
+	expandedModelCatalog  ExpandedLLMModelCatalog
 	openClawConfigService OpenClawConfigService
 	allowPrivilegedPods   bool
 	runtimePodRepo        repository.RuntimePodRepository
@@ -292,19 +304,17 @@ const (
 type gatewayTokenAliasRecorder interface {
 	UpsertGatewayTokenAlias(ctx context.Context, instanceID int, accessToken string, expiresAt time.Time) error
 }
-type gatewayModelInjection struct {
-	defaultModel            string
-	codingAgentDefaultModel string
-	modelsJSON              string
-	reasoningJSON           string
-	reasoningControlJSON    string
-}
-
 type InstanceServiceOption func(*instanceService)
 
 func WithPrivilegedInstancePods(allowed bool) InstanceServiceOption {
 	return func(s *instanceService) {
 		s.allowPrivilegedPods = allowed
+	}
+}
+
+func WithExpandedLLMModelCatalog(catalog ExpandedLLMModelCatalog) InstanceServiceOption {
+	return func(s *instanceService) {
+		s.expandedModelCatalog = catalog
 	}
 }
 
@@ -400,6 +410,9 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 	}
 
 	instanceMode := resolveCreateInstanceMode(req)
+	if err := validateCreateInstanceDiskGB(req, instanceMode); err != nil {
+		return nil, err
+	}
 	if err := validateWindowsWorkbuddyRequest(req); err != nil {
 		return nil, err
 	}
@@ -504,7 +517,11 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 		runtimeType = modeRuntimeType
 	}
 	if (req.ImageRegistry == nil || strings.TrimSpace(*req.ImageRegistry) == "") && (req.ImageTag == nil || strings.TrimSpace(*req.ImageTag) == "") {
-		if selection, ok := runtimeImageOverride(req.Type); ok {
+		selection, ok := runtimeImageOverride(req.Type)
+		if modeRuntimeType != "" {
+			selection, ok = RuntimeImageForBackend(req.Type, modeRuntimeType)
+		}
+		if ok {
 			image := selection.Image
 			req.ImageRegistry = &image
 			req.ImageTag = nil
@@ -1010,6 +1027,31 @@ func (s *instanceService) GetByUserID(userID int, offset, limit int) ([]models.I
 	return instances, total, nil
 }
 
+func (s *instanceService) GetFilteredByUserID(userID int, filter models.InstanceListFilter, offset, limit int) ([]models.Instance, int, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support filtered queries")
+	}
+	instances, err := repo.GetFilteredByUserID(userID, filter, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountFilteredByUserID(userID, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+func (s *instanceService) GetSummaryByUserID(userID int) (*models.InstanceSummary, error) {
+	repo, ok := s.instanceRepo.(repository.InstanceQueryRepository)
+	if !ok {
+		return nil, fmt.Errorf("instance repository does not support summary queries")
+	}
+	return repo.SummarizeByUserID(userID)
+}
+
 // GetLiteByUserIDAndOwner returns only the caller's Lite instances whose owner
 // matches exactly. Owner is normalized before it reaches the repository.
 func (s *instanceService) GetLiteByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
@@ -1054,9 +1096,30 @@ func (s *instanceService) GetWorkbuddyProByUserIDAndOwner(userID int, owner stri
 	return instances, total, nil
 }
 
-// GetNorthboundByUserIDAndOwner returns the unified collection exposed by the
-// legacy /lite-instances northbound path: managed Lite runtimes plus Linux
-// WorkBuddy Pro. Mode selection remains an internal provisioning concern.
+func (s *instanceService) GetProByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
+	normalized, err := NormalizeInstanceOwner(owner)
+	if err != nil {
+		return nil, 0, err
+	}
+	repo, ok := s.instanceRepo.(repository.InstanceOwnerRepository)
+	if !ok {
+		return nil, 0, fmt.Errorf("instance repository does not support owner filtering")
+	}
+	instances, err := repo.GetProByUserIDAndOwner(userID, normalized, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	hydrateInstancesDesktopStreamProfile(instances)
+	total, err := repo.CountProByUserIDAndOwner(userID, normalized)
+	if err != nil {
+		return nil, 0, err
+	}
+	return instances, total, nil
+}
+
+// GetNorthboundByUserIDAndOwner returns the compatibility unified collection
+// exposed by /lite-instances: managed Lite runtimes plus every Pro runtime
+// supported by the northbound contract.
 func (s *instanceService) GetNorthboundByUserIDAndOwner(userID int, owner string, offset, limit int) ([]models.Instance, int, error) {
 	normalized, err := NormalizeInstanceOwner(owner)
 	if err != nil {
@@ -1502,6 +1565,7 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 		"CLAWMANAGER_LLM_BASE_URL":          baseURL,
 		"CLAWMANAGER_LLM_API_KEY":           token,
 		"CLAWMANAGER_LLM_MODEL":             modelInjection.modelsJSON,
+		"CLAWMANAGER_LLM_PROVIDER_MODELS":   modelInjection.providerModelsJSON,
 		"CLAWMANAGER_LLM_REASONING":         modelInjection.reasoningJSON,
 		"CLAWMANAGER_LLM_REASONING_CONTROL": modelInjection.reasoningControlJSON,
 		"CLAWMANAGER_LLM_PROVIDER":          "openai-compatible",
@@ -1517,7 +1581,7 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 	if strings.EqualFold(strings.TrimSpace(instance.Type), RuntimeTypeOpenCode) {
 		env["OPENCODE_SERVER_PASSWORD"] = token
 		env["OPENCODE_SERVER_USERNAME"] = "opencode"
-		configContent, err := buildOpenCodeGatewayConfig(modelInjection.modelsJSON)
+		configContent, err := buildOpenCodeGatewayConfig(modelInjection.providerModelsJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build opencode gateway config: %w", err)
 		}
@@ -1534,50 +1598,6 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 		}
 	}
 	return env, nil
-}
-
-// buildOpenCodeGatewayConfig translates ClawManager's active model catalogue
-// into OpenCode's custom-provider format. The gateway's "auto" model is always
-// included, so a newly-created Lite instance is usable even when the active
-// catalogue contains only aliases added after the runtime image was built.
-func buildOpenCodeGatewayConfig(modelsJSON string) (string, error) {
-	var modelIDs []string
-	if err := json.Unmarshal([]byte(modelsJSON), &modelIDs); err != nil {
-		return "", fmt.Errorf("invalid gateway model catalogue: %w", err)
-	}
-
-	models := make(map[string]map[string]string, len(modelIDs))
-	for _, modelID := range modelIDs {
-		modelID = strings.TrimSpace(modelID)
-		if modelID == "" {
-			continue
-		}
-		models[modelID] = map[string]string{"name": modelID}
-	}
-	if _, ok := models["auto"]; !ok {
-		models["auto"] = map[string]string{"name": "auto"}
-	}
-
-	config := map[string]interface{}{
-		"$schema": "https://opencode.ai/config.json",
-		"model":   "clawmanager/auto",
-		"provider": map[string]interface{}{
-			"clawmanager": map[string]interface{}{
-				"npm":  "@ai-sdk/openai-compatible",
-				"name": "ClawManager AI Gateway",
-				"options": map[string]string{
-					"baseURL": "{env:CLAWMANAGER_LLM_BASE_URL}",
-					"apiKey":  "{env:CLAWMANAGER_LLM_API_KEY}",
-				},
-				"models": models,
-			},
-		},
-	}
-	raw, err := json.Marshal(config)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
 }
 
 func (s *instanceService) BuildGatewayEnv(instance *models.Instance) (map[string]string, error) {
@@ -1845,75 +1865,6 @@ fi
 chown -R 1000:1000 "$target" || true`,
 		},
 	}
-}
-
-func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection, error) {
-	if s.llmModelRepo == nil {
-		return nil, fmt.Errorf("llm model repository not configured")
-	}
-
-	items, err := s.llmModelRepo.ListActive()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list active models: %w", err)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("no active models are configured")
-	}
-	items = models.ExpandLLMModelCatalog(items)
-
-	modelsForInjection := []string{"auto"}
-	reasoningForInjection := map[string]bool{"auto": false}
-	reasoningControlForInjection := map[string]string{"auto": models.ReasoningControlNone}
-	seen := map[string]struct{}{
-		"auto": {},
-	}
-
-	for _, item := range items {
-		displayName := strings.TrimSpace(item.DisplayName)
-		if displayName == "" {
-			displayName = strings.TrimSpace(item.ProviderModelName)
-		}
-		if displayName == "" {
-			continue
-		}
-
-		normalizedName := strings.ToLower(displayName)
-		if _, exists := seen[normalizedName]; exists {
-			continue
-		}
-		seen[normalizedName] = struct{}{}
-		modelsForInjection = append(modelsForInjection, displayName)
-		models.PopulateLLMReasoningCapability(&item)
-		reasoningForInjection[displayName] = item.SupportsReasoning && item.ReasoningEnabled
-		reasoningControlForInjection[displayName] = item.ReasoningControl
-
-	}
-
-	rawModels, err := json.Marshal(modelsForInjection)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode gateway model list: %w", err)
-	}
-	rawReasoning, err := json.Marshal(reasoningForInjection)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode gateway model reasoning settings: %w", err)
-	}
-	rawReasoningControl, err := json.Marshal(reasoningControlForInjection)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode gateway model reasoning controls: %w", err)
-	}
-
-	return &gatewayModelInjection{
-		defaultModel: "auto",
-		codingAgentDefaultModel: func() string {
-			if len(modelsForInjection) > 1 {
-				return modelsForInjection[1]
-			}
-			return ""
-		}(),
-		modelsJSON:           string(rawModels),
-		reasoningJSON:        string(rawReasoning),
-		reasoningControlJSON: string(rawReasoningControl),
-	}, nil
 }
 
 func mergeEnvMaps(base map[string]string, overlay map[string]string) map[string]string {
@@ -2990,6 +2941,24 @@ func modeForExistingInstance(instance *models.Instance) string {
 func instanceModeUsesDedicatedResources(mode string) bool {
 	normalized, ok := NormalizeInstanceMode(mode)
 	return ok && normalized == InstanceModePro
+}
+
+func validateCreateInstanceDiskGB(req CreateInstanceRequest, mode string) error {
+	normalizedMode, ok := NormalizeInstanceMode(mode)
+	if !ok {
+		return fmt.Errorf("unsupported instance mode %q", mode)
+	}
+	minimum := DefaultLiteDiskGB
+	if normalizedMode == InstanceModePro {
+		minimum = MinimumProDiskGB
+	}
+	if req.DiskGB < minimum {
+		return fmt.Errorf("%s disk must be at least %dGB", normalizedMode, minimum)
+	}
+	if req.DiskGB > 1000 {
+		return fmt.Errorf("disk must not exceed 1000GB")
+	}
+	return nil
 }
 
 func (s *instanceService) enforceInstanceModeLimits(ctx context.Context, mode string, cpuCores float64, memoryGB, storageGB, gpuCount int) error {

@@ -21,6 +21,9 @@ const (
 	northboundWorkbuddyCPUCores = 4
 	northboundWorkbuddyMemoryGB = 8
 	northboundWorkbuddyDiskGB   = 40
+	northboundProCPUCores       = 4
+	northboundProMemoryGB       = 8
+	northboundProDiskGB         = 50
 )
 
 type CoreService struct {
@@ -150,10 +153,47 @@ func isSupportedNorthboundType(instanceType string) bool {
 	}
 }
 
+func isSupportedNorthboundProType(instanceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(instanceType)) {
+	case services.RuntimeTypeOpenClaw,
+		services.RuntimeTypeHermes,
+		services.RuntimeTypeOpenCode,
+		"workbuddy":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string, req CreateProInstanceRequest) (*models.NorthboundOperation, bool, error) {
-	// Keep /pro-instances as a compatibility alias, but place every newly
-	// submitted request in the canonical idempotency and operation domain.
-	return s.SubmitCreate(principal, idempotencyKey, CreateLiteInstanceRequest(req))
+	req.Name = strings.TrimSpace(req.Name)
+	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
+	owner, ownerErr := services.NormalizeInstanceOwner(req.Owner)
+	if ownerErr != nil {
+		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
+	}
+	req.Owner = owner
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundProType(req.Type) {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", nil)
+	}
+	if req.Description != nil && len(*req.Description) > 2000 {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Description is too long", nil)
+	}
+	// WorkBuddy remains in the canonical unified/Lite operation domain so old
+	// and new clients cannot create duplicates by switching collection paths.
+	if req.Type == "workbuddy" {
+		return s.SubmitCreate(principal, idempotencyKey, CreateLiteInstanceRequest(req))
+	}
+	if _, ok := services.RuntimeImageForBackend(req.Type, services.RuntimeBackendDesktop); !ok {
+		return nil, false, apiError(422, "PRO_IMAGE_NOT_CONFIGURED", "An enabled Pro image is not configured for this runtime", nil)
+	}
+	return s.submitCreateOperation(
+		principal,
+		idempotencyKey,
+		req,
+		OperationTypeProInstance,
+		"Too many unfinished Pro instance operations",
+	)
 }
 
 func (s *CoreService) submitCreateOperation(
@@ -248,7 +288,7 @@ func (s *CoreService) GetProInstance(userID, instanceID int) (*models.Instance, 
 	if err != nil {
 		return nil, err
 	}
-	if item == nil || item.UserID != userID || !isWorkbuddyLinuxPro(item) {
+	if item == nil || item.UserID != userID || !isSupportedNorthboundProInstance(item) {
 		return nil, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
 	}
 	return item, nil
@@ -420,13 +460,13 @@ func (s *CoreService) ListProInstances(userID int, owner string, page, limit int
 	if !ok {
 		return nil, 0, fmt.Errorf("instance service does not support owner filtering")
 	}
-	items, total, err := ownerService.GetWorkbuddyProByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
+	items, total, err := ownerService.GetProByUserIDAndOwner(userID, normalizedOwner, (page-1)*limit, limit)
 	if err != nil {
 		return nil, 0, err
 	}
 	filtered := make([]LiteInstanceResponse, 0, len(items))
 	for idx := range items {
-		if isWorkbuddyLinuxPro(&items[idx]) {
+		if isSupportedNorthboundProInstance(&items[idx]) {
 			filtered = append(filtered, liteInstanceResponse(&items[idx]))
 		}
 	}
@@ -452,11 +492,28 @@ func isWorkbuddyLinuxPro(item *models.Instance) bool {
 	return ok && mode == services.InstanceModePro
 }
 
+func isSupportedNorthboundProInstance(item *models.Instance) bool {
+	if item == nil || !isSupportedNorthboundProType(item.Type) {
+		return false
+	}
+	mode, ok := services.NormalizeInstanceMode(item.InstanceMode)
+	if !ok || mode != services.InstanceModePro {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Type), "workbuddy") {
+		return strings.EqualFold(strings.TrimSpace(item.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	}
+	return true
+}
+
 func isSupportedNorthboundInstance(item *models.Instance) bool {
 	if item == nil {
 		return false
 	}
 	if isWorkbuddyLinuxPro(item) {
+		return true
+	}
+	if isSupportedNorthboundProInstance(item) {
 		return true
 	}
 	return isLite(item) && isSupportedNorthboundType(item.Type) &&
@@ -583,7 +640,8 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 			return services.CreateInstanceRequest{}, "", err
 		}
 		if strings.EqualFold(strings.TrimSpace(request.Type), "workbuddy") {
-			return proCreateRequest(item, CreateProInstanceRequest(request)), "northbound.pro.create", nil
+			createRequest, err := proCreateRequest(item, CreateProInstanceRequest(request))
+			return createRequest, "northbound.pro.create", err
 		}
 		return liteCreateRequest(item, request), "northbound.lite.create", nil
 	case OperationTypeProInstance:
@@ -591,10 +649,11 @@ func operationCreateRequest(item *models.NorthboundOperation) (services.CreateIn
 		if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil {
 			return services.CreateInstanceRequest{}, "", err
 		}
-		if strings.ToLower(strings.TrimSpace(request.Type)) != "workbuddy" {
+		if !isSupportedNorthboundProType(request.Type) {
 			return services.CreateInstanceRequest{}, "", errors.New("unsupported Pro instance type")
 		}
-		return proCreateRequest(item, request), "northbound.pro.create", nil
+		createRequest, err := proCreateRequest(item, request)
+		return createRequest, "northbound.pro.create", err
 	default:
 		return services.CreateInstanceRequest{}, "", fmt.Errorf("unsupported operation type %q", item.OperationType)
 	}
@@ -611,7 +670,7 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 		RuntimeType:             services.RuntimeBackendGateway,
 		CPUCores:                2,
 		MemoryGB:                4,
-		DiskGB:                  20,
+		DiskGB:                  services.DefaultLiteDiskGB,
 		GPUEnabled:              false,
 		GPUCount:                0,
 		OSType:                  request.Type,
@@ -620,27 +679,57 @@ func liteCreateRequest(item *models.NorthboundOperation, request CreateLiteInsta
 	}
 }
 
-func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanceRequest) services.CreateInstanceRequest {
-	image := services.LinuxWorkbuddyImage()
+func proCreateRequest(item *models.NorthboundOperation, request CreateProInstanceRequest) (services.CreateInstanceRequest, error) {
+	instanceType := strings.ToLower(strings.TrimSpace(request.Type))
+	if instanceType == "workbuddy" {
+		image := services.LinuxWorkbuddyImage()
+		return services.CreateInstanceRequest{
+			Name:                    request.Name,
+			Owner:                   &request.Owner,
+			Description:             request.Description,
+			Type:                    "workbuddy",
+			RuntimeVariant:          services.WorkbuddyRuntimeLinux,
+			Mode:                    services.InstanceModePro,
+			InstanceMode:            services.InstanceModePro,
+			RuntimeType:             services.RuntimeBackendDesktop,
+			CPUCores:                northboundWorkbuddyCPUCores,
+			MemoryGB:                northboundWorkbuddyMemoryGB,
+			DiskGB:                  northboundWorkbuddyDiskGB,
+			GPUEnabled:              false,
+			GPUCount:                0,
+			OSType:                  "workbuddy",
+			OSVersion:               "latest",
+			ImageRegistry:           &image,
+			ProvisioningOperationID: item.OperationID,
+		}, nil
+	}
+	if !isSupportedNorthboundProType(instanceType) {
+		return services.CreateInstanceRequest{}, errors.New("unsupported Pro instance type")
+	}
+	imageConfig, ok := services.RuntimeImageForBackend(instanceType, services.RuntimeBackendDesktop)
+	if !ok || strings.TrimSpace(imageConfig.Image) == "" {
+		return services.CreateInstanceRequest{}, fmt.Errorf("enabled Pro image is not configured for %s", instanceType)
+	}
+	image := strings.TrimSpace(imageConfig.Image)
 	return services.CreateInstanceRequest{
 		Name:                    request.Name,
 		Owner:                   &request.Owner,
 		Description:             request.Description,
-		Type:                    "workbuddy",
-		RuntimeVariant:          services.WorkbuddyRuntimeLinux,
+		Type:                    instanceType,
+		RuntimeVariant:          imageConfig.RuntimeVariant,
 		Mode:                    services.InstanceModePro,
 		InstanceMode:            services.InstanceModePro,
 		RuntimeType:             services.RuntimeBackendDesktop,
-		CPUCores:                northboundWorkbuddyCPUCores,
-		MemoryGB:                northboundWorkbuddyMemoryGB,
-		DiskGB:                  northboundWorkbuddyDiskGB,
+		CPUCores:                northboundProCPUCores,
+		MemoryGB:                northboundProMemoryGB,
+		DiskGB:                  northboundProDiskGB,
 		GPUEnabled:              false,
 		GPUCount:                0,
-		OSType:                  "workbuddy",
+		OSType:                  instanceType,
 		OSVersion:               "latest",
 		ImageRegistry:           &image,
 		ProvisioningOperationID: item.OperationID,
-	}
+	}, nil
 }
 
 func classifyCreateError(err error, instanceMode string) (string, string, bool) {

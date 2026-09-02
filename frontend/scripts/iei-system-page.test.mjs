@@ -8,6 +8,7 @@ const router = read("../src/router/index.tsx");
 const listPage = read("../src/pages/instances/IEISystemListInstancesPage.tsx");
 const detailPage = read("../src/pages/instances/IEISystemInstancePage.tsx");
 const service = read("../src/services/ieiSystemService.ts");
+const renewalHook = read("../src/hooks/useExpiringResourceRenewal.ts");
 const workspaceManager = read("../src/components/WorkspaceFileManager.tsx");
 const translations = read("../src/lib/i18n.ts");
 const runtimeCatalog = read("../src/lib/ieiRuntimeCatalog.ts");
@@ -27,6 +28,7 @@ assert(
 assert(
   service.includes('axios.create({') &&
     service.includes("withCredentials: true") &&
+    service.includes('post("/session/refresh")') &&
     !service.includes('from "./api"') &&
     !service.toLowerCase().includes("share"),
   "IEI access must use a dedicated cookie client and must not reuse ShareLink or normal JWT auth.",
@@ -89,6 +91,20 @@ assert(
     (mockServer.match(/type: "workbuddy"/g) ?? []).length === 2 &&
     (mockServer.match(/runtime_variant: "linux"/g) ?? []).length === 2,
   "The local IEI test server must provide two instances for every supported runtime and Linux-only WorkBuddy data.",
+);
+
+assert(
+  listPage.includes("useExpiringResourceRenewal") &&
+    listPage.includes("refreshSession()") &&
+    detailPage.includes("refreshSession()") &&
+    detailPage.includes("useExpiringResourceRenewal") &&
+    detailPage.includes("refreshDedicatedRuntimeCookie") &&
+    detailPage.includes("__clawmanager_access_refresh") &&
+    detailPage.includes('mode: "no-cors"') &&
+    renewalHook.includes('"visibilitychange"') &&
+    renewalHook.includes('"focus"') &&
+    mockServer.includes('/api/v1/ieisystem/session/refresh'),
+  "Active IEI pages must renew the local session and dedicated runtime cookie without reloading the agent iframe.",
 );
 
 assert(

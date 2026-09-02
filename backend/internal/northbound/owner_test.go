@@ -10,6 +10,24 @@ import (
 
 func ownerPointer(value string) *string { return &value }
 
+type northboundRuntimeImageProviderStub struct {
+	images map[string]services.RuntimeImageConfig
+}
+
+func (s northboundRuntimeImageProviderStub) GetRuntimeImage(instanceType string) (services.RuntimeImageConfig, bool) {
+	config, ok := s.images[instanceType]
+	return config, ok
+}
+
+func (s northboundRuntimeImageProviderStub) GetRuntimeImageForRuntimeType(instanceType, runtimeType string) (services.RuntimeImageConfig, bool) {
+	config, ok := s.images[instanceType+":"+runtimeType]
+	return config, ok
+}
+
+func (s northboundRuntimeImageProviderStub) GetRuntimeImageForImage(string, string) (services.RuntimeImageConfig, bool) {
+	return services.RuntimeImageConfig{}, false
+}
+
 func TestCoreServiceListsOnlyExactOwnerLiteInstances(t *testing.T) {
 	service := &CoreService{instances: &northboundInstanceStub{items: map[int]*models.Instance{
 		1: {ID: 1, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite, Name: "lite-match"},
@@ -38,20 +56,36 @@ func TestCoreServiceListsOnlyExactOwnerLiteInstances(t *testing.T) {
 	}
 }
 
-func TestCoreServiceListsOnlyExactOwnerLinuxWorkbuddyProInstances(t *testing.T) {
+func TestCoreServiceListsOnlyExactOwnerSupportedProInstances(t *testing.T) {
 	service := &CoreService{instances: &northboundInstanceStub{items: map[int]*models.Instance{
 		1: {ID: 1, UserID: 7, Owner: ownerPointer("tenant-a"), Type: "workbuddy", RuntimeVariant: "linux", InstanceMode: services.InstanceModePro, Name: "match"},
 		2: {ID: 2, UserID: 7, Owner: ownerPointer("tenant-a"), Type: "workbuddy", RuntimeVariant: "windows", InstanceMode: services.InstanceModePro, Name: "windows"},
 		3: {ID: 3, UserID: 7, Owner: ownerPointer("tenant-a"), Type: "workbuddy", RuntimeVariant: "linux", InstanceMode: services.InstanceModeLite, Name: "lite"},
 		4: {ID: 4, UserID: 8, Owner: ownerPointer("tenant-a"), Type: "workbuddy", RuntimeVariant: "linux", InstanceMode: services.InstanceModePro, Name: "other-user"},
+		5: {ID: 5, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModePro, Name: "openclaw-pro"},
+		6: {ID: 6, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeHermes, InstanceMode: services.InstanceModePro, Name: "hermes-pro"},
+		7: {ID: 7, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeOpenCode, InstanceMode: services.InstanceModePro, Name: "opencode-pro"},
+		8: {ID: 8, UserID: 7, Owner: ownerPointer("tenant-a"), Type: services.RuntimeTypeDeepSeekHarness, InstanceMode: services.InstanceModePro, Name: "unsupported-pro"},
 	}}}
 
 	items, total, err := service.ListProInstances(7, " tenant-a ", 1, 20)
 	if err != nil {
 		t.Fatalf("ListProInstances returned error: %v", err)
 	}
-	if total != 1 || len(items) != 1 || items[0].ID != 1 {
+	if total != 4 || len(items) != 4 {
 		t.Fatalf("unexpected owner-scoped Pro instances: total=%d items=%+v", total, items)
+	}
+	seen := map[int]bool{}
+	for _, item := range items {
+		seen[item.ID] = true
+		if item.InstanceMode != services.InstanceModePro || item.RuntimeType != "" && item.RuntimeType != services.RuntimeBackendDesktop {
+			t.Fatalf("unexpected Pro response: %+v", item)
+		}
+	}
+	for _, id := range []int{1, 5, 6, 7} {
+		if !seen[id] {
+			t.Fatalf("supported Pro instance %d missing from response: %+v", id, items)
+		}
 	}
 }
 
@@ -92,6 +126,9 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 		if request.Type != instanceType || request.InstanceMode != services.InstanceModeLite || request.RuntimeType != services.RuntimeBackendGateway {
 			t.Fatalf("unexpected %s Lite request: %+v", instanceType, request)
 		}
+		if request.DiskGB != services.DefaultLiteDiskGB {
+			t.Fatalf("%s Lite disk = %dGiB, want %dGiB", instanceType, request.DiskGB, services.DefaultLiteDiskGB)
+		}
 	}
 	if !isSupportedNorthboundType("workbuddy") {
 		t.Fatal("workbuddy must be accepted by the unified northbound contract")
@@ -105,10 +142,13 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 
 func TestProCreateRequestUsesFixedLinuxWorkbuddyPreset(t *testing.T) {
 	t.Setenv("CLAWMANAGER_WORKBUDDY_LINUX_IMAGE", "registry.example/workbuddy-linux:test")
-	request := proCreateRequest(
+	request, err := proCreateRequest(
 		&models.NorthboundOperation{OperationID: "op_pro_owner_test"},
 		CreateProInstanceRequest{Name: "workbuddy-test", Owner: "tenant-a", Type: "workbuddy"},
 	)
+	if err != nil {
+		t.Fatalf("proCreateRequest returned error: %v", err)
+	}
 	if request.Owner == nil || *request.Owner != "tenant-a" {
 		t.Fatalf("owner = %v, want tenant-a", request.Owner)
 	}
@@ -125,6 +165,59 @@ func TestProCreateRequestUsesFixedLinuxWorkbuddyPreset(t *testing.T) {
 	}
 	if request.ProvisioningOperationID != "op_pro_owner_test" {
 		t.Fatalf("operation ID = %q", request.ProvisioningOperationID)
+	}
+}
+
+func TestProCreateRequestSupportsManagedDesktopRuntimes(t *testing.T) {
+	services.SetRuntimeImageSettingsProvider(nil)
+	for _, instanceType := range []string{
+		services.RuntimeTypeOpenClaw,
+		services.RuntimeTypeHermes,
+		services.RuntimeTypeOpenCode,
+	} {
+		if !isSupportedNorthboundProType(instanceType) {
+			t.Fatalf("runtime %q must be accepted by the northbound Pro contract", instanceType)
+		}
+		request, err := proCreateRequest(
+			&models.NorthboundOperation{OperationID: "op_pro_" + instanceType},
+			CreateProInstanceRequest{Name: instanceType + "-pro", Owner: "tenant-a", Type: instanceType},
+		)
+		if err != nil {
+			t.Fatalf("proCreateRequest(%q) returned error: %v", instanceType, err)
+		}
+		if request.Type != instanceType || request.Mode != services.InstanceModePro ||
+			request.InstanceMode != services.InstanceModePro || request.RuntimeType != services.RuntimeBackendDesktop {
+			t.Fatalf("unexpected %s Pro request: %+v", instanceType, request)
+		}
+		if request.ImageRegistry == nil || strings.Contains(strings.ToLower(*request.ImageRegistry), "-lite") {
+			t.Fatalf("%s Pro request selected an invalid image: %v", instanceType, request.ImageRegistry)
+		}
+	}
+	for _, instanceType := range []string{services.RuntimeTypeDeepSeekHarness, "codex", "claude-code", "custom"} {
+		if isSupportedNorthboundProType(instanceType) {
+			t.Fatalf("runtime %q must not be accepted by this Pro contract", instanceType)
+		}
+	}
+}
+
+func TestProCreateRequestUsesSavedClawManagerDesktopImage(t *testing.T) {
+	services.SetRuntimeImageSettingsProvider(northboundRuntimeImageProviderStub{images: map[string]services.RuntimeImageConfig{
+		"opencode:desktop": {
+			Image:       "10.130.15.40:5000/agentsruntime/opencode-pro:saved",
+			RuntimeType: services.RuntimeBackendDesktop,
+		},
+	}})
+	t.Cleanup(func() { services.SetRuntimeImageSettingsProvider(nil) })
+
+	request, err := proCreateRequest(
+		&models.NorthboundOperation{OperationID: "op_saved_image"},
+		CreateProInstanceRequest{Name: "opencode-pro", Owner: "tenant-a", Type: services.RuntimeTypeOpenCode},
+	)
+	if err != nil {
+		t.Fatalf("proCreateRequest returned error: %v", err)
+	}
+	if request.ImageRegistry == nil || *request.ImageRegistry != "10.130.15.40:5000/agentsruntime/opencode-pro:saved" {
+		t.Fatalf("northbound Pro request did not use the saved desktop image: %v", request.ImageRegistry)
 	}
 }
 
@@ -153,5 +246,13 @@ func TestOperationCreateRequestSelectsModeFromType(t *testing.T) {
 	})
 	if err != nil || pro.InstanceMode != services.InstanceModePro || pro.RuntimeVariant != services.WorkbuddyRuntimeLinux {
 		t.Fatalf("unexpected Pro operation request: request=%+v err=%v", pro, err)
+	}
+	openCodePro, _, err := operationCreateRequest(&models.NorthboundOperation{
+		OperationID:    "op_opencode_pro",
+		OperationType:  OperationTypeProInstance,
+		RequestPayload: `{"name":"opencode-pro","owner":"tenant-a","type":"opencode"}`,
+	})
+	if err != nil || openCodePro.InstanceMode != services.InstanceModePro || openCodePro.RuntimeType != services.RuntimeBackendDesktop {
+		t.Fatalf("unexpected OpenCode Pro operation request: request=%+v err=%v", openCodePro, err)
 	}
 }

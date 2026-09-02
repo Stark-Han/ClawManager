@@ -65,6 +65,31 @@ func TestIEISSOServiceAcceptsExternalTokenAt24HourBoundary(t *testing.T) {
 	}
 }
 
+func TestIEISSOServiceRenewsLocalSessionWithoutChangingBinding(t *testing.T) {
+	service, err := NewIEISSOService(testIEISystemConfig())
+	if err != nil {
+		t.Fatalf("NewIEISSOService() error = %v", err)
+	}
+	base := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return base }
+	initial, err := service.issueSession("owner@example.com")
+	if err != nil {
+		t.Fatalf("issueSession() error = %v", err)
+	}
+
+	service.now = func() time.Time { return base.Add(10 * time.Minute) }
+	renewed, err := service.RenewSession(initial.Token)
+	if err != nil {
+		t.Fatalf("RenewSession() error = %v", err)
+	}
+	if renewed.Email != initial.Email || renewed.SessionID != initial.SessionID {
+		t.Fatalf("renewed identity/binding = %#v, initial = %#v", renewed, initial)
+	}
+	if want := initial.ExpiresAt.Add(10 * time.Minute); !renewed.ExpiresAt.Equal(want) {
+		t.Fatalf("renewed expiry = %s, want %s", renewed.ExpiresAt, want)
+	}
+}
+
 func TestIEISSOServiceRejectsExpiredOrTamperedExternalToken(t *testing.T) {
 	service, err := NewIEISSOService(testIEISystemConfig())
 	if err != nil {

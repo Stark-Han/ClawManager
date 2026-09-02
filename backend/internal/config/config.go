@@ -56,11 +56,15 @@ type ServerConfig struct {
 
 // DatabaseConfig holds database-related configuration
 type DatabaseConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
+	Host            string        `yaml:"host"`
+	Port            int           `yaml:"port"`
+	User            string        `yaml:"user"`
+	Password        string        `yaml:"password"`
+	Database        string        `yaml:"database"`
+	MaxOpenConns    int           `yaml:"maxOpenConns"`
+	MaxIdleConns    int           `yaml:"maxIdleConns"`
+	ConnMaxLifetime time.Duration `yaml:"connMaxLifetime"`
+	ConnMaxIdleTime time.Duration `yaml:"connMaxIdleTime"`
 }
 
 // JWTConfig holds JWT-related configuration
@@ -220,6 +224,7 @@ type RuntimePoolConfig struct {
 	OpenCodeImage             string        `yaml:"openCodeImage"`
 	MaxGatewaysPerPod         int           `yaml:"maxGatewaysPerPod"`
 	GatewayStartInFlightLimit int           `yaml:"gatewayStartInFlightLimit"`
+	SkillReportPersistence    bool          `yaml:"skillReportPersistence"`
 	GatewayPortStart          int           `yaml:"gatewayPortStart"`
 	GatewayPortEnd            int           `yaml:"gatewayPortEnd"`
 }
@@ -267,11 +272,15 @@ func Load() (*Config, error) {
 			Mode:    "debug",
 		},
 		Database: DatabaseConfig{
-			Host:     "localhost",
-			Port:     3306,
-			User:     "clawreef",
-			Password: "clawreef123",
-			Database: "clawreef",
+			Host:            "localhost",
+			Port:            3306,
+			User:            "clawreef",
+			Password:        "clawreef123",
+			Database:        "clawreef",
+			MaxOpenConns:    50,
+			MaxIdleConns:    25,
+			ConnMaxLifetime: 30 * time.Minute,
+			ConnMaxIdleTime: 5 * time.Minute,
 		},
 		JWT: JWTConfig{
 			Secret:        getEnv("JWT_SECRET", "clawreef-secret-key-change-in-production"),
@@ -294,7 +303,7 @@ func Load() (*Config, error) {
 		IEISystem: IEISystemConfig{
 			Enabled:      getEnvBool("IEISYSTEM_SSO_ENABLED", false),
 			TokenTTL:     getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", 24*time.Hour),
-			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 30*time.Minute),
+			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 24*time.Hour),
 			Timezone:     getEnv("IEISYSTEM_SSO_TIMEZONE", "Asia/Shanghai"),
 			CookieSecure: getEnvBool("IEISYSTEM_COOKIE_SECURE", true),
 		},
@@ -364,6 +373,7 @@ func Load() (*Config, error) {
 			OpenCodeImage:             getEnv("OPENCODE_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
 			MaxGatewaysPerPod:         getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),
 			GatewayStartInFlightLimit: getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", 32),
+			SkillReportPersistence:    getEnvBool("SKILL_REPORT_PERSISTENCE_ENABLED", true),
 			GatewayPortStart:          getEnvInt("RUNTIME_GATEWAY_PORT_START", 20000),
 			GatewayPortEnd:            getEnvInt("RUNTIME_GATEWAY_PORT_END", 20299),
 		},
@@ -467,6 +477,10 @@ func applyEnvOverrides(config *Config) {
 	if db := os.Getenv("DB_NAME"); db != "" {
 		config.Database.Database = db
 	}
+	config.Database.MaxOpenConns = getEnvInt("DB_MAX_OPEN_CONNS", config.Database.MaxOpenConns)
+	config.Database.MaxIdleConns = getEnvInt("DB_MAX_IDLE_CONNS", config.Database.MaxIdleConns)
+	config.Database.ConnMaxLifetime = getEnvDuration("DB_CONN_MAX_LIFETIME", config.Database.ConnMaxLifetime)
+	config.Database.ConnMaxIdleTime = getEnvDuration("DB_CONN_MAX_IDLE_TIME", config.Database.ConnMaxIdleTime)
 
 	// JWT config
 	if secret := os.Getenv("JWT_SECRET"); secret != "" {
@@ -572,6 +586,7 @@ func applyEnvOverrides(config *Config) {
 	config.Runtime.OpenCodeImage = getEnv("OPENCODE_RUNTIME_IMAGE", config.Runtime.OpenCodeImage)
 	config.Runtime.MaxGatewaysPerPod = getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", config.Runtime.MaxGatewaysPerPod)
 	config.Runtime.GatewayStartInFlightLimit = getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", config.Runtime.GatewayStartInFlightLimit)
+	config.Runtime.SkillReportPersistence = getEnvBool("SKILL_REPORT_PERSISTENCE_ENABLED", config.Runtime.SkillReportPersistence)
 	config.Runtime.GatewayPortStart = getEnvInt("RUNTIME_GATEWAY_PORT_START", config.Runtime.GatewayPortStart)
 	config.Runtime.GatewayPortEnd = getEnvInt("RUNTIME_GATEWAY_PORT_END", config.Runtime.GatewayPortEnd)
 	config.LeaderElection.Enabled = getEnvBool("CLAWMANAGER_LEADER_ELECTION", config.LeaderElection.Enabled)

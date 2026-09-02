@@ -165,7 +165,7 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
       responses:
         "200":
-          description: Paginated managed Lite instances and Linux WorkBuddy Pro instances
+          description: Compatibility unified view containing managed Lite instances plus supported Pro instances
           content:
             application/json:
               schema:
@@ -200,7 +200,7 @@ paths:
           schema: { type: integer, minimum: 1 }
       responses:
         "200":
-          description: Managed Lite instance or Linux WorkBuddy Pro instance
+          description: Managed Lite instance or supported Pro instance
           content:
             application/json:
               schema:
@@ -209,9 +209,8 @@ paths:
           $ref: "#/components/responses/NotFound"
   /api/northbound/v1/pro-instances:
     post:
-      summary: Submit a Linux WorkBuddy Pro provisioning operation
-      deprecated: true
-      description: Compatibility alias. New integrations should send `type=workbuddy` to `/api/northbound/v1/lite-instances`; both paths use the same canonical operation and idempotency domain.
+      summary: Submit a managed Pro provisioning operation
+      description: Creates OpenClaw, Hermes, or OpenCode in dedicated Pro/desktop mode using the enabled DESKTOP image saved in ClawManager system settings. WorkBuddy is also accepted for compatibility and shares its canonical idempotency domain with `POST /lite-instances`.
       operationId: createProInstance
       security:
         - bearerAuth: []
@@ -246,9 +245,8 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
     get:
-      summary: List the current user's Linux WorkBuddy Pro instances
-      deprecated: true
-      description: Compatibility view. New integrations should use `/api/northbound/v1/lite-instances`, which returns all supported runtimes for the owner.
+      summary: List the current user's supported Pro instances
+      description: Returns OpenClaw, Hermes, OpenCode, and Linux WorkBuddy Pro instances for the exact owner.
       operationId: listProInstances
       security:
         - bearerAuth: []
@@ -266,7 +264,7 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
       responses:
         "200":
-          description: Paginated Linux WorkBuddy Pro instances
+          description: Paginated supported Pro instances
           content:
             application/json:
               schema:
@@ -289,9 +287,7 @@ paths:
           $ref: "#/components/responses/ValidationError"
   /api/northbound/v1/pro-instances/{id}:
     get:
-      summary: Get one Linux WorkBuddy Pro instance owned by the current user
-      deprecated: true
-      description: Compatibility view. New integrations should use `/api/northbound/v1/lite-instances/{id}`.
+      summary: Get one supported Pro instance owned by the current user
       operationId: getProInstance
       security:
         - bearerAuth: []
@@ -302,7 +298,7 @@ paths:
           schema: { type: integer, minimum: 1 }
       responses:
         "200":
-          description: Linux WorkBuddy Pro instance
+          description: Supported Pro instance
           content:
             application/json:
               schema:
@@ -312,7 +308,7 @@ paths:
   /api/northbound/v1/lite-instances/{id}/external-access/password:
     post:
       summary: Enable password-protected ShareLink access for a supported instance
-      description: Requires `lite-instances:share-link:manage`. Supports the four managed Lite runtimes and Linux WorkBuddy Pro. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
+      description: Requires `lite-instances:share-link:manage`. Supports the managed Lite runtimes plus OpenClaw, Hermes, OpenCode, and Linux WorkBuddy Pro. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
       operationId: enableLiteInstanceShareLinkPassword
       security:
         - bearerAuth: []
@@ -539,8 +535,8 @@ components:
           description: Creator or business owner identifier using the same normalization and exact-query contract as CreateLiteInstance.
         type:
           type: string
-          const: workbuddy
-          description: WorkBuddy is provisioned as a Linux desktop with a server-controlled preset of 4 CPU, 8 GB memory, 40 GB storage, and no GPU.
+          enum: [openclaw, hermes, opencode, workbuddy]
+          description: Runtime family. The endpoint fixes Pro/desktop mode and resolves the enabled DESKTOP image saved in ClawManager. WorkBuddy remains Linux-only with 4 CPU, 8 GB memory, 40 GB storage, and no GPU; the other runtimes use 4 CPU, 8 GB memory, 50 GB storage, and no GPU.
         description:
           type: [string, "null"]
           maxLength: 2000
@@ -574,13 +570,16 @@ components:
           description: Controls only shared Workspace files. none hides files and denies all file APIs; read permits list, preview, and download; write additionally permits upload, mkdir, rename, and delete. Chat and the shared instance page remain accessible in every mode. Reset operations preserve this value; call the enable endpoint again to change it.
     LiteInstance:
       type: object
-      required: [id, name, owner, type, status, created_at, updated_at]
+      required: [id, name, owner, type, instance_mode, runtime_type, status, created_at, updated_at]
       properties:
         id: { type: integer, minimum: 1, description: Supported instance ID used by subsequent instance and ShareLink calls. }
         name: { type: string, description: Instance display name. }
         owner: { type: string, description: Creator or business owner identifier stored on this instance. }
         description: { type: [string, "null"], description: Optional instance metadata. }
         type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy], description: Managed runtime family; workbuddy identifies the fixed Linux Pro runtime. }
+        instance_mode: { type: string, enum: [lite, pro], description: Effective instance mode selected by the server. }
+        runtime_type: { type: string, enum: [gateway, desktop, shell], description: Effective runtime backend. }
+        runtime_variant: { type: string, enum: [linux, windows], description: Optional managed runtime variant. }
         status: { type: string, description: Runtime lifecycle status; callers should wait for running before treating the instance as ready. }
         availability: { type: string, enum: [available, starting, unavailable], description: Derived display state; running maps to available and creating maps to starting. }
         created_at: { type: string, format: date-time }
@@ -588,13 +587,16 @@ components:
         started_at: { type: [string, "null"], format: date-time }
     ProInstance:
       type: object
-      required: [id, name, owner, type, status, created_at, updated_at]
+      required: [id, name, owner, type, instance_mode, runtime_type, status, created_at, updated_at]
       properties:
         id: { type: integer, minimum: 1 }
         name: { type: string }
         owner: { type: string }
         description: { type: [string, "null"] }
-        type: { type: string, const: workbuddy }
+        type: { type: string, enum: [openclaw, hermes, opencode, workbuddy] }
+        instance_mode: { type: string, const: pro }
+        runtime_type: { type: string, const: desktop }
+        runtime_variant: { type: string, enum: [linux, windows] }
         status: { type: string }
         availability: { type: string, enum: [available, starting, unavailable] }
         created_at: { type: string, format: date-time }
@@ -606,7 +608,7 @@ components:
       properties:
         operation_id: { type: string, description: Opaque ID used to poll this operation. }
         status: { type: string, enum: [queued, processing, succeeded, failed] }
-        resource_type: { type: string, enum: [lite_instance, pro_instance], description: New submissions through either collection return lite_instance for compatibility with the original workflow. pro_instance remains readable for operations queued by older versions. }
+        resource_type: { type: string, enum: [lite_instance, pro_instance], description: Non-WorkBuddy requests submitted through `/pro-instances` return pro_instance. Lite requests and WorkBuddy's compatibility flow return lite_instance. }
         instance_id: { type: integer, minimum: 1, description: Present after success; use it for instance and ShareLink endpoints. }
         error_code: { type: string }
         error_message: { type: string }

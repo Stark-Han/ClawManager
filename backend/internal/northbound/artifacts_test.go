@@ -67,10 +67,10 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 	}
 	for _, required := range []string{
 		"required: [name, owner, type]",
-		"required: [id, name, owner, type, status, created_at, updated_at]",
+		"required: [id, name, owner, type, instance_mode, runtime_type, status, created_at, updated_at]",
 		"Exact, case-sensitive owner identifier",
-		"const: workbuddy",
-		"server-controlled preset of 4 CPU, 8 GB memory, 40 GB storage, and no GPU",
+		"enum: [openclaw, hermes, opencode, workbuddy]",
+		"resolves the enabled DESKTOP image saved in ClawManager",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("northbound OpenAPI is missing owner contract %q", required)

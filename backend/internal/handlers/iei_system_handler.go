@@ -99,6 +99,28 @@ func (h *IEISystemHandler) GetSession(c *gin.Context) {
 	})
 }
 
+// RefreshSession renews a still-valid ClawManager portal session. IEI is only
+// involved in the initial external-token exchange; active browser sessions are
+// maintained locally after that trust boundary has been crossed.
+func (h *IEISystemHandler) RefreshSession(c *gin.Context) {
+	h.noStore(c)
+	session, ok := h.requireSession(c)
+	if !ok {
+		return
+	}
+	renewed, err := h.sso.RenewSession(session.Token)
+	if err != nil {
+		h.clearSessionCookie(c)
+		utils.Error(c, http.StatusUnauthorized, "IEI system session is invalid or expired")
+		return
+	}
+	h.setSessionCookie(c, renewed.Token, renewed.ExpiresAt)
+	utils.Success(c, http.StatusOK, "IEI system session renewed", gin.H{
+		"owner":      renewed.Email,
+		"expires_at": renewed.ExpiresAt,
+	})
+}
+
 func (h *IEISystemHandler) DeleteSession(c *gin.Context) {
 	h.noStore(c)
 	h.clearSessionCookie(c)
@@ -152,6 +174,38 @@ func (h *IEISystemHandler) GetInstance(c *gin.Context) {
 	}
 	utils.Success(c, http.StatusOK, "IEI instance retrieved", gin.H{
 		"instance": newIEIInstanceView(instance),
+	})
+}
+
+// RestartInstance restarts an IEI-owned instance through the existing runtime
+// lifecycle service. The dedicated IEI session and exact owner match are
+// required; the normal user JWT handler must not be reused for this surface.
+func (h *IEISystemHandler) RestartInstance(c *gin.Context) {
+	h.noStore(c)
+	session, ok := h.requireSession(c)
+	if !ok {
+		return
+	}
+	instance, ok := h.requireOwnedSupportedInstance(c, session.Email)
+	if !ok {
+		return
+	}
+
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if status != "running" {
+		utils.Error(c, http.StatusConflict, "Instance is not running")
+		return
+	}
+	if err := h.instances.Restart(instance.ID); err != nil {
+		// Runtime lifecycle errors are operational failures. Do not expose
+		// Kubernetes resource names or internal endpoints on this public portal.
+		utils.Error(c, http.StatusServiceUnavailable, "Unable to restart instance")
+		return
+	}
+
+	utils.Success(c, http.StatusAccepted, "Instance restart submitted", gin.H{
+		"instance_id": instance.ID,
+		"status":      "restarting",
 	})
 }
 
@@ -342,8 +396,17 @@ func (h *IEISystemHandler) ownedSupportedInstance(instance *models.Instance, own
 			return false
 		}
 	}
-	return mode == services.InstanceModePro && typeName == "workbuddy" &&
-		strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	if mode != services.InstanceModePro {
+		return false
+	}
+	switch typeName {
+	case services.RuntimeTypeOpenClaw, services.RuntimeTypeHermes, services.RuntimeTypeOpenCode:
+		return true
+	case "workbuddy":
+		return strings.EqualFold(strings.TrimSpace(instance.RuntimeVariant), services.WorkbuddyRuntimeLinux)
+	default:
+		return false
+	}
 }
 
 func newIEIInstanceView(instance *models.Instance) ieiInstanceView {

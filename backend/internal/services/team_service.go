@@ -1350,6 +1350,10 @@ func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Tea
 		instanceMode = InstanceModeLite
 	}
 	runtimeBackendType, _ := RuntimeTypeForInstanceMode(instanceMode)
+	defaultDiskGB := 20
+	if instanceMode == InstanceModeLite {
+		defaultDiskGB = DefaultLiteDiskGB
+	}
 	memberEnv := s.teamMemberEnv(team, memberPlan)
 	if instanceMode == InstanceModeLite {
 		memberEnv["CLAWMANAGER_TEAM_SHARED_DIR"] = s.teamRuntimeSharedPath(team)
@@ -1372,7 +1376,7 @@ func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Tea
 		RuntimeType:          runtimeBackendType,
 		CPUCores:             defaultFloat(req.CPUCores, 2),
 		MemoryGB:             defaultInt(req.MemoryGB, 4),
-		DiskGB:               defaultInt(req.DiskGB, 20),
+		DiskGB:               defaultInt(req.DiskGB, defaultDiskGB),
 		GPUEnabled:           req.GPUEnabled,
 		GPUCount:             req.GPUCount,
 		OSType:               memberPlan.RuntimeType,

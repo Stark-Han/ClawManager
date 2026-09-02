@@ -36,6 +36,8 @@ const (
 	maxLiteBatchCreateCount       = 100
 	liteBatchCreateConcurrency    = 4
 	maxLiteBatchDeleteCount       = 100
+	dedicatedAccessRefreshPath    = "/__clawmanager_access_refresh"
+	dedicatedAccessRefreshHeader  = "X-ClawManager-Access-Refresh-Token"
 )
 
 // desktopDirectProxyEnv toggles embedding the instance Service "host:port" into
@@ -222,7 +224,7 @@ type CreateInstanceRequest struct {
 	DesktopStreamProfile string                       `json:"desktop_stream_profile,omitempty" binding:"omitempty,oneof=low standard high"`
 	CPUCores             float64                      `json:"cpu_cores" binding:"required,min=0.1,max=32"`
 	MemoryGB             int                          `json:"memory_gb" binding:"required,min=1,max=128"`
-	DiskGB               int                          `json:"disk_gb" binding:"required,min=10,max=1000"`
+	DiskGB               int                          `json:"disk_gb" binding:"required,min=5,max=1000"`
 	GPUEnabled           bool                         `json:"gpu_enabled"`
 	GPUCount             int                          `json:"gpu_count" binding:"min=0,max=4"`
 	OSType               string                       `json:"os_type" binding:"required"`
@@ -306,9 +308,13 @@ type RestartInstanceRequest struct {
 
 // ListInstancesRequest represents a list instances request
 type ListInstancesRequest struct {
-	Page   int    `form:"page,default=1"`
-	Limit  int    `form:"limit,default=20"`
-	Status string `form:"status,omitempty"`
+	Page         int    `form:"page,default=1"`
+	Limit        int    `form:"limit,default=20"`
+	Query        string `form:"query,omitempty"`
+	Type         string `form:"type,omitempty"`
+	InstanceMode string `form:"instance_mode,omitempty"`
+	Availability string `form:"availability,omitempty"`
+	Status       string `form:"status,omitempty"`
 }
 
 // ListInstances lists instances owned by the current user (workspace view).
@@ -325,11 +331,42 @@ func (h *InstanceHandler) ListInstances(c *gin.Context) {
 		utils.ValidationError(c, err)
 		return
 	}
+	if req.Page < 1 {
+		req.Page = 1
+	}
+	if req.Limit < 1 {
+		req.Limit = 20
+	}
+	if req.Limit > 100 {
+		req.Limit = 100
+	}
+	if mode := strings.ToLower(strings.TrimSpace(req.InstanceMode)); mode != "" && mode != services.InstanceModeLite && mode != services.InstanceModePro {
+		utils.ValidationError(c, fmt.Errorf("instance_mode must be lite or pro"))
+		return
+	}
+	if availability := strings.ToLower(strings.TrimSpace(req.Availability)); availability != "" && availability != "available" && availability != "starting" && availability != "unavailable" {
+		utils.ValidationError(c, fmt.Errorf("availability must be available, starting, or unavailable"))
+		return
+	}
 
 	// Calculate offset
 	offset := (req.Page - 1) * req.Limit
 
-	instances, total, err := h.instanceService.GetByUserID(userID.(int), offset, req.Limit)
+	queryService, supportsQuery := h.instanceService.(services.InstanceQueryService)
+	var instances []models.Instance
+	var total int
+	var err error
+	if supportsQuery {
+		instances, total, err = queryService.GetFilteredByUserID(userID.(int), models.InstanceListFilter{
+			Query:        req.Query,
+			Type:         req.Type,
+			InstanceMode: req.InstanceMode,
+			Availability: req.Availability,
+			Status:       req.Status,
+		}, offset, req.Limit)
+	} else {
+		instances, total, err = h.instanceService.GetByUserID(userID.(int), offset, req.Limit)
+	}
 	if err != nil {
 		utils.HandleError(c, err)
 		return
@@ -343,6 +380,22 @@ func (h *InstanceHandler) ListInstances(c *gin.Context) {
 	}
 
 	utils.Success(c, http.StatusOK, "Instances retrieved successfully", response)
+}
+
+// GetInstanceSummary returns aggregate instance counts for the current user.
+func (h *InstanceHandler) GetInstanceSummary(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	queryService, ok := h.instanceService.(services.InstanceQueryService)
+	if !ok {
+		utils.HandleError(c, fmt.Errorf("instance summary is not supported"))
+		return
+	}
+	summary, err := queryService.GetSummaryByUserID(userID.(int))
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "Instance summary retrieved successfully", summary)
 }
 
 // ListAllInstances lists every instance across all users (admin console view).
@@ -604,7 +657,7 @@ func buildLiteBatchCreateRequests(req BatchCreateLiteInstancesRequest) ([]servic
 		template.MemoryGB = 4
 	}
 	if template.DiskGB <= 0 {
-		template.DiskGB = 20
+		template.DiskGB = services.DefaultLiteDiskGB
 	}
 	if strings.TrimSpace(template.OSType) == "" {
 		template.OSType = template.Type
@@ -1651,12 +1704,21 @@ func (h *InstanceHandler) ProxyInstance(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if h.isDedicatedAccessRefreshRequest(c, id, token) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+		c.Status(http.StatusNoContent)
+		return
+	}
 
 	h.proxyInstanceWithToken(c, id, token)
 }
 
 func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool) {
 	queryToken := strings.TrimSpace(c.Query("token"))
+	if queryToken == "" && isDedicatedAccessRefreshPath(c, id) {
+		queryToken = strings.TrimSpace(c.GetHeader(dedicatedAccessRefreshHeader))
+	}
 	// A freshly issued ClawManager token must be allowed to replace an expired
 	// dedicated-origin cookie. Runtime applications can also own a `token`
 	// query parameter, so only prefer the query value when it is recognizably an
@@ -1826,6 +1888,25 @@ func isDedicatedIEIRuntimeOrigin(c *gin.Context, accessToken *services.AccessTok
 	}
 	expectedPrefix := fmt.Sprintf("%s-%d.", originRuntimeType, accessToken.InstanceID)
 	return strings.HasPrefix(strings.ToLower(host), expectedPrefix)
+}
+
+func (h *InstanceHandler) isDedicatedAccessRefreshRequest(c *gin.Context, instanceID int, token string) bool {
+	if c == nil || c.Request == nil || (c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead) {
+		return false
+	}
+	if !isDedicatedAccessRefreshPath(c, instanceID) {
+		return false
+	}
+	accessToken, err := h.accessService.ValidateToken(token)
+	return err == nil && accessToken.InstanceID == instanceID && isDedicatedIEIRuntimeOrigin(c, accessToken)
+}
+
+func isDedicatedAccessRefreshPath(c *gin.Context, instanceID int) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	want := fmt.Sprintf("/api/v1/instances/%d/proxy%s", instanceID, dedicatedAccessRefreshPath)
+	return c.Request.URL.Path == want
 }
 
 func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token string) {
