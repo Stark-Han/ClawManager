@@ -723,28 +723,72 @@ func (s *RuntimeUpgradeService) drainSourceRuntimePods(ctx context.Context, roll
 	if err := json.Unmarshal([]byte(*rollout.SourceImagesJSON), &sourceImages); err != nil || len(sourceImages) == 0 {
 		return errors.New("source runtime inventory is invalid")
 	}
-	pods, err := s.pods.List(ctx, RuntimeTypeOpenClaw)
+	if s.deployments == nil {
+		return errors.New("live source runtime inventory is unavailable")
+	}
+	livePods, err := s.deployments.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
 	if err != nil {
 		return err
 	}
-	for _, pod := range pods {
+	databasePods, err := s.pods.List(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return err
+	}
+	databaseByIdentity := make(map[string]models.RuntimePod, len(databasePods))
+	for _, pod := range databasePods {
+		key := runtimePodIdentity(pod)
+		if current, exists := databaseByIdentity[key]; !exists || pod.ID > current.ID {
+			databaseByIdentity[key] = pod
+		}
+	}
+	seenDeployments := map[string]bool{}
+	for _, pod := range livePods {
 		key := pod.Namespace + "/" + pod.DeploymentName
 		sourceImage, ok := sourceImages[key]
-		if !ok || !runtimePodMatchesImage(pod, sourceImage) || pod.Draining {
+		if !ok || !runtimePodMatchesImage(pod, sourceImage) {
 			continue
 		}
-		endpoint := stringValue(pod.AgentEndpoint)
+		if pod.State != "ready" {
+			return fmt.Errorf("live source runtime pod %s is not ready", pod.PodName)
+		}
+		seenDeployments[key] = true
+		databasePod, registered := databaseByIdentity[runtimePodIdentity(pod)]
+		endpoint := runtimeAgentEndpoint(pod)
+		if registered && stringValue(databasePod.AgentEndpoint) != "" {
+			endpoint = stringValue(databasePod.AgentEndpoint)
+		}
 		if endpoint == "" {
 			return fmt.Errorf("source runtime pod %s has no agent endpoint", pod.PodName)
 		}
 		if err := s.agent.Drain(ctx, endpoint); err != nil {
 			return fmt.Errorf("drain source runtime pod %s: %w", pod.PodName, err)
 		}
-		if err := s.pods.MarkState(ctx, pod.ID, "draining", true); err != nil {
-			return err
+		if registered {
+			if err := s.pods.MarkState(ctx, databasePod.ID, "draining", true); err != nil {
+				return err
+			}
+		}
+	}
+	for key := range sourceImages {
+		if !seenDeployments[key] {
+			return fmt.Errorf("source runtime deployment %s has no live pod at the rollback image", key)
 		}
 	}
 	return nil
+}
+
+func runtimePodIdentity(pod models.RuntimePod) string {
+	return strings.TrimSpace(pod.Namespace) + "/" + strings.TrimSpace(pod.DeploymentName) + "/" + strings.TrimSpace(pod.PodName)
+}
+
+func runtimeAgentEndpoint(pod models.RuntimePod) string {
+	if endpoint := strings.TrimSpace(stringValue(pod.AgentEndpoint)); endpoint != "" {
+		return endpoint
+	}
+	if pod.PodIP == nil || strings.TrimSpace(*pod.PodIP) == "" {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(strings.TrimSpace(*pod.PodIP), "19090")
 }
 
 func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout *models.RuntimeRollout, item models.RuntimeUpgradeItem, targetEndpoint string, upgradeAgent RuntimeUpgradeAgentClient) error {

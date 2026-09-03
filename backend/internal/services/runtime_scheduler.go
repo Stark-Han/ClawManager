@@ -643,36 +643,45 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 		}
 	}
 	if len(errs) == 0 {
-		pods, listErr := s.podRepo.List(ctx, RuntimeTypeOpenClaw)
-		if listErr != nil {
-			errs = append(errs, listErr)
+		undrainer, canUndrain := s.agentClient.(interface {
+			Undrain(context.Context, string) error
+		})
+		if !canUndrain {
+			errs = append(errs, fmt.Errorf("source runtime agent cannot be released from drain"))
 		} else {
-			undrainer, canUndrain := s.agentClient.(interface {
-				Undrain(context.Context, string) error
-			})
-			for _, pod := range pods {
-				key := pod.Namespace + "/" + pod.DeploymentName
-				if _, source := sourceImages[key]; !source || !pod.Draining {
-					continue
+			livePods, listErr := s.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
+			if listErr != nil {
+				errs = append(errs, listErr)
+			} else {
+				seenDeployments := map[string]bool{}
+				for _, pod := range livePods {
+					key := pod.Namespace + "/" + pod.DeploymentName
+					sourceImage, source := sourceImages[key]
+					if !source || !runtimePodMatchesImage(pod, sourceImage) {
+						continue
+					}
+					seenDeployments[key] = true
+					endpoint := runtimeAgentEndpoint(pod)
+					if endpoint == "" {
+						errs = append(errs, fmt.Errorf("live source runtime pod %s has no agent endpoint", pod.PodName))
+						continue
+					}
+					if err := undrainer.Undrain(ctx, endpoint); err != nil {
+						errs = append(errs, fmt.Errorf("release live source runtime pod %s from drain: %w", pod.PodName, err))
+					}
 				}
-				if !canUndrain || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" {
-					errs = append(errs, fmt.Errorf("source runtime pod %s cannot be released from drain", pod.PodName))
-					continue
-				}
-				if err := undrainer.Undrain(ctx, strings.TrimSpace(*pod.AgentEndpoint)); err != nil {
-					errs = append(errs, err)
-					continue
-				}
-				if err := s.podRepo.MarkState(ctx, pod.ID, "ready", false); err != nil {
-					errs = append(errs, err)
+				for key := range sourceImages {
+					if !seenDeployments[key] {
+						errs = append(errs, fmt.Errorf("rollback source deployment %s has no live pod", key))
+					}
 				}
 			}
 		}
 	}
 	if len(errs) == 0 {
-		deadline := time.Now().Add(2 * time.Minute)
+		deadline := time.Now().Add(30 * time.Second)
 		for {
-			pods, listErr := s.podRepo.List(ctx, RuntimeTypeOpenClaw)
+			pods, listErr := s.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
 			if listErr != nil {
 				errs = append(errs, listErr)
 				break
@@ -680,7 +689,7 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 			ready := map[string]bool{}
 			for _, pod := range pods {
 				key := pod.Namespace + "/" + pod.DeploymentName
-				if source, ok := sourceImages[key]; ok && pod.State == "ready" && !pod.Draining && runtimePodMatchesImage(pod, source) {
+				if source, ok := sourceImages[key]; ok && pod.State == "ready" && runtimePodMatchesImage(pod, source) {
 					ready[key] = true
 				}
 			}
@@ -692,16 +701,10 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 				}
 			}
 			if allReady {
-				for _, pod := range pods {
-					key := pod.Namespace + "/" + pod.DeploymentName
-					if source, ok := sourceImages[key]; ok && !runtimePodMatchesImage(pod, source) {
-						_ = s.podRepo.MarkState(ctx, pod.ID, "draining", true)
-					}
-				}
 				break
 			}
 			if time.Now().After(deadline) {
-				errs = append(errs, fmt.Errorf("rollback source runtime did not become ready within 2 minutes"))
+				errs = append(errs, fmt.Errorf("live rollback source runtime did not become ready within 30 seconds"))
 				break
 			}
 			select {
