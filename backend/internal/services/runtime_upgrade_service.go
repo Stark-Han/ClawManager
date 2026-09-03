@@ -394,7 +394,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	var targetPods []models.RuntimePod
 	targetCapacity := 0
 	for _, pod := range pods {
-		if pod.RuntimeType != RuntimeTypeOpenClaw || pod.Draining || strings.TrimSpace(pod.ImageRef) != strings.TrimSpace(rollout.TargetImageRef) || (pod.State != "standby" && pod.State != "ready") {
+		if pod.RuntimeType != RuntimeTypeOpenClaw || pod.Draining || !runtimePodMatchesImage(pod, rollout.TargetImageRef) || (pod.State != "standby" && pod.State != "ready") {
 			continue
 		}
 		targetPods = append(targetPods, pod)
@@ -407,9 +407,6 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		}
 		if value := stringValue(pod.AgentProtocolVersion); value != "openclaw-upgrade-v3" {
 			return false, fmt.Errorf("target pod %s reports agent protocol %q, want openclaw-upgrade-v3", pod.PodName, value)
-		}
-		if value := stringValue(pod.TeamPluginVersion); value != "0.3.0" {
-			return false, fmt.Errorf("target pod %s reports Redis Team plugin %q, want 0.3.0", pod.PodName, value)
 		}
 		if rollout.TargetImageDigest != nil && stringValue(pod.ImageDigest) != strings.TrimSpace(*rollout.TargetImageDigest) {
 			return false, fmt.Errorf("target pod %s reports image digest %q, want %s", pod.PodName, stringValue(pod.ImageDigest), strings.TrimSpace(*rollout.TargetImageDigest))
@@ -747,9 +744,6 @@ func (s *RuntimeUpgradeService) drainSourceRuntimePods(ctx context.Context, roll
 		sourceImage, ok := sourceImages[key]
 		if !ok || !runtimePodMatchesImage(pod, sourceImage) {
 			continue
-		}
-		if pod.State != "ready" {
-			return fmt.Errorf("live source runtime pod %s is not ready", pod.PodName)
 		}
 		seenDeployments[key] = true
 		databasePod, registered := databaseByIdentity[runtimePodIdentity(pod)]

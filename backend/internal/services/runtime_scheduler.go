@@ -679,45 +679,6 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 		}
 	}
 	if len(errs) == 0 {
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			pods, listErr := s.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
-			if listErr != nil {
-				errs = append(errs, listErr)
-				break
-			}
-			ready := map[string]bool{}
-			for _, pod := range pods {
-				key := pod.Namespace + "/" + pod.DeploymentName
-				if source, ok := sourceImages[key]; ok && pod.State == "ready" && runtimePodMatchesImage(pod, source) {
-					ready[key] = true
-				}
-			}
-			allReady := true
-			for key := range sourceImages {
-				if !ready[key] {
-					allReady = false
-					break
-				}
-			}
-			if allReady {
-				break
-			}
-			if time.Now().After(deadline) {
-				errs = append(errs, fmt.Errorf("live rollback source runtime did not become ready within 30 seconds"))
-				break
-			}
-			select {
-			case <-ctx.Done():
-				errs = append(errs, ctx.Err())
-			case <-time.After(2 * time.Second):
-			}
-			if len(errs) > 0 {
-				break
-			}
-		}
-	}
-	if len(errs) == 0 {
 		if err := s.upgrade.CompleteRollback(ctx, rollout); err != nil {
 			errs = append(errs, err)
 		}
