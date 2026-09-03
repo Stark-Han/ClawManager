@@ -83,3 +83,17 @@ export interface RuntimeUpgradePreflightResult {
   hermes_team_member_count: number;
   required_capabilities: string[];
 }
+
+export interface RuntimeUpgradeItem {
+  id: number;
+  instance_id: number;
+  team_id?: number;
+  state: string;
+  error_message?: string;
+}
+
+export interface RuntimeUpgradeDetails {
+  rollout: RuntimeRollout;
+  items: RuntimeUpgradeItem[];
+  audits: Array<{ id: number; action: string; phase: string; outcome: string; created_at: string }>;
+}

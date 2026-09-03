@@ -1,11 +1,8 @@
 package services
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
-	"errors"
-	"io"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -141,52 +138,9 @@ func TestLocalUpgradeSnapshotPreservesOpenClawWorkspaceBytes(t *testing.T) {
 	}
 
 	service := &RuntimeUpgradeService{workspaceRoot: root}
-	ref, inventory, err := service.createLocalSnapshot(77, runtimeUpgradeCandidate{InstanceID: 123, UserID: 45, WorkspacePath: workspace})
+	_, _, err := service.createLocalSnapshot(77, runtimeUpgradeCandidate{InstanceID: 123, UserID: 45, WorkspacePath: workspace})
 	if err == nil {
 		t.Fatal("full workspace snapshot unexpectedly remained enabled")
-	}
-	return
-	if !inventory.SQLiteHeaderValid || inventory.SQLiteFileCount != 1 || inventory.ManifestSHA256 == "" {
-		t.Fatalf("inventory = %#v", inventory)
-	}
-	archivePath := strings.TrimPrefix(ref, "local:")
-	if err := verifyLocalSnapshotArchive(root, ref); err != nil {
-		t.Fatalf("verifyLocalSnapshotArchive() error = %v", err)
-	}
-	file, err := os.Open(archivePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	gz, err := gzip.NewReader(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	foundSettings, foundSQLite, foundLock := false, false, false
-	for {
-		header, err := tr.Next()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			t.Fatal(err)
-		}
-		switch header.Name {
-		case ".openclaw/settings.json":
-			foundSettings = true
-		case ".openclaw/sessions/sessions.sqlite":
-			foundSQLite = true
-		case ".openclaw/tmp/openclaw-200075/device-identity.98ce393a.lock.sqlite":
-			foundLock = true
-		}
-	}
-	if !foundSettings || !foundSQLite || !foundLock {
-		t.Fatalf("snapshot entries settings=%v sqlite=%v lock=%v", foundSettings, foundSQLite, foundLock)
-	}
-	if _, err := os.Stat(workspace); err != nil {
-		t.Fatalf("snapshot modified active workspace: %v", err)
 	}
 }
 
@@ -271,5 +225,35 @@ func TestRuntimeUpgradeCandidateOrderKeepsLeaderLastWithinEachTeam(t *testing.T)
 		if candidates[index].InstanceID != instanceID {
 			t.Fatalf("candidate order = %#v, want %v", candidates, want)
 		}
+	}
+}
+
+func TestValidateOpenClawUpgradeAggregateCapacityUsesSessionDataOnly(t *testing.T) {
+	compatibility := func(instanceID int, sessionBytes, configBytes int64, availableBytes uint64) models.RuntimeUpgradeItem {
+		raw, err := json.Marshal(map[string]any{"compatibility": RuntimeAgentUpgradeCompatibility{
+			InstanceID: instanceID, Status: "compatible", SessionBytes: sessionBytes,
+			ConfigBytes: configBytes, AvailableBytes: availableBytes,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		value := string(raw)
+		return models.RuntimeUpgradeItem{InstanceID: instanceID, State: "compatibility_checked", PreflightJSON: &value}
+	}
+	items := []models.RuntimeUpgradeItem{
+		compatibility(1, 10<<20, 4<<10, 2<<30),
+		compatibility(2, 20<<20, 8<<10, 3<<30),
+	}
+	required, available, err := validateOpenClawUpgradeAggregateCapacity(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRequired := uint64(1<<30) + uint64(30<<20)*3 + uint64(12<<10)*2
+	if required != wantRequired || available != uint64(2<<30) {
+		t.Fatalf("capacity = required %d available %d, want %d and %d", required, available, wantRequired, uint64(2<<30))
+	}
+	tooSmall := compatibility(3, 64<<20, 1024, 1<<30)
+	if _, _, err := validateOpenClawUpgradeAggregateCapacity([]models.RuntimeUpgradeItem{tooSmall}); err == nil {
+		t.Fatal("aggregate capacity accepted a volume without migration reserve")
 	}
 }

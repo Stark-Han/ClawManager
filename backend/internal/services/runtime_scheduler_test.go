@@ -2877,7 +2877,12 @@ type fakeRuntimeDeploymentService struct {
 	scaleCalls        int
 	scales            []fakeScaleCall
 	rolloutImageCalls []fakeRolloutImageCall
+	upgradePoolCalls  []fakeUpgradePoolCall
 	pods              []k8s.RuntimeDeploymentPod
+}
+
+type fakeUpgradePoolCall struct {
+	namespace, sourceName, targetName, image, upgradeID string
 }
 
 type fakeScaleCall struct {
@@ -2913,6 +2918,10 @@ func (s *fakeRuntimeDeploymentService) RolloutImage(ctx context.Context, namespa
 		maxUnavailable: maxUnavailable,
 		maxSurge:       maxSurge,
 	})
+	return nil
+}
+func (s *fakeRuntimeDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
+	s.upgradePoolCalls = append(s.upgradePoolCalls, fakeUpgradePoolCall{namespace: namespace, sourceName: sourceName, targetName: targetName, image: image, upgradeID: upgradeID})
 	return nil
 }
 func (s *fakeRuntimeDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {

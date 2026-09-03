@@ -8,7 +8,7 @@ import {
   type SystemImageSetting,
 } from '../../services/systemSettingsService';
 import { runtimePoolService } from '../../services/runtimePoolService';
-import type { RuntimeUpgradePreflightResult } from '../../types/runtimePool';
+import type { RuntimeUpgradeDetails, RuntimeUpgradePreflightResult } from '../../types/runtimePool';
 import type { RuntimePod, RuntimeType } from '../../types/runtimePool';
 
 type ImageRuntimeType = 'desktop' | 'gateway';
@@ -273,11 +273,13 @@ const SystemSettingsPage: React.FC = () => {
   const [rolloutImage, setRolloutImage] = useState('');
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
-  const [rolloutBatchSize, setRolloutBatchSize] = useState(8);
+	const [rolloutBatchSize, setRolloutBatchSize] = useState(2);
   const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(0);
   const [rolloutSaving, setRolloutSaving] = useState(false);
   const [rolloutError, setRolloutError] = useState<string | null>(null);
   const [rolloutPreflight, setRolloutPreflight] = useState<RuntimeUpgradePreflightResult | null>(null);
+	const [rolloutDetails, setRolloutDetails] = useState<RuntimeUpgradeDetails | null>(null);
+	const [activeRolloutId, setActiveRolloutId] = useState<number | null>(null);
 
   const liteCards = useMemo(
     () => LITE_RUNTIME_CARDS.map((definition) =>
@@ -354,6 +356,44 @@ const SystemSettingsPage: React.FC = () => {
       cancelled = true;
     };
   }, [rolloutRuntimeType]);
+
+	useEffect(() => {
+		if (!activeRolloutId) {
+			return undefined;
+		}
+		let cancelled = false;
+		let timer: number | undefined;
+		const poll = async () => {
+			try {
+				const details = await runtimePoolService.getRollout(activeRolloutId);
+				if (cancelled) return;
+				setRolloutDetails(details);
+				const terminal = ['finished', 'error', 'cancelled'].includes(details.rollout.status);
+				if (terminal) {
+					setActiveRolloutId(null);
+					setRolloutSaving(false);
+					void refreshRolloutCurrentImage(details.rollout.runtime_type);
+					if (details.rollout.status === 'error') {
+						setRolloutError(details.rollout.rollback_status === 'restored'
+							? `升级失败，已恢复旧版本：${details.rollout.error_message || details.rollout.rollback_error || '请查看阶段详情'}`
+							: details.rollout.error_message || details.rollout.rollback_error || '升级失败');
+					}
+					return;
+				}
+				timer = window.setTimeout(() => void poll(), 2000);
+			} catch (error: unknown) {
+				if (!cancelled) {
+					setRolloutError(getErrorMessage(error, t('systemSettingsPage.rolloutFailed')));
+					timer = window.setTimeout(() => void poll(), 5000);
+				}
+			}
+		};
+		void poll();
+		return () => {
+			cancelled = true;
+			if (timer !== undefined) window.clearTimeout(timer);
+		};
+	}, [activeRolloutId, t]);
 
   const refreshRolloutCurrentImage = async (runtimeType: RuntimeType) => {
     try {
@@ -489,6 +529,7 @@ const SystemSettingsPage: React.FC = () => {
       : nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
     setRolloutError(null);
     setRolloutPreflight(null);
+		setRolloutDetails(null);
     setRolloutMaxUnavailable(runtimeType === 'openclaw' ? 0 : 1);
   };
 
@@ -500,10 +541,10 @@ const SystemSettingsPage: React.FC = () => {
     try {
       setRolloutSaving(true);
       setRolloutError(null);
-	  if (rolloutRuntimeType === 'openclaw' && rolloutPreflight && !rolloutPreflight.passed) {
-		setRolloutError(rolloutPreflight.blockers.join('；'));
-		return;
-	  }
+		if (rolloutRuntimeType === 'openclaw' && rolloutPreflight && !rolloutPreflight.passed) {
+			setRolloutError(rolloutPreflight.blockers.join('；'));
+			return;
+		}
       if (rolloutRuntimeType === 'openclaw' && !rolloutPreflight) {
         const preflight = await runtimePoolService.preflightOpenClawRollout({
           target_image_ref: rolloutImage.trim(),
@@ -518,7 +559,7 @@ const SystemSettingsPage: React.FC = () => {
         }
         return;
       }
-      await runtimePoolService.startRollout({
+		const rollout = await runtimePoolService.startRollout({
         runtime_type: rolloutRuntimeType,
         target_image_ref: rolloutImage.trim(),
         batch_size: Math.max(1, rolloutBatchSize),
@@ -526,16 +567,15 @@ const SystemSettingsPage: React.FC = () => {
         preflight_id: rolloutPreflight?.rollout.preflight_id,
         auto_rollback: true,
       });
+		setRolloutDetails({ rollout, items: [], audits: [] });
+		setActiveRolloutId(rollout.id);
       setRolloutPreflight(null);
       setRolloutImage(rolloutCard?.image.trim() || rolloutImage.trim());
       void refreshRolloutCurrentImage(rolloutRuntimeType);
-      window.setTimeout(() => {
-        void refreshRolloutCurrentImage(rolloutRuntimeType);
-      }, 5000);
     } catch (error: unknown) {
       setRolloutError(getErrorMessage(error, t('systemSettingsPage.rolloutFailed')));
     } finally {
-      setRolloutSaving(false);
+		if (!activeRolloutId) setRolloutSaving(false);
     }
   };
 
@@ -682,7 +722,7 @@ const SystemSettingsPage: React.FC = () => {
               <input
                 type="number"
                 min={1}
-				max={32}
+				max={8}
                 value={rolloutBatchSize}
                 onChange={(event) => { setRolloutBatchSize(Number(event.target.value) || 1); setRolloutPreflight(null); }}
                 className="app-input mt-1 block w-full"
@@ -702,11 +742,13 @@ const SystemSettingsPage: React.FC = () => {
             <button
               type="button"
               onClick={() => void startRollout()}
-              disabled={rolloutSaving}
+				disabled={rolloutSaving || activeRolloutId !== null}
               className="app-button-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Rocket className="h-4 w-4" />
-              {rolloutSaving
+			  {activeRolloutId !== null
+				? `升级执行中（#${activeRolloutId}）`
+				: rolloutSaving
                 ? t('systemSettingsPage.rolloutStarting')
                 : rolloutRuntimeType === 'openclaw' && rolloutPreflight?.passed
                   ? '确认执行（自动回退）'
@@ -720,6 +762,23 @@ const SystemSettingsPage: React.FC = () => {
               {rolloutError}
             </div>
           )}
+		  {rolloutDetails && (
+			<div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+			  <div className="font-medium">
+				升级 #{rolloutDetails.rollout.id}：{rolloutDetails.rollout.status} / {rolloutDetails.rollout.phase}
+			  </div>
+			  <div className="mt-1">
+				目标：<span className="font-mono break-all">{rolloutDetails.rollout.target_image_ref}</span>
+			  </div>
+			  <div className="mt-1">
+				实例 {rolloutDetails.items.length} 个；已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；已恢复 {rolloutDetails.items.filter((item) => ['restored', 'restart_ready'].includes(item.state)).length} 个。
+			  </div>
+			  {rolloutDetails.rollout.rollback_status && <div className="mt-1">自动回退：{rolloutDetails.rollout.rollback_status}</div>}
+			  {(rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error) && (
+				<div className="mt-2 text-red-700">{rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error}</div>
+			  )}
+			</div>
+		  )}
           {rolloutPreflight && (
             <div className={`mt-4 rounded-md border px-4 py-3 text-sm ${rolloutPreflight.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
               <div className="font-medium">

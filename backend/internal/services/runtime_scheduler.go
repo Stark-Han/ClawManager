@@ -431,11 +431,27 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
 			upgradeID = strconv.FormatInt(rollout.ID, 10)
 		}
-		if err := s.deployments.RolloutImage(ctx, ref.namespace, ref.name, targetImage, upgradeID, maxUnavailable, maxSurge); err != nil {
+		var err error
+		if upgradeID != "" {
+			err = s.deployments.EnsureUpgradePool(ctx, ref.namespace, ref.name, runtimeUpgradeTargetDeploymentName(ref.name, rollout.ID), targetImage, upgradeID)
+		} else {
+			err = s.deployments.RolloutImage(ctx, ref.namespace, ref.name, targetImage, "", maxUnavailable, maxSurge)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func runtimeUpgradeTargetDeploymentName(source string, rolloutID int64) string {
+	suffix := fmt.Sprintf("-u%d", rolloutID)
+	source = strings.Trim(strings.ToLower(strings.TrimSpace(source)), "-")
+	maxSource := 63 - len(suffix)
+	if len(source) > maxSource {
+		source = strings.TrimRight(source[:maxSource], "-")
+	}
+	return source + suffix
 }
 
 func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeType string) ([]models.RuntimePod, error) {
@@ -565,6 +581,19 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 			}
 			return nil
 		}
+		var sources map[string]string
+		if rollout.SourceImagesJSON == nil || json.Unmarshal([]byte(*rollout.SourceImagesJSON), &sources) != nil || len(sources) == 0 {
+			return fmt.Errorf("OpenClaw rollout source deployment inventory is unavailable at commit")
+		}
+		for deployment := range sources {
+			parts := strings.SplitN(deployment, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid OpenClaw source deployment entry %q", deployment)
+			}
+			if err := s.deployments.Scale(ctx, parts[0], parts[1], 0); err != nil {
+				return fmt.Errorf("scale committed OpenClaw source pool %s to zero: %w", deployment, err)
+			}
+		}
 	}
 	finishedAt := time.Now().UTC()
 	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
@@ -572,7 +601,7 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 
 func canAutoRollbackOpenClaw(phase string) bool {
 	switch strings.TrimSpace(phase) {
-	case "maintenance", "image_rollout", "session_migration", "rollback_image", "rollback_restore":
+	case "maintenance", "image_rollout", "compatibility_check", "session_migration", "rollback_image", "rollback_restore":
 		return true
 	default:
 		// Once target gateways are released, new SQLite-only writes may exist.
@@ -600,17 +629,44 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 	if err := s.upgrade.Rollback(ctx, rollout); err != nil {
 		errs = append(errs, err)
 	}
-	for deployment, image := range sourceImages {
+	for deployment := range sourceImages {
 		if len(errs) > 0 {
 			break
 		}
 		parts := strings.SplitN(deployment, "/", 2)
-		if len(parts) != 2 || strings.TrimSpace(image) == "" {
+		if len(parts) != 2 {
 			errs = append(errs, fmt.Errorf("invalid rollback deployment entry %q", deployment))
 			continue
 		}
-		if err := s.deployments.RolloutImage(ctx, parts[0], parts[1], image, "", 0, 1); err != nil {
+		if err := s.deployments.Scale(ctx, parts[0], runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID), 0); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 {
+		pods, listErr := s.podRepo.List(ctx, RuntimeTypeOpenClaw)
+		if listErr != nil {
+			errs = append(errs, listErr)
+		} else {
+			undrainer, canUndrain := s.agentClient.(interface {
+				Undrain(context.Context, string) error
+			})
+			for _, pod := range pods {
+				key := pod.Namespace + "/" + pod.DeploymentName
+				if _, source := sourceImages[key]; !source || !pod.Draining {
+					continue
+				}
+				if !canUndrain || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" {
+					errs = append(errs, fmt.Errorf("source runtime pod %s cannot be released from drain", pod.PodName))
+					continue
+				}
+				if err := undrainer.Undrain(ctx, strings.TrimSpace(*pod.AgentEndpoint)); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				if err := s.podRepo.MarkState(ctx, pod.ID, "ready", false); err != nil {
+					errs = append(errs, err)
+				}
+			}
 		}
 	}
 	if len(errs) == 0 {

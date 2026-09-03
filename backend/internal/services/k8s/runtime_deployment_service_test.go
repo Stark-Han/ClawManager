@@ -365,6 +365,39 @@ func TestRuntimeDeploymentServiceRolloutImage(t *testing.T) {
 	}
 }
 
+func TestRuntimeDeploymentServiceCreatesIsolatedUpgradePool(t *testing.T) {
+	source := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime", Namespace: "runtime-system", RuntimeType: "openclaw", Image: "registry/openclaw:old", Replicas: 3, WorkspacePVCClaimName: "workspaces"})
+	client := fake.NewSimpleClientset(source)
+	service := NewRuntimeDeploymentService(client)
+	targetImage := "registry/openclaw@sha256:" + strings.Repeat("a", 64)
+	if err := service.EnsureUpgradePool(context.Background(), "runtime-system", "openclaw-runtime", "openclaw-runtime-u81", targetImage, "81"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := client.AppsV1().Deployments("runtime-system").Get(context.Background(), "openclaw-runtime-u81", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Spec.Replicas == nil || *target.Spec.Replicas != 3 {
+		t.Fatalf("target replicas = %v, want 3", target.Spec.Replicas)
+	}
+	if target.Spec.Selector.MatchLabels["app"] != "openclaw-runtime-u81" || target.Labels["clawmanager.io/source-deployment"] != "openclaw-runtime" {
+		t.Fatalf("target labels/selectors are not isolated: labels=%v selector=%v", target.Labels, target.Spec.Selector.MatchLabels)
+	}
+	container := target.Spec.Template.Spec.Containers[0]
+	if container.Image != targetImage {
+		t.Fatalf("target runtime image = %s", container.Image)
+	}
+	requireEnv(t, container, "CLAWMANAGER_RUNTIME_UPGRADE_ID", "81")
+	requireEnv(t, container, "CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", "openclaw-runtime-u81")
+	unchanged, err := client.AppsV1().Deployments("runtime-system").Get(context.Background(), "openclaw-runtime", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Spec.Template.Spec.Containers[0].Image != "registry/openclaw:old" {
+		t.Fatalf("source deployment image was mutated: %s", unchanged.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
 func TestRuntimeDeploymentServiceCreatesFullStandbySurgeForOpenClawUpgrade(t *testing.T) {
 	deployment := BuildRuntimeDeployment(RuntimeDeploymentSpec{
 		Name: "openclaw-runtime", Namespace: "runtime-system", RuntimeType: "openclaw",

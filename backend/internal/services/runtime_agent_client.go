@@ -35,6 +35,7 @@ type RuntimeUpgradeAgentClient interface {
 	VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error
 	RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error)
 	MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error)
+	PreflightUpgradeCompatibility(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentUpgradeCompatibility, error)
 	RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error)
 	ActivateUpgrade(ctx context.Context, endpoint, rolloutID string) error
 }
@@ -98,20 +99,34 @@ type RuntimeAgentRestoreResponse struct {
 }
 
 type RuntimeAgentSessionSQLiteMigration struct {
-	InstanceID        int       `json:"instance_id"`
-	Status            string    `json:"status"`
-	OutputSHA256      string    `json:"output_sha256"`
-	ArchiveBytes      int64     `json:"archive_bytes"`
-	ArchiveFiles      int64     `json:"archive_files"`
-	RollbackAvailable bool      `json:"rollback_available"`
-	CompletedAt       time.Time `json:"completed_at"`
+	InstanceID           int       `json:"instance_id"`
+	Status               string    `json:"status"`
+	OutputSHA256         string    `json:"output_sha256"`
+	ArchiveBytes         int64     `json:"archive_bytes"`
+	ArchiveFiles         int64     `json:"archive_files"`
+	RollbackAvailable    bool      `json:"rollback_available"`
+	ConfigOriginalSHA256 string    `json:"config_original_sha256,omitempty"`
+	ConfigTargetSHA256   string    `json:"config_target_sha256,omitempty"`
+	CompletedAt          time.Time `json:"completed_at"`
+}
+
+type RuntimeAgentUpgradeCompatibility struct {
+	InstanceID           int       `json:"instance_id"`
+	Status               string    `json:"status"`
+	ConfigOriginalSHA256 string    `json:"config_original_sha256"`
+	ConfigTargetSHA256   string    `json:"config_target_sha256"`
+	ConfigBytes          int64     `json:"config_bytes"`
+	SessionBytes         int64     `json:"session_bytes"`
+	AvailableBytes       uint64    `json:"available_bytes"`
+	CheckedAt            time.Time `json:"checked_at"`
 }
 
 type RuntimeAgentSessionSQLiteRestore struct {
-	InstanceID   int       `json:"instance_id"`
-	Status       string    `json:"status"`
-	OutputSHA256 string    `json:"output_sha256"`
-	CompletedAt  time.Time `json:"completed_at"`
+	InstanceID     int       `json:"instance_id"`
+	Status         string    `json:"status"`
+	OutputSHA256   string    `json:"output_sha256"`
+	ConfigRestored bool      `json:"config_restored"`
+	CompletedAt    time.Time `json:"completed_at"`
 }
 
 type RuntimeAgentGatewayState struct {
@@ -145,6 +160,7 @@ type RuntimeAgentCreateGatewayRequest struct {
 	MemoryMB            int                   `json:"memory_mb"`
 	DiskQuotaMB         int                   `json:"disk_quota_mb"`
 	Generation          int                   `json:"generation"`
+	UpgradeID           string                `json:"upgrade_id,omitempty"`
 	Environment         map[string]string     `json:"environment,omitempty"`
 }
 
@@ -198,6 +214,10 @@ func (c *runtimeAgentHTTPClient) DeleteGateway(ctx context.Context, endpoint, ga
 
 func (c *runtimeAgentHTTPClient) Drain(ctx context.Context, endpoint string) error {
 	return c.do(ctx, http.MethodPost, endpoint, "/v1/drain", map[string]bool{"draining": true}, nil)
+}
+
+func (c *runtimeAgentHTTPClient) Undrain(ctx context.Context, endpoint string) error {
+	return c.do(ctx, http.MethodPost, endpoint, "/v1/drain", map[string]bool{"draining": false}, nil)
 }
 
 func (c *runtimeAgentHTTPClient) ResyncInstanceSkills(ctx context.Context, endpoint string, instanceID int, mode string) error {
@@ -260,6 +280,14 @@ func (c *runtimeAgentHTTPClient) RestoreWorkspaceSnapshot(ctx context.Context, e
 func (c *runtimeAgentHTTPClient) MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
 	var response RuntimeAgentSessionSQLiteMigration
 	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/migrate", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) PreflightUpgradeCompatibility(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentUpgradeCompatibility, error) {
+	var response RuntimeAgentUpgradeCompatibility
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/upgrade/preflight", req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

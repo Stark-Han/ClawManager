@@ -63,7 +63,78 @@ type RuntimeDeploymentService interface {
 	Ensure(ctx context.Context, spec RuntimeDeploymentSpec) error
 	Scale(ctx context.Context, namespace, name string, replicas int32) error
 	RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error
+	EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error
 	ListPods(ctx context.Context, namespace, runtimeType string) ([]RuntimeDeploymentPod, error)
+}
+
+func (s *runtimeDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	if strings.TrimSpace(sourceName) == "" || strings.TrimSpace(targetName) == "" || sourceName == targetName {
+		return fmt.Errorf("distinct source and target runtime deployment names are required")
+	}
+	if runtimeImageDigest(image) == "" || strings.TrimSpace(upgradeID) == "" {
+		return fmt.Errorf("upgrade pool requires an immutable image and upgrade id")
+	}
+	deployments := s.client.AppsV1().Deployments(namespace)
+	if existing, err := deployments.Get(ctx, targetName, metav1.GetOptions{}); err == nil {
+		if runtimeContainerImage(existing.Spec.Template.Spec.Containers) != strings.TrimSpace(image) || existing.Labels["clawmanager.io/upgrade-id"] != upgradeID || existing.Labels["clawmanager.io/source-deployment"] != sourceName {
+			return fmt.Errorf("existing upgrade pool %s/%s does not match rollout", namespace, targetName)
+		}
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+	source, err := deployments.Get(ctx, sourceName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get source runtime deployment %s/%s: %w", namespace, sourceName, err)
+	}
+	target := source.DeepCopy()
+	target.TypeMeta = metav1.TypeMeta{}
+	target.ObjectMeta = metav1.ObjectMeta{Name: targetName, Namespace: namespace, Labels: map[string]string{}}
+	for key, value := range source.Labels {
+		target.Labels[key] = value
+	}
+	target.Labels["app"] = targetName
+	target.Labels["clawmanager.io/pool-role"] = "upgrade-target"
+	target.Labels["clawmanager.io/upgrade-id"] = upgradeID
+	target.Labels["clawmanager.io/source-deployment"] = sourceName
+	selector := map[string]string{"app": targetName, "clawmanager.io/runtime-type": source.Labels["clawmanager.io/runtime-type"], "clawmanager.io/upgrade-id": upgradeID}
+	target.Spec.Selector = &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}
+	if target.Spec.Template.Labels == nil {
+		target.Spec.Template.Labels = map[string]string{}
+	}
+	for key := range target.Spec.Template.Labels {
+		delete(target.Spec.Template.Labels, key)
+	}
+	for key, value := range selector {
+		target.Spec.Template.Labels[key] = value
+	}
+	target.Spec.Template.Labels["clawmanager.io/pool-role"] = "upgrade-target"
+	target.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	target.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{MaxSkew: 1, TopologyKey: "kubernetes.io/hostname", WhenUnsatisfiable: corev1.ScheduleAnyway, LabelSelector: &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}}}
+	containerIndex := -1
+	for index := range target.Spec.Template.Spec.Containers {
+		if target.Spec.Template.Spec.Containers[index].Name == "runtime" {
+			containerIndex = index
+			break
+		}
+	}
+	if containerIndex < 0 {
+		return fmt.Errorf("source runtime deployment %s/%s has no runtime container", namespace, sourceName)
+	}
+	container := &target.Spec.Template.Spec.Containers[containerIndex]
+	container.Image = strings.TrimSpace(image)
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", targetName)
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_REF", strings.TrimSpace(image))
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", runtimeImageDigest(image))
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_UPGRADE_ID", upgradeID)
+	container.ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("agent"), Scheme: corev1.URISchemeHTTP}}, InitialDelaySeconds: 1, PeriodSeconds: 2, TimeoutSeconds: 1, FailureThreshold: 3, SuccessThreshold: 1}
+	if _, err := deployments.Create(ctx, target, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create upgrade runtime pool %s/%s: %w", namespace, targetName, err)
+	}
+	return nil
 }
 
 type runtimeDeploymentService struct {

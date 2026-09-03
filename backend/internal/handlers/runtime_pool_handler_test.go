@@ -513,6 +513,10 @@ func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, 
 	})
 	return nil
 }
+
+func (s *runtimePoolHandlerDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
+	return nil
+}
 func (s *runtimePoolHandlerDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {
 	var pods []k8s.RuntimeDeploymentPod
 	for _, pod := range s.pods {
