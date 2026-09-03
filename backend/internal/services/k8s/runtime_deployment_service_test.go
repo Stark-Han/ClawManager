@@ -338,7 +338,7 @@ func TestRuntimeDeploymentServiceRolloutImage(t *testing.T) {
 	client := fake.NewSimpleClientset(deployment)
 	service := NewRuntimeDeploymentService(client)
 
-	if err := service.RolloutImage(context.Background(), "runtime-system", "runtime-hermes", "registry/hermes:v2", 1, 2); err != nil {
+	if err := service.RolloutImage(context.Background(), "runtime-system", "runtime-hermes", "registry/hermes:v2", "", 1, 2); err != nil {
 		t.Fatalf("RolloutImage returned error: %v", err)
 	}
 
@@ -365,6 +365,49 @@ func TestRuntimeDeploymentServiceRolloutImage(t *testing.T) {
 	}
 }
 
+func TestRuntimeDeploymentServiceCreatesFullStandbySurgeForOpenClawUpgrade(t *testing.T) {
+	deployment := BuildRuntimeDeployment(RuntimeDeploymentSpec{
+		Name: "openclaw-runtime", Namespace: "runtime-system", RuntimeType: "openclaw",
+		Image: "registry/openclaw:old", Replicas: 4, WorkspaceNFSServer: "nfs.local", WorkspaceNFSPath: "/exports",
+	})
+	client := fake.NewSimpleClientset(deployment)
+	service := NewRuntimeDeploymentService(client)
+	if err := service.RolloutImage(context.Background(), "runtime-system", "openclaw-runtime", "registry/openclaw@sha256:"+strings.Repeat("a", 64), "81", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := client.AppsV1().Deployments("runtime-system").Get(context.Background(), "openclaw-runtime", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := updated.Spec.Template.Spec.Containers[0]
+	requireEnv(t, container, "CLAWMANAGER_RUNTIME_UPGRADE_ID", "81")
+	if container.ReadinessProbe == nil || container.ReadinessProbe.HTTPGet == nil || container.ReadinessProbe.HTTPGet.Path != "/readyz" || container.ReadinessProbe.HTTPGet.Port.StrVal != "agent" {
+		t.Fatalf("standby readiness probe = %#v", container.ReadinessProbe)
+	}
+	if got := updated.Spec.Strategy.RollingUpdate.MaxUnavailable.IntValue(); got != 0 {
+		t.Fatalf("maxUnavailable = %d, want 0", got)
+	}
+	if got := updated.Spec.Strategy.RollingUpdate.MaxSurge.IntValue(); got != 4 {
+		t.Fatalf("maxSurge = %d, want full replica count 4", got)
+	}
+	if err := service.RolloutImage(context.Background(), "runtime-system", "openclaw-runtime", "registry/openclaw:old", "", 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	rolledBack, err := client.AppsV1().Deployments("runtime-system").Get(context.Background(), "openclaw-runtime", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container = rolledBack.Spec.Template.Spec.Containers[0]
+	if container.ReadinessProbe != nil {
+		t.Fatalf("upgrade readiness probe survived rollback: %#v", container.ReadinessProbe)
+	}
+	for _, env := range container.Env {
+		if env.Name == "CLAWMANAGER_RUNTIME_UPGRADE_ID" {
+			t.Fatal("upgrade id survived rollback")
+		}
+	}
+}
+
 func TestRuntimeDeploymentServiceRolloutImageRetriesConflict(t *testing.T) {
 	deployment := BuildRuntimeDeployment(RuntimeDeploymentSpec{
 		Name:               "runtime-hermes",
@@ -386,7 +429,7 @@ func TestRuntimeDeploymentServiceRolloutImageRetriesConflict(t *testing.T) {
 	})
 	service := NewRuntimeDeploymentService(client)
 
-	if err := service.RolloutImage(context.Background(), "runtime-system", "runtime-hermes", "registry/hermes:v2", 1, 1); err != nil {
+	if err := service.RolloutImage(context.Background(), "runtime-system", "runtime-hermes", "registry/hermes:v2", "", 1, 1); err != nil {
 		t.Fatalf("RolloutImage returned error: %v", err)
 	}
 	if updateAttempts < 2 {

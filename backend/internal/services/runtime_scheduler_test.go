@@ -2890,6 +2890,7 @@ type fakeRolloutImageCall struct {
 	namespace      string
 	name           string
 	image          string
+	upgradeID      string
 	maxUnavailable int
 	maxSurge       int
 }
@@ -2903,11 +2904,12 @@ func (s *fakeRuntimeDeploymentService) Scale(ctx context.Context, namespace, nam
 	s.scales = append(s.scales, fakeScaleCall{namespace: namespace, name: name, replicas: replicas})
 	return nil
 }
-func (s *fakeRuntimeDeploymentService) RolloutImage(ctx context.Context, namespace, name, image string, maxUnavailable, maxSurge int) error {
+func (s *fakeRuntimeDeploymentService) RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error {
 	s.rolloutImageCalls = append(s.rolloutImageCalls, fakeRolloutImageCall{
 		namespace:      namespace,
 		name:           name,
 		image:          image,
+		upgradeID:      upgradeID,
 		maxUnavailable: maxUnavailable,
 		maxSurge:       maxSurge,
 	})

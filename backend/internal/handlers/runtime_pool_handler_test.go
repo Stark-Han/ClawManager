@@ -503,7 +503,7 @@ func (s *runtimePoolHandlerDeploymentService) Ensure(ctx context.Context, spec k
 func (s *runtimePoolHandlerDeploymentService) Scale(ctx context.Context, namespace, name string, replicas int32) error {
 	return nil
 }
-func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, namespace, name, image string, maxUnavailable, maxSurge int) error {
+func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error {
 	s.rollouts = append(s.rollouts, runtimePoolHandlerDeploymentRollout{
 		namespace:      namespace,
 		name:           name,

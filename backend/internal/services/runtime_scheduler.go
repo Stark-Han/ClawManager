@@ -427,7 +427,11 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 	}
 	var errs []error
 	for ref := range refs {
-		if err := s.deployments.RolloutImage(ctx, ref.namespace, ref.name, targetImage, maxUnavailable, maxSurge); err != nil {
+		upgradeID := ""
+		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
+			upgradeID = strconv.FormatInt(rollout.ID, 10)
+		}
+		if err := s.deployments.RolloutImage(ctx, ref.namespace, ref.name, targetImage, upgradeID, maxUnavailable, maxSurge); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -505,7 +509,7 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
 			timeoutErr := fmt.Errorf("OpenClaw target runtime did not register within 15 minutes")
 			message := timeoutErr.Error()
-			if rollout.AutoRollback {
+			if rollout.AutoRollback && canAutoRollbackOpenClaw(rollout.Phase) {
 				if rollbackErr := s.rollbackOpenClawRollout(ctx, &rollout); rollbackErr != nil {
 					message = errors.Join(timeoutErr, rollbackErr).Error()
 				}
@@ -515,13 +519,41 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 		}
 		return nil
 	}
-	for _, pod := range pods {
-		if pod.RuntimeType != rollout.RuntimeType {
-			continue
+	dataSafeOpenClaw := rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil
+	if !dataSafeOpenClaw {
+		for _, pod := range pods {
+			if pod.RuntimeType != rollout.RuntimeType {
+				continue
+			}
+			if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
+				return nil
+			}
 		}
-		if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
-			if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
-				timeoutErr := fmt.Errorf("OpenClaw target runtime did not become ready within 15 minutes")
+	}
+	if dataSafeOpenClaw {
+		if s.upgrade == nil {
+			return fmt.Errorf("OpenClaw data-safe rollout service is not configured")
+		}
+		ready, err := s.upgrade.ValidateTargetRuntime(ctx, &rollout, pods)
+		if err != nil {
+			if !canAutoRollbackOpenClaw(rollout.Phase) {
+				// The target has crossed the activation boundary. Keep the rollout
+				// active and Team dispatch fenced so reconciliation can forward-repair
+				// transient pod/Gateway failures without hiding new SQLite writes.
+				return fmt.Errorf("OpenClaw forward repair pending in %s: %w", rollout.Phase, err)
+			}
+			message := err.Error()
+			if rollout.AutoRollback && canAutoRollbackOpenClaw(rollout.Phase) {
+				if rollbackErr := s.rollbackOpenClawRollout(ctx, &rollout); rollbackErr != nil {
+					message = errors.Join(err, rollbackErr).Error()
+				}
+			}
+			_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, nil, &message)
+			return errors.New(message)
+		}
+		if !ready {
+			if rollout.Phase == "image_rollout" && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
+				timeoutErr := fmt.Errorf("OpenClaw standby target runtime did not register within 15 minutes")
 				message := timeoutErr.Error()
 				if rollout.AutoRollback {
 					if rollbackErr := s.rollbackOpenClawRollout(ctx, &rollout); rollbackErr != nil {
@@ -534,27 +566,20 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 			return nil
 		}
 	}
-	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
-		if s.upgrade == nil {
-			return fmt.Errorf("OpenClaw data-safe rollout service is not configured")
-		}
-		ready, err := s.upgrade.ValidateTargetRuntime(ctx, &rollout, pods)
-		if err != nil {
-			message := err.Error()
-			if rollout.AutoRollback {
-				if rollbackErr := s.rollbackOpenClawRollout(ctx, &rollout); rollbackErr != nil {
-					message = errors.Join(err, rollbackErr).Error()
-				}
-			}
-			_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, nil, &message)
-			return errors.New(message)
-		}
-		if !ready {
-			return nil
-		}
-	}
 	finishedAt := time.Now().UTC()
 	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
+}
+
+func canAutoRollbackOpenClaw(phase string) bool {
+	switch strings.TrimSpace(phase) {
+	case "maintenance", "image_rollout", "session_migration", "rollback_image", "rollback_restore":
+		return true
+	default:
+		// Once target gateways are released, new SQLite-only writes may exist.
+		// A blind downgrade would hide them from 7.1, so failures after activation
+		// are held for forward repair instead of destructive automatic rollback.
+		return false
+	}
 }
 
 func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout *models.RuntimeRollout) error {
@@ -569,13 +594,22 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 		return err
 	}
 	var errs []error
+	// Restore OpenClaw's official migration archives while the 8.1 target
+	// agents are still alive. Switching the Deployment image first would remove
+	// the only runtime that understands the transactional restore format.
+	if err := s.upgrade.Rollback(ctx, rollout); err != nil {
+		errs = append(errs, err)
+	}
 	for deployment, image := range sourceImages {
+		if len(errs) > 0 {
+			break
+		}
 		parts := strings.SplitN(deployment, "/", 2)
 		if len(parts) != 2 || strings.TrimSpace(image) == "" {
 			errs = append(errs, fmt.Errorf("invalid rollback deployment entry %q", deployment))
 			continue
 		}
-		if err := s.deployments.RolloutImage(ctx, parts[0], parts[1], image, 0, 1); err != nil {
+		if err := s.deployments.RolloutImage(ctx, parts[0], parts[1], image, "", 0, 1); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -625,7 +659,7 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 		}
 	}
 	if len(errs) == 0 {
-		if err := s.upgrade.Rollback(ctx, rollout); err != nil {
+		if err := s.upgrade.CompleteRollback(ctx, rollout); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -12,11 +12,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"clawreef/internal/models"
@@ -26,6 +30,7 @@ import (
 )
 
 const targetOpenClawUpgradeVersion = "2026.8.1"
+const maxOpenClawUpgradeBatchSize = 32
 
 var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.state.sqlite",
@@ -34,10 +39,11 @@ var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.database.preflight",
 	"openclaw.plugin.capability-consent",
 	"openclaw.gateway.stop-confirm",
-	"openclaw.workspace.atomic-restore",
-	"openclaw.workspace.snapshot-v1",
 	"openclaw.workspace.writer-lease",
 	"openclaw.session-sqlite-migrate-v1",
+	"openclaw.session-sqlite-restore-v1",
+	"openclaw.runtime-standby-v1",
+	"openclaw.upgrade-capsule-v2",
 	"redis-team.group-hooks-v1",
 }
 
@@ -146,9 +152,8 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	if target == "" {
 		result.Blockers = append(result.Blockers, "target_image_ref is required")
 	}
-	digest := imageDigestFromReference(target)
-	if digest == "" {
-		result.Blockers = append(result.Blockers, "target image must be immutable and include @sha256:<64 hex>")
+	if req.BatchSize > maxOpenClawUpgradeBatchSize {
+		result.Blockers = append(result.Blockers, fmt.Sprintf("batch_size must not exceed %d", maxOpenClawUpgradeBatchSize))
 	}
 	if !strings.Contains(strings.ToLower(target), "openclaw") {
 		result.Blockers = append(result.Blockers, "target image must be an OpenClaw runtime image")
@@ -160,11 +165,19 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	}
 	result.Warnings = append(result.Warnings, warnings...)
 	result.Blockers = append(result.Blockers, blockers...)
-	for _, candidate := range candidates {
-		if err := validateRuntimeWorkspaceSQLite(candidate.WorkspacePath); err != nil {
-			result.Blockers = append(result.Blockers, fmt.Sprintf("instance %d workspace database preflight: %v", candidate.InstanceID, err))
+	if target != "" {
+		resolved, resolveErr := resolveRuntimeImageReference(ctx, target, sourceImages)
+		if resolveErr != nil {
+			result.Blockers = append(result.Blockers, "target image could not be pinned to an immutable digest: "+resolveErr.Error())
+		} else {
+			target = resolved
 		}
 	}
+	digest := imageDigestFromReference(target)
+	if digest == "" {
+		result.Blockers = append(result.Blockers, "target image must resolve to an immutable sha256 digest")
+	}
+	result.Warnings = append(result.Warnings, "OpenClaw session migration inputs will be scoped and validated by the standby 8.1 Runtime; project files are not copied or inspected as databases")
 	if len(sourceImages) == 0 {
 		result.Blockers = append(result.Blockers, "no current OpenClaw deployment image is available for rollback")
 	}
@@ -221,7 +234,7 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 		PlanFingerprint:          &fingerprint,
 		PreflightJSON:            &preflightRaw,
 		RequiredCapabilitiesJSON: &requiredRaw,
-		BatchSize:                maxInt(req.BatchSize, 1),
+		BatchSize:                minInt(maxInt(req.BatchSize, 1), maxOpenClawUpgradeBatchSize),
 		MaxUnavailable:           0,
 		StartedBy:                req.ActorUserID,
 		AutoRollback:             req.AutoRollback,
@@ -350,47 +363,24 @@ func (s *RuntimeUpgradeService) Prepare(ctx context.Context, rollout *models.Run
 		return fmt.Errorf("Team state changed while entering runtime maintenance: %s", strings.Join(uniqueSortedStrings(fencedBlockers), "; "))
 	}
 
-	sortRuntimeUpgradeCandidates(candidates)
+	// Persist only the immutable binding/path capsule. User projects, plugin
+	// caches and the rest of the workspace remain in place and are never copied.
+	now := time.Now().UTC()
 	for _, candidate := range candidates {
-		if err := s.stopCandidateGateway(ctx, candidate); err != nil {
-			return fmt.Errorf("stop instance %d before snapshot: %w", candidate.InstanceID, err)
-		}
-	}
-	if err := s.updateRolloutPhase(ctx, rollout.ID, "snapshot"); err != nil {
-		return err
-	}
-	existingItems, err := s.listUpgradeItems(ctx, rollout.ID)
-	if err != nil {
-		return err
-	}
-	existingByInstance := make(map[int]models.RuntimeUpgradeItem, len(existingItems))
-	for _, item := range existingItems {
-		existingByInstance[item.InstanceID] = item
-	}
-	for _, candidate := range candidates {
-		if existing, ok := existingByInstance[candidate.InstanceID]; ok && existing.State == "snapshotted" && existing.SnapshotRef != nil && existing.WorkspaceManifestSHA256 != nil {
-			current, err := inspectRuntimeWorkspace(candidate.WorkspacePath)
-			if err != nil {
-				return fmt.Errorf("resume snapshot validation for instance %d: %w", candidate.InstanceID, err)
-			}
-			if current.ManifestSHA256 != strings.TrimSpace(*existing.WorkspaceManifestSHA256) {
-				return fmt.Errorf("instance %d workspace changed after its persisted snapshot", candidate.InstanceID)
-			}
-			if err := verifyLocalSnapshotArchive(s.workspaceRoot, *existing.SnapshotRef); err != nil {
-				return fmt.Errorf("resume snapshot verification for instance %d: %w", candidate.InstanceID, err)
-			}
-			continue
-		}
-		snapshot, inventory, err := s.snapshotCandidate(ctx, rollout.ID, candidate)
-		if err != nil {
-			return fmt.Errorf("snapshot instance %d: %w", candidate.InstanceID, err)
-		}
-		if err := s.updateUpgradeItemSnapshot(ctx, rollout.ID, candidate.InstanceID, snapshot, inventory); err != nil {
+		capsule, _ := json.Marshal(map[string]any{
+			"schema_version": 2,
+			"workspace_path": filepath.Clean(candidate.WorkspacePath),
+			"runtime_pod_id": candidate.RuntimePodID,
+			"gateway_id":     candidate.GatewayID,
+			"generation":     candidate.Generation,
+			"source_version": candidate.SourceVersion,
+		})
+		if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'prepared', snapshot_ref = NULL, workspace_manifest_sha256 = NULL, preflight_json = ?, started_at = COALESCE(started_at, ?), updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state IN ('pending','prepared')`, string(capsule), now, now, rollout.ID, candidate.InstanceID); err != nil {
 			return err
 		}
 	}
 	prepared = true
-	if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "prepare", "snapshot", "passed", map[string]any{"instance_count": len(candidates), "team_count": len(teamIDs)}); err != nil {
+	if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "prepare", "capsule", "passed", map[string]any{"instance_count": len(candidates), "team_count": len(teamIDs), "workspace_snapshot": false}); err != nil {
 		return err
 	}
 	return s.updateRolloutPhase(ctx, rollout.ID, "image_rollout")
@@ -400,12 +390,14 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	if rollout == nil {
 		return false, fmt.Errorf("rollout is required")
 	}
-	readyTarget := 0
+	var targetPods []models.RuntimePod
+	targetCapacity := 0
 	for _, pod := range pods {
-		if pod.RuntimeType != RuntimeTypeOpenClaw || pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != strings.TrimSpace(rollout.TargetImageRef) {
+		if pod.RuntimeType != RuntimeTypeOpenClaw || pod.Draining || strings.TrimSpace(pod.ImageRef) != strings.TrimSpace(rollout.TargetImageRef) || (pod.State != "standby" && pod.State != "ready") {
 			continue
 		}
-		readyTarget++
+		targetPods = append(targetPods, pod)
+		targetCapacity += maxInt(pod.Capacity, 0)
 		if value := stringValue(pod.OpenClawVersion); value != targetOpenClawUpgradeVersion {
 			return false, fmt.Errorf("target pod %s reports OpenClaw %q, want %s", pod.PodName, value, targetOpenClawUpgradeVersion)
 		}
@@ -427,7 +419,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			}
 		}
 	}
-	if readyTarget == 0 {
+	if len(targetPods) == 0 {
 		return false, nil
 	}
 	items, err := s.listUpgradeItems(ctx, rollout.ID)
@@ -437,85 +429,73 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	if len(items) == 0 {
 		return false, fmt.Errorf("OpenClaw data-safe rollout has no persisted upgrade items")
 	}
-	if rollout.Phase != "session_migration" && rollout.Phase != "gateway_restart" && rollout.Phase != "postflight" {
-		for _, item := range items {
-			workspace, err := s.workspaceForInstance(item.InstanceID)
-			if err != nil {
-				return false, err
-			}
-			inventory, err := inspectRuntimeWorkspace(workspace)
-			if err != nil {
-				return false, fmt.Errorf("pre-restart workspace validation for instance %d: %w", item.InstanceID, err)
-			}
-			if item.WorkspaceManifestSHA256 == nil || inventory.ManifestSHA256 != strings.TrimSpace(*item.WorkspaceManifestSHA256) {
-				return false, fmt.Errorf("instance %d workspace changed between snapshot and target restart", item.InstanceID)
-			}
-		}
+	if targetCapacity < len(items) {
+		return false, nil
+	}
+	if rollout.Phase == "image_rollout" {
 		if err := s.updateRolloutPhase(ctx, rollout.ID, "session_migration"); err != nil {
 			return false, err
 		}
 		rollout.Phase = "session_migration"
 	}
-	if rollout.Phase != "gateway_restart" && rollout.Phase != "postflight" {
-		var targetPod *models.RuntimePod
-		for index := range pods {
-			pod := &pods[index]
-			if pod.RuntimeType == RuntimeTypeOpenClaw && pod.State == "ready" && !pod.Draining && strings.TrimSpace(pod.ImageRef) == strings.TrimSpace(rollout.TargetImageRef) && stringValue(pod.AgentEndpoint) != "" {
-				targetPod = pod
-				break
-			}
-		}
-		if targetPod == nil {
-			return false, nil
-		}
+	if rollout.Phase == "session_migration" {
 		upgradeAgent, ok := s.agent.(RuntimeUpgradeAgentClient)
 		if !ok {
-			return false, fmt.Errorf("target Runtime Agent does not implement session SQLite migration")
+			return false, fmt.Errorf("target Runtime Agent does not implement the upgrade capsule contract")
+		}
+		for _, pod := range targetPods {
+			if pod.State != "standby" {
+				return false, fmt.Errorf("target pod %s became ready before all migrations completed", pod.PodName)
+			}
+			if stringValue(pod.AgentEndpoint) == "" {
+				return false, nil
+			}
+		}
+		batch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "prepared")
+		var workers, leaders []models.RuntimeUpgradeItem
+		for _, item := range batch {
+			if item.IsTeamLeader {
+				leaders = append(leaders, item)
+			} else {
+				workers = append(workers, item)
+			}
+		}
+		for _, wave := range [][]models.RuntimeUpgradeItem{workers, leaders} {
+			var wg sync.WaitGroup
+			errCh := make(chan error, len(wave))
+			for index, item := range wave {
+				wg.Add(1)
+				go func(index int, item models.RuntimeUpgradeItem) {
+					defer wg.Done()
+					endpoint := stringValue(targetPods[index%len(targetPods)].AgentEndpoint)
+					if err := s.migrateUpgradeItem(ctx, rollout, item, endpoint, upgradeAgent); err != nil {
+						errCh <- err
+					}
+				}(index, item)
+			}
+			wg.Wait()
+			close(errCh)
+			var waveErrors []error
+			for waveErr := range errCh {
+				waveErrors = append(waveErrors, waveErr)
+			}
+			if len(waveErrors) > 0 {
+				return false, errors.Join(waveErrors...)
+			}
+		}
+		if len(batch) > 0 {
+			return false, nil
 		}
 		for _, item := range items {
-			if item.State == "migrated" || item.State == "restart_ready" || item.State == "gateway_verified" || item.State == "verified" {
-				continue
+			if item.State != "migrated" {
+				return false, fmt.Errorf("instance %d has unexpected pre-activation state %q", item.InstanceID, item.State)
 			}
-			if item.State != "snapshotted" {
-				return false, fmt.Errorf("instance %d has unexpected migration state %q", item.InstanceID, item.State)
+		}
+		rolloutID := strconv.FormatInt(rollout.ID, 10)
+		for _, pod := range targetPods {
+			if err := upgradeAgent.ActivateUpgrade(ctx, stringValue(pod.AgentEndpoint), rolloutID); err != nil {
+				return false, fmt.Errorf("activate target pod %s: %w", pod.PodName, err)
 			}
-			var userID, generation int
-			row, queryErr := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
-			if queryErr != nil {
-				return false, queryErr
-			}
-			if scanErr := row.Scan(&userID, &generation); scanErr != nil {
-				return false, scanErr
-			}
-			leaseToken, tokenErr := randomUpgradeID()
-			if tokenErr != nil {
-				return false, tokenErr
-			}
-			request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: userID, InstanceID: item.InstanceID, Generation: generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), LeaseToken: leaseToken}
-			lease := RuntimeAgentWriterLeaseRequest{RuntimeAgentWorkspaceRequest: request, Token: leaseToken, TTLSeconds: 3600}
-			if err := upgradeAgent.AcquireWriterLease(ctx, stringValue(targetPod.AgentEndpoint), lease); err != nil {
-				return false, fmt.Errorf("acquire migration writer lease for instance %d: %w", item.InstanceID, err)
-			}
-			migration, migrateErr := upgradeAgent.MigrateSessionSQLite(ctx, stringValue(targetPod.AgentEndpoint), request)
-			releaseErr := upgradeAgent.ReleaseWriterLease(ctx, stringValue(targetPod.AgentEndpoint), lease)
-			if migrateErr != nil {
-				return false, fmt.Errorf("migrate instance %d session store: %w", item.InstanceID, migrateErr)
-			}
-			if releaseErr != nil {
-				return false, fmt.Errorf("release migration writer lease for instance %d: %w", item.InstanceID, releaseErr)
-			}
-			if migration == nil || migration.Status != "validated" || strings.TrimSpace(migration.OutputSHA256) == "" {
-				return false, fmt.Errorf("instance %d session migration did not return validated evidence", item.InstanceID)
-			}
-			postflight, _ := json.Marshal(migration)
-			result, updateErr := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'migrated', postflight_json = ?, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'snapshotted'`, string(postflight), time.Now().UTC(), rollout.ID, item.InstanceID)
-			if updateErr != nil {
-				return false, updateErr
-			}
-			if affected, _ := result.RowsAffected(); affected != 1 {
-				return false, fmt.Errorf("instance %d migration state changed concurrently", item.InstanceID)
-			}
-			return false, nil
 		}
 		if err := s.updateRolloutPhase(ctx, rollout.ID, "gateway_restart"); err != nil {
 			return false, err
@@ -526,28 +506,35 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			return false, err
 		}
 	}
-	// Target agents are now capability-verified. Release exactly one instance
-	// at a time. Items are ordered OpenClaw workers first and the Leader last;
-	// Team maintenance remains active until every recreated binding is healthy.
-	if rollout.Phase == "gateway_restart" && len(items) > 0 && items[0].State == "migrated" {
-		if err := s.markUpgradeItemRestartReady(ctx, rollout.ID, items[0].InstanceID); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
 	if rollout.Phase != "postflight" {
-		for index, item := range items {
-			if item.State == "gateway_verified" || item.State == "verified" {
-				continue
+		allTargetsReady := true
+		for _, pod := range targetPods {
+			if pod.State != "ready" {
+				allTargetsReady = false
 			}
-			if item.State == "migrated" {
-				// Resume safely after a controller restart between releasing two
-				// serial members (or between the phase update and first release).
+		}
+		if !allTargetsReady {
+			return false, nil
+		}
+		activeBatch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "restart_ready")
+		if len(activeBatch) == 0 {
+			nextBatch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "migrated")
+			for _, item := range nextBatch {
 				if err := s.markUpgradeItemRestartReady(ctx, rollout.ID, item.InstanceID); err != nil {
 					return false, err
 				}
+			}
+			if len(nextBatch) > 0 {
 				return false, nil
 			}
+			for _, item := range items {
+				if item.State != "gateway_verified" && item.State != "verified" {
+					return false, fmt.Errorf("instance %d has unexpected terminal restart state %q", item.InstanceID, item.State)
+				}
+			}
+			rollout.Phase = "postflight"
+		}
+		for _, item := range activeBatch {
 			if item.State != "restart_ready" {
 				return false, fmt.Errorf("instance %d has unexpected restart state %q", item.InstanceID, item.State)
 			}
@@ -585,13 +572,9 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "instance_gateway_verified", "gateway_restart", "passed", map[string]any{"instance_id": item.InstanceID, "is_team_leader": item.IsTeamLeader}); err != nil {
 				return false, err
 			}
-			if index+1 < len(items) {
-				if err := s.markUpgradeItemRestartReady(ctx, rollout.ID, items[index+1].InstanceID); err != nil {
-					return false, err
-				}
-				return false, nil
-			}
-			break
+		}
+		if len(activeBatch) > 0 {
+			return false, nil
 		}
 	}
 	if err := s.updateRolloutPhase(ctx, rollout.ID, "postflight"); err != nil {
@@ -612,6 +595,133 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	now := time.Now().UTC()
 	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'verified', finished_at = ?, updated_at = ? WHERE rollout_id = ?`, now, now, rollout.ID)
 	return true, nil
+}
+
+func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout *models.RuntimeRollout, item models.RuntimeUpgradeItem, targetEndpoint string, upgradeAgent RuntimeUpgradeAgentClient) error {
+	candidate, err := s.candidateForUpgradeItem(ctx, item)
+	if err != nil {
+		return err
+	}
+	if err := s.stopCandidateGateway(ctx, candidate); err != nil {
+		return fmt.Errorf("stop instance %d before session migration: %w", item.InstanceID, err)
+	}
+	var userID, generation int
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
+	if err != nil {
+		return err
+	}
+	if err := row.Scan(&userID, &generation); err != nil {
+		return err
+	}
+	leaseToken, err := randomUpgradeID()
+	if err != nil {
+		return err
+	}
+	request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: userID, InstanceID: item.InstanceID, Generation: generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), LeaseToken: leaseToken}
+	lease := RuntimeAgentWriterLeaseRequest{RuntimeAgentWorkspaceRequest: request, Token: leaseToken, TTLSeconds: 3600}
+	if err := upgradeAgent.AcquireWriterLease(ctx, targetEndpoint, lease); err != nil {
+		return fmt.Errorf("acquire migration writer lease for instance %d: %w", item.InstanceID, err)
+	}
+	inventory, preflightErr := upgradeAgent.PreflightWorkspace(ctx, targetEndpoint, request)
+	if preflightErr != nil {
+		_ = upgradeAgent.ReleaseWriterLease(ctx, targetEndpoint, lease)
+		return fmt.Errorf("preflight instance %d session migration: %w", item.InstanceID, preflightErr)
+	}
+	migration, migrateErr := upgradeAgent.MigrateSessionSQLite(ctx, targetEndpoint, request)
+	releaseErr := upgradeAgent.ReleaseWriterLease(ctx, targetEndpoint, lease)
+	if migrateErr != nil {
+		return fmt.Errorf("migrate instance %d session store: %w", item.InstanceID, migrateErr)
+	}
+	if releaseErr != nil {
+		return fmt.Errorf("release migration writer lease for instance %d: %w", item.InstanceID, releaseErr)
+	}
+	if migration == nil || migration.Status != "validated" || strings.TrimSpace(migration.OutputSHA256) == "" {
+		return fmt.Errorf("instance %d session migration did not return validated evidence", item.InstanceID)
+	}
+	postflight, _ := json.Marshal(map[string]any{"migration": migration, "session_inventory": inventory, "target_agent_endpoint": targetEndpoint})
+	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'migrated', postflight_json = ?, snapshot_ref = ?, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'prepared'`, string(postflight), "official-session-archive", time.Now().UTC(), rollout.ID, item.InstanceID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("instance %d migration state changed concurrently", item.InstanceID)
+	}
+	return nil
+}
+
+func (s *RuntimeUpgradeService) candidateForUpgradeItem(ctx context.Context, item models.RuntimeUpgradeItem) (runtimeUpgradeCandidate, error) {
+	var userID, generation int
+	var workspace sql.NullString
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation, workspace_path FROM instances WHERE id = ?`, item.InstanceID)
+	if err != nil {
+		return runtimeUpgradeCandidate{}, err
+	}
+	if err := row.Scan(&userID, &generation, &workspace); err != nil {
+		return runtimeUpgradeCandidate{}, err
+	}
+	expected := RuntimeWorkspacePathWithRoot(s.workspaceRoot, RuntimeTypeOpenClaw, userID, item.InstanceID)
+	actual := filepath.Clean(strings.TrimSpace(workspace.String))
+	if actual == "." || actual == "" {
+		actual = expected
+	}
+	if !sameCleanPath(actual, expected) || !pathWithin(s.workspaceRoot, actual) {
+		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d workspace left its fixed managed path", item.InstanceID)
+	}
+	candidate := runtimeUpgradeCandidate{InstanceID: item.InstanceID, UserID: userID, Generation: generation, WorkspacePath: actual, TeamID: item.TeamID, TeamMemberID: item.TeamMemberID}
+	binding, err := s.bindings.GetByInstanceID(ctx, item.InstanceID)
+	if err != nil {
+		return runtimeUpgradeCandidate{}, err
+	}
+	if binding == nil {
+		return candidate, nil
+	}
+	candidate.RuntimePodID = &binding.RuntimePodID
+	candidate.GatewayID = strings.TrimSpace(binding.GatewayID)
+	candidate.Generation = binding.Generation
+	candidate.BindingState = strings.ToLower(strings.TrimSpace(binding.State))
+	pod, err := s.pods.GetByID(ctx, binding.RuntimePodID)
+	if err != nil {
+		return runtimeUpgradeCandidate{}, err
+	}
+	if pod == nil || pod.State != "ready" || pod.Draining || stringValue(pod.AgentEndpoint) == "" {
+		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d source Runtime pod is unavailable", item.InstanceID)
+	}
+	candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
+	candidate.Capabilities = pod.Capabilities()
+	return candidate, nil
+}
+
+func nextRuntimeUpgradeBatch(items []models.RuntimeUpgradeItem, limit int, state string) []models.RuntimeUpgradeItem {
+	if limit <= 0 {
+		limit = 1
+	}
+	var batch []models.RuntimeUpgradeItem
+	for index := 0; index < len(items); {
+		item := items[index]
+		end := index + 1
+		if item.TeamID != nil {
+			for end < len(items) && items[end].TeamID != nil && *items[end].TeamID == *item.TeamID {
+				end++
+			}
+		}
+		var group []models.RuntimeUpgradeItem
+		for _, candidate := range items[index:end] {
+			if candidate.State == state {
+				group = append(group, candidate)
+			}
+		}
+		if len(group) > 0 {
+			if len(batch) > 0 && len(batch)+len(group) > limit {
+				break
+			}
+			batch = append(batch, group...)
+			if len(batch) >= limit {
+				break
+			}
+		}
+		index = end
+	}
+	return batch
 }
 
 func (s *RuntimeUpgradeService) workspaceForInstance(instanceID int) (string, error) {
@@ -638,56 +748,143 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 	if len(items) == 0 {
 		return fmt.Errorf("rollback refused: rollout %d has no persisted upgrade items", rollout.ID)
 	}
+	upgradeAgent, ok := s.agent.(RuntimeUpgradeAgentClient)
+	if !ok {
+		return fmt.Errorf("target Runtime Agent does not implement official session restore")
+	}
 	var errs []error
 	teamIDs := map[int]struct{}{}
+	var fallbackEndpoints []string
+	if runtimePods, listErr := s.pods.List(ctx, RuntimeTypeOpenClaw); listErr == nil {
+		for _, pod := range runtimePods {
+			endpoint := stringValue(pod.AgentEndpoint)
+			if strings.TrimSpace(pod.ImageRef) == strings.TrimSpace(rollout.TargetImageRef) && endpoint != "" && (pod.State == "standby" || pod.State == "ready") {
+				fallbackEndpoints = append(fallbackEndpoints, endpoint)
+			}
+		}
+	}
 	for _, item := range items {
 		if item.TeamID != nil {
 			teamIDs[*item.TeamID] = struct{}{}
 		}
-		if item.SnapshotRef == nil || strings.TrimSpace(*item.SnapshotRef) == "" {
-			errs = append(errs, fmt.Errorf("restore instance %d: persisted snapshot is missing", item.InstanceID))
+		if item.State == "prepared" || item.State == "pending" {
 			continue
 		}
-		if item.WorkspaceManifestSHA256 == nil || strings.TrimSpace(*item.WorkspaceManifestSHA256) == "" {
-			errs = append(errs, fmt.Errorf("restore instance %d: persisted workspace manifest is missing", item.InstanceID))
+		if item.PostflightJSON == nil || strings.TrimSpace(*item.PostflightJSON) == "" {
+			errs = append(errs, fmt.Errorf("restore instance %d: official migration evidence is missing", item.InstanceID))
 			continue
 		}
-		if err := verifyLocalSnapshotArchive(s.workspaceRoot, *item.SnapshotRef); err != nil {
-			errs = append(errs, fmt.Errorf("verify instance %d snapshot: %w", item.InstanceID, err))
+		var evidence struct {
+			Migration           RuntimeAgentSessionSQLiteMigration `json:"migration"`
+			TargetAgentEndpoint string                             `json:"target_agent_endpoint"`
+		}
+		if err := json.Unmarshal([]byte(*item.PostflightJSON), &evidence); err != nil || evidence.Migration.Status != "validated" {
+			errs = append(errs, fmt.Errorf("restore instance %d: invalid official migration evidence", item.InstanceID))
 			continue
 		}
-		if err := s.restoreLocalSnapshot(item.InstanceID, *item.SnapshotRef); err != nil {
-			errs = append(errs, fmt.Errorf("restore instance %d: %w", item.InstanceID, err))
+		if !evidence.Migration.RollbackAvailable {
+			_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restored', updated_at = ? WHERE rollout_id = ? AND instance_id = ?`, time.Now().UTC(), rollout.ID, item.InstanceID)
 			continue
 		}
-		workspace, pathErr := s.workspaceForInstance(item.InstanceID)
-		if pathErr != nil {
-			errs = append(errs, fmt.Errorf("verify restored instance %d workspace: %w", item.InstanceID, pathErr))
+		var userID, generation int
+		row, queryErr := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
+		if queryErr != nil || row.Scan(&userID, &generation) != nil {
+			errs = append(errs, fmt.Errorf("restore instance %d: instance identity is unavailable", item.InstanceID))
 			continue
 		}
-		inventory, inspectErr := inspectRuntimeWorkspace(workspace)
-		if inspectErr != nil {
-			errs = append(errs, fmt.Errorf("verify restored instance %d manifest: %w", item.InstanceID, inspectErr))
+		leaseToken, tokenErr := randomUpgradeID()
+		if tokenErr != nil {
+			errs = append(errs, tokenErr)
 			continue
 		}
-		if inventory.ManifestSHA256 != strings.TrimSpace(*item.WorkspaceManifestSHA256) {
-			errs = append(errs, fmt.Errorf("verify restored instance %d manifest: got %s want %s", item.InstanceID, inventory.ManifestSHA256, strings.TrimSpace(*item.WorkspaceManifestSHA256)))
+		request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: userID, InstanceID: item.InstanceID, Generation: generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), LeaseToken: leaseToken}
+		lease := RuntimeAgentWriterLeaseRequest{RuntimeAgentWorkspaceRequest: request, Token: leaseToken, TTLSeconds: 3600}
+		endpoints := uniqueSortedStrings(append([]string{strings.TrimSpace(evidence.TargetAgentEndpoint)}, fallbackEndpoints...))
+		if len(endpoints) == 0 {
+			errs = append(errs, fmt.Errorf("restore instance %d: target agent endpoint is missing", item.InstanceID))
+			continue
 		}
+		endpoint := ""
+		var acquireErrors []error
+		for _, candidateEndpoint := range endpoints {
+			if err := upgradeAgent.AcquireWriterLease(ctx, candidateEndpoint, lease); err == nil {
+				endpoint = candidateEndpoint
+				break
+			} else {
+				acquireErrors = append(acquireErrors, err)
+			}
+		}
+		if endpoint == "" {
+			errs = append(errs, fmt.Errorf("restore instance %d acquire writer lease: %w", item.InstanceID, errors.Join(acquireErrors...)))
+			continue
+		}
+		restored, restoreErr := upgradeAgent.RestoreSessionSQLite(ctx, endpoint, request)
+		releaseErr := upgradeAgent.ReleaseWriterLease(ctx, endpoint, lease)
+		if restoreErr != nil {
+			errs = append(errs, fmt.Errorf("restore instance %d official session archive: %w", item.InstanceID, restoreErr))
+			continue
+		}
+		if releaseErr != nil {
+			errs = append(errs, fmt.Errorf("restore instance %d release writer lease: %w", item.InstanceID, releaseErr))
+			continue
+		}
+		if restored == nil || restored.Status != "restored" || strings.TrimSpace(restored.OutputSHA256) == "" {
+			errs = append(errs, fmt.Errorf("restore instance %d returned no verified evidence", item.InstanceID))
+			continue
+		}
+		_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restored', updated_at = ? WHERE rollout_id = ? AND instance_id = ?`, time.Now().UTC(), rollout.ID, item.InstanceID)
 	}
 	if len(errs) == 0 {
-		if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "rollback", "rollback_restore", "passed", map[string]any{"instance_count": len(items)}); err != nil {
+		if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "rollback_restore", "rollback_restore", "passed", map[string]any{"instance_count": len(items), "workspace_snapshot": false}); err != nil {
 			return err
 		}
-		if err := s.setTeamMaintenance(ctx, teamIDs, rollout.ID, false); err != nil {
-			return err
-		}
-		status := "restored"
-		_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = ?, rollback_error = NULL, updated_at = ? WHERE id = ?`, status, time.Now().UTC(), rollout.ID)
+		_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'waiting', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID)
 		return nil
 	}
 	message := errors.Join(errs...).Error()
 	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'error', rollback_error = ?, updated_at = ? WHERE id = ?`, message, time.Now().UTC(), rollout.ID)
 	return errors.Join(errs...)
+}
+
+func (s *RuntimeUpgradeService) CompleteRollback(ctx context.Context, rollout *models.RuntimeRollout) error {
+	if rollout == nil {
+		return nil
+	}
+	items, err := s.listUpgradeItems(ctx, rollout.ID)
+	if err != nil {
+		return err
+	}
+	teamIDs := map[int]struct{}{}
+	for _, item := range items {
+		if item.TeamID != nil {
+			teamIDs[*item.TeamID] = struct{}{}
+		}
+	}
+	if err := s.sess.TxContext(ctx, func(tx db.Session) error {
+		now := time.Now().UTC()
+		for _, item := range items {
+			if item.State != "restored" {
+				continue
+			}
+			if _, err := tx.SQL().ExecContext(ctx, `UPDATE instances SET status = 'creating', runtime_generation = runtime_generation + 1, runtime_error_message = NULL, updated_at = ? WHERE id = ?`, now, item.InstanceID); err != nil {
+				return err
+			}
+			if _, err := tx.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restart_ready', updated_at = ? WHERE rollout_id = ? AND instance_id = ?`, now, rollout.ID, item.InstanceID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil); err != nil {
+		return err
+	}
+	if err := s.setTeamMaintenance(ctx, teamIDs, rollout.ID, false); err != nil {
+		return err
+	}
+	if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "rollback_complete", "rollback_image", "passed", map[string]any{"instance_count": len(items)}); err != nil {
+		return err
+	}
+	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'restored', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID)
+	return err
 }
 
 func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int64) error {
@@ -696,7 +893,23 @@ func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int
 }
 
 func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, instanceID int) bool {
-	return s.ValidateInstanceDeletion(ctx, instanceID) != nil
+	if s == nil || s.sess == nil || instanceID <= 0 {
+		return true
+	}
+	var count int
+	row, err := s.sess.SQL().QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM runtime_upgrade_items i
+		JOIN runtime_rollouts r ON r.id = i.rollout_id
+		WHERE i.instance_id = ? AND (
+		  (r.status IN ('pending','running') AND r.phase IN ('maintenance','image_rollout','session_migration','postflight','rollback_restore'))
+		  OR (r.status IN ('pending','running') AND r.phase = 'gateway_restart' AND i.state <> 'restart_ready')
+		  OR (r.status IN ('pending','running') AND r.rollback_status IN ('starting','waiting'))
+		)
+	`, instanceID)
+	if err == nil {
+		err = row.Scan(&count)
+	}
+	return err != nil || count > 0
 }
 
 func (s *RuntimeUpgradeService) ValidateInstanceDeletion(ctx context.Context, instanceID int) error {
@@ -707,11 +920,7 @@ func (s *RuntimeUpgradeService) ValidateInstanceDeletion(ctx context.Context, in
 	row, err := s.sess.SQL().QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runtime_upgrade_items i
 		JOIN runtime_rollouts r ON r.id = i.rollout_id
-		WHERE i.instance_id = ? AND (
-		  (r.status IN ('pending','running') AND r.phase IN ('maintenance','snapshot','image_rollout','session_migration','postflight','rollback_restore'))
-		  OR (r.status IN ('pending','running') AND r.phase = 'gateway_restart' AND i.state <> 'restart_ready')
-		  OR r.rollback_status IN ('starting','waiting','error')
-		)
+		WHERE i.instance_id = ? AND r.status IN ('pending','running')
 	`, instanceID)
 	if err == nil {
 		err = row.Scan(&count)
@@ -819,7 +1028,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 				candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
 				candidate.Capabilities = pod.Capabilities()
 				if candidate.SourceVersion == "" {
-					warnings = append(warnings, fmt.Sprintf("instance %d is a legacy 7.1-compatible source; local immutable workspace snapshot will be used", instanceID))
+					warnings = append(warnings, fmt.Sprintf("instance %d is a legacy 7.1-compatible source; OpenClaw's transactional session migration archive will be used without copying the workspace", instanceID))
 				}
 			}
 		}
@@ -841,7 +1050,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context) ([]runtim
 			if candidate.AgentEndpoint == "" {
 				blockers = append(blockers, fmt.Sprintf("instance %d has a running gateway but no reachable Runtime Agent", instanceID))
 			} else if !containsString(candidate.Capabilities, "openclaw.gateway.stop-confirm") {
-				warnings = append(warnings, fmt.Sprintf("instance %d uses the legacy 7.1 synchronous stop path; snapshot consistency will be verified twice", instanceID))
+				warnings = append(warnings, fmt.Sprintf("instance %d uses the legacy 7.1 synchronous stop path; its Gateway stop will be confirmed immediately before migration", instanceID))
 			}
 		}
 		candidates = append(candidates, candidate)
@@ -989,6 +1198,7 @@ func (s *RuntimeUpgradeService) stopCandidateGateway(ctx context.Context, candid
 }
 
 func (s *RuntimeUpgradeService) snapshotCandidate(ctx context.Context, rolloutID int64, candidate runtimeUpgradeCandidate) (string, runtimeWorkspaceInventory, error) {
+	return "", runtimeWorkspaceInventory{}, errors.New("full workspace snapshots are disabled; use the OpenClaw session migration capsule")
 	localInventory, localInventoryErr := inspectRuntimeWorkspace(candidate.WorkspacePath)
 	if localInventoryErr != nil {
 		return "", localInventory, localInventoryErr
@@ -1043,6 +1253,7 @@ func (s *RuntimeUpgradeService) snapshotCandidate(ctx context.Context, rolloutID
 }
 
 func (s *RuntimeUpgradeService) createLocalSnapshot(rolloutID int64, candidate runtimeUpgradeCandidate) (string, runtimeWorkspaceInventory, error) {
+	return "", runtimeWorkspaceInventory{}, errors.New("full workspace snapshots are disabled; use the OpenClaw session migration capsule")
 	inventory, err := inspectRuntimeWorkspace(candidate.WorkspacePath)
 	if err != nil {
 		return "", inventory, err
@@ -1136,6 +1347,7 @@ func (s *RuntimeUpgradeService) createLocalSnapshot(rolloutID int64, candidate r
 }
 
 func (s *RuntimeUpgradeService) restoreLocalSnapshot(instanceID int, snapshotRef string) error {
+	return errors.New("full workspace restore is disabled; use the OpenClaw session migration restore")
 	if strings.HasPrefix(snapshotRef, "agent:") {
 		return fmt.Errorf("agent snapshot restore requires the original runtime agent and is not available through local fallback")
 	}
@@ -1426,15 +1638,25 @@ func (s *RuntimeUpgradeService) updateUpgradeItemSnapshot(ctx context.Context, r
 }
 
 func (s *RuntimeUpgradeService) markUpgradeItemRestartReady(ctx context.Context, rolloutID int64, instanceID int) error {
-	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restart_ready', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state IN ('migrated','gateway_verified')`, time.Now().UTC(), rolloutID, instanceID)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
-		return fmt.Errorf("instance %d could not enter restart_ready", instanceID)
-	}
-	return nil
+	return s.sess.TxContext(ctx, func(tx db.Session) error {
+		now := time.Now().UTC()
+		result, err := tx.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restart_ready', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'migrated'`, now, rolloutID, instanceID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil || affected != 1 {
+			return fmt.Errorf("instance %d could not enter restart_ready", instanceID)
+		}
+		result, err = tx.SQL().ExecContext(ctx, `UPDATE instances SET status = 'creating', runtime_generation = runtime_generation + 1, runtime_error_message = NULL, updated_at = ? WHERE id = ? AND LOWER(TRIM(status)) <> 'deleting'`, now, instanceID)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return fmt.Errorf("instance %d could not enter runtime recreation", instanceID)
+		}
+		return nil
+	}, nil)
 }
 
 func (s *RuntimeUpgradeService) markUpgradeItemGatewayVerified(ctx context.Context, rolloutID int64, instanceID int) error {
@@ -1478,6 +1700,99 @@ func imageDigestFromReference(value string) string {
 		return ""
 	}
 	return digest
+}
+
+func resolveRuntimeImageReference(ctx context.Context, target string, sourceImages map[string]string) (string, error) {
+	target = strings.TrimSpace(target)
+	host, repository, tag, err := splitRegistryImage(target)
+	if err != nil {
+		return "", err
+	}
+	allowed := false
+	for _, source := range sourceImages {
+		sourceHost, _, _, sourceErr := splitRegistryImage(source)
+		if sourceErr == nil && strings.EqualFold(sourceHost, host) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("registry host %q differs from the live OpenClaw registry", host)
+	}
+	if digest := imageDigestFromReference(target); digest != "" {
+		return host + "/" + repository + "@" + digest, nil
+	}
+	if tag == "" {
+		return "", fmt.Errorf("image tag is required")
+	}
+	scheme := "https"
+	hostname := host
+	if parsedHost, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+		hostname = parsedHost
+	}
+	ip := net.ParseIP(strings.Trim(hostname, "[]"))
+	if strings.EqualFold(hostname, "localhost") || (ip != nil && (ip.IsPrivate() || ip.IsLoopback())) {
+		scheme = "http"
+	}
+	pathParts := strings.Split(repository, "/")
+	for index := range pathParts {
+		pathParts[index] = url.PathEscape(pathParts[index])
+	}
+	manifestURL := scheme + "://" + host + "/v2/" + strings.Join(pathParts, "/") + "/manifests/" + url.PathEscape(tag)
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json")
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("registry returned status %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return "", err
+	}
+	digest := strings.TrimSpace(response.Header.Get("Docker-Content-Digest"))
+	if imageDigestFromReference("image@"+digest) == "" {
+		sum := sha256.Sum256(body)
+		digest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	return host + "/" + repository + "@" + digest, nil
+}
+
+func splitRegistryImage(value string) (host, repository, tag string, err error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, "://") || strings.ContainsAny(value, " \t\r\n") {
+		return "", "", "", fmt.Errorf("invalid registry image reference")
+	}
+	slash := strings.Index(value, "/")
+	if slash <= 0 || slash == len(value)-1 {
+		return "", "", "", fmt.Errorf("registry host and repository are required")
+	}
+	host = value[:slash]
+	remainder := value[slash+1:]
+	if strings.Contains(host, "@") || strings.Contains(host, "\\") || strings.Contains(remainder, "\\") || strings.Contains(remainder, "..") {
+		return "", "", "", fmt.Errorf("invalid registry image reference")
+	}
+	if at := strings.LastIndex(remainder, "@sha256:"); at >= 0 {
+		repository = remainder[:at]
+		return host, repository, "", nil
+	}
+	lastSlash := strings.LastIndex(remainder, "/")
+	if colon := strings.LastIndex(remainder, ":"); colon > lastSlash {
+		repository, tag = remainder[:colon], remainder[colon+1:]
+	} else {
+		repository = remainder
+	}
+	if repository == "" {
+		return "", "", "", fmt.Errorf("repository is required")
+	}
+	return host, repository, tag, nil
 }
 
 func immutableRuntimeImage(imageRef, digest string) (string, error) {

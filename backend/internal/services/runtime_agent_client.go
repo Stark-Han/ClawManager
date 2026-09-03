@@ -35,6 +35,8 @@ type RuntimeUpgradeAgentClient interface {
 	VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error
 	RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error)
 	MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error)
+	RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error)
+	ActivateUpgrade(ctx context.Context, endpoint, rolloutID string) error
 }
 
 type RuntimeAgentWorkspaceRequest struct {
@@ -96,6 +98,16 @@ type RuntimeAgentRestoreResponse struct {
 }
 
 type RuntimeAgentSessionSQLiteMigration struct {
+	InstanceID        int       `json:"instance_id"`
+	Status            string    `json:"status"`
+	OutputSHA256      string    `json:"output_sha256"`
+	ArchiveBytes      int64     `json:"archive_bytes"`
+	ArchiveFiles      int64     `json:"archive_files"`
+	RollbackAvailable bool      `json:"rollback_available"`
+	CompletedAt       time.Time `json:"completed_at"`
+}
+
+type RuntimeAgentSessionSQLiteRestore struct {
 	InstanceID   int       `json:"instance_id"`
 	Status       string    `json:"status"`
 	OutputSHA256 string    `json:"output_sha256"`
@@ -251,6 +263,18 @@ func (c *runtimeAgentHTTPClient) MigrateSessionSQLite(ctx context.Context, endpo
 		return nil, err
 	}
 	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error) {
+	var response RuntimeAgentSessionSQLiteRestore
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/restore", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) ActivateUpgrade(ctx context.Context, endpoint, rolloutID string) error {
+	return c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/upgrade/activate", map[string]string{"rollout_id": rolloutID}, nil)
 }
 
 func (c *runtimeAgentHTTPClient) do(ctx context.Context, method, endpoint, path string, body any, out any) error {

@@ -3,8 +3,11 @@ package services
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +28,36 @@ func TestImageDigestFromReferenceRequiresImmutableSHA256(t *testing.T) {
 	}
 }
 
+func TestOpenClawUpgradeContractExcludesFullWorkspaceSnapshots(t *testing.T) {
+	joined := strings.Join(openClawUpgradeRequiredCapabilities, ",")
+	if strings.Contains(joined, "workspace.snapshot") || strings.Contains(joined, "workspace.atomic-restore") {
+		t.Fatalf("full-workspace capability remained in upgrade contract: %s", joined)
+	}
+	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2"} {
+		if !containsString(openClawUpgradeRequiredCapabilities, required) {
+			t.Fatalf("missing capability %s", required)
+		}
+	}
+}
+
+func TestNextRuntimeUpgradeBatchKeepsTeamAtomicAndWorkerBeforeLeader(t *testing.T) {
+	team := 7
+	items := []models.RuntimeUpgradeItem{
+		{InstanceID: 1, State: "prepared"},
+		{InstanceID: 2, TeamID: &team, State: "prepared"},
+		{InstanceID: 3, TeamID: &team, State: "prepared", IsTeamLeader: true},
+		{InstanceID: 4, State: "prepared"},
+	}
+	batch := nextRuntimeUpgradeBatch(items, 2, "prepared")
+	if len(batch) != 1 || batch[0].InstanceID != 1 {
+		t.Fatalf("first batch = %+v, want only standalone instance 1", batch)
+	}
+	batch = nextRuntimeUpgradeBatch(items[1:], 1, "prepared")
+	if len(batch) != 2 || batch[0].InstanceID != 2 || batch[1].InstanceID != 3 {
+		t.Fatalf("Team batch = %+v, want worker and leader together", batch)
+	}
+}
+
 func TestImmutableRuntimeImagePinsTagToObservedDigest(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	got, err := immutableRuntimeImage("10.130.14.23:5000/agentsruntime/openclaw-lite:legacy", digest)
@@ -37,6 +70,31 @@ func TestImmutableRuntimeImagePinsTagToObservedDigest(t *testing.T) {
 	}
 	if _, err := immutableRuntimeImage("registry/openclaw:legacy", ""); err == nil {
 		t.Fatal("missing source digest was accepted")
+	}
+}
+
+func TestResolveRuntimeImageReferencePinsTagInLiveRegistry(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/agentsruntime/openclaw-lite/manifests/release" {
+			t.Fatalf("registry path = %q", r.URL.Path)
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = w.Write([]byte(`{"schemaVersion":2}`))
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	sources := map[string]string{"runtime-system/openclaw-runtime": host + "/agentsruntime/openclaw-lite@sha256:" + strings.Repeat("a", 64)}
+	got, err := resolveRuntimeImageReference(context.Background(), host+"/agentsruntime/openclaw-lite:release", sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := host + "/agentsruntime/openclaw-lite@" + digest
+	if got != want {
+		t.Fatalf("resolved image = %q, want %q", got, want)
+	}
+	if _, err := resolveRuntimeImageReference(context.Background(), "other.invalid/agentsruntime/openclaw-lite:release", sources); err == nil {
+		t.Fatal("cross-registry target was accepted")
 	}
 }
 
@@ -84,9 +142,10 @@ func TestLocalUpgradeSnapshotPreservesOpenClawWorkspaceBytes(t *testing.T) {
 
 	service := &RuntimeUpgradeService{workspaceRoot: root}
 	ref, inventory, err := service.createLocalSnapshot(77, runtimeUpgradeCandidate{InstanceID: 123, UserID: 45, WorkspacePath: workspace})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("full workspace snapshot unexpectedly remained enabled")
 	}
+	return
 	if !inventory.SQLiteHeaderValid || inventory.SQLiteFileCount != 1 || inventory.ManifestSHA256 == "" {
 		t.Fatalf("inventory = %#v", inventory)
 	}

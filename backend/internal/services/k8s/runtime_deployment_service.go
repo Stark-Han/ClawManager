@@ -62,7 +62,7 @@ type RuntimeDeploymentPod struct {
 type RuntimeDeploymentService interface {
 	Ensure(ctx context.Context, spec RuntimeDeploymentSpec) error
 	Scale(ctx context.Context, namespace, name string, replicas int32) error
-	RolloutImage(ctx context.Context, namespace, name, image string, maxUnavailable, maxSurge int) error
+	RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error
 	ListPods(ctx context.Context, namespace, runtimeType string) ([]RuntimeDeploymentPod, error)
 }
 
@@ -296,7 +296,7 @@ func (s *runtimeDeploymentService) Scale(ctx context.Context, namespace, name st
 	return nil
 }
 
-func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, name, image string, maxUnavailable, maxSurge int) error {
+func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("k8s client not initialized")
 	}
@@ -328,6 +328,27 @@ func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, 
 		container.Image = image
 		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_REF", image)
 		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", runtimeImageDigest(image))
+		upgradeID = strings.TrimSpace(upgradeID)
+		if upgradeID != "" {
+			upsertEnvVar(container, "CLAWMANAGER_RUNTIME_UPGRADE_ID", upgradeID)
+			container.ReadinessProbe = &corev1.Probe{
+				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("agent"), Scheme: corev1.URISchemeHTTP}},
+				InitialDelaySeconds: 1,
+				PeriodSeconds:       2,
+				TimeoutSeconds:      1,
+				FailureThreshold:    3,
+				SuccessThreshold:    1,
+			}
+			maxUnavailable = 0
+			if updated.Spec.Replicas != nil && *updated.Spec.Replicas > 0 {
+				maxSurge = int(*updated.Spec.Replicas)
+			}
+		} else {
+			removeEnvVar(container, "CLAWMANAGER_RUNTIME_UPGRADE_ID")
+			if container.ReadinessProbe != nil && container.ReadinessProbe.HTTPGet != nil && container.ReadinessProbe.HTTPGet.Path == "/readyz" {
+				container.ReadinessProbe = nil
+			}
+		}
 
 		updated.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
 		updated.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{
@@ -488,6 +509,19 @@ func upsertEnvVar(container *corev1.Container, name, value string) {
 		}
 	}
 	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
+}
+
+func removeEnvVar(container *corev1.Container, name string) {
+	if container == nil {
+		return
+	}
+	filtered := container.Env[:0]
+	for _, env := range container.Env {
+		if env.Name != name {
+			filtered = append(filtered, env)
+		}
+	}
+	container.Env = filtered
 }
 
 func runtimeImageDigest(image string) string {

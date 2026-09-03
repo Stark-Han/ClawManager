@@ -102,7 +102,6 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
   },
 };
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
-const IMMUTABLE_IMAGE_REFERENCE = /@sha256:[a-fA-F0-9]{64}$/;
 const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
 // Keep the saved Windows image setting intact so it can be restored later,
 // but do not expose it in the image configuration page while Linux WorkBuddy
@@ -274,7 +273,7 @@ const SystemSettingsPage: React.FC = () => {
   const [rolloutImage, setRolloutImage] = useState('');
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
-  const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
+  const [rolloutBatchSize, setRolloutBatchSize] = useState(8);
   const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(0);
   const [rolloutSaving, setRolloutSaving] = useState(false);
   const [rolloutError, setRolloutError] = useState<string | null>(null);
@@ -498,14 +497,13 @@ const SystemSettingsPage: React.FC = () => {
       setRolloutError(t('systemSettingsPage.rolloutTargetRequired'));
       return;
     }
-    if (rolloutRuntimeType === 'openclaw' && !IMMUTABLE_IMAGE_REFERENCE.test(rolloutImage.trim())) {
-      setRolloutError(t('systemSettingsPage.rolloutImmutableTargetRequired'));
-      return;
-    }
-
     try {
       setRolloutSaving(true);
       setRolloutError(null);
+	  if (rolloutRuntimeType === 'openclaw' && rolloutPreflight && !rolloutPreflight.passed) {
+		setRolloutError(rolloutPreflight.blockers.join('；'));
+		return;
+	  }
       if (rolloutRuntimeType === 'openclaw' && !rolloutPreflight) {
         const preflight = await runtimePoolService.preflightOpenClawRollout({
           target_image_ref: rolloutImage.trim(),
@@ -514,6 +512,7 @@ const SystemSettingsPage: React.FC = () => {
           auto_rollback: true,
         });
         setRolloutPreflight(preflight);
+        setRolloutImage(preflight.rollout.target_image_ref);
         if (!preflight.passed) {
           setRolloutError(preflight.blockers.join('；'));
         }
@@ -669,7 +668,7 @@ const SystemSettingsPage: React.FC = () => {
                 onChange={(event) => { setRolloutImage(event.target.value); setRolloutPreflight(null); setRolloutError(null); }}
                 className="app-input mt-1 block w-full"
                 placeholder={rolloutRuntimeType === 'openclaw'
-                  ? 'registry/repository@sha256:<64 hex>'
+				  ? 'registry/repository:tag 或 registry/repository@sha256:...'
                   : rolloutCard?.default_image}
               />
               {rolloutRuntimeType === 'openclaw' && (
@@ -683,6 +682,7 @@ const SystemSettingsPage: React.FC = () => {
               <input
                 type="number"
                 min={1}
+				max={32}
                 value={rolloutBatchSize}
                 onChange={(event) => { setRolloutBatchSize(Number(event.target.value) || 1); setRolloutPreflight(null); }}
                 className="app-input mt-1 block w-full"
