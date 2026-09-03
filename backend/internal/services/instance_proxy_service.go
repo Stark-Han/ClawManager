@@ -150,7 +150,7 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType, targetPort) && !dedicatedRuntimeOrigin
 
 	// Build target URL
-	targetURL, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
+	targetURL, runtimeGateway, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
 	if err != nil {
 		return err
 	}
@@ -230,8 +230,16 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		}
 	}
 
-	// Set X-Forwarded headers
+	// Set X-Forwarded headers. OpenClaw 2026.8.1 rejects proxy-shaped
+	// requests whose forwarded client cannot be attributed to a concrete IP.
+	// Shared Runtime gateways reach this backend through the nginx sidecar in
+	// the same Pod, so r.RemoteAddr is loopback rather than the browser peer.
+	// Rebuild only the OpenClaw Runtime header at that trusted local boundary;
+	// all other instance types retain their existing proxy contract.
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	if runtimeGateway && isOpenClawRuntimeType(accessToken.InstanceType) {
+		setOpenClawRuntimeForwardedClient(proxyReq.Header, r)
+	}
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", requestScheme(r))
 	proxyReq.Header.Set("X-Forwarded-Prefix", proxyPrefix)
@@ -396,7 +404,7 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 
-	targetURL, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
+	targetURL, runtimeGateway, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
 	if err != nil {
 		return err
 	}
@@ -432,6 +440,9 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	upstreamHeader.Del("Sec-Websocket-Version")
 	upstreamHeader.Del("Sec-Websocket-Extensions")
 	upstreamHeader.Set("X-Forwarded-For", r.RemoteAddr)
+	if runtimeGateway && isOpenClawRuntimeType(accessToken.InstanceType) {
+		setOpenClawRuntimeForwardedClient(upstreamHeader, r)
+	}
 	upstreamHeader.Set("X-Forwarded-Host", r.Host)
 	upstreamHeader.Set("X-Forwarded-Proto", requestScheme(r))
 	upstreamHeader.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
@@ -616,6 +627,46 @@ func hermesProxyPrefix(instanceID int) string {
 func isOpenCodeRuntimeType(instanceType string) bool {
 	runtimeType, managed := NormalizeV2RuntimeType(instanceType)
 	return managed && runtimeType == RuntimeTypeOpenCode
+}
+
+func isOpenClawRuntimeType(instanceType string) bool {
+	runtimeType, managed := NormalizeV2RuntimeType(instanceType)
+	return managed && runtimeType == RuntimeTypeOpenClaw
+}
+
+// setOpenClawRuntimeForwardedClient reconstructs the client attribution passed
+// to an OpenClaw shared Runtime gateway. Only the in-Pod nginx hop is allowed
+// to supply X-Real-IP. Direct callers cannot spoof either forwarded header.
+func setOpenClawRuntimeForwardedClient(header http.Header, request *http.Request) {
+	if header == nil || request == nil {
+		return
+	}
+	peer := parseProxyPeerIP(request.RemoteAddr)
+	client := peer
+	if peer != nil && peer.IsLoopback() {
+		if realIP := net.ParseIP(strings.TrimSpace(request.Header.Get("X-Real-IP"))); realIP != nil {
+			client = realIP
+		}
+	}
+	if client == nil {
+		header.Del("X-Forwarded-For")
+		header.Del("X-Real-IP")
+		return
+	}
+	normalized := client.String()
+	header.Set("X-Forwarded-For", normalized)
+	header.Set("X-Real-IP", normalized)
+}
+
+func parseProxyPeerIP(remoteAddr string) net.IP {
+	value := strings.TrimSpace(remoteAddr)
+	if value == "" {
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	return net.ParseIP(strings.Trim(value, "[]"))
 }
 
 func (s *InstanceProxyService) isOpenCodeLiteProxyInstance(instanceID int, instanceType string) bool {
@@ -1095,34 +1146,34 @@ func (s *InstanceProxyService) managedRuntimeGatewayBearerToken(ctx context.Cont
 	return ""
 }
 
-func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, bool, error) {
 	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, false); ok || err != nil {
-		return targetURL, err
+		return targetURL, ok, err
 	}
 	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get or create service: %w", err)
+		return nil, false, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
 		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, false),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
-	}, nil
+	}, false, nil
 }
 
-func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, bool, error) {
 	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, true); ok || err != nil {
-		return targetURL, err
+		return targetURL, ok, err
 	}
 	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get or create service: %w", err)
+		return nil, false, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
 		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, true),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
-	}, nil
+	}, false, nil
 }
 
 func (s *InstanceProxyService) resolveV2ProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPath, requestPath string, websocket bool) (*url.URL, bool, error) {

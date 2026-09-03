@@ -30,6 +30,12 @@ func TestInstanceProxyServiceUsesRuntimeBindingForV2(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer internal-openclaw-token" {
 			t.Fatalf("Authorization = %q", got)
 		}
+		if got := r.Header.Get("X-Forwarded-For"); got != "198.51.100.24" {
+			t.Fatalf("X-Forwarded-For = %q, want normalized nginx client", got)
+		}
+		if got := r.Header.Get("X-Real-IP"); got != "198.51.100.24" {
+			t.Fatalf("X-Real-IP = %q, want normalized nginx client", got)
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -74,6 +80,9 @@ func TestInstanceProxyServiceUsesRuntimeBindingForV2(t *testing.T) {
 	service.openClawGatewayToken = "internal-openclaw-token"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/instances/123/proxy/apps/openclaw?token="+url.QueryEscape(token.Token), nil)
+	req.RemoteAddr = "127.0.0.1:43125"
+	req.Header.Set("X-Real-IP", "198.51.100.24")
+	req.Header.Set("X-Forwarded-For", "203.0.113.99, 198.51.100.24")
 	rec := httptest.NewRecorder()
 
 	if err := service.ProxyRequest(req.Context(), 123, token.Token, rec, req); err != nil {
@@ -81,6 +90,92 @@ func TestInstanceProxyServiceUsesRuntimeBindingForV2(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
 		t.Fatalf("unexpected proxy response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSetOpenClawRuntimeForwardedClientTrustBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		realIP     string
+		forwarded  string
+		want       string
+	}{
+		{name: "local nginx ipv4", remoteAddr: "127.0.0.1:43125", realIP: "198.51.100.24", forwarded: "203.0.113.99", want: "198.51.100.24"},
+		{name: "local nginx ipv6", remoteAddr: "[::1]:43125", realIP: "2001:db8::24", forwarded: "203.0.113.99", want: "2001:db8::24"},
+		{name: "direct peer ignores spoofed headers", remoteAddr: "10.244.8.12:43125", realIP: "198.51.100.24", forwarded: "203.0.113.99", want: "10.244.8.12"},
+		{name: "invalid local claim fails closed to peer", remoteAddr: "127.0.0.1:43125", realIP: "198.51.100.24, 203.0.113.99", forwarded: "198.51.100.24", want: "127.0.0.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://manager.example.test/", nil)
+			req.RemoteAddr = test.remoteAddr
+			req.Header.Set("X-Real-IP", test.realIP)
+			req.Header.Set("X-Forwarded-For", test.forwarded)
+			header := req.Header.Clone()
+
+			setOpenClawRuntimeForwardedClient(header, req)
+
+			if got := header.Get("X-Forwarded-For"); got != test.want {
+				t.Fatalf("X-Forwarded-For = %q, want %q", got, test.want)
+			}
+			if got := header.Get("X-Real-IP"); got != test.want {
+				t.Fatalf("X-Real-IP = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestInstanceProxyServiceAttributesOpenClawRuntimeWebSocketClient(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Forwarded-For"); got != "198.51.100.25" {
+			t.Fatalf("X-Forwarded-For = %q, want normalized nginx client", got)
+		}
+		if got := r.Header.Get("X-Real-IP"); got != "198.51.100.25" {
+			t.Fatalf("X-Real-IP = %q, want normalized nginx client", got)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upstream websocket upgrade failed: %v", err)
+		}
+		defer conn.Close()
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("upstream websocket read failed: %v", err)
+		}
+		if err := conn.WriteMessage(messageType, message); err != nil {
+			t.Fatalf("upstream websocket write failed: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	service, token := newOpenClawV2ProxyTestService(t, upstream.URL, 141)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := service.ProxyWebSocket(r.Context(), 141, token.Token, w, r); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		}
+	}))
+	defer proxy.Close()
+
+	header := http.Header{}
+	header.Set("X-Real-IP", "198.51.100.25")
+	header.Set("X-Forwarded-For", "203.0.113.99")
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + "/api/v1/instances/141/proxy/ws"
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("client websocket dial failed: %v", err)
+	}
+	defer clientConn.Close()
+	if err := clientConn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("client websocket write failed: %v", err)
+	}
+	_, message, err := clientConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("client websocket read failed: %v", err)
+	}
+	if string(message) != "ping" {
+		t.Fatalf("client websocket message = %q, want ping", message)
 	}
 }
 
@@ -96,6 +191,12 @@ func TestInstanceProxyServiceLeavesDedicatedOpenCodeOriginAtRoot(t *testing.T) {
 			w.WriteHeader(http.StatusTemporaryRedirect)
 			return
 		}
+		if got := r.Header.Get("X-Forwarded-For"); got != "127.0.0.1:43126" {
+			t.Fatalf("OpenCode X-Forwarded-For changed to %q", got)
+		}
+		if got := r.Header.Get("X-Real-IP"); got != "198.51.100.26" {
+			t.Fatalf("OpenCode X-Real-IP changed to %q", got)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!doctype html><html><head><script src="/assets/app.js"></script></head><body></body></html>`))
 	}))
@@ -107,6 +208,8 @@ func TestInstanceProxyServiceLeavesDedicatedOpenCodeOriginAtRoot(t *testing.T) {
 	service.httpClient = client
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/instances/134/proxy/?token="+url.QueryEscape(token.Token), nil)
+	req.RemoteAddr = "127.0.0.1:43126"
+	req.Header.Set("X-Real-IP", "198.51.100.26")
 	req.Header.Set(DedicatedRuntimeOriginHeader, RuntimeTypeOpenCode)
 	rec := httptest.NewRecorder()
 	if err := service.ProxyRequest(req.Context(), 134, token.Token, rec, req); err != nil {
@@ -1264,6 +1367,29 @@ func newV2ProxyTestService(t *testing.T, instanceRepo repository.InstanceReposit
 	service.instanceRepo = instanceRepo
 	service.bindingRepo = bindingRepo
 	service.runtimePodRepo = podRepo
+	return service, token
+}
+
+func newOpenClawV2ProxyTestService(t *testing.T, upstreamURL string, instanceID int) (*InstanceProxyService, *AccessToken) {
+	t.Helper()
+	podIP, gatewayPort := splitURLHostPortForProxyTest(t, upstreamURL)
+	workspacePath := "/workspaces/openclaw/user-45/instance-" + strconv.Itoa(instanceID)
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[instanceID] = &models.Instance{
+		ID: instanceID, UserID: 45, Type: RuntimeTypeOpenClaw,
+		RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite,
+		Status: "running", WorkspacePath: &workspacePath, RuntimeGeneration: 1,
+	}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[instanceID] = &models.InstanceRuntimeBinding{
+		InstanceID: instanceID, RuntimePodID: int64(instanceID), GatewayPort: gatewayPort,
+		State: "running", Generation: 1,
+	}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		int64(instanceID): {ID: int64(instanceID), PodIP: &podIP, State: "ready"},
+	}}
+	service, token := newV2ProxyTestService(t, instanceRepo, bindingRepo, podRepo, 45, instanceID, RuntimeTypeOpenClaw)
+	service.openClawGatewayToken = "internal-openclaw-token"
 	return service, token
 }
 
