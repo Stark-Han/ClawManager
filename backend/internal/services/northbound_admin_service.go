@@ -29,6 +29,7 @@ var ErrNorthboundSettingsConflict = errors.New("northbound settings were changed
 
 var allowedNorthboundScopes = map[string]struct{}{
 	"lite-instances:create": {}, "lite-instances:read": {}, "pro-instances:create": {}, "pro-instances:read": {},
+	"lite-instances:restart": {}, "lite-instances:reset": {}, "pro-instances:restart": {}, "pro-instances:reset": {},
 	"lite-instances:share-link:manage": {}, "lite-instances:share-link:reset": {},
 }
 
@@ -37,7 +38,7 @@ var allowedLiteRuntimeTypes = map[string]struct{}{
 }
 
 var allowedProRuntimeTypes = map[string]struct{}{
-	"openclaw": {}, "hermes": {}, "opencode": {}, "workbuddy": {},
+	"openclaw": {}, "hermes": {}, "opencode": {}, "deepseek-harness": {}, "workbuddy": {},
 }
 
 type NorthboundCertificateStatus struct {

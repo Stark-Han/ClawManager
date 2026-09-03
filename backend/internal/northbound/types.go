@@ -22,11 +22,19 @@ const (
 	ScopeLiteRead        = "lite-instances:read"
 	ScopeProCreate       = "pro-instances:create"
 	ScopeProRead         = "pro-instances:read"
+	ScopeLiteRestart     = "lite-instances:restart"
+	ScopeLiteReset       = "lite-instances:reset"
+	ScopeProRestart      = "pro-instances:restart"
+	ScopeProReset        = "pro-instances:reset"
 	ScopeShareLinkManage = "lite-instances:share-link:manage"
 	ScopeShareLinkReset  = "lite-instances:share-link:reset"
 
 	OperationTypeLiteInstance = "lite_instance"
 	OperationTypeProInstance  = "pro_instance"
+	OperationTypeLiteRestart  = "lite_instance_restart"
+	OperationTypeLiteReset    = "lite_instance_reset"
+	OperationTypeProRestart   = "pro_instance_restart"
+	OperationTypeProReset     = "pro_instance_reset"
 )
 
 type APIError struct {
@@ -107,8 +115,19 @@ type CreateLiteInstanceRequest struct {
 type CreateProInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
 	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode workbuddy"`
+	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness workbuddy"`
 	Description *string `json:"description,omitempty"`
+}
+
+type InstanceLifecycleRequest struct {
+	InstanceID int `json:"instance_id"`
+}
+
+// ConfirmInstanceResetRequest makes the destructive reset contract explicit.
+// Older clients that submit an empty body must fail closed instead of silently
+// changing from the former data-preserving reset behavior.
+type ConfirmInstanceResetRequest struct {
+	ConfirmDataLoss bool `json:"confirm_data_loss"`
 }
 
 type EnableShareLinkPasswordRequest struct {

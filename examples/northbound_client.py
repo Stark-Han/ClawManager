@@ -420,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
             "list",
             "get",
             "operation",
+            "restart-instance",
+            "reset-instance",
             "enable-password",
             "reset-url",
             "reset-password",
@@ -542,6 +544,27 @@ def run(command: str) -> None:
         operation_id = required_env("NORTHBOUND_OPERATION_ID")
         encoded_id = urllib.parse.quote(operation_id, safe="")
         result, _ = client.authenticated_request("GET", f"/operations/{encoded_id}")
+        print_result(client, result)
+        return
+
+    if command in {"restart-instance", "reset-instance"}:
+        instance_id = required_positive_int("NORTHBOUND_INSTANCE_ID")
+        action = "restart" if command == "restart-instance" else "reset"
+        idempotency_key = os.getenv(
+            "NORTHBOUND_IDEMPOTENCY_KEY", f"demo-{action}-{uuid.uuid4()}"
+        )
+        body = {"confirm_data_loss": True} if action == "reset" else {}
+        operation, headers = client.authenticated_request(
+            "POST",
+            f"{instance_collection_path()}/{instance_id}/{action}",
+            body=body,
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        result = {
+            "operation": operation,
+            "idempotent_replayed": headers.get("Idempotent-Replayed") == "true",
+            "final_operation": wait_for_operation(client, operation["operation_id"]),
+        }
         print_result(client, result)
         return
 

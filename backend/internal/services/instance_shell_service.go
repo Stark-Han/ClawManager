@@ -187,7 +187,7 @@ func openCodeTUICommand(instance *models.Instance, binding *models.InstanceRunti
 	// gateway. Running it directly avoids reading the gateway's private
 	// credentials from /proc, which is blocked by the runtime's process
 	// isolation. The TUI still loads the same per-instance provider config.
-	command := "/usr/local/bin/opencode " + shellQuoteForTerminal(workspace)
+	command := "/usr/local/bin/opencode " + shellQuoteForTerminal(workspace+"/"+OpenCodeDefaultProjectRelativePath)
 	script := "exec setpriv --reuid=" + strconv.Itoa(uid) + " --regid=" + strconv.Itoa(uid) + " --clear-groups sh -lc " + shellQuoteForTerminal(
 		"gateway_pid="+shellQuoteForTerminal(gatewayPID)+"; "+
 			"if [ -n \"$gateway_pid\" ]; then export $(tr '\\000' '\\n' </proc/$gateway_pid/environ | grep '^CLAWMANAGER_LLM_API_KEY=' || true); fi; "+

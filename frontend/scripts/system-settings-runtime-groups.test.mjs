@@ -13,9 +13,10 @@ const servicePath = path.resolve(
 );
 const i18nPath = path.resolve(scriptDir, "../src/lib/i18n.ts");
 
-const pageSource = readFileSync(pagePath, "utf8");
-const serviceSource = readFileSync(servicePath, "utf8");
-const i18nSource = readFileSync(i18nPath, "utf8");
+const normalizeNewlines = (source) => source.replace(/\r\n/g, "\n");
+const pageSource = normalizeNewlines(readFileSync(pagePath, "utf8"));
+const serviceSource = normalizeNewlines(readFileSync(servicePath, "utf8"));
+const i18nSource = normalizeNewlines(readFileSync(i18nPath, "utf8"));
 
 function assert(condition, message) {
   if (!condition) {

@@ -16,15 +16,19 @@ type LLMModel struct {
 	ReasoningEnabled   bool               `db:"reasoning_enabled" json:"reasoning_enabled"`
 	SupportsReasoning  bool               `db:"-" json:"supports_reasoning"`
 	ReasoningControl   string             `db:"-" json:"reasoning_control,omitempty"`
-	APIKey             *string            `db:"api_key" json:"api_key,omitempty"`
-	APIKeySecretRef    *string            `db:"api_key_secret_ref" json:"api_key_secret_ref,omitempty"`
-	IsSecure           bool               `db:"is_secure" json:"is_secure"`
-	IsActive           bool               `db:"is_active" json:"is_active"`
-	InputPrice         float64            `db:"input_price" json:"input_price"`
-	OutputPrice        float64            `db:"output_price" json:"output_price"`
-	Currency           string             `db:"currency" json:"currency"`
-	CreatedAt          time.Time          `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time          `db:"updated_at" json:"updated_at"`
+	// CatalogProviderName is the configured provider alias used when a runtime
+	// renders qualified model references such as "provider/model". It is
+	// populated only for the expanded in-memory catalog and is never persisted.
+	CatalogProviderName string    `db:"-" json:"catalog_provider_name,omitempty"`
+	APIKey              *string   `db:"api_key" json:"api_key,omitempty"`
+	APIKeySecretRef     *string   `db:"api_key_secret_ref" json:"api_key_secret_ref,omitempty"`
+	IsSecure            bool      `db:"is_secure" json:"is_secure"`
+	IsActive            bool      `db:"is_active" json:"is_active"`
+	InputPrice          float64   `db:"input_price" json:"input_price"`
+	OutputPrice         float64   `db:"output_price" json:"output_price"`
+	Currency            string    `db:"currency" json:"currency"`
+	CreatedAt           time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // TableName returns the table name for the LLM model.

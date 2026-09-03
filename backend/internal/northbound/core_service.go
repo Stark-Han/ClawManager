@@ -24,6 +24,11 @@ const (
 	northboundProCPUCores       = 4
 	northboundProMemoryGB       = 8
 	northboundProDiskGB         = 50
+	lifecycleReadyTimeout       = 5 * time.Minute
+	lifecycleReadyPollInterval  = 2 * time.Second
+	lifecycleWaitingCode        = "LIFECYCLE_WAITING"
+	lifecycleReplacementWaiting = "RESET_REPLACEMENT_WAITING"
+	lifecycleCleanupWarningCode = "OLD_INSTANCE_CLEANUP_PENDING"
 )
 
 type CoreService struct {
@@ -173,6 +178,7 @@ func isSupportedNorthboundProType(instanceType string) bool {
 	case services.RuntimeTypeOpenClaw,
 		services.RuntimeTypeHermes,
 		services.RuntimeTypeOpenCode,
+		services.RuntimeTypeDeepSeekHarness,
 		"workbuddy":
 		return true
 	default:
@@ -212,6 +218,74 @@ func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string
 		OperationTypeProInstance,
 		"Too many unfinished Pro instance operations",
 	)
+}
+
+func (s *CoreService) SubmitLifecycle(principal Principal, idempotencyKey string, instanceID int, mode, action string) (*models.NorthboundOperation, bool, error) {
+	if instanceID <= 0 {
+		return nil, false, apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	action = strings.ToLower(strings.TrimSpace(action))
+	var (
+		instance      *models.Instance
+		operationType string
+		err           error
+	)
+	switch mode {
+	case services.InstanceModeLite:
+		instance, err = s.GetInstance(principal.UserID, instanceID)
+		if err == nil && !strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModeLite) && !isWorkbuddyLinuxPro(instance) {
+			err = apiError(404, "INSTANCE_NOT_FOUND", "Instance not found", nil)
+		}
+		if action == "restart" {
+			operationType = OperationTypeLiteRestart
+		} else if action == "reset" {
+			operationType = OperationTypeLiteReset
+		}
+	case services.InstanceModePro:
+		instance, err = s.GetProInstance(principal.UserID, instanceID)
+		if action == "restart" {
+			operationType = OperationTypeProRestart
+		} else if action == "reset" {
+			operationType = OperationTypeProReset
+		}
+		// WorkBuddy remains in the canonical Lite compatibility domain, matching
+		// its create behavior and preventing duplicate lifecycle operations when
+		// callers switch between the old and new collection paths.
+		if err == nil && isWorkbuddyLinuxPro(instance) {
+			if action == "restart" {
+				operationType = OperationTypeLiteRestart
+			} else if action == "reset" {
+				operationType = OperationTypeLiteReset
+			}
+		}
+	default:
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid instance mode", nil)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if operationType == "" {
+		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid lifecycle action", nil)
+	}
+	active, err := s.repo.GetActiveLifecycleOperation(principal.UserID, instanceID)
+	if err != nil {
+		return nil, false, err
+	}
+	if active != nil {
+		if active.OperationType == operationType {
+			return active, true, nil
+		}
+		return nil, false, apiError(409, "LIFECYCLE_IN_PROGRESS", "Another lifecycle operation is already in progress", nil)
+	}
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if action == "restart" && status != "running" {
+		return nil, false, apiError(409, "INVALID_INSTANCE_STATE", "Instance is not running", nil)
+	}
+	if action == "reset" && status != "running" && status != "stopped" && status != "error" {
+		return nil, false, apiError(409, "INVALID_INSTANCE_STATE", "Instance cannot be reset while a lifecycle operation is in progress", nil)
+	}
+	return s.submitCreateOperation(principal, idempotencyKey, InstanceLifecycleRequest{InstanceID: instanceID}, operationType, "Too many unfinished instance operations")
 }
 
 func (s *CoreService) submitCreateOperation(
@@ -266,6 +340,10 @@ func (s *CoreService) submitCreateOperation(
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+	if lifecycleRequest, ok := request.(InstanceLifecycleRequest); ok && lifecycleRequest.InstanceID > 0 {
+		instanceID := lifecycleRequest.InstanceID
+		item.InstanceID = &instanceID
+	}
 	if err := s.repo.CreateOperation(item); err != nil {
 		existing, getErr := s.repo.GetOperationByIdempotency(principal.UserID, operationType, keyHash)
 		if getErr == nil && existing != nil {
@@ -285,6 +363,31 @@ func (s *CoreService) GetOperation(userID int, operationID string) (*models.Nort
 		return nil, err
 	}
 	if item == nil || item.UserID != userID {
+		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
+	}
+	return item, nil
+}
+
+// GetOperationForSession is used by the IEI portal while a replacement reset
+// changes instance identity and ownership. The operation remains bound to the
+// exact server-derived IEI session, so it cannot be enumerated across owners.
+func (s *CoreService) GetOperationForSession(operationID, sessionID string) (*models.NorthboundOperation, error) {
+	item, err := s.repo.GetOperationByID(strings.TrimSpace(operationID))
+	if err != nil {
+		return nil, err
+	}
+	if item == nil || item.SessionID != strings.TrimSpace(sessionID) {
+		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
+	}
+	return item, nil
+}
+
+func (s *CoreService) GetLatestLifecycleOperation(userID, instanceID int) (*models.NorthboundOperation, error) {
+	item, err := s.repo.GetLatestLifecycleOperation(userID, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	if item != nil && item.UserID != userID {
 		return nil, apiError(404, "OPERATION_NOT_FOUND", "Operation not found", nil)
 	}
 	return item, nil
@@ -610,6 +713,10 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	if item == nil {
 		return
 	}
+	if isLifecycleOperation(item.OperationType) {
+		w.processLifecycle(ctx, item)
+		return
+	}
 	createRequest, auditPrefix, err := w.service.operationCreateRequest(item)
 	if err != nil {
 		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
@@ -645,6 +752,275 @@ func (w *OperationWorker) processOne(ctx context.Context) {
 	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, code, message, requeueAt.Add(delay), requeueAt)
 	item.Status = "queued"
 	w.service.auditOperation(item, auditPrefix+".retry", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "retry scheduled"), nil, code)
+}
+
+func isLifecycleOperation(operationType string) bool {
+	switch operationType {
+	case OperationTypeLiteRestart, OperationTypeLiteReset, OperationTypeProRestart, OperationTypeProReset:
+		return true
+	default:
+		return false
+	}
+}
+
+func (w *OperationWorker) processLifecycle(ctx context.Context, item *models.NorthboundOperation) {
+	var request InstanceLifecycleRequest
+	if err := json.Unmarshal([]byte(item.RequestPayload), &request); err != nil || request.InstanceID <= 0 {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_REQUEST", "Stored operation payload is invalid", time.Now().UTC())
+		return
+	}
+	// Replacement reset records switch instance_id from the source to the new
+	// instance while retaining the immutable source id in request_payload. Resume
+	// them before loading the source: the source row may already have been safely
+	// deleted if the worker stopped between cleanup and operation completion.
+	if isResetOperation(item.OperationType) && item.ErrorCode != nil && *item.ErrorCode == lifecycleReplacementWaiting {
+		w.finishOrContinueReplacementReset(ctx, item, request.InstanceID)
+		return
+	}
+	var current *models.Instance
+	var currentErr error
+	if item.OperationType == OperationTypeProRestart || item.OperationType == OperationTypeProReset {
+		current, currentErr = w.service.GetProInstance(item.UserID, request.InstanceID)
+	} else {
+		current, currentErr = w.service.GetInstance(item.UserID, request.InstanceID)
+	}
+	if currentErr != nil || current == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INSTANCE_NOT_FOUND", "Instance not found", time.Now().UTC())
+		return
+	}
+	currentStatus := strings.ToLower(strings.TrimSpace(current.Status))
+	if item.ErrorCode != nil && *item.ErrorCode == lifecycleWaitingCode {
+		w.finishOrContinueLifecycle(ctx, item, request.InstanceID, currentStatus, lifecycleAuditPrefix(item.OperationType))
+		return
+	}
+	if (item.OperationType == OperationTypeLiteRestart || item.OperationType == OperationTypeProRestart) && currentStatus != "running" {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance is not running", time.Now().UTC())
+		return
+	}
+	if (item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset) && currentStatus != "running" && currentStatus != "stopped" && currentStatus != "error" {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INVALID_INSTANCE_STATE", "Instance lifecycle operation is already in progress", time.Now().UTC())
+		return
+	}
+	if isResetOperation(item.OperationType) {
+		replacer, ok := w.service.instances.(services.InstanceReplacementResetService)
+		if !ok {
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_UNAVAILABLE", "Safe replacement reset is unavailable; original instance was not changed", time.Now().UTC())
+			return
+		}
+		replacement, createErr := replacer.CreateResetReplacement(request.InstanceID, item.OperationID)
+		if createErr != nil || replacement == nil {
+			message := "Unable to create a clean replacement; original instance and data were not deleted"
+			if createErr != nil {
+				log.Printf("northbound replacement reset %s create failed: %v", item.OperationID, createErr)
+			}
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_CREATE_FAILED", message, time.Now().UTC())
+			item.Status = "failed"
+			w.service.auditOperation(item, lifecycleAuditPrefix(item.OperationType)+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "replacement create failed; source retained"), &request.InstanceID, "RESET_REPLACEMENT_CREATE_FAILED")
+			return
+		}
+		now := time.Now().UTC()
+		if err := w.service.repo.RequeueReplacementOperation(ctx, item.OperationID, replacement.ID, lifecycleReplacementWaiting, "Waiting for clean replacement runtime to become ready", now.Add(lifecycleReadyPollInterval), now); err != nil {
+			log.Printf("northbound replacement reset %s could not persist replacement %d: %v", item.OperationID, replacement.ID, err)
+			_ = replacer.DiscardResetReplacement(replacement.ID)
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_TRACKING_FAILED", "Unable to track the clean replacement; original instance and data were not deleted", time.Now().UTC())
+		}
+		return
+	}
+	var (
+		action      func() error
+		auditPrefix string
+	)
+	switch item.OperationType {
+	case OperationTypeLiteRestart:
+		auditPrefix = "northbound.lite.restart"
+		action = func() error { return restartInstance(w.service.instances, request.InstanceID) }
+	case OperationTypeProRestart:
+		auditPrefix = "northbound.pro.restart"
+		action = func() error { return restartInstance(w.service.instances, request.InstanceID) }
+	case OperationTypeLiteReset:
+		auditPrefix = "northbound.lite.reset"
+		action = func() error { return resetInstance(w.service.instances, request.InstanceID) }
+	case OperationTypeProReset:
+		auditPrefix = "northbound.pro.reset"
+		action = func() error { return resetInstance(w.service.instances, request.InstanceID) }
+	}
+	actionErr := w.runLifecycleActionWithLease(ctx, item, action)
+	if actionErr != nil {
+		// Lifecycle operations are not retried automatically. A failed factory
+		// reset may already have erased persistent data, so the error must never
+		// imply that the old workspace was retained.
+		message := "Instance lifecycle operation failed"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance factory reset failed; original data may already have been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", message, time.Now().UTC())
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &request.InstanceID, "LIFECYCLE_FAILED")
+		return
+	}
+	refreshed, refreshErr := w.service.instances.GetByID(request.InstanceID)
+	if refreshErr != nil || refreshed == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "INSTANCE_NOT_FOUND", "Instance not found after lifecycle operation", time.Now().UTC())
+		return
+	}
+	w.finishOrContinueLifecycle(ctx, item, request.InstanceID, strings.ToLower(strings.TrimSpace(refreshed.Status)), auditPrefix)
+}
+
+func isResetOperation(operationType string) bool {
+	return operationType == OperationTypeLiteReset || operationType == OperationTypeProReset
+}
+
+func (w *OperationWorker) finishOrContinueReplacementReset(ctx context.Context, item *models.NorthboundOperation, sourceInstanceID int) {
+	replacer, ok := w.service.instances.(services.InstanceReplacementResetService)
+	if !ok || item.InstanceID == nil || *item.InstanceID <= 0 || *item.InstanceID == sourceInstanceID {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_INVALID", "Safe replacement state is invalid; original instance and data were not deleted", time.Now().UTC())
+		return
+	}
+	replacementID := *item.InstanceID
+	replacement, err := w.service.instances.GetByID(replacementID)
+	if err != nil || replacement == nil {
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_REPLACEMENT_NOT_FOUND", "Clean replacement was not found; original instance and data were not deleted", time.Now().UTC())
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(replacement.Status))
+	now := time.Now().UTC()
+	if status == "running" {
+		cleanupPending, warning, finalizeErr := replacer.FinalizeResetReplacement(sourceInstanceID, replacementID)
+		if finalizeErr != nil {
+			log.Printf("northbound replacement reset %s cutover failed: %v", item.OperationID, finalizeErr)
+			_ = replacer.DiscardResetReplacement(replacementID)
+			_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "RESET_CUTOVER_FAILED", "Unable to activate the clean replacement; original instance and data were not deleted", now)
+			return
+		}
+		if cleanupPending {
+			if strings.TrimSpace(warning) == "" {
+				warning = "New instance is ready; old instance cleanup requires administrator attention"
+			}
+			_ = w.service.repo.MarkOperationSucceededWithWarning(ctx, item.OperationID, replacementID, lifecycleCleanupWarningCode, warning, now)
+		} else {
+			_ = w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, replacementID, now)
+		}
+		item.Status = "succeeded"
+		item.InstanceID = &replacementID
+		w.service.auditOperation(item, lifecycleAuditPrefix(item.OperationType)+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "replacement activated"), &replacementID, "")
+		return
+	}
+
+	failed := status == "error" || status == "deleting" || status == "stopped"
+	timedOut := item.StartedAt != nil && now.Sub(*item.StartedAt) >= lifecycleReadyTimeout
+	if failed || timedOut {
+		if discardErr := replacer.DiscardResetReplacement(replacementID); discardErr != nil {
+			log.Printf("northbound replacement reset %s staging cleanup failed: %v", item.OperationID, discardErr)
+		}
+		code := "RESET_REPLACEMENT_FAILED"
+		if timedOut {
+			code = "RESET_REPLACEMENT_TIMEOUT"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, code, "Clean replacement did not become ready; original instance and data were not deleted", now)
+		return
+	}
+	_ = w.service.repo.RequeueReplacementOperation(ctx, item.OperationID, replacementID, lifecycleReplacementWaiting, "Waiting for clean replacement runtime to become ready", now.Add(lifecycleReadyPollInterval), now)
+}
+
+func lifecycleAuditPrefix(operationType string) string {
+	switch operationType {
+	case OperationTypeLiteRestart:
+		return "northbound.lite.restart"
+	case OperationTypeProRestart:
+		return "northbound.pro.restart"
+	case OperationTypeLiteReset:
+		return "northbound.lite.reset"
+	case OperationTypeProReset:
+		return "northbound.pro.reset"
+	default:
+		return "northbound.lifecycle"
+	}
+}
+
+func (w *OperationWorker) finishOrContinueLifecycle(ctx context.Context, item *models.NorthboundOperation, instanceID int, instanceStatus, auditPrefix string) {
+	now := time.Now().UTC()
+	if instanceStatus == "running" {
+		if err := w.service.repo.MarkOperationSucceeded(ctx, item.OperationID, instanceID, now); err != nil {
+			log.Printf("northbound operation %s completion failed: %v", item.OperationID, err)
+			return
+		}
+		item.Status = "succeeded"
+		item.InstanceID = &instanceID
+		w.service.auditOperation(item, auditPrefix+".succeeded", models.AuditSeverityInfo, auditOperationMessage(item.OperationID, "succeeded"), &instanceID, "")
+		return
+	}
+	if instanceStatus == "error" || instanceStatus == "deleting" {
+		message := "Instance did not recover"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance did not recover after factory reset; original data may already have been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_FAILED", message, now)
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "failed"), &instanceID, "LIFECYCLE_FAILED")
+		return
+	}
+	startedAt := item.StartedAt
+	if startedAt != nil && now.Sub(*startedAt) >= lifecycleReadyTimeout {
+		if recorder, ok := w.service.instances.(services.InstanceLifecycleFailureService); ok {
+			_ = recorder.MarkLifecycleFailure(instanceID)
+		}
+		message := "Instance did not become ready in time; persistent workspace was retained"
+		if item.OperationType == OperationTypeLiteReset || item.OperationType == OperationTypeProReset {
+			message = "Instance did not become ready in time after factory reset; original data has already been deleted"
+		}
+		_ = w.service.repo.MarkOperationFailed(ctx, item.OperationID, "LIFECYCLE_TIMEOUT", message, now)
+		item.Status = "failed"
+		w.service.auditOperation(item, auditPrefix+".failed", models.AuditSeverityWarn, auditOperationMessage(item.OperationID, "timed out"), &instanceID, "LIFECYCLE_TIMEOUT")
+		return
+	}
+	_ = w.service.repo.RequeueOperation(ctx, item.OperationID, lifecycleWaitingCode, "Waiting for the instance runtime to become ready", now.Add(lifecycleReadyPollInterval), now)
+}
+
+func (w *OperationWorker) runLifecycleActionWithLease(ctx context.Context, item *models.NorthboundOperation, action func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- action() }()
+	lease := time.Duration(w.service.settings().OperationLeaseSeconds) * time.Second
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	interval := lease / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-result:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if item.LeaseOwner == nil {
+				continue
+			}
+			now := time.Now().UTC()
+			if err := w.service.repo.RenewOperationLease(ctx, item.OperationID, *item.LeaseOwner, now.Add(lease), now); err != nil {
+				log.Printf("northbound lifecycle operation %s lease renewal failed: %v", item.OperationID, err)
+			}
+		}
+	}
+}
+
+func restartInstance(instances coreInstanceService, instanceID int) error {
+	restarter, ok := instances.(interface{ Restart(int) error })
+	if !ok {
+		return errors.New("instance restart service is unavailable")
+	}
+	return restarter.Restart(instanceID)
+}
+
+func resetInstance(instances coreInstanceService, instanceID int) error {
+	resetter, ok := instances.(services.InstanceResetService)
+	if !ok {
+		return errors.New("instance reset service is unavailable")
+	}
+	return resetter.Reset(instanceID)
 }
 
 func operationCreateRequest(item *models.NorthboundOperation) (services.CreateInstanceRequest, string, error) {

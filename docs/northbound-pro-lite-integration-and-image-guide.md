@@ -273,7 +273,7 @@ opencode
 workbuddy
 ```
 
-DeepSeek Harness Pro 虽然可以在 ClawManager 管理后台配置镜像，但当前北向 `/pro-instances` 尚未开放该类型，不应通过北向 Pro 接口调用。
+DeepSeek Harness Pro 已通过北向 `/pro-instances` 开放。服务端固定读取 ClawManager 中已保存且启用的 `deepseek-harness` DESKTOP 镜像，调用方不能提交任意镜像地址。
 
 ## 8. WorkBuddy 兼容调用
 

@@ -27,6 +27,97 @@ func TestValidateCreateInstanceDiskGBUsesModeSpecificMinimum(t *testing.T) {
 	}
 }
 
+func TestResetReplacementUsesFreshStandardCreateForDeployedNorthboundRuntimes(t *testing.T) {
+	owner := "owner@example.com"
+	cases := []struct {
+		name           string
+		instanceType   string
+		mode           string
+		runtimeType    string
+		runtimeVariant string
+		diskGB         int
+	}{
+		{name: "OpenClaw Lite", instanceType: RuntimeTypeOpenClaw, mode: InstanceModeLite, runtimeType: RuntimeBackendGateway, diskGB: DefaultLiteDiskGB},
+		{name: "Hermes Lite", instanceType: RuntimeTypeHermes, mode: InstanceModeLite, runtimeType: RuntimeBackendGateway, diskGB: DefaultLiteDiskGB},
+		{name: "OpenCode Lite", instanceType: RuntimeTypeOpenCode, mode: InstanceModeLite, runtimeType: RuntimeBackendGateway, diskGB: DefaultLiteDiskGB},
+		{name: "DeepSeek Harness Lite", instanceType: RuntimeTypeDeepSeekHarness, mode: InstanceModeLite, runtimeType: RuntimeBackendGateway, diskGB: DefaultLiteDiskGB},
+		{name: "WorkBuddy Linux Pro", instanceType: "workbuddy", mode: InstanceModePro, runtimeType: RuntimeBackendDesktop, runtimeVariant: WorkbuddyRuntimeLinux, diskGB: 40},
+	}
+
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := &models.Instance{
+				ID:             100 + index,
+				UserID:         7,
+				Owner:          &owner,
+				Name:           "existing-instance",
+				Description:    factoryResetString("old description"),
+				Type:           tc.instanceType,
+				InstanceMode:   tc.mode,
+				RuntimeType:    tc.runtimeType,
+				RuntimeVariant: tc.runtimeVariant,
+				Status:         "error",
+				CPUCores:       2,
+				MemoryGB:       4,
+				DiskGB:         tc.diskGB,
+				OSType:         "linux",
+				OSVersion:      "latest",
+				StorageClass:   "longhorn",
+			}
+			req, err := resetReplacementCreateRequest(source, "op_replacement_test")
+			if err != nil {
+				t.Fatalf("resetReplacementCreateRequest returned error: %v", err)
+			}
+			if req.Owner == nil || *req.Owner != factoryResetStagingOwner {
+				t.Fatalf("staging owner = %v, want staging owner", req.Owner)
+			}
+			if req.Name == source.Name || !strings.HasPrefix(req.Name, "reset-") {
+				t.Fatalf("staging name = %q", req.Name)
+			}
+			if req.Type != tc.instanceType || req.InstanceMode != tc.mode || req.Mode != tc.mode || req.RuntimeType != tc.runtimeType || req.RuntimeVariant != tc.runtimeVariant {
+				t.Fatalf("replacement runtime shape changed: %#v", req)
+			}
+			if req.DiskGB != tc.diskGB || req.CPUCores != source.CPUCores || req.MemoryGB != source.MemoryGB || req.StorageClass != source.StorageClass {
+				t.Fatalf("replacement resources changed: %#v", req)
+			}
+			if req.ImageRegistry != nil || req.ImageTag != nil || req.EnvironmentOverrides != nil || req.OpenClawConfigPlan != nil {
+				t.Fatalf("replacement copied mutable runtime data instead of using fresh defaults: %#v", req)
+			}
+			if req.ProvisioningOperationID != "reset_op_replacement_test" {
+				t.Fatalf("provisioning operation id = %q", req.ProvisioningOperationID)
+			}
+		})
+	}
+}
+
+func TestFinalizeResetReplacementIsIdempotentAfterSourceCleanup(t *testing.T) {
+	repo := newV2LifecycleInstanceRepo()
+	owner := "owner@example.com"
+	repo.byID[202] = &models.Instance{
+		ID:       202,
+		UserID:   7,
+		Owner:    &owner,
+		Name:     "replacement-instance",
+		Status:   "running",
+		Type:     RuntimeTypeOpenClaw,
+		DiskGB:   DefaultLiteDiskGB,
+		CPUCores: 2,
+		MemoryGB: 4,
+	}
+	service := &instanceService{instanceRepo: repo}
+
+	cleanupPending, warning, err := service.FinalizeResetReplacement(101, 202)
+	if err != nil {
+		t.Fatalf("FinalizeResetReplacement returned error on completion retry: %v", err)
+	}
+	if cleanupPending || warning != "" {
+		t.Fatalf("completion retry returned cleanupPending=%v warning=%q", cleanupPending, warning)
+	}
+	if _, ok := repo.byID[202]; !ok {
+		t.Fatal("promoted replacement was removed during completion retry")
+	}
+}
+
 func TestInstanceServiceCreateV2CreatesWorkspaceOnly(t *testing.T) {
 	workspaceRoot := strings.ReplaceAll(t.TempDir(), "\\", "/")
 	instanceRepo := newV2LifecycleInstanceRepo()
@@ -968,6 +1059,81 @@ func TestInstanceServiceDeleteV2ChecksUpgradeGuardBeforeMutation(t *testing.T) {
 	}
 	if !reflect.DeepEqual(guard.calls, []int{191}) {
 		t.Fatalf("guard calls = %#v, want [191]", guard.calls)
+	}
+}
+
+func TestInstanceServiceFactoryResetChecksUpgradeGuardBeforeMutation(t *testing.T) {
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[196] = &models.Instance{
+		ID:           196,
+		UserID:       45,
+		Name:         "source",
+		Type:         "openclaw",
+		RuntimeType:  "gateway",
+		InstanceMode: "lite",
+		Status:       "running",
+	}
+	guard := &runtimeUpgradeDeletionGuardStub{err: errors.New("active rollout")}
+	service := &instanceService{
+		instanceRepo:        instanceRepo,
+		runtimeUpgradeGuard: guard,
+	}
+
+	err := service.Reset(196)
+	if err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("Reset error = %v, want active rollout rejection", err)
+	}
+	if got := instanceRepo.byID[196].Status; got != "running" {
+		t.Fatalf("instance status = %q, want running", got)
+	}
+	if !reflect.DeepEqual(guard.calls, []int{196}) {
+		t.Fatalf("guard calls = %#v, want [196]", guard.calls)
+	}
+}
+
+func TestInstanceServiceReplacementResetChecksUpgradeGuardBeforeMutation(t *testing.T) {
+	owner := "owner@example.com"
+	instanceRepo := newV2LifecycleInstanceRepo()
+	instanceRepo.byID[197] = &models.Instance{
+		ID:           197,
+		UserID:       45,
+		Name:         "source",
+		Owner:        &owner,
+		Type:         "openclaw",
+		RuntimeType:  "gateway",
+		InstanceMode: "lite",
+		Status:       "running",
+	}
+	instanceRepo.byID[198] = &models.Instance{
+		ID:           198,
+		UserID:       45,
+		Name:         "reset-197-staging",
+		Owner:        factoryResetString(factoryResetStagingOwner),
+		Type:         "openclaw",
+		RuntimeType:  "gateway",
+		InstanceMode: "lite",
+		Status:       "running",
+	}
+	guard := &runtimeUpgradeDeletionGuardStub{err: errors.New("active rollout")}
+	service := &instanceService{
+		instanceRepo:        instanceRepo,
+		runtimeUpgradeGuard: guard,
+	}
+
+	if _, err := service.CreateResetReplacement(197, "op_guarded"); err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("CreateResetReplacement error = %v, want active rollout rejection", err)
+	}
+	if cleanupPending, warning, err := service.FinalizeResetReplacement(197, 198); err == nil || !strings.Contains(err.Error(), "active rollout") || cleanupPending || warning != "" {
+		t.Fatalf("FinalizeResetReplacement = (%v, %q, %v), want active rollout rejection", cleanupPending, warning, err)
+	}
+	if err := service.DiscardResetReplacement(198); err == nil || !strings.Contains(err.Error(), "active rollout") {
+		t.Fatalf("DiscardResetReplacement error = %v, want active rollout rejection", err)
+	}
+	if instanceRepo.byID[197].Name != "source" || instanceRepo.byID[198].Name != "reset-197-staging" {
+		t.Fatalf("replacement reset mutated instances while upgrade guard was active: source=%#v replacement=%#v", instanceRepo.byID[197], instanceRepo.byID[198])
+	}
+	if !reflect.DeepEqual(guard.calls, []int{197, 197, 198}) {
+		t.Fatalf("guard calls = %#v, want [197 197 198]", guard.calls)
 	}
 }
 

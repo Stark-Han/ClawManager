@@ -3,6 +3,7 @@ import { ArrowLeft, Maximize2, Minimize2, RefreshCw, RotateCw, ShieldAlert } fro
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
+import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
 import { useRuntimeCertificateTrust } from "../../hooks/useRuntimeCertificateTrust";
 import { prepareOpenClawControlUIStorage } from "../../lib/openclawControlStorage";
 import {
@@ -39,9 +40,26 @@ function wait(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+async function refreshDedicatedRuntimeCookie(accessURL: string) {
+  const target = new URL(resolveEmbedUrl(accessURL), window.location.href);
+  if (target.origin === window.location.origin || !target.searchParams.has("token")) return;
+  target.pathname = "/__clawmanager_access_refresh";
+  target.hash = "";
+  await window.fetch(target.toString(), {
+    method: "GET",
+    credentials: "include",
+    mode: "no-cors",
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+  });
+}
+
 export default function IEISystemInstancePage() {
   const { id = "" } = useParams<{ id: string }>();
   const instanceID = Number(id);
+  const listReturnURL = Number.isInteger(instanceID) && instanceID > 0
+    ? `/ieisystem/list-instances?selected_instance_id=${instanceID}`
+    : "/ieisystem/list-instances";
   const frameContainerRef = useRef<HTMLElement | null>(null);
   const [instance, setInstance] = useState<IEISystemInstance | null>(null);
   const [access, setAccess] = useState<IEISystemInstanceAccess | null>(null);
@@ -56,6 +74,7 @@ export default function IEISystemInstancePage() {
   const mountedRef = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
@@ -90,6 +109,24 @@ export default function IEISystemInstancePage() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [openInstance]);
+
+  const renewAccess = useCallback(async () => {
+    await ieiSystemService.refreshSession();
+    const nextAccess = await ieiSystemService.generateAccess(instanceID);
+    await refreshDedicatedRuntimeCookie(nextAccess.access_url);
+    if (!mountedRef.current) return;
+    // Updating the iframe URL would reload the running agent UI. The fresh
+    // cookie is installed in the background, so keep the existing src while
+    // advancing the local expiry and access metadata.
+    setAccess((current) =>
+      current ? { ...nextAccess, access_url: current.access_url } : nextAccess,
+    );
+  }, [instanceID]);
+
+  useExpiringResourceRenewal({
+    expiresAt: access?.expires_at,
+    renew: renewAccess,
+  });
 
   useEffect(() => {
     const existing = document.querySelector<HTMLMetaElement>('meta[name="referrer"]');
@@ -139,18 +176,22 @@ export default function IEISystemInstancePage() {
     else void element.requestFullscreen().catch(() => undefined);
   };
 
-  const waitForRestartRecovery = useCallback(async () => {
+  const waitForRestartRecovery = useCallback(async (operationID: string) => {
     const deadline = Date.now() + restartTimeoutMs;
     while (Date.now() < deadline) {
       await wait(restartPollIntervalMs);
       if (!mountedRef.current) return;
 
+      const operation = await ieiSystemService.getLifecycleOperation(operationID);
+      if (operation.status === "failed") {
+        throw new Error(operation.error_message || "实例重启失败，工作区数据已保留。");
+      }
       const nextInstance = await ieiSystemService.getInstance(instanceID);
       if (!mountedRef.current) return;
       setInstance(nextInstance);
 
       const status = nextInstance.status.trim().toLowerCase();
-      if (status === "running") {
+      if (operation.status === "succeeded" && status === "running") {
         const nextAccess = await ieiSystemService.generateAccess(instanceID);
         if (!mountedRef.current) return;
         setAccess(nextAccess);
@@ -171,8 +212,8 @@ export default function IEISystemInstancePage() {
     setRestartError(null);
     setRestartNotice("正在重启实例，服务会短暂中断，恢复后将自动重新连接。");
     try {
-      await ieiSystemService.restartInstance(instance.id);
-      await waitForRestartRecovery();
+      const operation = await ieiSystemService.restartInstance(instance.id);
+      await waitForRestartRecovery(operation.operation_id);
       if (mountedRef.current) {
         setRestartNotice("实例已完成重启并重新连接。");
       }
@@ -202,7 +243,7 @@ export default function IEISystemInstancePage() {
           <h1 className="text-lg font-semibold text-slate-950">实例不可访问</h1>
           <p className="mt-2 text-sm leading-6 text-slate-600">{error ?? "访问验证未通过。"}</p>
           <div className="mt-5 flex justify-center gap-2">
-            <Link className="app-button-secondary" to="/ieisystem/list-instances">
+            <Link className="app-button-secondary" to={listReturnURL}>
               <ArrowLeft className="h-4 w-4" /> 返回列表
             </Link>
             <button type="button" className="app-button-primary" onClick={() => void openInstance()}>
@@ -220,7 +261,7 @@ export default function IEISystemInstancePage() {
     <main className="flex h-screen min-h-[560px] flex-col overflow-hidden bg-slate-100">
       <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4">
         <div className="flex min-w-0 items-center gap-3">
-          <Link className="cm-icon-button shrink-0" title="返回实例列表" to="/ieisystem/list-instances">
+          <Link className="cm-icon-button shrink-0" title="返回实例列表" to={listReturnURL}>
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <div className="min-w-0">

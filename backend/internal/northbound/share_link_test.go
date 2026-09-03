@@ -15,7 +15,19 @@ import (
 )
 
 type northboundInstanceStub struct {
-	items map[int]*models.Instance
+	items        map[int]*models.Instance
+	restartCalls []int
+	resetCalls   []int
+}
+
+func (s *northboundInstanceStub) Restart(id int) error {
+	s.restartCalls = append(s.restartCalls, id)
+	return nil
+}
+
+func (s *northboundInstanceStub) Reset(id int) error {
+	s.resetCalls = append(s.resetCalls, id)
+	return nil
 }
 
 func (s *northboundInstanceStub) Create(int, services.CreateInstanceRequest) (*models.Instance, error) {
@@ -372,6 +384,14 @@ func TestNorthboundResourceRoutesAreRegistered(t *testing.T) {
 		"POST /internal/northbound/v1/pro-instances":                                       false,
 		"GET /internal/northbound/v1/pro-instances":                                        false,
 		"GET /internal/northbound/v1/pro-instances/:id":                                    false,
+		"POST /api/northbound/v1/lite-instances/:id/restart":                              false,
+		"POST /api/northbound/v1/lite-instances/:id/reset":                                false,
+		"POST /api/northbound/v1/pro-instances/:id/restart":                               false,
+		"POST /api/northbound/v1/pro-instances/:id/reset":                                 false,
+		"POST /internal/northbound/v1/lite-instances/:id/restart":                         false,
+		"POST /internal/northbound/v1/lite-instances/:id/reset":                           false,
+		"POST /internal/northbound/v1/pro-instances/:id/restart":                          false,
+		"POST /internal/northbound/v1/pro-instances/:id/reset":                            false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password":              false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/share-link/reset":      false,
 		"POST /api/northbound/v1/lite-instances/:id/external-access/password/reset":        false,

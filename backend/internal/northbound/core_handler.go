@@ -132,6 +132,57 @@ func (h *CoreHandler) GetProInstance(c *gin.Context) {
 	c.JSON(http.StatusOK, liteInstanceResponse(item))
 }
 
+func (h *CoreHandler) SubmitLiteRestart(c *gin.Context) {
+	h.submitLifecycle(c, ScopeLiteRestart, "lite", "restart")
+}
+func (h *CoreHandler) SubmitLiteReset(c *gin.Context) {
+	if !requireResetDataLossConfirmation(c) {
+		return
+	}
+	h.submitLifecycle(c, ScopeLiteReset, "lite", "reset")
+}
+func (h *CoreHandler) SubmitProRestart(c *gin.Context) {
+	h.submitLifecycle(c, ScopeProRestart, "pro", "restart")
+}
+func (h *CoreHandler) SubmitProReset(c *gin.Context) {
+	if !requireResetDataLossConfirmation(c) {
+		return
+	}
+	h.submitLifecycle(c, ScopeProReset, "pro", "reset")
+}
+
+func requireResetDataLossConfirmation(c *gin.Context) bool {
+	var request ConfirmInstanceResetRequest
+	if err := c.ShouldBindJSON(&request); err != nil || !request.ConfirmDataLoss {
+		writeError(c, apiError(http.StatusBadRequest, "RESET_CONFIRMATION_REQUIRED", "Reset permanently deletes all instance data; set confirm_data_loss to true", err))
+		return false
+	}
+	return true
+}
+
+func (h *CoreHandler) submitLifecycle(c *gin.Context, requiredScope, mode, action string) {
+	principal := currentPrincipal(c)
+	if principal == nil || !principal.HasScope(requiredScope) {
+		writeError(c, apiError(http.StatusForbidden, "SCOPE_DENIED", "Insufficient permission", nil))
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		writeError(c, apiError(http.StatusNotFound, "INSTANCE_NOT_FOUND", "Instance not found", nil))
+		return
+	}
+	item, replayed, err := h.service.SubmitLifecycle(*principal, c.GetHeader("Idempotency-Key"), id, mode, action)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	if replayed {
+		c.Header("Idempotent-Replayed", "true")
+	}
+	c.Header("Location", "/api/northbound/v1/operations/"+item.OperationID)
+	c.JSON(http.StatusAccepted, operationResponse(item))
+}
+
 func (h *CoreHandler) ListInstances(c *gin.Context) {
 	principal := currentPrincipal(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -243,9 +294,13 @@ func RegisterCoreRoutes(router *gin.Engine, handler *CoreHandler) {
 	group.POST("/lite-instances", handler.SubmitCreate)
 	group.GET("/lite-instances", handler.ListInstances)
 	group.GET("/lite-instances/:id", handler.GetInstance)
+	group.POST("/lite-instances/:id/restart", handler.SubmitLiteRestart)
+	group.POST("/lite-instances/:id/reset", handler.SubmitLiteReset)
 	group.POST("/pro-instances", handler.SubmitProCreate)
 	group.GET("/pro-instances", handler.ListProInstances)
 	group.GET("/pro-instances/:id", handler.GetProInstance)
+	group.POST("/pro-instances/:id/restart", handler.SubmitProRestart)
+	group.POST("/pro-instances/:id/reset", handler.SubmitProReset)
 	group.POST("/lite-instances/:id/external-access/password", handler.EnableShareLinkPassword)
 	group.POST("/lite-instances/:id/external-access/share-link/reset", handler.ResetShareLinkURL)
 	group.POST("/lite-instances/:id/external-access/password/reset", handler.ResetShareLinkPassword)

@@ -38,9 +38,17 @@ export interface IEISystemInstanceAccess {
   workspace_root: string;
 }
 
-export interface IEISystemRestartResult {
-  instance_id: number;
-  status: "restarting" | string;
+export interface IEISystemLifecycleOperation {
+  operation_id: string;
+  action: "restart" | "reset";
+  status: "queued" | "processing" | "succeeded" | "failed" | string;
+  instance_id?: number;
+  error_code?: string;
+  error_message?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
@@ -51,6 +59,11 @@ const ieiAPI = axios.create({
   withCredentials: true,
 });
 
+function lifecycleIdempotencyKey() {
+  if (typeof crypto.randomUUID === "function") return `iei-${crypto.randomUUID()}`;
+  return `iei-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export const ieiSystemService = {
   async exchangeSession(token: string): Promise<IEISystemSession> {
     const response = await ieiAPI.post("/session", { token });
@@ -59,6 +72,11 @@ export const ieiSystemService = {
 
   async getSession(): Promise<IEISystemSession> {
     const response = await ieiAPI.get("/session");
+    return response.data.data;
+  },
+
+  async refreshSession(): Promise<IEISystemSession> {
+    const response = await ieiAPI.post("/session/refresh");
     return response.data.data;
   },
 
@@ -76,9 +94,32 @@ export const ieiSystemService = {
     return response.data.data.instance;
   },
 
-  async restartInstance(id: number): Promise<IEISystemRestartResult> {
-    const response = await ieiAPI.post(`/instances/${id}/restart`);
-    return response.data.data;
+  async restartInstance(id: number, idempotencyKey = lifecycleIdempotencyKey()): Promise<IEISystemLifecycleOperation> {
+    const response = await ieiAPI.post(
+      `/instances/${id}/restart`,
+      undefined,
+      { headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.data.data.operation;
+  },
+
+  async resetInstance(id: number, idempotencyKey = lifecycleIdempotencyKey()): Promise<IEISystemLifecycleOperation> {
+    const response = await ieiAPI.post(
+      `/instances/${id}/reset`,
+      { confirm_data_loss: true },
+      { headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.data.data.operation;
+  },
+
+  async getLatestLifecycleOperation(id: number): Promise<IEISystemLifecycleOperation | null> {
+    const response = await ieiAPI.get(`/instances/${id}/lifecycle-operation`);
+    return response.data.data.operation ?? null;
+  },
+
+  async getLifecycleOperation(operationID: string): Promise<IEISystemLifecycleOperation> {
+    const response = await ieiAPI.get(`/lifecycle-operations/${encodeURIComponent(operationID)}`);
+    return response.data.data.operation;
   },
 
   async generateAccess(id: number): Promise<IEISystemInstanceAccess> {

@@ -1258,11 +1258,12 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		return fmt.Errorf("runtime gateway start is not prepared")
 	}
 	resp, err := s.agentClient.CreateGateway(ctx, start.endpoint, RuntimeAgentCreateGatewayRequest{
-		InstanceID:    instance.ID,
-		UserID:        instance.UserID,
-		AgentType:     runtimeType,
-		WorkspacePath: start.workspacePath,
-		GatewayPort:   start.reservedBinding.GatewayPort,
+		InstanceID:          instance.ID,
+		UserID:              instance.UserID,
+		AgentType:           runtimeType,
+		WorkspacePath:       start.workspacePath,
+		ProjectRelativePath: strings.TrimSpace(start.environment["CLAWMANAGER_DEFAULT_PROJECT_RELATIVE_PATH"]),
+		GatewayPort:         start.reservedBinding.GatewayPort,
 		PortRange: RuntimeAgentPortRange{
 			Start: s.gatewayPortStart,
 			End:   s.gatewayPortEnd,

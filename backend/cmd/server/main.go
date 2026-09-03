@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clawreef/internal/aigateway"
+	"clawreef/internal/buildinfo"
 	"clawreef/internal/config"
 	"clawreef/internal/db"
 	"clawreef/internal/handlers"
@@ -28,6 +29,9 @@ import (
 )
 
 func main() {
+	build := buildinfo.Current()
+	log.Printf("Starting ClawManager version=%s commit=%s build_time=%s", build.Version, build.Commit, build.BuildTime)
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
@@ -125,10 +129,12 @@ func main() {
 		services.WithPrivilegedInstancePods(cfg.Kubernetes.Runtime.Pod.Privileged),
 		services.WithV2RuntimeLifecycle(runtimePodRepo, bindingRepo, runtimeAgentClient, cfg.Runtime.WorkspaceRoot),
 		services.WithRuntimeUpgradeDeletionGuard(runtimeUpgradeService),
+		services.WithExpandedLLMModelCatalog(llmModelService),
 	)
 	externalAccessService := services.NewInstanceExternalAccessService(instanceExternalAccessRepo)
 	var northboundCoreServer *http.Server
 	var northboundOperationWorker *northbound.OperationWorker
+	var northboundCoreService *northbound.CoreService
 	if cfg.Northbound.Enabled {
 		coreTLSConfig, tlsErr := northbound.CoreTLSConfig(cfg.Northbound)
 		if tlsErr != nil {
@@ -137,10 +143,10 @@ func main() {
 		if len(cfg.Northbound.InternalJWTSecret) < 32 {
 			log.Fatal("Failed to initialize northbound Core: NORTHBOUND_INTERNAL_JWT_SECRET must contain at least 32 bytes")
 		}
-		coreService := northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound, northboundRuntimeSettings)
-		coreService.SetAuditRepository(auditEventRepo)
-		northboundOperationWorker = northbound.NewOperationWorker(coreService, cfg.Runtime.BackendReplicaID)
-		coreHandler := northbound.NewCoreHandler(coreService, cfg.Northbound.InternalJWTSecret)
+		northboundCoreService = northbound.NewCoreService(northboundRepo, userRepo, instanceService, externalAccessService, cfg.Northbound, northboundRuntimeSettings)
+		northboundCoreService.SetAuditRepository(auditEventRepo)
+		northboundOperationWorker = northbound.NewOperationWorker(northboundCoreService, cfg.Runtime.BackendReplicaID)
+		coreHandler := northbound.NewCoreHandler(northboundCoreService, cfg.Northbound.InternalJWTSecret)
 		coreRouter := gin.New()
 		_ = coreRouter.SetTrustedProxies(nil)
 		coreRouter.Use(gin.Logger(), gin.Recovery(), northbound.RequestContext(), northbound.BodyLimit(64<<10))
@@ -193,10 +199,21 @@ func main() {
 	)
 	services.ConfigureSkillRuntimeSync(skillService, bindingRepo, runtimePodRepo, runtimeAgentClient)
 	securityScanService := services.NewSecurityScanService(securityScanRepo, skillRepo, objectStorageService, skillScannerClient)
-	aiGatewayService := aigateway.NewService(llmModelRepo, modelInvocationService, auditEventService, costRecordService, riskDetectionService, riskHitService, chatSessionService, chatMessageService)
+	aiGatewayService := aigateway.NewService(
+		llmModelRepo,
+		modelInvocationService,
+		auditEventService,
+		costRecordService,
+		riskDetectionService,
+		riskHitService,
+		chatSessionService,
+		chatMessageService,
+		aigateway.WithExpandedLLMModelCatalog(llmModelService),
+	)
 	customTeamTemplateService := teamtemplate.NewService(customTeamTemplateRepo, aiGatewayService)
 
 	// Initialize handlers
+	versionHandler := handlers.NewVersionHandler()
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, quotaService)
 	instanceHandler := handlers.NewInstanceHandler(
@@ -218,6 +235,9 @@ func main() {
 	}
 	instanceHandler.SetIEISSOService(ieiSSOService)
 	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
+	if northboundCoreService != nil {
+		ieiSystemHandler.SetLifecycleService(northboundCoreService)
+	}
 	systemSettingsHandler := handlers.NewSystemSettingsHandler(systemImageSettingService)
 	var northboundController services.NorthboundClusterController
 	if k8s.GetClient() != nil && k8s.GetClient().Clientset != nil {
@@ -255,7 +275,17 @@ func main() {
 	skillHandler := handlers.NewSkillHandler(skillService, instanceService)
 	skillHubHandler := handlers.NewSkillHubHandler(skillService, instanceService)
 	securityHandler := handlers.NewSecurityHandler(securityScanService)
-	agentHandler := handlers.NewAgentHandler(instanceAgentService, instanceCommandService, instanceRuntimeStatusService, instanceConfigRevisionService, skillService)
+	agentHandler := handlers.NewAgentHandler(
+		instanceAgentService,
+		instanceCommandService,
+		instanceRuntimeStatusService,
+		instanceConfigRevisionService,
+		skillService,
+		handlers.WithAgentSkillReportPersistence(cfg.Runtime.SkillReportPersistence),
+	)
+	if !cfg.Runtime.SkillReportPersistence {
+		log.Printf("skill inventory report persistence is disabled; reports will be acknowledged without database synchronization")
+	}
 	teamHandler := handlers.NewTeamHandler(teamService)
 	workspaceFileHandler := handlers.NewWorkspaceFileHandler(instanceService, workspaceFileService, runtimeWorkspaceFileService)
 	workspaceFileHandler.SetSkillRepository(skillRepo)
@@ -404,14 +434,23 @@ func main() {
 
 	api := r.Group("/api/v1")
 	{
+		// Build information is intentionally public so operators can identify the
+		// running control-plane version even when authentication is unavailable.
+		api.GET("/version", versionHandler.Get)
+
 		ieiSystem := api.Group("/ieisystem")
 		{
 			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
 			ieiSystem.GET("/session", ieiSystemHandler.GetSession)
+			ieiSystem.POST("/session/refresh", ieiSystemHandler.RefreshSession)
 			ieiSystem.DELETE("/session", ieiSystemHandler.DeleteSession)
 			ieiSystem.GET("/instances", ieiSystemHandler.ListInstances)
 			ieiSystem.GET("/instances/:id", ieiSystemHandler.GetInstance)
 			ieiSystem.POST("/instances/:id/restart", ieiSystemHandler.RestartInstance)
+			ieiSystem.POST("/instances/:id/reset", ieiSystemHandler.ResetInstance)
+			ieiSystem.GET("/instances/:id/lifecycle-operation", ieiSystemHandler.GetLatestLifecycleOperation)
+			ieiSystem.GET("/instances/:id/lifecycle-operations/:operationID", ieiSystemHandler.GetLifecycleOperation)
+			ieiSystem.GET("/lifecycle-operations/:operationID", ieiSystemHandler.GetSessionLifecycleOperation)
 			ieiSystem.POST("/instances/:id/access", ieiSystemHandler.GenerateInstanceAccess)
 			ieiSystem.GET("/instances/:id/workspace/files", ieiSystemHandler.ListWorkspace)
 			ieiSystem.GET("/instances/:id/workspace/preview", ieiSystemHandler.PreviewWorkspace)

@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: 10.130.15.40:5000/clawmanager-app:browser-https-20260825-3d9308c
+          image: 10.130.15.40:5000/clawmanager@sha256:0fe32d900babed48ea224a1043d140a28335db9220c108128b8fb2f47b8c34de
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/clawreef-northbound-gateway"]
           ports:

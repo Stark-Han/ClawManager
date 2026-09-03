@@ -43,6 +43,68 @@ func TestRuntimeManifestsAreValidYAML(t *testing.T) {
 	}
 }
 
+func TestNineNodeProductionDatabaseLoadControls(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	manifest := filepath.Join(repoRoot, "deployments", "k8s", "sites", "nine-node-production", "20-clawmanager-production.yaml")
+	file, err := os.Open(manifest)
+	if err != nil {
+		t.Fatalf("open production manifest: %v", err)
+	}
+	defer file.Close()
+
+	decoder := yaml.NewDecoder(file)
+	for document := 1; ; document++ {
+		var value any
+		err := decoder.Decode(&value)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("parse production manifest document %d: %v", document, err)
+		}
+	}
+
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatalf("read production manifest: %v", err)
+	}
+	// Keep the deployment assertion portable across Git checkouts that use
+	// either LF or CRLF line endings.
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	for _, want := range []string{
+		`--max-connections=800`,
+		`--binlog-expire-logs-seconds=259200`,
+		"strategy:\n    type: Recreate\n  selector:\n    matchLabels:\n      app: mysql",
+		`name: DB_MAX_OPEN_CONNS`,
+		`name: DB_MAX_IDLE_CONNS`,
+		`name: DB_CONN_MAX_LIFETIME`,
+		`name: DB_CONN_MAX_IDLE_TIME`,
+		`name: SKILL_REPORT_PERSISTENCE_ENABLED`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("production manifest must contain %q", want)
+		}
+	}
+}
+
+func TestNineNodeProductionUsesPinnedClawManagerImage(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	want := "10.130.15.40:5000/clawmanager@sha256:0fe32d900babed48ea224a1043d140a28335db9220c108128b8fb2f47b8c34de"
+	for _, relativePath := range []string{
+		filepath.Join("deployments", "k8s", "sites", "nine-node-production", "20-clawmanager-production.yaml"),
+		filepath.Join("deployments", "k8s", "sites", "nine-node-production", "50-northbound-production.yaml"),
+	} {
+		manifest := filepath.Join(repoRoot, relativePath)
+		raw, err := os.ReadFile(manifest)
+		if err != nil {
+			t.Fatalf("read production manifest %s: %v", manifest, err)
+		}
+		if !strings.Contains(string(raw), "image: "+want) {
+			t.Fatalf("production manifest %s must use pinned image %s", manifest, want)
+		}
+	}
+}
+
 func TestRuntimeManifestsStartHermesRuntime(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	for _, manifest := range deploymentRuntimeManifests(repoRoot) {
@@ -174,6 +236,50 @@ func TestNginxDedicatedRuntimeOriginsExposeCertificateConfirmation(t *testing.T)
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("nginx certificate confirmation must contain %q", want)
+		}
+	}
+}
+
+func TestNginxAgentRoutesSupportSilentRenewalAndLongRunningWork(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"location = /__clawmanager_access_refresh",
+		"proxy_set_header X-ClawManager-Access-Refresh-Token $dedicated_refresh_token;",
+	} {
+		if count := strings.Count(text, want); count != 2 {
+			t.Fatalf("nginx dedicated runtime origins must contain %q twice, got %d", want, count)
+		}
+	}
+	for _, want := range []string{
+		"proxy_read_timeout 86400s;",
+		"proxy_send_timeout 86400s;",
+	} {
+		if count := strings.Count(text, want); count != 4 {
+			t.Fatalf("nginx agent routes must contain %q four times, got %d", want, count)
+		}
+	}
+}
+
+func TestDesktopAuthAllowsDedicatedOriginTokenRotation(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "njs", "desktop_auth.js"))
+	if err != nil {
+		t.Fatalf("read desktop auth script: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"validateTokenCandidate(r, readQueryToken(r), key, false)",
+		"var cookieTokens = readCookieTokens(r)",
+		"validateTokenCandidate(r, cookieTokens[i], key, false)",
+		"validateTokenCandidate(r, queryToken, key, true)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("desktop auth must support managed query-token rotation; missing %q", want)
 		}
 	}
 }

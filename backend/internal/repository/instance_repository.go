@@ -67,6 +67,26 @@ type IEISystemInstanceRepository interface {
 	CountSupportedByOwnerEmail(owner string) (int, error)
 }
 
+// InstanceLifecycleStatusRepository provides an atomic status transition used
+// to serialize reset operations across API replicas.
+type InstanceLifecycleStatusRepository interface {
+	ClaimLifecycleStatus(ctx context.Context, id int, allowedStatuses []string, targetStatus string) (bool, error)
+}
+
+// InstanceFactoryResetRepository clears only instance-local runtime state. It
+// deliberately preserves the instance row, audit history, usage history and
+// backups so a factory reset cannot broaden into account or record deletion.
+type InstanceFactoryResetRepository interface {
+	ResetInstanceRuntimeData(ctx context.Context, id int) error
+}
+
+// InstanceResetReplacementRepository atomically hands a healthy replacement
+// to the original owner while quarantining the source instance. It uses only
+// columns and tables that already exist in deployed installations.
+type InstanceResetReplacementRepository interface {
+	PromoteResetReplacement(ctx context.Context, sourceID, replacementID int, owner, name, quarantineOwner, quarantineName, reason string) error
+}
+
 // InstanceQueryRepository is the optional filtered-list and aggregation
 // capability used by the user workspace. It is kept separate from
 // InstanceRepository so unrelated repository test doubles remain small.
@@ -118,6 +138,31 @@ func (r *instanceRepository) GetByID(id int) (*models.Instance, error) {
 		return nil, fmt.Errorf("failed to get instance: %w", err)
 	}
 	return &instance, nil
+}
+
+func (r *instanceRepository) ClaimLifecycleStatus(ctx context.Context, id int, allowedStatuses []string, targetStatus string) (bool, error) {
+	if id <= 0 || len(allowedStatuses) == 0 || strings.TrimSpace(targetStatus) == "" {
+		return false, fmt.Errorf("invalid lifecycle status transition")
+	}
+	placeholders := make([]string, 0, len(allowedStatuses))
+	arguments := make([]any, 0, len(allowedStatuses)+3)
+	arguments = append(arguments, strings.TrimSpace(targetStatus), time.Now().UTC(), id)
+	for _, status := range allowedStatuses {
+		placeholders = append(placeholders, "?")
+		arguments = append(arguments, strings.ToLower(strings.TrimSpace(status)))
+	}
+	result, err := r.sess.SQL().ExecContext(ctx, `
+		UPDATE instances
+		SET status = ?, updated_at = ?
+		WHERE id = ? AND LOWER(status) IN (`+strings.Join(placeholders, ",")+`)`, arguments...)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim instance lifecycle status: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect instance lifecycle claim: %w", err)
+	}
+	return rows == 1, nil
 }
 
 // GetByProvisioningOperationID returns the instance created for a durable
@@ -449,7 +494,7 @@ func supportedNorthboundProOwnerInstances(userID int, owner string) db.LogicalEx
 	return db.And(
 		db.Cond{"user_id": userID, "owner": owner, "instance_mode": "pro"},
 		db.Or(
-			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode"}},
+			db.Cond{"type IN": []string{"openclaw", "hermes", "opencode", "deepseek-harness"}},
 			db.Cond{"type": "workbuddy", "runtime_variant": "linux"},
 		),
 	)
@@ -488,7 +533,7 @@ func supportedNorthboundOwnerInstances(userID int, owner string) db.LogicalExpr 
 			},
 			db.Cond{
 				"instance_mode": "pro",
-				"type IN":       []string{"openclaw", "hermes", "opencode"},
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
 			},
 		),
 	)
@@ -527,7 +572,7 @@ func supportedIEIOwnerInstances(owner string) db.LogicalExpr {
 			},
 			db.Cond{
 				"instance_mode": "pro",
-				"type IN":       []string{"openclaw", "hermes", "opencode"},
+				"type IN":       []string{"openclaw", "hermes", "opencode", "deepseek-harness"},
 			},
 		),
 	)
@@ -741,6 +786,104 @@ func (r *instanceRepository) UpdateWorkspaceUsage(ctx context.Context, id int, u
 		return fmt.Errorf("failed to update instance workspace usage: %w", err)
 	}
 	return nil
+}
+
+func (r *instanceRepository) ResetInstanceRuntimeData(ctx context.Context, id int) error {
+	if id <= 0 {
+		return fmt.Errorf("invalid instance id")
+	}
+	return r.sess.TxContext(ctx, func(tx db.Session) error {
+		// These rows describe the old runtime only. Global Skill Hub records,
+		// backups, usage history, workspace audits and the instance identity are
+		// intentionally outside this list.
+		for _, table := range []string{
+			"skill_package_materialize_jobs",
+			"instance_skills",
+			"instance_commands",
+			"instance_desired_state",
+			"instance_runtime_status",
+			"instance_agents",
+			"instance_config_revisions",
+			"instance_external_access",
+			"instance_gateway_token_aliases",
+		} {
+			if _, err := tx.SQL().ExecContext(ctx, "DELETE FROM "+table+" WHERE instance_id = ?", id); err != nil {
+				return fmt.Errorf("failed to clear %s for instance factory reset: %w", table, err)
+			}
+		}
+		if _, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET workspace_usage_bytes = 0,
+			    runtime_error_message = NULL,
+			    pod_name = NULL,
+			    pod_namespace = NULL,
+			    pod_ip = NULL,
+			    access_url = NULL,
+			    access_token = NULL,
+			    agent_bootstrap_token = NULL,
+			    stopped_at = NULL,
+			    updated_at = ?
+			WHERE id = ?
+		`, time.Now().UTC(), id); err != nil {
+			return fmt.Errorf("failed to reset instance runtime fields: %w", err)
+		}
+		return nil
+	}, nil)
+}
+
+func (r *instanceRepository) PromoteResetReplacement(ctx context.Context, sourceID, replacementID int, owner, name, quarantineOwner, quarantineName, reason string) error {
+	if sourceID <= 0 || replacementID <= 0 || sourceID == replacementID {
+		return fmt.Errorf("invalid factory-reset replacement ids")
+	}
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	quarantineOwner = strings.TrimSpace(quarantineOwner)
+	quarantineName = strings.TrimSpace(quarantineName)
+	if owner == "" || name == "" || quarantineOwner == "" || quarantineName == "" {
+		return fmt.Errorf("invalid factory-reset replacement identity")
+	}
+	return r.sess.TxContext(ctx, func(tx db.Session) error {
+		now := time.Now().UTC()
+		oldResult, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET owner = ?, name = ?, status = 'stopped', runtime_error_message = ?,
+			    access_url = NULL, access_token = NULL, agent_bootstrap_token = NULL,
+			    pod_name = NULL, pod_namespace = NULL, pod_ip = NULL,
+			    stopped_at = ?, updated_at = ?
+			WHERE id = ?
+		`, quarantineOwner, quarantineName, reason, now, now, sourceID)
+		if err != nil {
+			return fmt.Errorf("failed to quarantine factory-reset source: %w", err)
+		}
+		if affected, affectedErr := oldResult.RowsAffected(); affectedErr != nil || affected != 1 {
+			if affectedErr != nil {
+				return fmt.Errorf("failed to inspect factory-reset source quarantine: %w", affectedErr)
+			}
+			return fmt.Errorf("factory-reset source instance not found")
+		}
+
+		newResult, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET owner = ?, name = ?, updated_at = ?
+			WHERE id = ? AND status = 'running'
+		`, owner, name, now, replacementID)
+		if err != nil {
+			return fmt.Errorf("failed to promote factory-reset replacement: %w", err)
+		}
+		if affected, affectedErr := newResult.RowsAffected(); affectedErr != nil || affected != 1 {
+			if affectedErr != nil {
+				return fmt.Errorf("failed to inspect factory-reset replacement promotion: %w", affectedErr)
+			}
+			return fmt.Errorf("factory-reset replacement is not running")
+		}
+
+		for _, table := range []string{"instance_external_access", "instance_gateway_token_aliases"} {
+			if _, err := tx.SQL().ExecContext(ctx, "DELETE FROM "+table+" WHERE instance_id = ?", sourceID); err != nil {
+				return fmt.Errorf("failed to revoke factory-reset source access in %s: %w", table, err)
+			}
+		}
+		return nil
+	}, nil)
 }
 
 // Update updates an instance

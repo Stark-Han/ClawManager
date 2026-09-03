@@ -84,7 +84,7 @@ func (s *fakeWorkspaceFileService) OpenPreview(ctx context.Context, scope servic
 	s.lastScope = scope
 	return s.file, "text/plain; charset=utf-8", s.size, nil
 }
-func (s *fakeWorkspaceFileService) OpenDownload(ctx context.Context, scope services.WorkspaceFileScope, relativePath string) (*os.File, string, int64, error) {
+func (s *fakeWorkspaceFileService) OpenDownload(ctx context.Context, scope services.WorkspaceFileScope, relativePath string) (io.ReadCloser, string, int64, error) {
 	s.lastScope = scope
 	return s.file, s.filename, s.size, nil
 }

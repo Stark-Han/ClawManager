@@ -118,19 +118,22 @@ type RuntimeAgentCreateGatewayRequest struct {
 	// GatewayPort is the exact primary port allocated by ClawManager. Runtime
 	// agents use PortRange only for backwards-compatible callers that have not
 	// yet been upgraded to control-plane port assignment.
-	GatewayPort   int                   `json:"gateway_port,omitempty"`
-	InstanceID    int                   `json:"instance_id"`
-	UserID        int                   `json:"user_id"`
-	AgentType     string                `json:"agent_type"`
-	WorkspacePath string                `json:"workspace_path"`
-	PortRange     RuntimeAgentPortRange `json:"port_range"`
-	UID           int                   `json:"uid"`
-	GID           int                   `json:"gid"`
-	CPUCores      float64               `json:"cpu_cores"`
-	MemoryMB      int                   `json:"memory_mb"`
-	DiskQuotaMB   int                   `json:"disk_quota_mb"`
-	Generation    int                   `json:"generation"`
-	Environment   map[string]string     `json:"environment,omitempty"`
+	GatewayPort   int    `json:"gateway_port,omitempty"`
+	InstanceID    int    `json:"instance_id"`
+	UserID        int    `json:"user_id"`
+	AgentType     string `json:"agent_type"`
+	WorkspacePath string `json:"workspace_path"`
+	// ProjectRelativePath lets compatible runtime images start their UI in a
+	// project below WorkspacePath. Older agents safely ignore this optional field.
+	ProjectRelativePath string                `json:"project_relative_path,omitempty"`
+	PortRange           RuntimeAgentPortRange `json:"port_range"`
+	UID                 int                   `json:"uid"`
+	GID                 int                   `json:"gid"`
+	CPUCores            float64               `json:"cpu_cores"`
+	MemoryMB            int                   `json:"memory_mb"`
+	DiskQuotaMB         int                   `json:"disk_quota_mb"`
+	Generation          int                   `json:"generation"`
+	Environment         map[string]string     `json:"environment,omitempty"`
 }
 
 type RuntimeAgentCreateGatewayResponse struct {

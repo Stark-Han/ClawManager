@@ -36,6 +36,8 @@ const (
 	maxLiteBatchCreateCount       = 100
 	liteBatchCreateConcurrency    = 4
 	maxLiteBatchDeleteCount       = 100
+	dedicatedAccessRefreshPath    = "/__clawmanager_access_refresh"
+	dedicatedAccessRefreshHeader  = "X-ClawManager-Access-Refresh-Token"
 )
 
 // desktopDirectProxyEnv toggles embedding the instance Service "host:port" into
@@ -1702,12 +1704,21 @@ func (h *InstanceHandler) ProxyInstance(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if h.isDedicatedAccessRefreshRequest(c, id, token) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+		c.Status(http.StatusNoContent)
+		return
+	}
 
 	h.proxyInstanceWithToken(c, id, token)
 }
 
 func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool) {
 	queryToken := strings.TrimSpace(c.Query("token"))
+	if queryToken == "" && isDedicatedAccessRefreshPath(c, id) {
+		queryToken = strings.TrimSpace(c.GetHeader(dedicatedAccessRefreshHeader))
+	}
 	// A freshly issued ClawManager token must be allowed to replace an expired
 	// dedicated-origin cookie. Runtime applications can also own a `token`
 	// query parameter, so only prefer the query value when it is recognizably an
@@ -1877,6 +1888,25 @@ func isDedicatedIEIRuntimeOrigin(c *gin.Context, accessToken *services.AccessTok
 	}
 	expectedPrefix := fmt.Sprintf("%s-%d.", originRuntimeType, accessToken.InstanceID)
 	return strings.HasPrefix(strings.ToLower(host), expectedPrefix)
+}
+
+func (h *InstanceHandler) isDedicatedAccessRefreshRequest(c *gin.Context, instanceID int, token string) bool {
+	if c == nil || c.Request == nil || (c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead) {
+		return false
+	}
+	if !isDedicatedAccessRefreshPath(c, instanceID) {
+		return false
+	}
+	accessToken, err := h.accessService.ValidateToken(token)
+	return err == nil && accessToken.InstanceID == instanceID && isDedicatedIEIRuntimeOrigin(c, accessToken)
+}
+
+func isDedicatedAccessRefreshPath(c *gin.Context, instanceID int) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	want := fmt.Sprintf("/api/v1/instances/%d/proxy%s", instanceID, dedicatedAccessRefreshPath)
+	return c.Request.URL.Path == want
 }
 
 func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token string) {

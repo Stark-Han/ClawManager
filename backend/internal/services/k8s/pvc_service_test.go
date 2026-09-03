@@ -719,6 +719,57 @@ func TestWaitForPVCBindingLeavesDynamicStorageClassToProvisioner(t *testing.T) {
 	}
 }
 
+func TestValidatePVCDataDeletionPolicyAcceptsDeleteReclaimPolicy(t *testing.T) {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "factory-reset-pv"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	service := &PVCService{client: &Client{Clientset: fake.NewSimpleClientset(pv)}}
+
+	if err := service.ValidatePVCDataDeletionPolicy(context.Background(), pvc); err != nil {
+		t.Fatalf("ValidatePVCDataDeletionPolicy returned error: %v", err)
+	}
+}
+
+func TestValidatePVCDataDeletionPolicyRejectsRetainReclaimPolicy(t *testing.T) {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "retained-pv"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	service := &PVCService{client: &Client{Clientset: fake.NewSimpleClientset(pv)}}
+
+	err := service.ValidatePVCDataDeletionPolicy(context.Background(), pvc)
+	if err == nil || !strings.Contains(err.Error(), "cannot guarantee data deletion") {
+		t.Fatalf("expected Retain policy rejection, got %v", err)
+	}
+}
+
+func TestFactoryResetDeletionWaitsReturnWhenObjectsAreGone(t *testing.T) {
+	service := &PVCService{
+		client: &Client{
+			Clientset: fake.NewSimpleClientset(),
+			Namespace: "clawmanager",
+		},
+	}
+
+	if err := service.WaitForPVCDeleted(context.Background(), 42, "clawreef-7-pvc", time.Second); err != nil {
+		t.Fatalf("WaitForPVCDeleted returned error: %v", err)
+	}
+	if err := service.WaitForPVDeleted(context.Background(), "factory-reset-pv", time.Second); err != nil {
+		t.Fatalf("WaitForPVDeleted returned error: %v", err)
+	}
+}
+
 func stringPtr(value string) *string {
 	return &value
 }

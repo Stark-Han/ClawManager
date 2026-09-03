@@ -409,7 +409,7 @@ func isDesktopWorkspaceInstance(instance *models.Instance) bool {
 		strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendDesktop)
 }
 
-func streamWorkspaceFile(c *gin.Context, file io.ReadSeeker, filename, contentType, disposition string, size int64) {
+func streamWorkspaceFile(c *gin.Context, file io.Reader, filename, contentType, disposition string, size int64) {
 	safeName := safeWorkspaceDownloadName(filename)
 	c.Header("Content-Type", contentType)
 	c.Header("X-Content-Type-Options", "nosniff")
