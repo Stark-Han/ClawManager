@@ -680,7 +680,7 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 			ready := map[string]bool{}
 			for _, pod := range pods {
 				key := pod.Namespace + "/" + pod.DeploymentName
-				if source, ok := sourceImages[key]; ok && pod.State == "ready" && !pod.Draining && strings.TrimSpace(pod.ImageRef) == strings.TrimSpace(source) {
+				if source, ok := sourceImages[key]; ok && pod.State == "ready" && !pod.Draining && runtimePodMatchesImage(pod, source) {
 					ready[key] = true
 				}
 			}
@@ -694,7 +694,7 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 			if allReady {
 				for _, pod := range pods {
 					key := pod.Namespace + "/" + pod.DeploymentName
-					if source, ok := sourceImages[key]; ok && strings.TrimSpace(pod.ImageRef) != strings.TrimSpace(source) {
+					if source, ok := sourceImages[key]; ok && !runtimePodMatchesImage(pod, source) {
 						_ = s.podRepo.MarkState(ctx, pod.ID, "draining", true)
 					}
 				}
@@ -719,7 +719,11 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	joined := errors.Join(errs...)
+	if joined != nil {
+		s.upgrade.FailRollback(ctx, rollout.ID, joined)
+	}
+	return joined
 }
 
 func (s *RuntimeScheduler) currentRuntimePods(pods []models.RuntimePod, now time.Time) []models.RuntimePod {

@@ -30,10 +30,23 @@ func TestOpenClawUpgradeContractExcludesFullWorkspaceSnapshots(t *testing.T) {
 	if strings.Contains(joined, "workspace.snapshot") || strings.Contains(joined, "workspace.atomic-restore") {
 		t.Fatalf("full-workspace capability remained in upgrade contract: %s", joined)
 	}
-	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2"} {
+	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2", "openclaw.upgrade-preflight-v3"} {
 		if !containsString(openClawUpgradeRequiredCapabilities, required) {
 			t.Fatalf("missing capability %s", required)
 		}
+	}
+}
+
+func TestRuntimePodMatchesImmutableImageByDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("d", 64)
+	pod := models.RuntimePod{ImageRef: "registry/openclaw:legacy", ImageDigest: &digest}
+	if !runtimePodMatchesImage(pod, "registry/openclaw@"+digest) {
+		t.Fatal("tagged source pod did not match its immutable image digest")
+	}
+	other := "sha256:" + strings.Repeat("e", 64)
+	pod.ImageDigest = &other
+	if runtimePodMatchesImage(pod, "registry/openclaw@"+digest) {
+		t.Fatal("different image digest was accepted")
 	}
 }
 
@@ -228,11 +241,12 @@ func TestRuntimeUpgradeCandidateOrderKeepsLeaderLastWithinEachTeam(t *testing.T)
 	}
 }
 
-func TestValidateOpenClawUpgradeAggregateCapacityUsesSessionDataOnly(t *testing.T) {
-	compatibility := func(instanceID int, sessionBytes, configBytes int64, availableBytes uint64) models.RuntimeUpgradeItem {
+func TestValidateOpenClawUpgradeAggregateCapacityUsesSessionAndStateCapsule(t *testing.T) {
+	compatibility := func(instanceID int, sessionBytes, stateBytes, configBytes int64, availableBytes uint64) models.RuntimeUpgradeItem {
 		raw, err := json.Marshal(map[string]any{"compatibility": RuntimeAgentUpgradeCompatibility{
 			InstanceID: instanceID, Status: "compatible", SessionBytes: sessionBytes,
-			ConfigBytes: configBytes, AvailableBytes: availableBytes,
+			StateBytes: stateBytes, ConfigBytes: configBytes, AvailableBytes: availableBytes,
+			ConfigValidated: true, DoctorValidated: true, SessionDryRunValid: true,
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -241,18 +255,18 @@ func TestValidateOpenClawUpgradeAggregateCapacityUsesSessionDataOnly(t *testing.
 		return models.RuntimeUpgradeItem{InstanceID: instanceID, State: "compatibility_checked", PreflightJSON: &value}
 	}
 	items := []models.RuntimeUpgradeItem{
-		compatibility(1, 10<<20, 4<<10, 2<<30),
-		compatibility(2, 20<<20, 8<<10, 3<<30),
+		compatibility(1, 10<<20, 3<<20, 4<<10, 2<<30),
+		compatibility(2, 20<<20, 5<<20, 8<<10, 3<<30),
 	}
 	required, available, err := validateOpenClawUpgradeAggregateCapacity(items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRequired := uint64(1<<30) + uint64(30<<20)*3 + uint64(12<<10)*2
+	wantRequired := uint64(1<<30) + uint64(30<<20)*3 + uint64(12<<10)*2 + uint64(8<<20)*2
 	if required != wantRequired || available != uint64(2<<30) {
 		t.Fatalf("capacity = required %d available %d, want %d and %d", required, available, wantRequired, uint64(2<<30))
 	}
-	tooSmall := compatibility(3, 64<<20, 1024, 1<<30)
+	tooSmall := compatibility(3, 64<<20, 8<<20, 1024, 1<<30)
 	if _, _, err := validateOpenClawUpgradeAggregateCapacity([]models.RuntimeUpgradeItem{tooSmall}); err == nil {
 		t.Fatal("aggregate capacity accepted a volume without migration reserve")
 	}

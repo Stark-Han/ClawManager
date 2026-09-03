@@ -107,6 +107,7 @@ type RuntimeAgentSessionSQLiteMigration struct {
 	RollbackAvailable    bool      `json:"rollback_available"`
 	ConfigOriginalSHA256 string    `json:"config_original_sha256,omitempty"`
 	ConfigTargetSHA256   string    `json:"config_target_sha256,omitempty"`
+	StateCapsuleBytes    int64     `json:"state_capsule_bytes,omitempty"`
 	CompletedAt          time.Time `json:"completed_at"`
 }
 
@@ -117,7 +118,12 @@ type RuntimeAgentUpgradeCompatibility struct {
 	ConfigTargetSHA256   string    `json:"config_target_sha256"`
 	ConfigBytes          int64     `json:"config_bytes"`
 	SessionBytes         int64     `json:"session_bytes"`
+	StateBytes           int64     `json:"state_bytes"`
 	AvailableBytes       uint64    `json:"available_bytes"`
+	ConfigValidated      bool      `json:"config_validated"`
+	DoctorValidated      bool      `json:"doctor_validated"`
+	SessionDryRunValid   bool      `json:"session_dry_run_valid"`
+	ProbeOutputSHA256    string    `json:"probe_output_sha256"`
 	CheckedAt            time.Time `json:"checked_at"`
 }
 
@@ -126,6 +132,7 @@ type RuntimeAgentSessionSQLiteRestore struct {
 	Status         string    `json:"status"`
 	OutputSHA256   string    `json:"output_sha256"`
 	ConfigRestored bool      `json:"config_restored"`
+	StateRestored  bool      `json:"state_restored"`
 	CompletedAt    time.Time `json:"completed_at"`
 }
 

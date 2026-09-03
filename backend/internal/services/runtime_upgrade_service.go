@@ -44,7 +44,7 @@ var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.session-sqlite-restore-v1",
 	"openclaw.runtime-standby-v1",
 	"openclaw.upgrade-capsule-v2",
-	"openclaw.upgrade-preflight-v2",
+	"openclaw.upgrade-preflight-v3",
 	"redis-team.group-hooks-v1",
 }
 
@@ -405,8 +405,8 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		if value := stringValue(pod.SessionStore); value != "sqlite" {
 			return false, fmt.Errorf("target pod %s reports session store %q, want sqlite", pod.PodName, value)
 		}
-		if value := stringValue(pod.AgentProtocolVersion); value != "openclaw-upgrade-v2" {
-			return false, fmt.Errorf("target pod %s reports agent protocol %q, want openclaw-upgrade-v2", pod.PodName, value)
+		if value := stringValue(pod.AgentProtocolVersion); value != "openclaw-upgrade-v3" {
+			return false, fmt.Errorf("target pod %s reports agent protocol %q, want openclaw-upgrade-v3", pod.PodName, value)
 		}
 		if value := stringValue(pod.TeamPluginVersion); value != "0.3.0" {
 			return false, fmt.Errorf("target pod %s reports Redis Team plugin %q, want 0.3.0", pod.PodName, value)
@@ -456,7 +456,10 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if err != nil {
 				return false, fmt.Errorf("compatibility preflight instance %d: %w", item.InstanceID, err)
 			}
-			if compatibility == nil || compatibility.Status != "compatible" || compatibility.ConfigOriginalSHA256 == "" || compatibility.ConfigTargetSHA256 == "" {
+			if compatibility != nil && compatibility.Status == "deferred" {
+				return false, nil
+			}
+			if compatibility == nil || compatibility.Status != "compatible" || compatibility.ConfigOriginalSHA256 == "" || compatibility.ConfigTargetSHA256 == "" || !compatibility.ConfigValidated || !compatibility.DoctorValidated || !compatibility.SessionDryRunValid {
 				return false, fmt.Errorf("compatibility preflight instance %d returned incomplete evidence", item.InstanceID)
 			}
 			var capsule map[string]any
@@ -623,7 +626,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			}
 			targetPod := false
 			for _, pod := range pods {
-				if pod.ID == binding.RuntimePodID && strings.TrimSpace(pod.ImageRef) == strings.TrimSpace(rollout.TargetImageRef) && pod.State == "ready" && !pod.Draining {
+				if pod.ID == binding.RuntimePodID && runtimePodMatchesImage(pod, rollout.TargetImageRef) && pod.State == "ready" && !pod.Draining {
 					targetPod = true
 					break
 				}
@@ -680,11 +683,12 @@ func validateOpenClawUpgradeAggregateCapacity(items []models.RuntimeUpgradeItem)
 			return 0, 0, fmt.Errorf("instance %d has no valid compatibility capacity evidence", item.InstanceID)
 		}
 		compatibility := evidence.Compatibility
-		if compatibility.Status != "compatible" || compatibility.SessionBytes < 0 || compatibility.ConfigBytes < 0 || compatibility.AvailableBytes == 0 {
+		if compatibility.Status != "compatible" || !compatibility.ConfigValidated || !compatibility.DoctorValidated || !compatibility.SessionDryRunValid || compatibility.SessionBytes < 0 || compatibility.StateBytes < 0 || compatibility.ConfigBytes < 0 || compatibility.AvailableBytes == 0 {
 			return 0, 0, fmt.Errorf("instance %d has incomplete compatibility capacity evidence", item.InstanceID)
 		}
 		sessionBytes := uint64(compatibility.SessionBytes)
 		configBytes := uint64(compatibility.ConfigBytes)
+		stateBytes := uint64(compatibility.StateBytes)
 		if sessionBytes > (maxUint64-required)/3 {
 			return 0, 0, errors.New("aggregate session migration capacity overflow")
 		}
@@ -693,6 +697,11 @@ func validateOpenClawUpgradeAggregateCapacity(items []models.RuntimeUpgradeItem)
 			return 0, 0, errors.New("aggregate config migration capacity overflow")
 		}
 		required += configBytes * 2
+		if stateBytes > (maxUint64-required)/2 {
+			return 0, 0, errors.New("aggregate state capsule capacity overflow")
+		}
+		// One original control-state capsule plus the migrated target database.
+		required += stateBytes * 2
 		if compatibility.AvailableBytes < available {
 			available = compatibility.AvailableBytes
 		}
@@ -721,7 +730,7 @@ func (s *RuntimeUpgradeService) drainSourceRuntimePods(ctx context.Context, roll
 	for _, pod := range pods {
 		key := pod.Namespace + "/" + pod.DeploymentName
 		sourceImage, ok := sourceImages[key]
-		if !ok || strings.TrimSpace(pod.ImageRef) != strings.TrimSpace(sourceImage) || pod.Draining {
+		if !ok || !runtimePodMatchesImage(pod, sourceImage) || pod.Draining {
 			continue
 		}
 		endpoint := stringValue(pod.AgentEndpoint)
@@ -996,7 +1005,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			errs = append(errs, fmt.Errorf("restore instance %d release writer lease: %w", item.InstanceID, releaseErr))
 			continue
 		}
-		if restored == nil || restored.Status != "restored" || !restored.ConfigRestored {
+		if restored == nil || restored.Status != "restored" || !restored.ConfigRestored || !restored.StateRestored {
 			errs = append(errs, fmt.Errorf("restore instance %d returned no verified evidence", item.InstanceID))
 			continue
 		}
@@ -1065,6 +1074,14 @@ func (s *RuntimeUpgradeService) CompleteRollback(ctx context.Context, rollout *m
 	}
 	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'restored', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID)
 	return err
+}
+
+func (s *RuntimeUpgradeService) FailRollback(ctx context.Context, rolloutID int64, rollbackErr error) {
+	if s == nil || s.sess == nil || rollbackErr == nil {
+		return
+	}
+	message := rollbackErr.Error()
+	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'error', rollback_error = ?, updated_at = ? WHERE id = ?`, message, time.Now().UTC(), rolloutID)
 }
 
 func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int64) error {
@@ -1895,6 +1912,25 @@ func imageDigestFromReference(value string) string {
 		return ""
 	}
 	return digest
+}
+
+// Runtime agents report both the Deployment image reference and the image ID
+// resolved by the container runtime. A source Deployment commonly keeps its
+// human-readable tag while the rollout journal stores the immutable digest;
+// comparing the two raw strings leaves a successful rollback stuck forever.
+func runtimePodMatchesImage(pod models.RuntimePod, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false
+	}
+	if expectedDigest := imageDigestFromReference(expected); expectedDigest != "" {
+		actualDigest := strings.TrimSpace(stringValue(pod.ImageDigest))
+		if actualDigest == "" {
+			actualDigest = imageDigestFromReference(pod.ImageRef)
+		}
+		return strings.EqualFold(actualDigest, expectedDigest)
+	}
+	return strings.TrimSpace(pod.ImageRef) == expected
 }
 
 func resolveRuntimeImageReference(ctx context.Context, target string, sourceImages map[string]string) (string, error) {
