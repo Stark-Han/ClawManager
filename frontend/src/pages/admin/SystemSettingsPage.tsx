@@ -274,7 +274,7 @@ const SystemSettingsPage: React.FC = () => {
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
 	const [rolloutBatchSize, setRolloutBatchSize] = useState(2);
-  const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(0);
+  const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(1);
   const [rolloutSaving, setRolloutSaving] = useState(false);
   const [rolloutError, setRolloutError] = useState<string | null>(null);
   const [rolloutPreflight, setRolloutPreflight] = useState<RuntimeUpgradePreflightResult | null>(null);
@@ -530,7 +530,7 @@ const SystemSettingsPage: React.FC = () => {
     setRolloutError(null);
     setRolloutPreflight(null);
 		setRolloutDetails(null);
-    setRolloutMaxUnavailable(runtimeType === 'openclaw' ? 0 : 1);
+    setRolloutMaxUnavailable(1);
   };
 
   const startRollout = async () => {
@@ -541,30 +541,38 @@ const SystemSettingsPage: React.FC = () => {
     try {
       setRolloutSaving(true);
       setRolloutError(null);
-		if (rolloutRuntimeType === 'openclaw' && rolloutPreflight && !rolloutPreflight.passed) {
-			setRolloutError(rolloutPreflight.blockers.join('；'));
+		let targetImage = rolloutImage.trim();
+		let preflight = rolloutPreflight;
+		if (rolloutRuntimeType === 'openclaw' && preflight && !preflight.passed) {
+			setRolloutError(preflight.blockers.join('；'));
 			return;
 		}
-      if (rolloutRuntimeType === 'openclaw' && !rolloutPreflight) {
-        const preflight = await runtimePoolService.preflightOpenClawRollout({
-          target_image_ref: rolloutImage.trim(),
-          batch_size: Math.max(1, rolloutBatchSize),
-          max_unavailable: 0,
-          auto_rollback: true,
-        });
-        setRolloutPreflight(preflight);
-        setRolloutImage(preflight.rollout.target_image_ref);
-        if (!preflight.passed) {
-          setRolloutError(preflight.blockers.join('；'));
-        }
-        return;
-      }
+      if (rolloutRuntimeType === 'openclaw' && !preflight) {
+			preflight = await runtimePoolService.preflightOpenClawRollout({
+			  target_image_ref: targetImage,
+			  batch_size: Math.max(1, rolloutBatchSize),
+			  max_unavailable: 0,
+			  auto_rollback: true,
+			});
+			targetImage = preflight.target_image_ref || targetImage;
+			setRolloutImage(targetImage);
+			if (!preflight.passed) {
+			  setRolloutPreflight(preflight);
+			  setRolloutError(preflight.blockers.join('；'));
+			  return;
+			}
+			if (preflight.strategy === 'openclaw_8plus_data_safe') {
+			  setRolloutPreflight(preflight);
+			  setRolloutMaxUnavailable(0);
+			  return;
+			}
+		}
 		const rollout = await runtimePoolService.startRollout({
         runtime_type: rolloutRuntimeType,
-        target_image_ref: rolloutImage.trim(),
+		target_image_ref: targetImage,
         batch_size: Math.max(1, rolloutBatchSize),
-        max_unavailable: rolloutRuntimeType === 'openclaw' ? 0 : Math.max(1, rolloutMaxUnavailable),
-        preflight_id: rolloutPreflight?.rollout.preflight_id,
+		max_unavailable: preflight?.strategy === 'openclaw_8plus_data_safe' ? 0 : Math.max(1, rolloutMaxUnavailable),
+		preflight_id: preflight?.strategy === 'openclaw_8plus_data_safe' ? preflight.rollout?.preflight_id : undefined,
         auto_rollback: true,
       });
 		setRolloutDetails({ rollout, items: [], audits: [] });
@@ -722,7 +730,6 @@ const SystemSettingsPage: React.FC = () => {
               <input
                 type="number"
                 min={1}
-				max={8}
                 value={rolloutBatchSize}
                 onChange={(event) => { setRolloutBatchSize(Number(event.target.value) || 1); setRolloutPreflight(null); }}
                 className="app-input mt-1 block w-full"
@@ -732,10 +739,10 @@ const SystemSettingsPage: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.rolloutUnavailable')}</label>
               <input
                 type="number"
-                min={rolloutRuntimeType === 'openclaw' ? 0 : 1}
+				min={rolloutPreflight?.strategy === 'openclaw_8plus_data_safe' ? 0 : 1}
                 value={rolloutMaxUnavailable}
                 onChange={(event) => { setRolloutMaxUnavailable(Number(event.target.value) || 0); setRolloutPreflight(null); }}
-                disabled={rolloutRuntimeType === 'openclaw'}
+				disabled={rolloutPreflight?.strategy === 'openclaw_8plus_data_safe'}
                 className="app-input mt-1 block w-full"
               />
             </div>
@@ -750,7 +757,7 @@ const SystemSettingsPage: React.FC = () => {
 				? `升级执行中（#${activeRolloutId}）`
 				: rolloutSaving
                 ? t('systemSettingsPage.rolloutStarting')
-                : rolloutRuntimeType === 'openclaw' && rolloutPreflight?.passed
+				: rolloutRuntimeType === 'openclaw' && rolloutPreflight?.strategy === 'openclaw_8plus_data_safe' && rolloutPreflight.passed
                   ? '确认执行（自动回退）'
                   : rolloutRuntimeType === 'openclaw'
                     ? '执行升级预检'
@@ -789,7 +796,7 @@ const SystemSettingsPage: React.FC = () => {
               </div>
               {rolloutPreflight.warnings.length > 0 && <div className="mt-2">提示：{rolloutPreflight.warnings.join('；')}</div>}
               {rolloutPreflight.blockers.length > 0 && <div className="mt-2">阻断：{rolloutPreflight.blockers.join('；')}</div>}
-              <div className="mt-2 font-mono text-xs break-all">审计指纹：{rolloutPreflight.rollout.plan_fingerprint}</div>
+			  {rolloutPreflight.rollout?.plan_fingerprint && <div className="mt-2 font-mono text-xs break-all">审计指纹：{rolloutPreflight.rollout.plan_fingerprint}</div>}
             </div>
           )}
         </section>

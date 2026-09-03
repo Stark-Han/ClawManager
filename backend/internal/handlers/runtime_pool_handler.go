@@ -212,20 +212,34 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 			utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")
 			return
 		}
-		rollout, err := h.upgrade.ConfirmPreflight(c.Request.Context(), req.PreflightID, targetImage, startedBy)
+		if strings.TrimSpace(req.PreflightID) != "" {
+			rollout, err := h.upgrade.ConfirmPreflight(c.Request.Context(), req.PreflightID, targetImage, startedBy)
+			if err != nil {
+				utils.Error(c, http.StatusConflict, err.Error())
+				return
+			}
+			if h.scheduler != nil {
+				if err := h.scheduler.StartRollout(c.Request.Context(), rollout.ID); err != nil {
+					utils.HandleError(c, err)
+					return
+				}
+			}
+			h.publish(c.Request.Context(), "runtime_rollout", map[string]any{"rollout_id": rollout.ID, "runtime_type": rollout.RuntimeType, "target_image_ref": rollout.TargetImageRef, "status": rollout.Status, "phase": rollout.Phase})
+			utils.Success(c, http.StatusCreated, "Runtime rollout created successfully", gin.H{"rollout": rollout})
+			return
+		}
+		classification, err := h.upgrade.ClassifyOpenClawTarget(c.Request.Context(), targetImage)
 		if err != nil {
 			utils.Error(c, http.StatusConflict, err.Error())
 			return
 		}
-		if h.scheduler != nil {
-			if err := h.scheduler.StartRollout(c.Request.Context(), rollout.ID); err != nil {
-				utils.HandleError(c, err)
-				return
-			}
+		if classification.Strategy == services.RuntimeUpgradeStrategyOpenClawDataSafe {
+			utils.Error(c, http.StatusConflict, "OpenClaw 2026.8.1 or newer requires a successful data-safe preflight")
+			return
 		}
-		h.publish(c.Request.Context(), "runtime_rollout", map[string]any{"rollout_id": rollout.ID, "runtime_type": rollout.RuntimeType, "target_image_ref": rollout.TargetImageRef, "status": rollout.Status, "phase": rollout.Phase})
-		utils.Success(c, http.StatusCreated, "Runtime rollout created successfully", gin.H{"rollout": rollout})
-		return
+		// A recognized pre-8.1 OpenClaw target deliberately rejoins the
+		// unchanged generic Lite rolling-update path below.
+		targetImage = classification.ImageRef
 	}
 	rollout := &models.RuntimeRollout{
 		RuntimeType:    runtimeType,

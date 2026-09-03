@@ -357,13 +357,6 @@ func (s *RuntimeScheduler) reconcileRollouts(ctx context.Context) error {
 	}
 	var errs []error
 	for _, rollout := range rollouts {
-		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil {
-			message := "legacy OpenClaw rollout has no data-safety preflight and was stopped after upgrade"
-			if err := s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, nil, &message); err != nil {
-				errs = append(errs, fmt.Errorf("reject unsafe legacy OpenClaw rollout %d: %w", rollout.ID, err))
-			}
-			continue
-		}
 		switch rollout.Status {
 		case "pending":
 			if err := s.StartRollout(ctx, rollout.ID); err != nil {

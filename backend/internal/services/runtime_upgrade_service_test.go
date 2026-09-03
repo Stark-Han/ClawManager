@@ -108,6 +108,77 @@ func TestResolveRuntimeImageReferencePinsTagInLiveRegistry(t *testing.T) {
 	}
 }
 
+func TestInspectOpenClawRegistryImageSelectsUpgradeStrategyFromImageMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		version  string
+		strategy string
+		protocol string
+		want     string
+		wantErr  bool
+	}{
+		{name: "legacy 7.1 keeps generic rolling update", version: "2026.7.1-2", want: RuntimeUpgradeStrategyLegacyRolling},
+		{name: "8.1 uses data safe update", version: "2026.8.1", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},
+		{name: "later compatible version uses data safe update", version: "2026.9.0", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},
+		{name: "8.1 without contract is rejected", version: "2026.8.1", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifestDigest := "sha256:" + strings.Repeat("c", 64)
+			configDigest := "sha256:" + strings.Repeat("d", 64)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.Path, "/manifests/"):
+					w.Header().Set("Docker-Content-Digest", manifestDigest)
+					_, _ = w.Write([]byte(`{"schemaVersion":2,"config":{"digest":"` + configDigest + `"}}`))
+				case strings.Contains(r.URL.Path, "/blobs/"):
+					labels := map[string]string{
+						"io.clawmanager.runtime.type":     "openclaw",
+						"io.clawmanager.openclaw.version": test.version,
+					}
+					if test.strategy != "" {
+						labels["io.clawmanager.upgrade.strategy"] = test.strategy
+					}
+					if test.protocol != "" {
+						labels["io.clawmanager.upgrade.protocol"] = test.protocol
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"config": map[string]any{"Labels": labels}})
+				default:
+					t.Fatalf("unexpected registry path %q", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "http://")
+			sources := map[string]string{"runtime/openclaw-runtime": host + "/agentsruntime/openclaw-lite:old"}
+			got, err := inspectOpenClawRegistryImage(context.Background(), host+"/agentsruntime/openclaw-lite:release", sources)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("unsupported image was accepted: %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Strategy != test.want || got.RuntimeVersion != test.version || got.ImageRef != host+"/agentsruntime/openclaw-lite@"+manifestDigest {
+				t.Fatalf("classification = %+v", got)
+			}
+		})
+	}
+}
+
+func TestOpenClawNumericVersionComparison(t *testing.T) {
+	for _, version := range []string{"2026.8.1", "v2026.8.1", "2026.8.1-2", "2026.9.0", "2027.1.0"} {
+		if !openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
+			t.Fatalf("version %q was not classified as 8.1+", version)
+		}
+	}
+	for _, version := range []string{"2026.7.1-2", "2025.12.9", "latest", ""} {
+		if openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
+			t.Fatalf("version %q was classified as 8.1+", version)
+		}
+	}
+}
+
 func TestLiteClassificationHonorsExplicitInstanceMode(t *testing.T) {
 	for _, test := range []struct {
 		name    string

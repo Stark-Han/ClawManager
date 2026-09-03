@@ -31,6 +31,12 @@ import (
 
 const targetOpenClawUpgradeVersion = "2026.8.1"
 const maxOpenClawUpgradeBatchSize = 8
+const (
+	RuntimeUpgradeStrategyLegacyRolling    = "legacy_rolling"
+	RuntimeUpgradeStrategyOpenClawDataSafe = "openclaw_8plus_data_safe"
+	openClawDataSafeImageStrategy          = "openclaw-sqlite-v1"
+	openClawDataSafeProtocol               = "openclaw-upgrade-v3"
+)
 
 var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.state.sqlite",
@@ -57,7 +63,11 @@ type RuntimeUpgradePreflightRequest struct {
 }
 
 type RuntimeUpgradePreflightResult struct {
-	Rollout                 *models.RuntimeRollout `json:"rollout"`
+	Rollout                 *models.RuntimeRollout `json:"rollout,omitempty"`
+	Strategy                string                 `json:"strategy"`
+	TargetImageRef          string                 `json:"target_image_ref"`
+	TargetRuntimeVersion    string                 `json:"target_runtime_version,omitempty"`
+	TargetUpgradeProtocol   string                 `json:"target_upgrade_protocol,omitempty"`
 	Passed                  bool                   `json:"passed"`
 	Blockers                []string               `json:"blockers"`
 	Warnings                []string               `json:"warnings"`
@@ -66,6 +76,14 @@ type RuntimeUpgradePreflightResult struct {
 	OpenClawTeamMemberCount int                    `json:"openclaw_team_member_count"`
 	HermesTeamMemberCount   int                    `json:"hermes_team_member_count"`
 	RequiredCapabilities    []string               `json:"required_capabilities"`
+}
+
+type OpenClawTargetClassification struct {
+	Strategy       string
+	ImageRef       string
+	ImageDigest    string
+	RuntimeVersion string
+	Protocol       string
 }
 
 type RuntimeUpgradeDetails struct {
@@ -149,16 +167,35 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 		return nil, fmt.Errorf("runtime upgrade service is not configured")
 	}
 	target := strings.TrimSpace(req.TargetImageRef)
-	result := &RuntimeUpgradePreflightResult{RequiredCapabilities: append([]string(nil), openClawUpgradeRequiredCapabilities...)}
+	result := &RuntimeUpgradePreflightResult{}
 	if target == "" {
 		result.Blockers = append(result.Blockers, "target_image_ref is required")
+	}
+	if target != "" {
+		classification, classifyErr := s.ClassifyOpenClawTarget(ctx, target)
+		if classifyErr != nil {
+			result.Blockers = append(result.Blockers, classifyErr.Error())
+		} else {
+			result.Strategy = classification.Strategy
+			result.TargetImageRef = classification.ImageRef
+			result.TargetRuntimeVersion = classification.RuntimeVersion
+			result.TargetUpgradeProtocol = classification.Protocol
+			target = classification.ImageRef
+		}
+	}
+	if len(result.Blockers) > 0 {
+		result.Blockers = uniqueSortedStrings(result.Blockers)
+		return result, nil
+	}
+	if result.Strategy == RuntimeUpgradeStrategyLegacyRolling {
+		result.Passed = true
+		result.Warnings = []string{"The target is an OpenClaw version before 2026.8.1 and will use the unchanged legacy Lite rolling update path"}
+		return result, nil
 	}
 	if req.BatchSize > maxOpenClawUpgradeBatchSize {
 		result.Blockers = append(result.Blockers, fmt.Sprintf("batch_size must not exceed %d", maxOpenClawUpgradeBatchSize))
 	}
-	if !strings.Contains(strings.ToLower(target), "openclaw") {
-		result.Blockers = append(result.Blockers, "target image must be an OpenClaw runtime image")
-	}
+	result.RequiredCapabilities = append([]string(nil), openClawUpgradeRequiredCapabilities...)
 
 	candidates, sourceImages, warnings, blockers, err := s.inspectCandidates(ctx)
 	if err != nil {
@@ -166,14 +203,6 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	}
 	result.Warnings = append(result.Warnings, warnings...)
 	result.Blockers = append(result.Blockers, blockers...)
-	if target != "" {
-		resolved, resolveErr := resolveRuntimeImageReference(ctx, target, sourceImages)
-		if resolveErr != nil {
-			result.Blockers = append(result.Blockers, "target image could not be pinned to an immutable digest: "+resolveErr.Error())
-		} else {
-			target = resolved
-		}
-	}
 	digest := imageDigestFromReference(target)
 	if digest == "" {
 		result.Blockers = append(result.Blockers, "target image must resolve to an immutable sha256 digest")
@@ -209,6 +238,9 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	}
 	planFingerprint := runtimeUpgradeFingerprint(target, candidates, sourceImages)
 	preflightSummary, _ := json.Marshal(map[string]any{
+		"strategy":                   result.Strategy,
+		"target_runtime_version":     result.TargetRuntimeVersion,
+		"target_upgrade_protocol":    result.TargetUpgradeProtocol,
 		"passed":                     len(result.Blockers) == 0,
 		"blockers":                   result.Blockers,
 		"warnings":                   result.Warnings,
@@ -243,10 +275,11 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	if err := s.rollouts.Create(ctx, rollout); err != nil {
 		return nil, err
 	}
-	if err := s.insertUpgradeItems(ctx, rollout.ID, candidates); err != nil {
+	if err := s.insertUpgradeItems(ctx, rollout.ID, candidates, result.TargetRuntimeVersion); err != nil {
 		return nil, err
 	}
 	result.Rollout = rollout
+	result.TargetImageRef = target
 	result.Passed = len(result.Blockers) == 0
 	if err := s.audit(ctx, &rollout.ID, req.ActorUserID, "preflight", "preflight", map[bool]string{true: "passed", false: "blocked"}[result.Passed], map[string]any{
 		"plan_fingerprint":    planFingerprint,
@@ -391,6 +424,10 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	if rollout == nil {
 		return false, fmt.Errorf("rollout is required")
 	}
+	expectedVersion, expectedProtocol := rolloutTargetMetadata(rollout)
+	if !openClawVersionAtLeast(expectedVersion, targetOpenClawUpgradeVersion) || expectedProtocol != openClawDataSafeProtocol {
+		return false, fmt.Errorf("rollout target metadata is missing or unsupported")
+	}
 	var targetPods []models.RuntimePod
 	targetCapacity := 0
 	for _, pod := range pods {
@@ -399,14 +436,14 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		}
 		targetPods = append(targetPods, pod)
 		targetCapacity += maxInt(pod.Capacity, 0)
-		if value := stringValue(pod.OpenClawVersion); value != targetOpenClawUpgradeVersion {
-			return false, fmt.Errorf("target pod %s reports OpenClaw %q, want %s", pod.PodName, value, targetOpenClawUpgradeVersion)
+		if value := stringValue(pod.OpenClawVersion); value != expectedVersion {
+			return false, fmt.Errorf("target pod %s reports OpenClaw %q, want %s", pod.PodName, value, expectedVersion)
 		}
 		if value := stringValue(pod.SessionStore); value != "sqlite" {
 			return false, fmt.Errorf("target pod %s reports session store %q, want sqlite", pod.PodName, value)
 		}
-		if value := stringValue(pod.AgentProtocolVersion); value != "openclaw-upgrade-v3" {
-			return false, fmt.Errorf("target pod %s reports agent protocol %q, want openclaw-upgrade-v3", pod.PodName, value)
+		if value := stringValue(pod.AgentProtocolVersion); value != expectedProtocol {
+			return false, fmt.Errorf("target pod %s reports agent protocol %q, want %s", pod.PodName, value, expectedProtocol)
 		}
 		if rollout.TargetImageDigest != nil && stringValue(pod.ImageDigest) != strings.TrimSpace(*rollout.TargetImageDigest) {
 			return false, fmt.Errorf("target pod %s reports image digest %q, want %s", pod.PodName, stringValue(pod.ImageDigest), strings.TrimSpace(*rollout.TargetImageDigest))
@@ -1859,12 +1896,12 @@ func (s *RuntimeUpgradeService) setTeamMaintenance(ctx context.Context, teamIDs 
 	return nil
 }
 
-func (s *RuntimeUpgradeService) insertUpgradeItems(ctx context.Context, rolloutID int64, candidates []runtimeUpgradeCandidate) error {
+func (s *RuntimeUpgradeService) insertUpgradeItems(ctx context.Context, rolloutID int64, candidates []runtimeUpgradeCandidate, targetVersion string) error {
 	now := time.Now().UTC()
 	for _, candidate := range candidates {
 		leader := isTeamLeaderRole(candidate.Role)
 		order := candidate.InstanceID
-		item := &models.RuntimeUpgradeItem{RolloutID: rolloutID, TeamID: candidate.TeamID, TeamMemberID: candidate.TeamMemberID, InstanceID: candidate.InstanceID, RuntimePodID: candidate.RuntimePodID, MemberOrder: order, IsTeamLeader: leader, SourceRuntimeVersion: stringPtrOrNil(candidate.SourceVersion), TargetRuntimeVersion: stringPtrOrNil(targetOpenClawUpgradeVersion), State: "pending", CreatedAt: now, UpdatedAt: now}
+		item := &models.RuntimeUpgradeItem{RolloutID: rolloutID, TeamID: candidate.TeamID, TeamMemberID: candidate.TeamMemberID, InstanceID: candidate.InstanceID, RuntimePodID: candidate.RuntimePodID, MemberOrder: order, IsTeamLeader: leader, SourceRuntimeVersion: stringPtrOrNil(candidate.SourceVersion), TargetRuntimeVersion: stringPtrOrNil(targetVersion), State: "pending", CreatedAt: now, UpdatedAt: now}
 		if _, err := s.sess.Collection("runtime_upgrade_items").Insert(item); err != nil {
 			return err
 		}
@@ -1969,6 +2006,261 @@ func runtimePodMatchesImage(pod models.RuntimePod, expected string) bool {
 		return strings.EqualFold(actualDigest, expectedDigest)
 	}
 	return strings.TrimSpace(pod.ImageRef) == expected
+}
+
+type registryDescriptor struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Platform  *struct {
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+	} `json:"platform,omitempty"`
+}
+
+type registryManifestDocument struct {
+	MediaType string               `json:"mediaType"`
+	Config    registryDescriptor   `json:"config"`
+	Manifests []registryDescriptor `json:"manifests"`
+}
+
+type registryImageConfig struct {
+	Config struct {
+		Env    []string          `json:"Env"`
+		Labels map[string]string `json:"Labels"`
+	} `json:"config"`
+}
+
+func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, target string) (*OpenClawTargetClassification, error) {
+	if s == nil || s.deployments == nil {
+		return nil, fmt.Errorf("live runtime deployment inventory is not configured")
+	}
+	livePods, err := s.deployments.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return nil, fmt.Errorf("inspect live OpenClaw deployments: %w", err)
+	}
+	sourceImages := make(map[string]string)
+	for _, pod := range livePods {
+		if strings.TrimSpace(pod.ImageRef) != "" {
+			sourceImages[pod.Namespace+"/"+pod.DeploymentName] = pod.ImageRef
+		}
+	}
+	if len(sourceImages) == 0 {
+		return nil, fmt.Errorf("no current OpenClaw deployment image is available to authorize the target registry")
+	}
+	classification, err := inspectOpenClawRegistryImage(ctx, target, sourceImages)
+	if err != nil {
+		return nil, err
+	}
+	if classification.Strategy == RuntimeUpgradeStrategyLegacyRolling {
+		for _, pod := range livePods {
+			if openClawVersionAtLeast(stringValue(pod.OpenClawVersion), targetOpenClawUpgradeVersion) {
+				return nil, fmt.Errorf("downgrading an active OpenClaw 2026.8.1+ Runtime through the legacy rolling path is unsupported")
+			}
+		}
+	}
+	return classification, nil
+}
+
+func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImages map[string]string) (*OpenClawTargetClassification, error) {
+	host, repository, tag, err := splitRegistryImage(target)
+	if err != nil {
+		return nil, err
+	}
+	allowed := false
+	for _, source := range sourceImages {
+		sourceHost, _, _, sourceErr := splitRegistryImage(source)
+		if sourceErr == nil && strings.EqualFold(sourceHost, host) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, fmt.Errorf("registry host %q differs from the live OpenClaw registry", host)
+	}
+	reference := tag
+	if digest := imageDigestFromReference(target); digest != "" {
+		reference = digest
+	}
+	if reference == "" {
+		return nil, fmt.Errorf("image tag or digest is required")
+	}
+	client, baseURL, err := safeRegistryClient(host, repository)
+	if err != nil {
+		return nil, err
+	}
+	manifest, manifestDigest, err := fetchRegistryManifest(ctx, client, baseURL, reference)
+	if err != nil {
+		return nil, err
+	}
+	rootDigest := manifestDigest
+	if existing := imageDigestFromReference(target); existing != "" {
+		rootDigest = existing
+	}
+	if len(manifest.Manifests) > 0 {
+		selected := manifest.Manifests[0]
+		for _, candidate := range manifest.Manifests {
+			if candidate.Platform != nil && candidate.Platform.OS == "linux" && candidate.Platform.Architecture == "amd64" {
+				selected = candidate
+				break
+			}
+		}
+		if imageDigestFromReference("image@"+selected.Digest) == "" {
+			return nil, fmt.Errorf("registry image index contains an invalid platform digest")
+		}
+		manifest, _, err = fetchRegistryManifest(ctx, client, baseURL, selected.Digest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if imageDigestFromReference("image@"+rootDigest) == "" || imageDigestFromReference("image@"+manifest.Config.Digest) == "" {
+		return nil, fmt.Errorf("registry image manifest is missing a valid digest or config")
+	}
+	configURL := baseURL + "/blobs/" + url.PathEscape(manifest.Config.Digest)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("registry config returned status %d", response.StatusCode)
+	}
+	var config registryImageConfig
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 2<<20))
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("decode registry image config: %w", err)
+	}
+	env := make(map[string]string)
+	for _, item := range config.Config.Env {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	runtimeType := strings.TrimSpace(config.Config.Labels["io.clawmanager.runtime.type"])
+	if runtimeType == "" {
+		runtimeType = strings.TrimSpace(env["CLAWMANAGER_RUNTIME_TYPE"])
+	}
+	if !strings.EqualFold(runtimeType, RuntimeTypeOpenClaw) {
+		return nil, fmt.Errorf("target image metadata identifies runtime type %q, want openclaw", runtimeType)
+	}
+	version := strings.TrimSpace(config.Config.Labels["io.clawmanager.openclaw.version"])
+	if version == "" {
+		version = strings.TrimSpace(env["CLAWMANAGER_OPENCLAW_VERSION"])
+	}
+	if _, ok := parseOpenClawNumericVersion(version); !ok {
+		return nil, fmt.Errorf("target OpenClaw image does not publish a valid runtime version")
+	}
+	strategy := RuntimeUpgradeStrategyLegacyRolling
+	protocol := ""
+	if openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
+		imageStrategy := strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.strategy"])
+		protocol = strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.protocol"])
+		if imageStrategy != openClawDataSafeImageStrategy || protocol != openClawDataSafeProtocol {
+			return nil, fmt.Errorf("OpenClaw %s image lacks the supported data-safe upgrade contract", version)
+		}
+		strategy = RuntimeUpgradeStrategyOpenClawDataSafe
+	}
+	return &OpenClawTargetClassification{
+		Strategy: strategy, ImageRef: host + "/" + repository + "@" + rootDigest,
+		ImageDigest: rootDigest, RuntimeVersion: version, Protocol: protocol,
+	}, nil
+}
+
+func safeRegistryClient(host, repository string) (*http.Client, string, error) {
+	scheme := "https"
+	hostname := host
+	if parsedHost, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+		hostname = parsedHost
+	}
+	ip := net.ParseIP(strings.Trim(hostname, "[]"))
+	if strings.EqualFold(hostname, "localhost") || (ip != nil && (ip.IsPrivate() || ip.IsLoopback())) {
+		scheme = "http"
+	}
+	parts := strings.Split(repository, "/")
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return client, scheme + "://" + host + "/v2/" + strings.Join(parts, "/"), nil
+}
+
+func fetchRegistryManifest(ctx context.Context, client *http.Client, baseURL, reference string) (registryManifestDocument, string, error) {
+	var manifest registryManifestDocument
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/manifests/"+url.PathEscape(reference), nil)
+	if err != nil {
+		return manifest, "", err
+	}
+	request.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json")
+	response, err := client.Do(request)
+	if err != nil {
+		return manifest, "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return manifest, "", fmt.Errorf("registry returned status %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return manifest, "", err
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return manifest, "", fmt.Errorf("decode registry manifest: %w", err)
+	}
+	digest := strings.TrimSpace(response.Header.Get("Docker-Content-Digest"))
+	if imageDigestFromReference("image@"+digest) == "" {
+		sum := sha256.Sum256(body)
+		digest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	return manifest, digest, nil
+}
+
+func parseOpenClawNumericVersion(raw string) ([3]int, bool) {
+	var result [3]int
+	raw = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(raw), "v"))
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == '.' || r == '-' || r == '+' })
+	if len(parts) < 3 {
+		return result, false
+	}
+	for index := 0; index < 3; index++ {
+		value, err := strconv.Atoi(parts[index])
+		if err != nil || value < 0 {
+			return result, false
+		}
+		result[index] = value
+	}
+	return result, true
+}
+
+func openClawVersionAtLeast(current, required string) bool {
+	left, leftOK := parseOpenClawNumericVersion(current)
+	right, rightOK := parseOpenClawNumericVersion(required)
+	if !leftOK || !rightOK {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return left[index] > right[index]
+		}
+	}
+	return true
+}
+
+func rolloutTargetMetadata(rollout *models.RuntimeRollout) (string, string) {
+	if rollout == nil || rollout.PreflightJSON == nil {
+		return "", ""
+	}
+	var values struct {
+		TargetRuntimeVersion  string `json:"target_runtime_version"`
+		TargetUpgradeProtocol string `json:"target_upgrade_protocol"`
+	}
+	if json.Unmarshal([]byte(*rollout.PreflightJSON), &values) != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(values.TargetRuntimeVersion), strings.TrimSpace(values.TargetUpgradeProtocol)
 }
 
 func resolveRuntimeImageReference(ctx context.Context, target string, sourceImages map[string]string) (string, error) {

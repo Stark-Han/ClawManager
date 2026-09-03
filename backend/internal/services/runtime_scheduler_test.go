@@ -2248,6 +2248,33 @@ func TestRuntimeSchedulerRolloutUpdatesDeployments(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchedulerLegacyRolloutIsolationAcrossLiteRuntimes(t *testing.T) {
+	for _, runtimeType := range []string{RuntimeTypeOpenClaw, RuntimeTypeHermes, RuntimeTypeOpenCode, RuntimeTypeDeepSeekHarness} {
+		t.Run(runtimeType, func(t *testing.T) {
+			ctx := context.Background()
+			deploymentName := defaultRuntimeDeploymentName(runtimeType)
+			rolloutRepo := &fakeRuntimeRolloutRepo{rollouts: map[int64]*models.RuntimeRollout{
+				91: {ID: 91, RuntimeType: runtimeType, TargetImageRef: "registry/" + runtimeType + ":v2", Status: "pending", BatchSize: 3, MaxUnavailable: 2},
+			}}
+			podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+				1: {ID: 1, RuntimeType: runtimeType, State: "ready", Namespace: "runtime-system", DeploymentName: deploymentName},
+			}}
+			deployments := &fakeRuntimeDeploymentService{}
+			scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), rolloutRepo, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
+			if err := scheduler.StartRollout(ctx, 91); err != nil {
+				t.Fatal(err)
+			}
+			if len(deployments.rolloutImageCalls) != 1 || len(deployments.upgradePoolCalls) != 0 {
+				t.Fatalf("legacy path calls: rollout=%d upgradePool=%d", len(deployments.rolloutImageCalls), len(deployments.upgradePoolCalls))
+			}
+			call := deployments.rolloutImageCalls[0]
+			if call.name != deploymentName || call.maxUnavailable != 2 || call.maxSurge != 3 || call.upgradeID != "" {
+				t.Fatalf("legacy rollout semantics changed: %+v", call)
+			}
+		})
+	}
+}
+
 func TestRuntimeSchedulerRolloutUsesStalePodDeploymentRefWhenNoCurrentPods(t *testing.T) {
 	ctx := context.Background()
 	staleSeen := time.Now().UTC().Add(-5 * time.Minute)

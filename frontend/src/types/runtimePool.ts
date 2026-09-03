@@ -73,7 +73,11 @@ export interface RuntimeRollout {
 }
 
 export interface RuntimeUpgradePreflightResult {
-  rollout: RuntimeRollout;
+  rollout?: RuntimeRollout;
+  strategy: "legacy_rolling" | "openclaw_8plus_data_safe" | string;
+  target_image_ref: string;
+  target_runtime_version?: string;
+  target_upgrade_protocol?: string;
   passed: boolean;
   blockers: string[];
   warnings: string[];
