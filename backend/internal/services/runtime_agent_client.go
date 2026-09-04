@@ -109,6 +109,8 @@ type RuntimeAgentSessionSQLiteMigration struct {
 	ConfigOriginalSHA256 string    `json:"config_original_sha256,omitempty"`
 	ConfigTargetSHA256   string    `json:"config_target_sha256,omitempty"`
 	StateCapsuleBytes    int64     `json:"state_capsule_bytes,omitempty"`
+	SessionCount         int       `json:"session_count,omitempty"`
+	SessionCatalogSHA256 string    `json:"session_catalog_sha256,omitempty"`
 	CompletedAt          time.Time `json:"completed_at"`
 }
 

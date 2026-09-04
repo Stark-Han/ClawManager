@@ -48,6 +48,7 @@ var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.workspace.writer-lease",
 	"openclaw.session-sqlite-migrate-v1",
 	"openclaw.session-sqlite-restore-v1",
+	"openclaw.session-continuity-v1",
 	"openclaw.runtime-standby-v1",
 	"openclaw.upgrade-capsule-v2",
 	"openclaw.upgrade-preflight-v3",
@@ -919,7 +920,7 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 	if releaseErr != nil {
 		return fmt.Errorf("release migration writer lease for instance %d: %w", item.InstanceID, releaseErr)
 	}
-	if migration == nil || migration.Status != "validated" || strings.TrimSpace(migration.OutputSHA256) == "" {
+	if migration == nil || migration.Status != "validated" || strings.TrimSpace(migration.OutputSHA256) == "" || migration.SessionCount < 0 || strings.TrimSpace(migration.SessionCatalogSHA256) == "" {
 		return fmt.Errorf("instance %d session migration did not return validated evidence", item.InstanceID)
 	}
 	postflight, _ := json.Marshal(map[string]any{"migration": migration, "session_inventory": inventory, "target_agent_endpoint": targetEndpoint})

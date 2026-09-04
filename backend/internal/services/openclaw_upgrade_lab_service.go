@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -59,17 +60,42 @@ type OpenClawUpgradeLabCheck struct {
 }
 
 type OpenClawUpgradeLabView struct {
-	Run         *models.OpenClawUpgradeLabRun `json:"run"`
-	InstanceIDs []int                         `json:"instance_ids"`
-	Instances   []models.Instance             `json:"instances"`
-	Checks      []OpenClawUpgradeLabCheck     `json:"checks"`
-	Rollout     *RuntimeUpgradeDetails        `json:"rollout,omitempty"`
-	BaselineTag string                        `json:"baseline_tag"`
+	Run              *models.OpenClawUpgradeLabRun        `json:"run"`
+	InstanceIDs      []int                                `json:"instance_ids"`
+	Instances        []models.Instance                    `json:"instances"`
+	Checks           []OpenClawUpgradeLabCheck            `json:"checks"`
+	Rollout          *RuntimeUpgradeDetails               `json:"rollout,omitempty"`
+	BaselineTag      string                               `json:"baseline_tag"`
+	BaselineEvidence []OpenClawUpgradeLabBaselineEvidence `json:"baseline_evidence"`
 }
 
 type upgradeLabDataManifest struct {
-	Files  map[string]string `json:"files"`
-	Digest string            `json:"digest"`
+	Files    map[string]string         `json:"files"`
+	Digest   string                    `json:"digest"`
+	Sessions upgradeLabSessionManifest `json:"sessions"`
+}
+
+type upgradeLabSessionManifest struct {
+	SessionCount                int               `json:"session_count"`
+	UserMessageCount            int               `json:"user_message_count"`
+	AssistantMessageCount       int               `json:"assistant_message_count"`
+	InteractiveUserMessageCount int               `json:"interactive_user_message_count"`
+	CatalogSHA256               string            `json:"catalog_sha256"`
+	SourceFiles                 map[string]string `json:"source_files"`
+	SourceFilesSHA256           string            `json:"source_files_sha256"`
+}
+
+type OpenClawUpgradeLabBaselineEvidence struct {
+	InstanceID                  int    `json:"instance_id"`
+	ProjectFileCount            int    `json:"project_file_count"`
+	ManualProjectFileCount      int    `json:"manual_project_file_count"`
+	SessionCount                int    `json:"session_count"`
+	UserMessageCount            int    `json:"user_message_count"`
+	AssistantMessageCount       int    `json:"assistant_message_count"`
+	InteractiveUserMessageCount int    `json:"interactive_user_message_count"`
+	ProjectSHA256               string `json:"project_sha256"`
+	SessionCatalogSHA256        string `json:"session_catalog_sha256"`
+	SessionSourceSHA256         string `json:"session_source_sha256"`
 }
 
 type upgradeLabProvisionPlan struct {
@@ -183,6 +209,20 @@ func (s *OpenClawUpgradeLabService) StartUpgrade(ctx context.Context, id int64, 
 	if run.ActorUserID == nil || *run.ActorUserID != actorUserID || run.Status != "ready" {
 		return nil, fmt.Errorf("upgrade lab run is not ready for this administrator")
 	}
+	var before map[int]upgradeLabDataManifest
+	if run.Phase != "baseline_captured" || run.BeforeJSON == nil || json.Unmarshal([]byte(*run.BeforeJSON), &before) != nil {
+		return nil, fmt.Errorf("capture and validate the 7.1 baseline before starting the upgrade")
+	}
+	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
+	current, err := s.captureDataManifests(ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, instanceID := range ids {
+		if !sameUpgradeLabManifest(before[instanceID], current[instanceID]) {
+			return nil, fmt.Errorf("instance %d baseline changed after capture; capture it again", instanceID)
+		}
+	}
 	claim, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'preflighting', phase = 'data_capture', updated_at = ? WHERE id = ? AND actor_user_id = ? AND status = 'ready'`, time.Now().UTC(), run.ID, actorUserID)
 	if err != nil {
 		return nil, err
@@ -190,16 +230,11 @@ func (s *OpenClawUpgradeLabService) StartUpgrade(ctx context.Context, id int64, 
 	if affected, _ := claim.RowsAffected(); affected != 1 {
 		return nil, fmt.Errorf("upgrade lab run changed concurrently")
 	}
-	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
 	if len(ids) == 0 {
 		return nil, s.failRun(ctx, run.ID, "BASELINE_INSTANCES_MISSING", errors.New("upgrade lab run has no test instances"))
 	}
 	if s.upgrade == nil || s.scheduler == nil {
 		return nil, s.failRun(ctx, run.ID, "UPGRADE_ENGINE_UNAVAILABLE", errors.New("shared OpenClaw upgrade engine is unavailable"))
-	}
-	before, err := s.captureDataManifests(ids)
-	if err != nil {
-		return nil, s.failRun(ctx, run.ID, "BASELINE_DATA_CAPTURE_FAILED", err)
 	}
 	beforeRaw, _ := json.Marshal(before)
 	result, err := s.upgrade.Preflight(ctx, RuntimeUpgradePreflightRequest{TargetImageRef: strings.TrimSpace(targetImage), BatchSize: minInt(maxInt(batchSize, 1), openClawUpgradeLabMaxCases), MaxUnavailable: 0, AutoRollback: true, ActorUserID: &actorUserID, UpgradeLabRunID: &run.ID, CandidateInstanceIDs: ids})
@@ -218,6 +253,38 @@ func (s *OpenClawUpgradeLabService) StartUpgrade(ctx context.Context, id int64, 
 	}
 	if err := s.scheduler.StartRollout(ctx, rollout.ID); err != nil {
 		return nil, s.failRun(ctx, run.ID, "UPGRADE_START_FAILED", err)
+	}
+	return s.Get(ctx, run.ID)
+}
+
+func (s *OpenClawUpgradeLabService) CaptureBaseline(ctx context.Context, id int64, actorUserID int) (*OpenClawUpgradeLabView, error) {
+	run, err := s.getRun(ctx, id)
+	if err != nil || run == nil {
+		return nil, err
+	}
+	if run.ActorUserID == nil || *run.ActorUserID != actorUserID || run.Status != "ready" {
+		return nil, fmt.Errorf("upgrade lab run is not ready for baseline capture")
+	}
+	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("upgrade lab run has no test instances")
+	}
+	before, err := s.captureDataManifests(ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, instanceID := range ids {
+		manifest := before[instanceID]
+		if manifest.Sessions.SessionCount < 1 || manifest.Sessions.InteractiveUserMessageCount < 1 || manifest.Sessions.AssistantMessageCount < 1 {
+			return nil, fmt.Errorf("instance %d needs at least one completed manual user/assistant conversation; heartbeat messages do not count", instanceID)
+		}
+		if manualUpgradeLabProjectFileCount(manifest.Files) < 1 {
+			return nil, fmt.Errorf("instance %d needs at least one project file created or uploaded by the tester", instanceID)
+		}
+	}
+	raw, _ := json.Marshal(before)
+	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET phase = 'baseline_captured', before_json = ?, checks_json = NULL, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND actor_user_id = ? AND status = 'ready'`, string(raw), time.Now().UTC(), run.ID, actorUserID); err != nil {
+		return nil, err
 	}
 	return s.Get(ctx, run.ID)
 }
@@ -619,7 +686,7 @@ func (s *OpenClawUpgradeLabService) waitForLabPod(ctx context.Context, deploymen
 
 func (s *OpenClawUpgradeLabService) view(ctx context.Context, run *models.OpenClawUpgradeLabRun) (*OpenClawUpgradeLabView, error) {
 	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
-	view := &OpenClawUpgradeLabView{Run: run, InstanceIDs: ids, Instances: []models.Instance{}, Checks: decodeLabChecks(run.ChecksJSON), BaselineTag: OpenClawUpgradeLabBaselineTag}
+	view := &OpenClawUpgradeLabView{Run: run, InstanceIDs: ids, Instances: []models.Instance{}, Checks: decodeLabChecks(run.ChecksJSON), BaselineTag: OpenClawUpgradeLabBaselineTag, BaselineEvidence: decodeLabBaselineEvidence(run.BeforeJSON)}
 	for _, id := range ids {
 		instance, err := s.instances.GetByID(id)
 		if err != nil {
@@ -684,7 +751,27 @@ func (s *OpenClawUpgradeLabService) finalChecks(run *models.OpenClawUpgradeLabRu
 		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_workspace", id), Passed: before[id].Digest != "" && before[id].Digest == after[id].Digest, Expected: before[id].Digest, Actual: after[id].Digest, Message: "project files must remain byte-identical"})
 	}
 	for _, item := range details.Items {
-		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_session_migration", item.InstanceID), Passed: item.State == "verified" || item.State == "gateway_verified", Actual: item.State, Message: "official session migration and gateway restart evidence"})
+		baseline := before[item.InstanceID].Sessions
+		instance, getErr := s.instances.GetByID(item.InstanceID)
+		workspace := ""
+		if getErr == nil && instance != nil {
+			workspace = stringValue(instance.WorkspacePath)
+		}
+		archiveOK, archived, archiveErr := verifyUpgradeLabSessionArchive(workspace, baseline.SourceFiles)
+		archiveMessage := "every 7.1 session source file must remain byte-identical in the official import archive"
+		if archiveErr != nil {
+			archiveMessage = archiveErr.Error()
+		}
+		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_session_archive", item.InstanceID), Passed: archiveOK, Expected: strconv.Itoa(len(baseline.SourceFiles)), Actual: strconv.Itoa(archived), Message: archiveMessage})
+		var evidence struct {
+			Migration RuntimeAgentSessionSQLiteMigration `json:"migration"`
+		}
+		if item.PostflightJSON != nil {
+			_ = json.Unmarshal([]byte(*item.PostflightJSON), &evidence)
+		}
+		catalogOK := evidence.Migration.Status == "validated" && evidence.Migration.SessionCount == baseline.SessionCount && evidence.Migration.SessionCatalogSHA256 == baseline.CatalogSHA256
+		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_session_catalog", item.InstanceID), Passed: catalogOK, Expected: fmt.Sprintf("%d:%s", baseline.SessionCount, baseline.CatalogSHA256), Actual: fmt.Sprintf("%d:%s", evidence.Migration.SessionCount, evidence.Migration.SessionCatalogSHA256), Message: "8.1 official Session Catalog must contain the same session keys and ids as 7.1"})
+		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_gateway", item.InstanceID), Passed: item.State == "verified" || item.State == "gateway_verified", Actual: item.State, Message: "migrated gateway must pass the shared upgrade restart verification"})
 	}
 	return checks, nil
 }
@@ -696,13 +783,22 @@ func (s *OpenClawUpgradeLabService) captureDataManifests(ids []int) (map[int]upg
 		if err != nil || instance == nil {
 			return nil, fmt.Errorf("upgrade lab instance %d is unavailable", id)
 		}
-		manifest, err := inspectUpgradeLabProjectData(stringValue(instance.WorkspacePath))
+		manifest, err := inspectUpgradeLabWorkspace(stringValue(instance.WorkspacePath))
 		if err != nil {
 			return nil, err
 		}
 		result[id] = manifest
 	}
 	return result, nil
+}
+
+func inspectUpgradeLabWorkspace(workspace string) (upgradeLabDataManifest, error) {
+	manifest, err := inspectUpgradeLabProjectData(workspace)
+	if err != nil {
+		return manifest, err
+	}
+	manifest.Sessions, err = inspectUpgradeLabLegacySessions(workspace)
+	return manifest, err
 }
 
 func inspectUpgradeLabProjectData(workspace string) (upgradeLabDataManifest, error) {
@@ -755,6 +851,208 @@ func inspectUpgradeLabProjectData(workspace string) (upgradeLabDataManifest, err
 	}
 	manifest.Digest = hex.EncodeToString(hash.Sum(nil))
 	return manifest, nil
+}
+
+func inspectUpgradeLabLegacySessions(workspace string) (upgradeLabSessionManifest, error) {
+	manifest := upgradeLabSessionManifest{SourceFiles: map[string]string{}}
+	root := filepath.Join(filepath.Clean(workspace), "home", ".openclaw", "agents")
+	if !pathWithin(workspace, root) {
+		return manifest, errors.New("upgrade lab session path escaped its workspace")
+	}
+	catalog := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		slash := filepath.ToSlash(rel)
+		lower := strings.ToLower(slash)
+		if strings.Contains(lower, "session-sqlite-import-archive/") || strings.Contains(lower, "session-sqlite-migration-runs/") || (!strings.Contains(lower, "/sessions/") && !strings.HasSuffix(lower, "/sessions.json")) {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(raw)
+		manifest.SourceFiles[slash] = hex.EncodeToString(digest[:])
+		if strings.HasSuffix(lower, "sessions.json") {
+			var entries map[string]struct {
+				SessionID string `json:"sessionId"`
+			}
+			if json.Unmarshal(raw, &entries) == nil {
+				for key, entry := range entries {
+					if strings.TrimSpace(key) != "" && strings.TrimSpace(entry.SessionID) != "" {
+						catalog[strings.TrimSpace(key)] = strings.TrimSpace(entry.SessionID)
+					}
+				}
+			}
+		}
+		if strings.HasSuffix(lower, ".jsonl") && !strings.Contains(lower, ".trajectory") {
+			if err := countUpgradeLabMessages(raw, &manifest); err != nil {
+				return fmt.Errorf("read upgrade lab session transcript %s: %w", slash, err)
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return manifest, err
+	}
+	manifest.SessionCount, manifest.CatalogSHA256 = canonicalUpgradeLabCatalog(catalog)
+	manifest.SourceFilesSHA256 = digestUpgradeLabFiles(manifest.SourceFiles)
+	return manifest, nil
+}
+
+func countUpgradeLabMessages(raw []byte, manifest *upgradeLabSessionManifest) error {
+	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var record struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.Type != "message" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(record.Message.Role)) {
+		case "user":
+			manifest.UserMessageCount++
+			if !strings.HasPrefix(strings.TrimSpace(upgradeLabMessageText(record.Message.Content)), "[OpenClaw heartbeat poll]") {
+				manifest.InteractiveUserMessageCount++
+			}
+		case "assistant":
+			manifest.AssistantMessageCount++
+		}
+	}
+	return scanner.Err()
+}
+
+func upgradeLabMessageText(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []any:
+		var parts []string
+		for _, item := range value {
+			if object, ok := item.(map[string]any); ok {
+				if text, ok := object["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func canonicalUpgradeLabCatalog(entries map[string]string) (int, string) {
+	lines := make([]string, 0, len(entries))
+	for key, sessionID := range entries {
+		lines = append(lines, key+"\x00"+sessionID+"\n")
+	}
+	sort.Strings(lines)
+	hash := sha256.New()
+	for _, line := range lines {
+		_, _ = io.WriteString(hash, line)
+	}
+	return len(lines), hex.EncodeToString(hash.Sum(nil))
+}
+
+func digestUpgradeLabFiles(files map[string]string) string {
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	hash := sha256.New()
+	for _, key := range keys {
+		_, _ = io.WriteString(hash, key+"\x00"+files[key]+"\n")
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func verifyUpgradeLabSessionArchive(workspace string, sourceFiles map[string]string) (bool, int, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return false, 0, errors.New("upgrade lab workspace is unavailable")
+	}
+	want := map[string]int{}
+	for _, digest := range sourceFiles {
+		want[digest]++
+	}
+	found := map[string]int{}
+	root := filepath.Join(filepath.Clean(workspace), "home", ".openclaw", "agents")
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() || !info.Mode().IsRegular() || !strings.Contains(strings.ToLower(filepath.ToSlash(path)), "/session-sqlite-import-archive/") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(raw)
+		found[hex.EncodeToString(digest[:])]++
+		return nil
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	matched := 0
+	for digest, count := range want {
+		available := found[digest]
+		if available < count {
+			return false, matched + available, nil
+		}
+		matched += count
+	}
+	return len(sourceFiles) > 0, matched, nil
+}
+
+func sameUpgradeLabManifest(left, right upgradeLabDataManifest) bool {
+	return left.Digest != "" && left.Digest == right.Digest && left.Sessions.SourceFilesSHA256 != "" && left.Sessions.SourceFilesSHA256 == right.Sessions.SourceFilesSHA256 && left.Sessions.CatalogSHA256 == right.Sessions.CatalogSHA256 && left.Sessions.InteractiveUserMessageCount == right.Sessions.InteractiveUserMessageCount && left.Sessions.AssistantMessageCount == right.Sessions.AssistantMessageCount
+}
+
+func manualUpgradeLabProjectFileCount(files map[string]string) int {
+	count := 0
+	for name := range files {
+		if filepath.ToSlash(name) != "upgrade-lab-continuity.txt" {
+			count++
+		}
+	}
+	return count
+}
+
+func decodeLabBaselineEvidence(raw *string) []OpenClawUpgradeLabBaselineEvidence {
+	var manifests map[int]upgradeLabDataManifest
+	if raw == nil || json.Unmarshal([]byte(*raw), &manifests) != nil {
+		return []OpenClawUpgradeLabBaselineEvidence{}
+	}
+	ids := make([]int, 0, len(manifests))
+	for id := range manifests {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	result := make([]OpenClawUpgradeLabBaselineEvidence, 0, len(ids))
+	for _, id := range ids {
+		manifest := manifests[id]
+		result = append(result, OpenClawUpgradeLabBaselineEvidence{InstanceID: id, ProjectFileCount: len(manifest.Files), ManualProjectFileCount: manualUpgradeLabProjectFileCount(manifest.Files), SessionCount: manifest.Sessions.SessionCount, UserMessageCount: manifest.Sessions.UserMessageCount, AssistantMessageCount: manifest.Sessions.AssistantMessageCount, InteractiveUserMessageCount: manifest.Sessions.InteractiveUserMessageCount, ProjectSHA256: manifest.Digest, SessionCatalogSHA256: manifest.Sessions.CatalogSHA256, SessionSourceSHA256: manifest.Sessions.SourceFilesSHA256})
+	}
+	return result
 }
 
 func (s *OpenClawUpgradeLabService) getRun(ctx context.Context, id int64) (*models.OpenClawUpgradeLabRun, error) {

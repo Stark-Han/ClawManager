@@ -96,6 +96,24 @@ func (h *OpenClawUpgradeLabHandler) StartUpgrade(c *gin.Context) {
 	utils.Success(c, http.StatusAccepted, "OpenClaw upgrade lab rollout started", view)
 }
 
+func (h *OpenClawUpgradeLabHandler) CaptureBaseline(c *gin.Context) {
+	id, ok := upgradeLabRunID(c)
+	if !ok {
+		return
+	}
+	actor := currentUserIDPtr(c)
+	if actor == nil {
+		utils.Error(c, http.StatusUnauthorized, "administrator identity is unavailable")
+		return
+	}
+	view, err := h.service.CaptureBaseline(c.Request.Context(), id, *actor)
+	if err != nil {
+		utils.Error(c, http.StatusConflict, err.Error())
+		return
+	}
+	utils.Success(c, http.StatusOK, "OpenClaw 7.1 baseline evidence captured", view)
+}
+
 func (h *OpenClawUpgradeLabHandler) Reset(c *gin.Context) {
 	id, ok := upgradeLabRunID(c)
 	if !ok {

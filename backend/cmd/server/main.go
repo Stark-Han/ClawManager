@@ -618,6 +618,7 @@ func main() {
 				adminRuntime.GET("/openclaw-upgrade-lab", openClawUpgradeLabHandler.Latest)
 				adminRuntime.POST("/openclaw-upgrade-lab", openClawUpgradeLabHandler.CreateBaseline)
 				adminRuntime.GET("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Get)
+				adminRuntime.POST("/openclaw-upgrade-lab/:id/baseline", openClawUpgradeLabHandler.CaptureBaseline)
 				adminRuntime.POST("/openclaw-upgrade-lab/:id/upgrade", openClawUpgradeLabHandler.StartUpgrade)
 				adminRuntime.POST("/openclaw-upgrade-lab/:id/reset", openClawUpgradeLabHandler.Reset)
 				adminRuntime.DELETE("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Cleanup)

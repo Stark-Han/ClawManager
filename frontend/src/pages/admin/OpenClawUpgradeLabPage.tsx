@@ -113,9 +113,22 @@ const OpenClawUpgradeLabPage: React.FC = () => {
     }
   };
 
+  const captureBaseline = async () => {
+    if (!view?.run) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setView(await openClawUpgradeLabService.captureBaseline(view.run.id));
+    } catch (captureError) {
+      setError(errorMessage(captureError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const run = view?.run;
   const canReset = run && terminalStatuses.has(run.status);
-  const canUpgrade = run?.status === 'ready';
+  const canUpgrade = run?.status === 'ready' && run.phase === 'baseline_captured';
 
   return (
     <AdminLayout title="OpenClaw升级实验室">
@@ -200,13 +213,33 @@ const OpenClawUpgradeLabPage: React.FC = () => {
                 </div>
               ))}
             </div>
+            {run.status === 'ready' && (
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                <button type="button" disabled={busy} onClick={() => void captureBaseline()} className="app-button-primary inline-flex items-center gap-2 disabled:opacity-50">
+                  <CheckCircle2 className="h-4 w-4" />检查并锁定升级前数据
+                </button>
+                <span className="text-sm text-slate-600">每个实例必须已有至少一轮人工问答和一个自行创建/上传的项目文件；系统心跳与内置标记文件不计入。</span>
+              </div>
+            )}
+            {(view?.baseline_evidence || []).length > 0 && (
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {view!.baseline_evidence.map((evidence) => (
+                  <div key={evidence.instance_id} className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                    <div className="font-semibold">实例 #{evidence.instance_id} 基线已锁定</div>
+                    <div className="mt-2">会话 {evidence.session_count} 个 · 人工提问 {evidence.interactive_user_message_count} 条 · 助手回复 {evidence.assistant_message_count} 条</div>
+                    <div className="mt-1">项目文件 {evidence.project_file_count} 个（人工文件 {evidence.manual_project_file_count} 个）</div>
+                    <div className="mt-2 break-all font-mono text-xs">Session {evidence.session_catalog_sha256}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 
         {run && run.status !== 'cleaned' && (
           <section className="app-panel p-6">
             <h2 className="text-lg font-semibold text-gray-900">执行8.1专用升级</h2>
-            <p className="mt-1 text-sm text-slate-600">启动时自动记录project目录的逐文件SHA256；Session由正式升级线路的官方迁移和重启证据验证。</p>
+            <p className="mt-1 text-sm text-slate-600">升级仅在7.1人工问答与项目文件基线锁定后开放；完成后同时核对项目文件、原始Session归档和8.1官方Session目录。</p>
             <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(320px,1fr)_160px_auto] lg:items-end">
               <label className="text-sm font-medium text-slate-700">
                 新测试镜像

@@ -26,6 +26,19 @@ export interface OpenClawUpgradeLabCheck {
   message?: string;
 }
 
+export interface OpenClawUpgradeLabBaselineEvidence {
+  instance_id: number;
+  project_file_count: number;
+  manual_project_file_count: number;
+  session_count: number;
+  user_message_count: number;
+  assistant_message_count: number;
+  interactive_user_message_count: number;
+  project_sha256: string;
+  session_catalog_sha256: string;
+  session_source_sha256: string;
+}
+
 export interface OpenClawUpgradeLabView {
   run?: OpenClawUpgradeLabRun;
   instance_ids: number[];
@@ -33,4 +46,5 @@ export interface OpenClawUpgradeLabView {
   checks: OpenClawUpgradeLabCheck[];
   rollout?: RuntimeUpgradeDetails;
   baseline_tag: string;
+  baseline_evidence: OpenClawUpgradeLabBaselineEvidence[];
 }

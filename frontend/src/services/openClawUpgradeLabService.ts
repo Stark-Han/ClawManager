@@ -25,6 +25,11 @@ export const openClawUpgradeLabService = {
     return response.data.data;
   },
 
+  async captureBaseline(id: number): Promise<OpenClawUpgradeLabView> {
+    const response = await api.post(`/admin/openclaw-upgrade-lab/${id}/baseline`);
+    return response.data.data;
+  },
+
   async reset(id: number, instanceCount: number): Promise<OpenClawUpgradeLabView> {
     const response = await api.post(`/admin/openclaw-upgrade-lab/${id}/reset`, { instance_count: instanceCount });
     return response.data.data;
