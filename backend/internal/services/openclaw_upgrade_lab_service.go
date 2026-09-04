@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"clawreef/internal/config"
@@ -30,7 +31,7 @@ const (
 	openClawUpgradeLabDescription      = "openclaw-upgrade-lab:"
 	openClawUpgradeLabMaxCases         = 8
 	openClawUpgradeLabReadyTimeout     = 3 * time.Minute
-	openClawUpgradeLabProvisionTimeout = 5 * time.Minute
+	openClawUpgradeLabProvisionTimeout = 12 * time.Minute
 )
 
 type upgradeLabGatewayEnvBuilder interface {
@@ -38,17 +39,18 @@ type upgradeLabGatewayEnvBuilder interface {
 }
 
 type OpenClawUpgradeLabService struct {
-	sess        db.Session
-	instances   repository.InstanceRepository
-	pods        repository.RuntimePodRepository
-	bindings    repository.InstanceRuntimeBindingRepository
-	agent       RuntimeAgentClient
-	deployments k8s.RuntimeUpgradeLabDeploymentService
-	inventory   RuntimeDeploymentInventoryProvider
-	upgrade     *RuntimeUpgradeService
-	scheduler   *RuntimeScheduler
-	envBuilder  upgradeLabGatewayEnvBuilder
-	cfg         config.RuntimePoolConfig
+	sess         db.Session
+	instances    repository.InstanceRepository
+	pods         repository.RuntimePodRepository
+	bindings     repository.InstanceRuntimeBindingRepository
+	agent        RuntimeAgentClient
+	deployments  k8s.RuntimeUpgradeLabDeploymentService
+	inventory    RuntimeDeploymentInventoryProvider
+	upgrade      *RuntimeUpgradeService
+	scheduler    *RuntimeScheduler
+	envBuilder   upgradeLabGatewayEnvBuilder
+	conversation upgradeLabConversationClient
+	cfg          config.RuntimePoolConfig
 }
 
 type OpenClawUpgradeLabCheck struct {
@@ -103,7 +105,7 @@ type upgradeLabProvisionPlan struct {
 }
 
 func NewOpenClawUpgradeLabService(sess db.Session, instances repository.InstanceRepository, pods repository.RuntimePodRepository, bindings repository.InstanceRuntimeBindingRepository, agent RuntimeAgentClient, deployments k8s.RuntimeUpgradeLabDeploymentService, inventory RuntimeDeploymentInventoryProvider, upgrade *RuntimeUpgradeService, scheduler *RuntimeScheduler, envBuilder upgradeLabGatewayEnvBuilder, cfg config.RuntimePoolConfig) *OpenClawUpgradeLabService {
-	return &OpenClawUpgradeLabService{sess: sess, instances: instances, pods: pods, bindings: bindings, agent: agent, deployments: deployments, inventory: inventory, upgrade: upgrade, scheduler: scheduler, envBuilder: envBuilder, cfg: cfg}
+	return &OpenClawUpgradeLabService{sess: sess, instances: instances, pods: pods, bindings: bindings, agent: agent, deployments: deployments, inventory: inventory, upgrade: upgrade, scheduler: scheduler, envBuilder: envBuilder, conversation: openClawUpgradeLabConversationClient{}, cfg: cfg}
 }
 
 func (s *OpenClawUpgradeLabService) Latest(ctx context.Context) (*OpenClawUpgradeLabView, error) {
@@ -181,12 +183,14 @@ func (s *OpenClawUpgradeLabService) CreateBaseline(ctx context.Context, actorUse
 		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_RUNTIME_NOT_READY", err)
 	}
 	instanceIDs := make([]int, 0, count)
+	instances := make([]*models.Instance, 0, count)
 	for index := 0; index < count; index++ {
 		instance, err := s.createBaselineInstance(provisionCtx, run, pod, index)
 		if err != nil {
 			return nil, s.failRun(provisionCtx, run.ID, "BASELINE_GATEWAY_CREATE_FAILED", err)
 		}
 		instanceIDs = append(instanceIDs, instance.ID)
+		instances = append(instances, instance)
 		// Persist ownership after every successful fixture.  A later failure can
 		// therefore be cleaned without scanning or guessing across user data.
 		idsRaw, _ := json.Marshal(instanceIDs)
@@ -194,8 +198,19 @@ func (s *OpenClawUpgradeLabService) CreateBaseline(ctx context.Context, actorUse
 			return nil, s.failRun(provisionCtx, run.ID, "BASELINE_OWNERSHIP_RECORD_FAILED", err)
 		}
 	}
+	if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET phase = 'fixture_seeding', updated_at = ? WHERE id = ? AND status = 'provisioning'`, time.Now().UTC(), run.ID); err != nil {
+		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_FIXTURE_STATE_FAILED", err)
+	}
+	if err := s.seedBaselineFixtures(provisionCtx, run, pod, instances); err != nil {
+		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_FIXTURE_CREATE_FAILED", err)
+	}
+	before, err := s.captureAndValidateBaseline(run.ID, instanceIDs)
+	if err != nil {
+		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_CAPTURE_FAILED", err)
+	}
+	beforeRaw, _ := json.Marshal(before)
 	idsRaw, _ := json.Marshal(instanceIDs)
-	if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'fixture_ready', instance_ids_json = ?, before_json = NULL, updated_at = ? WHERE id = ?`, string(idsRaw), time.Now().UTC(), run.ID); err != nil {
+	if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'baseline_captured', instance_ids_json = ?, before_json = ?, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ?`, string(idsRaw), string(beforeRaw), time.Now().UTC(), run.ID); err != nil {
 		return nil, err
 	}
 	return s.Get(provisionCtx, run.ID)
@@ -214,15 +229,14 @@ func (s *OpenClawUpgradeLabService) StartUpgrade(ctx context.Context, id int64, 
 		return nil, fmt.Errorf("capture and validate the 7.1 baseline before starting the upgrade")
 	}
 	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
-	current, err := s.captureDataManifests(ids)
+	// Re-capture immediately before claiming the rollout. Automated fixtures
+	// must still be present, while optional tester conversations/files added
+	// after provisioning become part of the protected baseline automatically.
+	current, err := s.captureAndValidateBaseline(run.ID, ids)
 	if err != nil {
 		return nil, err
 	}
-	for _, instanceID := range ids {
-		if !sameUpgradeLabManifest(before[instanceID], current[instanceID]) {
-			return nil, fmt.Errorf("instance %d baseline changed after capture; capture it again", instanceID)
-		}
-	}
+	before = current
 	claim, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'preflighting', phase = 'data_capture', updated_at = ? WHERE id = ? AND actor_user_id = ? AND status = 'ready'`, time.Now().UTC(), run.ID, actorUserID)
 	if err != nil {
 		return nil, err
@@ -269,18 +283,9 @@ func (s *OpenClawUpgradeLabService) CaptureBaseline(ctx context.Context, id int6
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("upgrade lab run has no test instances")
 	}
-	before, err := s.captureDataManifests(ids)
+	before, err := s.captureAndValidateBaseline(run.ID, ids)
 	if err != nil {
 		return nil, err
-	}
-	for _, instanceID := range ids {
-		manifest := before[instanceID]
-		if manifest.Sessions.SessionCount < 1 || manifest.Sessions.InteractiveUserMessageCount < 1 || manifest.Sessions.AssistantMessageCount < 1 {
-			return nil, fmt.Errorf("instance %d needs at least one completed manual user/assistant conversation; heartbeat messages do not count", instanceID)
-		}
-		if manualUpgradeLabProjectFileCount(manifest.Files) < 1 {
-			return nil, fmt.Errorf("instance %d needs at least one project file created or uploaded by the tester", instanceID)
-		}
 	}
 	raw, _ := json.Marshal(before)
 	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET phase = 'baseline_captured', before_json = ?, checks_json = NULL, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND actor_user_id = ? AND status = 'ready'`, string(raw), time.Now().UTC(), run.ID, actorUserID); err != nil {
@@ -304,6 +309,9 @@ func (s *OpenClawUpgradeLabService) Cleanup(ctx context.Context, id int64, actor
 	if run.ActorUserID == nil || *run.ActorUserID != actorUserID {
 		return fmt.Errorf("upgrade lab run belongs to another administrator")
 	}
+	if run.Status == "cleaned" {
+		return nil
+	}
 	if run.Status == "provisioning" || run.Status == "preflighting" {
 		return fmt.Errorf("cannot clean an active upgrade lab setup")
 	}
@@ -314,6 +322,12 @@ func (s *OpenClawUpgradeLabService) Cleanup(ctx context.Context, id int64, actor
 		}
 		if details != nil && details.Rollout != nil && details.Rollout.Status != "finished" && details.Rollout.Status != "error" && details.Rollout.Status != "cancelled" {
 			return fmt.Errorf("cannot clean an active upgrade lab rollout")
+		}
+		if details != nil && details.Rollout != nil {
+			rollbackStatus := strings.ToLower(strings.TrimSpace(stringValue(details.Rollout.RollbackStatus)))
+			if rollbackStatus == "starting" || rollbackStatus == "waiting" {
+				return fmt.Errorf("cannot clean while the upgrade lab rollback is active")
+			}
 		}
 	}
 	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
@@ -420,6 +434,115 @@ func (s *OpenClawUpgradeLabService) createBaselineInstance(ctx context.Context, 
 	}
 	_ = os.Chown(fixturePath, RuntimeLinuxID(instance.ID), RuntimeLinuxID(instance.ID))
 	return instance, nil
+}
+
+func (s *OpenClawUpgradeLabService) seedBaselineFixtures(ctx context.Context, run *models.OpenClawUpgradeLabRun, pod models.RuntimePod, instances []*models.Instance) error {
+	if s.conversation == nil {
+		return errors.New("upgrade lab conversation client is unavailable")
+	}
+	seedCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sem := make(chan struct{}, minInt(4, len(instances)))
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	for index, instance := range instances {
+		index, instance := index, instance
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-seedCtx.Done():
+				return
+			}
+			if err := s.seedBaselineFixture(seedCtx, run, pod, instance, index); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("instance %d: %w", instance.ID, err)
+					cancel()
+				}
+				errMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+func (s *OpenClawUpgradeLabService) seedBaselineFixture(ctx context.Context, run *models.OpenClawUpgradeLabRun, pod models.RuntimePod, instance *models.Instance, index int) error {
+	if instance == nil || pod.AgentEndpoint == nil {
+		return errors.New("baseline gateway is unavailable")
+	}
+	env, err := s.envBuilder.BuildGatewayEnv(instance)
+	if err != nil {
+		return err
+	}
+	token := strings.TrimSpace(env["CLAWMANAGER_INSTANCE_TOKEN"])
+	if token == "" {
+		return errors.New("baseline gateway credential is unavailable")
+	}
+	marker := upgradeLabFixtureMarker(run.ID, index)
+	prompt := fmt.Sprintf("这是一次升级连续性测试。请用一句简短中文确认你已收到测试标识 %s。", marker)
+	sessionKey := fmt.Sprintf("agent:main:upgrade-lab-%d-%d", run.ID, index+1)
+	port := s.cfg.GatewayPortStart + index
+	if err := s.conversation.SendMessage(ctx, strings.TrimSpace(*pod.AgentEndpoint), port, instance.ID, token, sessionKey, prompt); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Minute)
+	workspace := strings.TrimSpace(stringValue(instance.WorkspacePath))
+	for {
+		completed, inspectErr := upgradeLabConversationCompleted(workspace, marker)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if completed {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("baseline assistant reply did not complete within 2 minutes")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (s *OpenClawUpgradeLabService) captureAndValidateBaseline(runID int64, ids []int) (map[int]upgradeLabDataManifest, error) {
+	manifests, err := s.captureDataManifests(ids)
+	if err != nil {
+		return nil, err
+	}
+	for index, instanceID := range ids {
+		manifest := manifests[instanceID]
+		if _, ok := manifest.Files["upgrade-lab-continuity.txt"]; !ok {
+			return nil, fmt.Errorf("instance %d automated project fixture is missing", instanceID)
+		}
+		if manifest.Sessions.SessionCount < 1 || manifest.Sessions.InteractiveUserMessageCount < 1 || manifest.Sessions.AssistantMessageCount < 1 {
+			return nil, fmt.Errorf("instance %d automated conversation fixture is incomplete", instanceID)
+		}
+		instance, getErr := s.instances.GetByID(instanceID)
+		if getErr != nil || instance == nil {
+			return nil, fmt.Errorf("upgrade lab instance %d is unavailable", instanceID)
+		}
+		completed, inspectErr := upgradeLabConversationCompleted(stringValue(instance.WorkspacePath), upgradeLabFixtureMarker(runID, index))
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		// Older runs did not use an automatic marker. They remain usable when
+		// they already contain a complete real conversation and fixture file.
+		if !completed && !upgradeLabAnyCompletedConversation(stringValue(instance.WorkspacePath)) {
+			return nil, fmt.Errorf("instance %d has no completed baseline conversation", instanceID)
+		}
+	}
+	return manifests, nil
+}
+
+func upgradeLabFixtureMarker(runID int64, index int) string {
+	return fmt.Sprintf("openclaw-upgrade-lab:%d:%d", runID, index+1)
 }
 
 // deleteLabInstance is intentionally narrower than the normal instance
@@ -583,6 +706,9 @@ func (s *OpenClawUpgradeLabService) recoverProvisionedRun(ctx context.Context, r
 		ids = append(ids, id)
 	}
 	_ = rows.Close()
+	if time.Since(run.UpdatedAt) < openClawUpgradeLabProvisionTimeout {
+		return run
+	}
 	if len(ids) != desired {
 		if time.Since(run.UpdatedAt) >= openClawUpgradeLabProvisionTimeout {
 			idsRaw, _ := json.Marshal(ids)
@@ -618,8 +744,17 @@ func (s *OpenClawUpgradeLabService) recoverProvisionedRun(ctx context.Context, r
 		}
 		_ = os.Chown(fixturePath, RuntimeLinuxID(instance.ID), RuntimeLinuxID(instance.ID))
 	}
+	before, captureErr := s.captureAndValidateBaseline(run.ID, ids)
+	if captureErr != nil {
+		_ = s.failRun(ctx, run.ID, "BASELINE_PROVISIONING_INTERRUPTED", captureErr)
+		if failed, getErr := s.getRun(ctx, run.ID); getErr == nil && failed != nil {
+			return failed
+		}
+		return run
+	}
 	idsRaw, _ := json.Marshal(ids)
-	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'fixture_ready', instance_ids_json = ?, before_json = NULL, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND status = 'provisioning'`, string(idsRaw), time.Now().UTC(), run.ID)
+	beforeRaw, _ := json.Marshal(before)
+	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'baseline_captured', instance_ids_json = ?, before_json = ?, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND status = 'provisioning'`, string(idsRaw), string(beforeRaw), time.Now().UTC(), run.ID)
 	if err != nil {
 		return run
 	}
@@ -687,6 +822,12 @@ func (s *OpenClawUpgradeLabService) waitForLabPod(ctx context.Context, deploymen
 func (s *OpenClawUpgradeLabService) view(ctx context.Context, run *models.OpenClawUpgradeLabRun) (*OpenClawUpgradeLabView, error) {
 	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
 	view := &OpenClawUpgradeLabView{Run: run, InstanceIDs: ids, Instances: []models.Instance{}, Checks: decodeLabChecks(run.ChecksJSON), BaselineTag: OpenClawUpgradeLabBaselineTag, BaselineEvidence: decodeLabBaselineEvidence(run.BeforeJSON)}
+	// A cleaned run intentionally retains instance ids and manifests as an
+	// audit receipt. Those instances no longer exist and must never be loaded or
+	// postflight-validated again.
+	if run.Status == "cleaned" {
+		return view, nil
+	}
 	for _, id := range ids {
 		instance, err := s.instances.GetByID(id)
 		if err != nil {
@@ -702,13 +843,21 @@ func (s *OpenClawUpgradeLabService) view(ctx context.Context, run *models.OpenCl
 			return nil, err
 		}
 		view.Rollout = details
-		if details != nil && details.Rollout != nil {
+		if details != nil && details.Rollout != nil && !terminalUpgradeLabStatus(run.Status) {
 			run.Phase = details.Rollout.Phase
 			switch details.Rollout.Status {
 			case "finished":
 				checks, checkErr := s.finalChecks(run, ids, details)
 				if checkErr != nil {
-					return nil, checkErr
+					message := redactUpgradeLabError(checkErr.Error())
+					checks = []OpenClawUpgradeLabCheck{{Name: "postflight_data_verification", Passed: false, Message: message}}
+					checksRaw, _ := json.Marshal(checks)
+					now := time.Now().UTC()
+					code := "POSTFLIGHT_DATA_CHECK_FAILED"
+					_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'verification_failed', phase = 'postflight', checks_json = ?, error_code = ?, error_message = ?, finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE id = ?`, string(checksRaw), code, message, now, now, run.ID)
+					run.Status, run.Phase, run.ErrorCode, run.ErrorMessage = "verification_failed", "postflight", &code, &message
+					view.Checks = checks
+					break
 				}
 				view.Checks = checks
 				allPassed := true
@@ -724,17 +873,52 @@ func (s *OpenClawUpgradeLabService) view(ctx context.Context, run *models.OpenCl
 				_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = ?, phase = 'postflight', checks_json = ?, finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE id = ?`, status, string(checksRaw), now, now, run.ID)
 				run.Status = status
 			case "error", "cancelled":
+				rollbackStatus := strings.ToLower(strings.TrimSpace(stringValue(details.Rollout.RollbackStatus)))
+				if rollbackStatus == "starting" || rollbackStatus == "waiting" || (details.Rollout.AutoRollback && rollbackStatus == "") {
+					run.Status = "upgrading"
+					run.Phase = "rollback_restore"
+					_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'upgrading', phase = 'rollback_restore', updated_at = ? WHERE id = ?`, time.Now().UTC(), run.ID)
+					break
+				}
 				message := stringValue(details.Rollout.ErrorMessage)
 				if message == "" {
 					message = stringValue(details.Rollout.RollbackError)
 				}
-				code := strings.ToUpper(strings.TrimSpace(details.Rollout.Phase)) + "_FAILED"
-				_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'failed', phase = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?`, details.Rollout.Phase, code, redactUpgradeLabError(message), time.Now().UTC(), run.ID)
-				run.Status, run.ErrorCode, run.ErrorMessage = "failed", &code, stringPtrOrNil(redactUpgradeLabError(message))
+				code, phase, display := describeUpgradeLabRolloutFailure(details.Rollout, message)
+				_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'failed', phase = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?`, phase, code, display, time.Now().UTC(), run.ID)
+				run.Status, run.Phase, run.ErrorCode, run.ErrorMessage = "failed", phase, &code, stringPtrOrNil(display)
 			}
 		}
 	}
 	return view, nil
+}
+
+func terminalUpgradeLabStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "finished", "verification_failed", "failed", "cleaned":
+		return true
+	default:
+		return false
+	}
+}
+
+func describeUpgradeLabRolloutFailure(rollout *models.RuntimeRollout, message string) (string, string, string) {
+	message = redactUpgradeLabError(message)
+	if rollout == nil {
+		return "UPGRADE_EXECUTION_FAILED", "upgrade_failed", message
+	}
+	rollbackStatus := strings.ToLower(strings.TrimSpace(stringValue(rollout.RollbackStatus)))
+	rollbackError := redactUpgradeLabError(stringValue(rollout.RollbackError))
+	if rollbackError != "" || rollbackStatus == "error" || rollbackStatus == "failed" {
+		if rollbackError != "" {
+			message = strings.TrimSpace(message + "; rollback: " + rollbackError)
+		}
+		return "ROLLBACK_RESTORE_FAILED", "rollback_failed", message
+	}
+	if rollbackStatus == "restored" || rollbackStatus == "finished" || rollbackStatus == "complete" || rollbackStatus == "completed" {
+		return "UPGRADE_FAILED_BASELINE_RESTORED", "upgrade_failed_restored", "升级失败，但7.1基线已恢复。原因：" + message
+	}
+	return "UPGRADE_EXECUTION_FAILED", "upgrade_failed", message
 }
 
 func (s *OpenClawUpgradeLabService) finalChecks(run *models.OpenClawUpgradeLabRun, ids []int, details *RuntimeUpgradeDetails) ([]OpenClawUpgradeLabCheck, error) {
@@ -939,6 +1123,83 @@ func countUpgradeLabMessages(raw []byte, manifest *upgradeLabSessionManifest) er
 	return scanner.Err()
 }
 
+func upgradeLabConversationCompleted(workspace, marker string) (bool, error) {
+	return inspectUpgradeLabCompletedConversation(workspace, func(text string) bool {
+		return strings.Contains(text, marker)
+	})
+}
+
+func upgradeLabAnyCompletedConversation(workspace string) bool {
+	completed, _ := inspectUpgradeLabCompletedConversation(workspace, func(text string) bool {
+		return !strings.HasPrefix(strings.TrimSpace(text), "[OpenClaw heartbeat poll]")
+	})
+	return completed
+}
+
+func inspectUpgradeLabCompletedConversation(workspace string, matchesUser func(string) bool) (bool, error) {
+	root := filepath.Join(filepath.Clean(workspace), "home", ".openclaw", "agents")
+	if !pathWithin(workspace, root) {
+		return false, errors.New("upgrade lab session path escaped its workspace")
+	}
+	completed := false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if completed || info.IsDir() || !info.Mode().IsRegular() || !strings.HasSuffix(strings.ToLower(path), ".jsonl") || strings.Contains(strings.ToLower(filepath.ToSlash(path)), "session-sqlite-import-archive/") {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		seenUser := false
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			role, text, ok := upgradeLabMessageRecord(scanner.Bytes())
+			if !ok {
+				continue
+			}
+			if role == "user" && matchesUser(text) {
+				seenUser = true
+				continue
+			}
+			if seenUser && role == "assistant" && strings.TrimSpace(text) != "" {
+				completed = true
+				break
+			}
+		}
+		return scanner.Err()
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return completed, err
+}
+
+func upgradeLabMessageRecord(raw []byte) (string, string, bool) {
+	var record struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &record) != nil || record.Type != "message" {
+		return "", "", false
+	}
+	role := strings.ToLower(strings.TrimSpace(record.Message.Role))
+	if role != "user" && role != "assistant" {
+		return "", "", false
+	}
+	return role, upgradeLabMessageText(record.Message.Content), true
+}
+
 func upgradeLabMessageText(content any) string {
 	switch value := content.(type) {
 	case string:
@@ -1021,10 +1282,6 @@ func verifyUpgradeLabSessionArchive(workspace string, sourceFiles map[string]str
 		matched += count
 	}
 	return len(sourceFiles) > 0, matched, nil
-}
-
-func sameUpgradeLabManifest(left, right upgradeLabDataManifest) bool {
-	return left.Digest != "" && left.Digest == right.Digest && left.Sessions.SourceFilesSHA256 != "" && left.Sessions.SourceFilesSHA256 == right.Sessions.SourceFilesSHA256 && left.Sessions.CatalogSHA256 == right.Sessions.CatalogSHA256 && left.Sessions.InteractiveUserMessageCount == right.Sessions.InteractiveUserMessageCount && left.Sessions.AssistantMessageCount == right.Sessions.AssistantMessageCount
 }
 
 func manualUpgradeLabProjectFileCount(files map[string]string) int {

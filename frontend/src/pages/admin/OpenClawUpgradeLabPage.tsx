@@ -9,8 +9,8 @@ const terminalStatuses = new Set(['finished', 'verification_failed', 'failed', '
 
 function errorMessage(error: unknown): string {
   if (typeof error === 'object' && error !== null) {
-    const candidate = error as { response?: { data?: { message?: string } }; message?: string };
-    return candidate.response?.data?.message || candidate.message || '操作失败';
+    const candidate = error as { response?: { data?: { error?: string; message?: string } }; message?: string };
+    return candidate.response?.data?.error || candidate.response?.data?.message || candidate.message || '操作失败';
   }
   return String(error || '操作失败');
 }
@@ -62,8 +62,8 @@ const OpenClawUpgradeLabPage: React.FC = () => {
     try {
       setView(await openClawUpgradeLabService.createBaseline(instanceCount));
     } catch (createError) {
-      setError(errorMessage(createError));
       await loadLatest();
+      setError(errorMessage(createError));
     } finally {
       setBusy(false);
     }
@@ -106,8 +106,8 @@ const OpenClawUpgradeLabPage: React.FC = () => {
     try {
       setView(await openClawUpgradeLabService.startUpgrade(view.run.id, targetImage.trim(), batchSize));
     } catch (upgradeError) {
-      setError(errorMessage(upgradeError));
       await loadLatest();
+      setError(errorMessage(upgradeError));
     } finally {
       setBusy(false);
     }
@@ -127,7 +127,7 @@ const OpenClawUpgradeLabPage: React.FC = () => {
   };
 
   const run = view?.run;
-  const canReset = run && terminalStatuses.has(run.status);
+  const canReset = run && (run.status === 'ready' || terminalStatuses.has(run.status));
   const canUpgrade = run?.status === 'ready' && run.phase === 'baseline_captured';
 
   return (
@@ -171,7 +171,7 @@ const OpenClawUpgradeLabPage: React.FC = () => {
             </label>
             {!run || run.status === 'cleaned' ? (
               <button type="button" disabled={busy || loading} onClick={() => void createBaseline()} className="app-button-primary inline-flex items-center gap-2 disabled:opacity-50">
-                <FlaskConical className="h-4 w-4" />创建7.1基线环境
+                <FlaskConical className="h-4 w-4" />{busy ? '正在自动准备基线…' : '创建7.1基线环境'}
               </button>
             ) : (
               <>
@@ -206,7 +206,7 @@ const OpenClawUpgradeLabPage: React.FC = () => {
                 <div key={instance.id} className="rounded-lg border border-slate-200 p-4">
                   <div className="font-medium text-gray-900">{instance.name}</div>
                   <div className="mt-1 text-sm text-slate-600">实例 #{instance.id} · {instance.status}</div>
-                  <div className="mt-3 text-xs text-slate-500">先进入实例写入测试对话，并在工作区创建或上传测试文件，然后再执行升级。</div>
+                  <div className="mt-3 text-xs text-slate-500">系统已自动写入连续性文件并完成一轮真实7.1问答。你也可以进入实例追加对话或文件，它们会在开始升级时自动纳入校验。</div>
                   <Link to={`/instances/${instance.id}`} className="app-button-secondary mt-4 inline-flex items-center gap-2">
                     <ExternalLink className="h-4 w-4" />打开会话和工作区
                   </Link>
@@ -216,9 +216,9 @@ const OpenClawUpgradeLabPage: React.FC = () => {
             {run.status === 'ready' && (
               <div className="mt-5 flex flex-wrap items-center gap-3">
                 <button type="button" disabled={busy} onClick={() => void captureBaseline()} className="app-button-primary inline-flex items-center gap-2 disabled:opacity-50">
-                  <CheckCircle2 className="h-4 w-4" />检查并锁定升级前数据
+                  <CheckCircle2 className="h-4 w-4" />重新检查并锁定当前数据
                 </button>
-                <span className="text-sm text-slate-600">每个实例必须已有至少一轮人工问答和一个自行创建/上传的项目文件；系统心跳与内置标记文件不计入。</span>
+                <span className="text-sm text-slate-600">此操作不是必需步骤；创建环境后系统已自动生成问答和文件基线。若你追加了测试内容，可手动提前刷新证据。</span>
               </div>
             )}
             {(view?.baseline_evidence || []).length > 0 && (
@@ -226,8 +226,8 @@ const OpenClawUpgradeLabPage: React.FC = () => {
                 {view!.baseline_evidence.map((evidence) => (
                   <div key={evidence.instance_id} className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
                     <div className="font-semibold">实例 #{evidence.instance_id} 基线已锁定</div>
-                    <div className="mt-2">会话 {evidence.session_count} 个 · 人工提问 {evidence.interactive_user_message_count} 条 · 助手回复 {evidence.assistant_message_count} 条</div>
-                    <div className="mt-1">项目文件 {evidence.project_file_count} 个（人工文件 {evidence.manual_project_file_count} 个）</div>
+                    <div className="mt-2">会话 {evidence.session_count} 个 · 有效提问 {evidence.interactive_user_message_count} 条 · 助手回复 {evidence.assistant_message_count} 条</div>
+                    <div className="mt-1">项目文件 {evidence.project_file_count} 个（用户追加 {evidence.manual_project_file_count} 个）</div>
                     <div className="mt-2 break-all font-mono text-xs">Session {evidence.session_catalog_sha256}</div>
                   </div>
                 ))}
@@ -239,7 +239,7 @@ const OpenClawUpgradeLabPage: React.FC = () => {
         {run && run.status !== 'cleaned' && (
           <section className="app-panel p-6">
             <h2 className="text-lg font-semibold text-gray-900">执行8.1专用升级</h2>
-            <p className="mt-1 text-sm text-slate-600">升级仅在7.1人工问答与项目文件基线锁定后开放；完成后同时核对项目文件、原始Session归档和8.1官方Session目录。</p>
+            <p className="mt-1 text-sm text-slate-600">创建7.1环境时会自动生成真实问答和项目文件；开始升级时再次锁定当前数据，完成后核对项目文件、原始Session归档和8.1官方Session目录。</p>
             <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(320px,1fr)_160px_auto] lg:items-end">
               <label className="text-sm font-medium text-slate-700">
                 新测试镜像
@@ -249,7 +249,7 @@ const OpenClawUpgradeLabPage: React.FC = () => {
                 实例迁移并发
                 <input type="number" min={1} max={8} value={batchSize} onChange={(event) => setBatchSize(Math.min(8, Math.max(1, Number(event.target.value) || 1)))} className="app-input mt-1 block w-full" />
               </label>
-              <button type="button" disabled={busy || !canUpgrade} onClick={() => void startUpgrade()} className="app-button-primary inline-flex items-center justify-center gap-2 disabled:opacity-50">
+              <button type="button" disabled={busy || !canUpgrade || !targetImage.trim()} onClick={() => void startUpgrade()} className="app-button-primary inline-flex items-center justify-center gap-2 disabled:opacity-50" title={!canUpgrade ? '等待7.1自动基线完成' : !targetImage.trim() ? '请先输入8.1测试镜像' : undefined}>
                 <Rocket className="h-4 w-4" />开始隔离升级测试
               </button>
             </div>

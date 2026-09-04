@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"clawreef/internal/models"
 )
 
 func TestInspectUpgradeLabProjectDataIsDeterministicAndDetectsChanges(t *testing.T) {
@@ -88,6 +90,48 @@ func TestInspectUpgradeLabLegacySessionsRequiresManualConversation(t *testing.T)
 	}
 	if manifest.CatalogSHA256 == "" || manifest.SourceFilesSHA256 == "" || len(manifest.SourceFiles) != 2 {
 		t.Fatalf("incomplete session evidence: %#v", manifest)
+	}
+}
+
+func TestUpgradeLabConversationCompletedRequiresAssistantAfterMatchingUser(t *testing.T) {
+	workspace := t.TempDir()
+	sessions := filepath.Join(workspace, "home", ".openclaw", "agents", "main", "sessions")
+	if err := os.MkdirAll(sessions, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	marker := "openclaw-upgrade-lab:7:1"
+	transcript := strings.Join([]string{
+		`{"type":"message","message":{"role":"assistant","content":"earlier"}}`,
+		`{"type":"message","message":{"role":"user","content":"` + marker + `"}}`,
+	}, "\n") + "\n"
+	path := filepath.Join(sessions, "session-1.jsonl")
+	if err := os.WriteFile(path, []byte(transcript), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if completed, err := upgradeLabConversationCompleted(workspace, marker); err != nil || completed {
+		t.Fatalf("conversation completed before reply: %v, %v", completed, err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString(`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n")
+	_ = file.Close()
+	if completed, err := upgradeLabConversationCompleted(workspace, marker); err != nil || !completed {
+		t.Fatalf("conversation not completed after reply: %v, %v", completed, err)
+	}
+}
+
+func TestDescribeUpgradeLabRolloutFailureDistinguishesRestoredFromRollbackFailure(t *testing.T) {
+	restored := "restored"
+	code, phase, message := describeUpgradeLabRolloutFailure(&models.RuntimeRollout{RollbackStatus: &restored}, "migration failed")
+	if code != "UPGRADE_FAILED_BASELINE_RESTORED" || phase != "upgrade_failed_restored" || !strings.Contains(message, "已恢复") {
+		t.Fatalf("restored failure = %s, %s, %s", code, phase, message)
+	}
+	rollbackError := "restore failed"
+	code, phase, _ = describeUpgradeLabRolloutFailure(&models.RuntimeRollout{RollbackError: &rollbackError}, "migration failed")
+	if code != "ROLLBACK_RESTORE_FAILED" || phase != "rollback_failed" {
+		t.Fatalf("rollback failure = %s, %s", code, phase)
 	}
 }
 
