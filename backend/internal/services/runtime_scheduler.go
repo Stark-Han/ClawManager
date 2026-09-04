@@ -401,6 +401,9 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
 			continue
 		}
+		if isOpenClawUpgradeLabDeployment(pod.DeploymentName) {
+			continue
+		}
 		if pod.RuntimeType != rollout.RuntimeType {
 			continue
 		}
@@ -534,6 +537,9 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 			if pod.RuntimeType != rollout.RuntimeType {
 				continue
 			}
+			if isOpenClawUpgradeLabDeployment(pod.DeploymentName) {
+				continue
+			}
 			if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
 				return nil
 			}
@@ -590,6 +596,12 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	finishedAt := time.Now().UTC()
 	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
+}
+
+const openClawUpgradeLabDeploymentPrefix = "openclaw-upgrade-lab-"
+
+func isOpenClawUpgradeLabDeployment(name string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), openClawUpgradeLabDeploymentPrefix)
 }
 
 func canAutoRollbackOpenClaw(phase string) bool {

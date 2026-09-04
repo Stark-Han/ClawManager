@@ -706,6 +706,7 @@ func buildV2SchedulerInstanceQuery(statuses []string, limit int) (string, []any)
 		SELECT *
 		FROM instances
 		WHERE status IN (%s)
+			AND LOWER(TRIM(COALESCE(description, ''))) NOT LIKE 'openclaw-upgrade-lab:%%'
 			AND runtime_type = ?
 			AND instance_mode = ?
 			AND workspace_path IS NOT NULL

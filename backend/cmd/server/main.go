@@ -312,6 +312,7 @@ func main() {
 	var runtimeSchedulerCancel context.CancelFunc
 	var runtimeSchedulerMu sync.Mutex
 	var runtimeScheduler *services.RuntimeScheduler
+	var openClawUpgradeLabHandler *handlers.OpenClawUpgradeLabHandler
 	if controller, ok := teamService.(services.TeamUpgradeMaintenanceController); ok {
 		runtimeUpgradeService.SetTeamMaintenanceController(controller)
 	}
@@ -349,6 +350,15 @@ func main() {
 				runtimeSchedulerOptions...,
 			)
 			runtimeUpgradeService.SetDeploymentInventoryProvider(runtimeScheduler)
+			if labDeployments, ok := runtimeDeployments.(k8s.RuntimeUpgradeLabDeploymentService); ok {
+				if envBuilder, ok := instanceService.(interface {
+					BuildGatewayEnv(*models.Instance) (map[string]string, error)
+				}); ok {
+					labService := services.NewOpenClawUpgradeLabService(database, instanceRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, labDeployments, runtimeScheduler, runtimeUpgradeService, runtimeScheduler, envBuilder, cfg.Runtime)
+					runtimeUpgradeService.SetUpgradeLabRestarter(labService)
+					openClawUpgradeLabHandler = handlers.NewOpenClawUpgradeLabHandler(labService)
+				}
+			}
 			log.Printf("runtime scheduler initialized")
 		}
 	} else {
@@ -597,6 +607,14 @@ func main() {
 			adminRuntime.POST("/runtime-rollouts", runtimePoolHandler.StartRollout)
 			adminRuntime.POST("/runtime-rollouts/preflight", runtimePoolHandler.PreflightOpenClawRollout)
 			adminRuntime.GET("/runtime-rollouts/:id", runtimePoolHandler.GetRollout)
+			if openClawUpgradeLabHandler != nil {
+				adminRuntime.GET("/openclaw-upgrade-lab", openClawUpgradeLabHandler.Latest)
+				adminRuntime.POST("/openclaw-upgrade-lab", openClawUpgradeLabHandler.CreateBaseline)
+				adminRuntime.GET("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Get)
+				adminRuntime.POST("/openclaw-upgrade-lab/:id/upgrade", openClawUpgradeLabHandler.StartUpgrade)
+				adminRuntime.POST("/openclaw-upgrade-lab/:id/reset", openClawUpgradeLabHandler.Reset)
+				adminRuntime.DELETE("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Cleanup)
+			}
 		}
 
 		teams := api.Group("/teams")

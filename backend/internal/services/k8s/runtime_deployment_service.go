@@ -67,6 +67,111 @@ type RuntimeDeploymentService interface {
 	ListPods(ctx context.Context, namespace, runtimeType string) ([]RuntimeDeploymentPod, error)
 }
 
+// RuntimeUpgradeLabDeploymentService is deliberately separate from the
+// production rollout interface.  Its implementation refuses to mutate a
+// Deployment unless the immutable lab ownership labels match the requested
+// run, so a test cleanup cannot target a serving Runtime pool.
+type RuntimeUpgradeLabDeploymentService interface {
+	EnsureUpgradeLabPool(ctx context.Context, namespace, templateName, name, image, runID string, replicas int32) error
+	DeleteUpgradeLabPool(ctx context.Context, namespace, name, runID string) error
+}
+
+const (
+	upgradeLabPurposeLabel = "clawmanager.io/purpose"
+	upgradeLabPurposeValue = "openclaw-upgrade-lab"
+	upgradeLabRunLabel     = "clawmanager.io/upgrade-lab-run"
+)
+
+func (s *runtimeDeploymentService) EnsureUpgradeLabPool(ctx context.Context, namespace, templateName, name, image, runID string, replicas int32) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	if strings.TrimSpace(templateName) == "" || strings.TrimSpace(name) == "" || templateName == name {
+		return fmt.Errorf("distinct template and lab deployment names are required")
+	}
+	if runtimeImageDigest(image) == "" || strings.TrimSpace(runID) == "" || replicas <= 0 {
+		return fmt.Errorf("lab pool requires an immutable image, run id and positive replicas")
+	}
+	deployments := s.client.AppsV1().Deployments(namespace)
+	if existing, err := deployments.Get(ctx, name, metav1.GetOptions{}); err == nil {
+		if existing.Labels[upgradeLabPurposeLabel] != upgradeLabPurposeValue || existing.Labels[upgradeLabRunLabel] != runID {
+			return fmt.Errorf("deployment %s/%s is not owned by upgrade lab run %s", namespace, name, runID)
+		}
+		if runtimeContainerImage(existing.Spec.Template.Spec.Containers) != strings.TrimSpace(image) {
+			return fmt.Errorf("existing upgrade lab pool %s/%s has a different image", namespace, name)
+		}
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+	template, err := deployments.Get(ctx, templateName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get upgrade lab template deployment %s/%s: %w", namespace, templateName, err)
+	}
+	target := template.DeepCopy()
+	target.TypeMeta = metav1.TypeMeta{}
+	target.ObjectMeta = metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: copyStringMap(template.Labels)}
+	if target.Labels == nil {
+		target.Labels = map[string]string{}
+	}
+	target.Labels["app"] = name
+	target.Labels["clawmanager.io/pool-role"] = "upgrade-lab"
+	target.Labels[upgradeLabPurposeLabel] = upgradeLabPurposeValue
+	target.Labels[upgradeLabRunLabel] = runID
+	selector := map[string]string{
+		"app": name, "clawmanager.io/runtime-type": template.Labels["clawmanager.io/runtime-type"],
+		upgradeLabPurposeLabel: upgradeLabPurposeValue, upgradeLabRunLabel: runID,
+	}
+	target.Spec.Selector = &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}
+	target.Spec.Replicas = &replicas
+	target.Spec.Template.Labels = copyStringMap(selector)
+	target.Spec.Template.Labels["clawmanager.io/pool-role"] = "upgrade-lab"
+	target.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	target.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{MaxSkew: 1, TopologyKey: "kubernetes.io/hostname", WhenUnsatisfiable: corev1.ScheduleAnyway, LabelSelector: &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}}}
+	containerIndex := -1
+	for index := range target.Spec.Template.Spec.Containers {
+		if target.Spec.Template.Spec.Containers[index].Name == "runtime" {
+			containerIndex = index
+			break
+		}
+	}
+	if containerIndex < 0 {
+		return fmt.Errorf("upgrade lab template %s/%s has no runtime container", namespace, templateName)
+	}
+	container := &target.Spec.Template.Spec.Containers[containerIndex]
+	container.Image = strings.TrimSpace(image)
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_DEPLOYMENT_NAME", name)
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_REF", strings.TrimSpace(image))
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", runtimeImageDigest(image))
+	upsertEnvVar(container, "CLAWMANAGER_RUNTIME_UPGRADE_ID", runID)
+	container.ReadinessProbe = nil
+	if _, err := deployments.Create(ctx, target, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create upgrade lab pool %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+func (s *runtimeDeploymentService) DeleteUpgradeLabPool(ctx context.Context, namespace, name, runID string) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	deployments := s.client.AppsV1().Deployments(namespace)
+	existing, err := deployments.Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if existing.Labels[upgradeLabPurposeLabel] != upgradeLabPurposeValue || existing.Labels[upgradeLabRunLabel] != strings.TrimSpace(runID) {
+		return fmt.Errorf("refusing to delete non-lab deployment %s/%s", namespace, name)
+	}
+	if err := deployments.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete upgrade lab pool %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
 func (s *runtimeDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("k8s client not initialized")

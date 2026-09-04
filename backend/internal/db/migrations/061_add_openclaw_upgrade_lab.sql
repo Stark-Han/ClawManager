@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS openclaw_upgrade_lab_runs (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  actor_user_id INT NULL,
+  status VARCHAR(32) NOT NULL,
+  phase VARCHAR(32) NOT NULL,
+  baseline_image_ref VARCHAR(1024) NOT NULL,
+  baseline_image_digest VARCHAR(255) NOT NULL,
+  source_deployment VARCHAR(255) NOT NULL,
+  instance_ids_json JSON NULL,
+  target_image_ref VARCHAR(1024) NULL,
+  rollout_id BIGINT NULL,
+  before_json JSON NULL,
+  checks_json JSON NULL,
+  error_code VARCHAR(64) NULL,
+  error_message TEXT NULL,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  finished_at DATETIME(6) NULL,
+  KEY idx_openclaw_upgrade_lab_actor_created (actor_user_id, created_at),
+  KEY idx_openclaw_upgrade_lab_status (status, updated_at),
+  CONSTRAINT fk_openclaw_upgrade_lab_actor FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_openclaw_upgrade_lab_rollout FOREIGN KEY (rollout_id) REFERENCES runtime_rollouts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -2259,6 +2259,9 @@ func TestRuntimeSchedulerLegacyRolloutIsolationAcrossLiteRuntimes(t *testing.T) 
 			podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
 				1: {ID: 1, RuntimeType: runtimeType, State: "ready", Namespace: "runtime-system", DeploymentName: deploymentName},
 			}}
+			if runtimeType == RuntimeTypeOpenClaw {
+				podRepo.pods[2] = &models.RuntimePod{ID: 2, RuntimeType: RuntimeTypeOpenClaw, State: "ready", Namespace: "runtime-system", DeploymentName: "openclaw-upgrade-lab-r7-source"}
+			}
 			deployments := &fakeRuntimeDeploymentService{}
 			scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), rolloutRepo, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
 			if err := scheduler.StartRollout(ctx, 91); err != nil {

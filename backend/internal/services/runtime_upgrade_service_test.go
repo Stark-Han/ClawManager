@@ -9,9 +9,94 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clawreef/internal/models"
 )
+
+type gatewayStateSequence struct {
+	states []string
+	calls  int
+}
+
+func (s *gatewayStateSequence) GatewayState(context.Context, string, string) (*RuntimeAgentGatewayState, error) {
+	if s.calls >= len(s.states) {
+		return nil, ErrRuntimeAgentNotFound
+	}
+	state := s.states[s.calls]
+	s.calls++
+	return &RuntimeAgentGatewayState{State: state}, nil
+}
+
+func TestWaitForGatewayStoppedAcceptsLegacyStoppedRecord(t *testing.T) {
+	reader := &gatewayStateSequence{states: []string{"stopping", "stopped"}}
+	confirmed, err := waitForGatewayStopped(context.Background(), reader, "http://agent", "gw-1", time.Second)
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%v err=%v", confirmed, err)
+	}
+}
+
+func TestWaitForGatewayStoppedAcceptsRemovedRecord(t *testing.T) {
+	confirmed, err := waitForGatewayStopped(context.Background(), &gatewayStateSequence{}, "http://agent", "gw-1", time.Second)
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%v err=%v", confirmed, err)
+	}
+}
+
+func TestRuntimeUpgradeScopePersistsLabSelectionWithoutNewRolloutColumns(t *testing.T) {
+	runID := int64(17)
+	raw := `{"upgrade_lab_run_id":17,"candidate_instance_ids":[9,3,9,-1]}`
+	rollout := &models.RuntimeRollout{PreflightJSON: &raw}
+	scope := runtimeUpgradeScopeFromRollout(rollout)
+	if scope.UpgradeLabRunID == nil || *scope.UpgradeLabRunID != runID {
+		t.Fatalf("lab run id = %#v", scope.UpgradeLabRunID)
+	}
+	if got := scope.CandidateInstanceIDs; len(got) != 2 || got[0] != 3 || got[1] != 9 {
+		t.Fatalf("candidate ids = %#v", got)
+	}
+}
+
+func TestRuntimeDeploymentInventoryIsPartitionedBetweenProductionAndLab(t *testing.T) {
+	runID := int64(7)
+	production := runtimeUpgradeScope{}
+	lab := runtimeUpgradeScope{UpgradeLabRunID: &runID}
+	cases := []struct {
+		name           string
+		productionWant bool
+		labWant        bool
+	}{
+		{name: "openclaw-runtime", productionWant: true, labWant: false},
+		{name: "openclaw-runtime-u44", productionWant: true, labWant: false},
+		{name: "openclaw-upgrade-lab-r7-source", productionWant: false, labWant: true},
+		{name: "openclaw-upgrade-lab-r7-source-u55", productionWant: false, labWant: true},
+		{name: "openclaw-upgrade-lab-r8-source", productionWant: false, labWant: false},
+	}
+	for _, test := range cases {
+		if got := runtimeDeploymentInUpgradeScope(test.name, production); got != test.productionWant {
+			t.Fatalf("production scope for %s = %v, want %v", test.name, got, test.productionWant)
+		}
+		if got := runtimeDeploymentInUpgradeScope(test.name, lab); got != test.labWant {
+			t.Fatalf("lab scope for %s = %v, want %v", test.name, got, test.labWant)
+		}
+	}
+}
+
+func TestRolloutExpectedTargetDeploymentsUsesOnlyPersistedSources(t *testing.T) {
+	sources := `{"runtime-system/openclaw-runtime":"registry/openclaw@sha256:abc","runtime-system/openclaw-upgrade-lab-r7-source":"registry/openclaw@sha256:def"}`
+	rollout := &models.RuntimeRollout{ID: 23, SourceImagesJSON: &sources}
+	targets, err := rolloutExpectedTargetDeployments(rollout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"runtime-system/openclaw-runtime-u23", "runtime-system/openclaw-upgrade-lab-r7-source-u23"} {
+		if _, ok := targets[expected]; !ok {
+			t.Fatalf("missing target %s in %#v", expected, targets)
+		}
+	}
+	if len(targets) != 2 {
+		t.Fatalf("unexpected target set: %#v", targets)
+	}
+}
 
 func TestImageDigestFromReferenceRequiresImmutableSHA256(t *testing.T) {
 	digest := strings.Repeat("a", 64)

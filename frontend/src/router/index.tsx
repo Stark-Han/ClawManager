@@ -24,6 +24,7 @@ import AdminSecurityScannerConfigPage from '../pages/admin/security/AdminSecurit
 import RiskRulesPage from '../pages/admin/RiskRulesPage';
 import ModelManagementPage from '../pages/admin/ModelManagementPage';
 import SystemSettingsPage from '../pages/admin/SystemSettingsPage';
+import OpenClawUpgradeLabPage from '../pages/admin/OpenClawUpgradeLabPage';
 import NorthboundSettingsPage from '../pages/admin/NorthboundSettingsPage';
 import RuntimePodsPage from '../pages/admin/RuntimePodsPage';
 import UserSettingsPage from '../pages/settings/UserSettingsPage';
@@ -503,6 +504,14 @@ function AppRoutes() {
         element={
           <AdminRoute>
             <SystemSettingsPage />
+          </AdminRoute>
+        }
+      />
+      <Route
+        path="/admin/settings/openclaw-upgrade-lab"
+        element={
+          <AdminRoute>
+            <OpenClawUpgradeLabPage />
           </AdminRoute>
         }
       />

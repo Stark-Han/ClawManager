@@ -142,6 +142,7 @@ func (r *runtimePodRepository) ListSchedulable(ctx context.Context, runtimeType 
 		SELECT *
 		FROM runtime_pods
 		WHERE runtime_type = ? AND state = 'ready' AND draining = 0 AND used_slots < capacity
+		  AND LOWER(TRIM(deployment_name)) NOT LIKE 'openclaw-upgrade-lab-%'
 		ORDER BY used_slots, id
 	`, runtimeType)
 	defer iter.Close()

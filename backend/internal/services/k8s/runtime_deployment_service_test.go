@@ -398,6 +398,50 @@ func TestRuntimeDeploymentServiceCreatesIsolatedUpgradePool(t *testing.T) {
 	}
 }
 
+func TestRuntimeDeploymentServiceUpgradeLabOwnershipIsIsolatedAndDeleteIsFailClosed(t *testing.T) {
+	const namespace = "runtime-system"
+	source := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime", Namespace: namespace, RuntimeType: "openclaw", Image: "registry/openclaw:serving", Replicas: 2, WorkspacePVCClaimName: "workspaces"})
+	client := fake.NewSimpleClientset(source)
+	service := NewRuntimeDeploymentService(client)
+	lab, ok := service.(RuntimeUpgradeLabDeploymentService)
+	if !ok {
+		t.Fatal("runtime deployment service does not expose upgrade lab operations")
+	}
+	labImage := "registry/openclaw@sha256:" + strings.Repeat("b", 64)
+	if err := lab.EnsureUpgradeLabPool(context.Background(), namespace, source.Name, "openclaw-upgrade-lab-r7-source", labImage, "lab-r7", 1); err != nil {
+		t.Fatal(err)
+	}
+	created, err := client.AppsV1().Deployments(namespace).Get(context.Background(), "openclaw-upgrade-lab-r7-source", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Labels[upgradeLabPurposeLabel] != upgradeLabPurposeValue || created.Labels[upgradeLabRunLabel] != "lab-r7" {
+		t.Fatalf("lab ownership labels = %#v", created.Labels)
+	}
+	if created.Spec.Replicas == nil || *created.Spec.Replicas != 1 || created.Spec.Selector.MatchLabels["app"] != created.Name {
+		t.Fatalf("lab pool is not isolated: replicas=%v selector=%#v", created.Spec.Replicas, created.Spec.Selector)
+	}
+	if got := created.Spec.Template.Spec.Containers[0].Image; got != labImage {
+		t.Fatalf("lab image = %q", got)
+	}
+	serving, err := client.AppsV1().Deployments(namespace).Get(context.Background(), source.Name, metav1.GetOptions{})
+	if err != nil || serving.Spec.Template.Spec.Containers[0].Image != "registry/openclaw:serving" {
+		t.Fatalf("serving deployment was changed: deployment=%#v err=%v", serving, err)
+	}
+	if err := lab.DeleteUpgradeLabPool(context.Background(), namespace, source.Name, "lab-r7"); err == nil {
+		t.Fatal("cleanup accepted a serving deployment")
+	}
+	if _, err := client.AppsV1().Deployments(namespace).Get(context.Background(), source.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("serving deployment was removed: %v", err)
+	}
+	if err := lab.DeleteUpgradeLabPool(context.Background(), namespace, created.Name, "wrong-run"); err == nil {
+		t.Fatal("cleanup accepted the wrong lab owner")
+	}
+	if err := lab.DeleteUpgradeLabPool(context.Background(), namespace, created.Name, "lab-r7"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeDeploymentServiceCreatesFullStandbySurgeForOpenClawUpgrade(t *testing.T) {
 	deployment := BuildRuntimeDeployment(RuntimeDeploymentSpec{
 		Name: "openclaw-runtime", Namespace: "runtime-system", RuntimeType: "openclaw",

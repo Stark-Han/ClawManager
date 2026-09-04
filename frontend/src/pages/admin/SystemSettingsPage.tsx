@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Plus, Rocket, Save, Trash2 } from 'lucide-react';
+import { FlaskConical, Plus, Rocket, Save, Trash2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import AdminLayout from '../../components/AdminLayout';
 import { useI18n } from '../../contexts/I18nContext';
 import PasswordSettingsSection from '../../components/PasswordSettingsSection';
@@ -683,9 +684,18 @@ const SystemSettingsPage: React.FC = () => {
         <PasswordSettingsSection />
 
         <section className="app-panel p-6">
-          <div className="flex flex-col gap-1">
-            <h2 className="text-xl font-semibold text-gray-900">{t('systemSettingsPage.liteRolloutTitle')}</h2>
-            <p className="text-sm text-gray-500">{t('systemSettingsPage.liteRolloutSubtitle')}</p>
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl font-semibold text-gray-900">{t('systemSettingsPage.liteRolloutTitle')}</h2>
+              <p className="text-sm text-gray-500">{t('systemSettingsPage.liteRolloutSubtitle')}</p>
+            </div>
+            <Link
+              to="/admin/settings/openclaw-upgrade-lab"
+              className="app-button-secondary inline-flex items-center justify-center gap-2"
+            >
+              <FlaskConical className="h-4 w-4" />
+              OpenClaw 升级实验室
+            </Link>
           </div>
           <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(180px,240px)_1fr] xl:grid-cols-[minmax(180px,240px)_minmax(260px,1fr)_minmax(320px,1.4fr)_120px_140px_auto] xl:items-end">
             <div>
