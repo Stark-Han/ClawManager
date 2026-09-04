@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	OpenClawUpgradeLabBaselineTag    = "master-20260824-737ad4c"
-	OpenClawUpgradeLabBaselineDigest = "sha256:c0905d813cdf22f5ed357d9bd6f61a6798020f1d099022f0aaec4a96c83df125"
-	openClawUpgradeLabDescription    = "openclaw-upgrade-lab:"
-	openClawUpgradeLabMaxCases       = 8
-	openClawUpgradeLabReadyTimeout   = 3 * time.Minute
+	OpenClawUpgradeLabBaselineTag      = "master-20260824-737ad4c"
+	OpenClawUpgradeLabBaselineDigest   = "sha256:c0905d813cdf22f5ed357d9bd6f61a6798020f1d099022f0aaec4a96c83df125"
+	openClawUpgradeLabDescription      = "openclaw-upgrade-lab:"
+	openClawUpgradeLabMaxCases         = 8
+	openClawUpgradeLabReadyTimeout     = 3 * time.Minute
+	openClawUpgradeLabProvisionTimeout = 5 * time.Minute
 )
 
 type upgradeLabGatewayEnvBuilder interface {
@@ -71,6 +72,10 @@ type upgradeLabDataManifest struct {
 	Digest string            `json:"digest"`
 }
 
+type upgradeLabProvisionPlan struct {
+	InstanceCount int `json:"instance_count"`
+}
+
 func NewOpenClawUpgradeLabService(sess db.Session, instances repository.InstanceRepository, pods repository.RuntimePodRepository, bindings repository.InstanceRuntimeBindingRepository, agent RuntimeAgentClient, deployments k8s.RuntimeUpgradeLabDeploymentService, inventory RuntimeDeploymentInventoryProvider, upgrade *RuntimeUpgradeService, scheduler *RuntimeScheduler, envBuilder upgradeLabGatewayEnvBuilder, cfg config.RuntimePoolConfig) *OpenClawUpgradeLabService {
 	return &OpenClawUpgradeLabService{sess: sess, instances: instances, pods: pods, bindings: bindings, agent: agent, deployments: deployments, inventory: inventory, upgrade: upgrade, scheduler: scheduler, envBuilder: envBuilder, cfg: cfg}
 }
@@ -83,6 +88,7 @@ func (s *OpenClawUpgradeLabService) Latest(ctx context.Context) (*OpenClawUpgrad
 		}
 		return nil, err
 	}
+	run = *s.recoverProvisionedRun(ctx, &run)
 	return s.view(ctx, &run)
 }
 
@@ -91,6 +97,7 @@ func (s *OpenClawUpgradeLabService) Get(ctx context.Context, id int64) (*OpenCla
 	if err != nil || run == nil {
 		return nil, err
 	}
+	run = s.recoverProvisionedRun(ctx, run)
 	return s.view(ctx, run)
 }
 
@@ -117,7 +124,9 @@ func (s *OpenClawUpgradeLabService) CreateBaseline(ctx context.Context, actorUse
 		return nil, err
 	}
 	now := time.Now().UTC()
-	run := &models.OpenClawUpgradeLabRun{ActorUserID: &actorUserID, Status: "provisioning", Phase: "baseline_pool", BaselineImageRef: baselineTagRef, BaselineImageDigest: OpenClawUpgradeLabBaselineDigest, CreatedAt: now, UpdatedAt: now}
+	planRaw, _ := json.Marshal(upgradeLabProvisionPlan{InstanceCount: count})
+	planJSON := string(planRaw)
+	run := &models.OpenClawUpgradeLabRun{ActorUserID: &actorUserID, Status: "provisioning", Phase: "baseline_pool", BaselineImageRef: baselineTagRef, BaselineImageDigest: OpenClawUpgradeLabBaselineDigest, BeforeJSON: &planJSON, CreatedAt: now, UpdatedAt: now}
 	inserted, err := s.sess.Collection(run.TableName()).Insert(run)
 	if err != nil {
 		return nil, err
@@ -129,37 +138,41 @@ func (s *OpenClawUpgradeLabService) CreateBaseline(ctx context.Context, actorUse
 	} else {
 		return nil, fmt.Errorf("upgrade lab run id was not returned")
 	}
+	// Provisioning belongs to the durable lab run, not to the browser request.
+	// Navigating away must not cancel a successfully recorded setup half-way.
+	provisionCtx, cancelProvision := context.WithTimeout(context.Background(), openClawUpgradeLabProvisionTimeout)
+	defer cancelProvision()
 	runToken := upgradeLabRunToken(run.ID)
 	run.SourceDeployment = fmt.Sprintf("%sr%d-source", openClawUpgradeLabDeploymentPrefix, run.ID)
-	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET source_deployment = ?, updated_at = ? WHERE id = ?`, run.SourceDeployment, time.Now().UTC(), run.ID); err != nil {
+	if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET source_deployment = ?, updated_at = ? WHERE id = ?`, run.SourceDeployment, time.Now().UTC(), run.ID); err != nil {
 		return nil, err
 	}
-	if err := s.deployments.EnsureUpgradeLabPool(ctx, template.Namespace, template.DeploymentName, run.SourceDeployment, baselineRef, runToken, 1); err != nil {
-		return nil, s.failRun(ctx, run.ID, "BASELINE_POOL_CREATE_FAILED", err)
+	if err := s.deployments.EnsureUpgradeLabPool(provisionCtx, template.Namespace, template.DeploymentName, run.SourceDeployment, baselineRef, runToken, 1); err != nil {
+		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_POOL_CREATE_FAILED", err)
 	}
-	pod, err := s.waitForLabPod(ctx, run.SourceDeployment, openClawUpgradeLabReadyTimeout)
+	pod, err := s.waitForLabPod(provisionCtx, run.SourceDeployment, openClawUpgradeLabReadyTimeout)
 	if err != nil {
-		return nil, s.failRun(ctx, run.ID, "BASELINE_RUNTIME_NOT_READY", err)
+		return nil, s.failRun(provisionCtx, run.ID, "BASELINE_RUNTIME_NOT_READY", err)
 	}
 	instanceIDs := make([]int, 0, count)
 	for index := 0; index < count; index++ {
-		instance, err := s.createBaselineInstance(ctx, run, pod, index)
+		instance, err := s.createBaselineInstance(provisionCtx, run, pod, index)
 		if err != nil {
-			return nil, s.failRun(ctx, run.ID, "BASELINE_GATEWAY_CREATE_FAILED", err)
+			return nil, s.failRun(provisionCtx, run.ID, "BASELINE_GATEWAY_CREATE_FAILED", err)
 		}
 		instanceIDs = append(instanceIDs, instance.ID)
 		// Persist ownership after every successful fixture.  A later failure can
 		// therefore be cleaned without scanning or guessing across user data.
 		idsRaw, _ := json.Marshal(instanceIDs)
-		if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET instance_ids_json = ?, updated_at = ? WHERE id = ?`, string(idsRaw), time.Now().UTC(), run.ID); err != nil {
-			return nil, s.failRun(ctx, run.ID, "BASELINE_OWNERSHIP_RECORD_FAILED", err)
+		if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET instance_ids_json = ?, updated_at = ? WHERE id = ?`, string(idsRaw), time.Now().UTC(), run.ID); err != nil {
+			return nil, s.failRun(provisionCtx, run.ID, "BASELINE_OWNERSHIP_RECORD_FAILED", err)
 		}
 	}
 	idsRaw, _ := json.Marshal(instanceIDs)
-	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'fixture_ready', instance_ids_json = ?, updated_at = ? WHERE id = ?`, string(idsRaw), time.Now().UTC(), run.ID); err != nil {
+	if _, err := s.sess.SQL().ExecContext(provisionCtx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'fixture_ready', instance_ids_json = ?, before_json = NULL, updated_at = ? WHERE id = ?`, string(idsRaw), time.Now().UTC(), run.ID); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, run.ID)
+	return s.Get(provisionCtx, run.ID)
 }
 
 func (s *OpenClawUpgradeLabService) StartUpgrade(ctx context.Context, id int64, actorUserID int, targetImage string, batchSize int) (*OpenClawUpgradeLabView, error) {
@@ -419,24 +432,44 @@ func (s *OpenClawUpgradeLabService) startGateway(ctx context.Context, run *model
 	if err := s.bindings.UpdateGatewayAssignment(ctx, instance.ID, instance.RuntimeGeneration, response.GatewayID, response.PID, response.Status, nil); err != nil {
 		return err
 	}
-	reader, ok := s.agent.(gatewayStateReader)
-	if !ok {
-		return fmt.Errorf("Runtime Agent cannot report upgrade lab gateway state")
+	if NormalizeRuntimeGatewayLifecycle(response.Status, nil).Running {
+		return s.commitLabGatewayRunning(ctx, instance, response)
 	}
+	reader, ok := s.agent.(gatewayStateReader)
 	deadline := time.Now().Add(2 * time.Minute)
+	lastObservation := strings.TrimSpace(response.Status)
 	for {
-		state, stateErr := reader.GatewayState(ctx, strings.TrimSpace(*pod.AgentEndpoint), response.GatewayID)
-		if stateErr == nil && state != nil && strings.EqualFold(state.State, "running") {
-			if err := s.bindings.UpdateRunning(ctx, instance.ID, instance.RuntimeGeneration, response.GatewayID, response.Port, response.PID); err != nil {
-				return err
+		if ok {
+			state, stateErr := reader.GatewayState(ctx, strings.TrimSpace(*pod.AgentEndpoint), response.GatewayID)
+			if stateErr == nil && state != nil {
+				lifecycle := NormalizeRuntimeGatewayLifecycle(state.State, nil)
+				lastObservation = state.State
+				if lifecycle.Running {
+					return s.commitLabGatewayRunning(ctx, instance, response)
+				}
+				if lifecycle.Recognized && lifecycle.BindingState == RuntimeGatewayBindingError {
+					return fmt.Errorf("gateway entered %s", state.State)
+				}
+			} else if stateErr != nil && !errors.Is(stateErr, ErrRuntimeAgentUnsupported) && !errors.Is(stateErr, ErrRuntimeAgentNotFound) {
+				lastObservation = stateErr.Error()
 			}
-			return s.instances.UpdateRuntimeState(ctx, instance.ID, "running", instance.RuntimeGeneration, nil)
 		}
-		if stateErr == nil && state != nil && (strings.EqualFold(state.State, "error") || strings.EqualFold(state.State, "stop_error")) {
-			return fmt.Errorf("gateway entered %s", state.State)
+		// The fixed 7.1 baseline Agent predates GET /v1/gateways/{id}. Its
+		// heartbeat is nevertheless authoritative and is already consumed by
+		// the normal binding reconciler. Falling back to that shared state keeps
+		// baseline creation compatible without weakening 8.1 verification.
+		binding, bindingErr := s.bindings.GetByInstanceID(ctx, instance.ID)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if binding != nil && binding.RuntimePodID == pod.ID && binding.Generation == instance.RuntimeGeneration && binding.GatewayID == response.GatewayID {
+			lastObservation = binding.State
+			if NormalizeRuntimeGatewayLifecycle(binding.State, nil).Running {
+				return s.commitLabGatewayRunning(ctx, instance, response)
+			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("gateway did not become running within 2 minutes")
+			return fmt.Errorf("gateway did not become running within 2 minutes (last observation %s)", lastObservation)
 		}
 		select {
 		case <-ctx.Done():
@@ -444,6 +477,94 @@ func (s *OpenClawUpgradeLabService) startGateway(ctx context.Context, run *model
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+func (s *OpenClawUpgradeLabService) commitLabGatewayRunning(ctx context.Context, instance *models.Instance, response *RuntimeAgentCreateGatewayResponse) error {
+	if err := s.bindings.UpdateRunning(ctx, instance.ID, instance.RuntimeGeneration, response.GatewayID, response.Port, response.PID); err != nil {
+		return err
+	}
+	return s.instances.UpdateRuntimeState(ctx, instance.ID, "running", instance.RuntimeGeneration, nil)
+}
+
+// recoverProvisionedRun closes the only safe crash window in baseline setup:
+// the isolated instance and binding are already running, but the browser or
+// application stopped before their ownership was committed to the lab row.
+// It never adopts an ordinary instance or a binding from another Deployment.
+func (s *OpenClawUpgradeLabService) recoverProvisionedRun(ctx context.Context, run *models.OpenClawUpgradeLabRun) *models.OpenClawUpgradeLabRun {
+	if s == nil || run == nil || run.Status != "provisioning" || strings.TrimSpace(run.SourceDeployment) == "" {
+		return run
+	}
+	desired := 1
+	if run.BeforeJSON != nil {
+		var plan upgradeLabProvisionPlan
+		if json.Unmarshal([]byte(*run.BeforeJSON), &plan) == nil && plan.InstanceCount >= 1 && plan.InstanceCount <= openClawUpgradeLabMaxCases {
+			desired = plan.InstanceCount
+		}
+	}
+	description := fmt.Sprintf("%s%d", openClawUpgradeLabDescription, run.ID)
+	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT id FROM instances WHERE description = ? ORDER BY id`, description)
+	if err != nil {
+		return run
+	}
+	ids := make([]int, 0, desired)
+	for rows.Next() {
+		var id int
+		if rows.Scan(&id) != nil {
+			_ = rows.Close()
+			return run
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if len(ids) != desired {
+		if time.Since(run.UpdatedAt) >= openClawUpgradeLabProvisionTimeout {
+			idsRaw, _ := json.Marshal(ids)
+			_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET instance_ids_json = ?, updated_at = ? WHERE id = ? AND status = 'provisioning'`, string(idsRaw), time.Now().UTC(), run.ID)
+			_ = s.failRun(ctx, run.ID, "BASELINE_PROVISIONING_INTERRUPTED", fmt.Errorf("baseline setup stopped after %d of %d test instances", len(ids), desired))
+			if failed, getErr := s.getRun(ctx, run.ID); getErr == nil && failed != nil {
+				return failed
+			}
+		}
+		return run
+	}
+	for index, id := range ids {
+		instance, getErr := s.instances.GetByID(id)
+		if getErr != nil || instance == nil || instance.Status != "running" || instance.UserID <= 0 {
+			return run
+		}
+		expectedWorkspace := RuntimeWorkspacePathWithRoot(s.cfg.WorkspaceRoot, RuntimeTypeOpenClaw, instance.UserID, instance.ID)
+		if !sameCleanPath(strings.TrimSpace(stringValue(instance.WorkspacePath)), expectedWorkspace) {
+			return run
+		}
+		binding, bindingErr := s.bindings.GetByInstanceID(ctx, id)
+		if bindingErr != nil || binding == nil || binding.State != RuntimeGatewayBindingRunning || binding.Generation != instance.RuntimeGeneration {
+			return run
+		}
+		pod, podErr := s.pods.GetByID(ctx, binding.RuntimePodID)
+		if podErr != nil || pod == nil || pod.DeploymentName != run.SourceDeployment || pod.Draining {
+			return run
+		}
+		fixturePath := filepath.Join(expectedWorkspace, "project", "upgrade-lab-continuity.txt")
+		fixture := []byte(fmt.Sprintf("openclaw-upgrade-lab run=%d case=%d baseline=2026.7.1-2\n", run.ID, index+1))
+		if writeErr := os.WriteFile(fixturePath, fixture, 0o640); writeErr != nil {
+			return run
+		}
+		_ = os.Chown(fixturePath, RuntimeLinuxID(instance.ID), RuntimeLinuxID(instance.ID))
+	}
+	idsRaw, _ := json.Marshal(ids)
+	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'ready', phase = 'fixture_ready', instance_ids_json = ?, before_json = NULL, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND status = 'provisioning'`, string(idsRaw), time.Now().UTC(), run.ID)
+	if err != nil {
+		return run
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return run
+	}
+	recovered, err := s.getRun(ctx, run.ID)
+	if err != nil || recovered == nil {
+		return run
+	}
+	return recovered
 }
 
 func (s *OpenClawUpgradeLabService) resolveBaseline(ctx context.Context) (models.RuntimePod, string, string, error) {

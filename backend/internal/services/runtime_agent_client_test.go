@@ -247,6 +247,25 @@ func TestRuntimeAgentClientNonConflictErrorIncludesStatusAndBody(t *testing.T) {
 	}
 }
 
+func TestRuntimeAgentClientClassifiesLegacyUnsupportedGatewayState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/gateways/gw-legacy" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}))
+	defer server.Close()
+
+	client, ok := NewRuntimeAgentClientWithHTTPClient("token", server.Client()).(RuntimeUpgradeAgentClient)
+	if !ok {
+		t.Fatal("HTTP Runtime Agent client does not implement gateway state")
+	}
+	_, err := client.GatewayState(context.Background(), server.URL, "gw-legacy")
+	if !errors.Is(err, ErrRuntimeAgentUnsupported) {
+		t.Fatalf("GatewayState error = %v, want ErrRuntimeAgentUnsupported", err)
+	}
+}
+
 func TestRuntimeAgentClientDeleteGatewayReturnsNotFoundSentinel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

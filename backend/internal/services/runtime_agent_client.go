@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrRuntimeAgentConflict = errors.New("runtime agent conflict")
-	ErrRuntimeAgentNotFound = errors.New("runtime agent resource not found")
+	ErrRuntimeAgentConflict    = errors.New("runtime agent conflict")
+	ErrRuntimeAgentNotFound    = errors.New("runtime agent resource not found")
+	ErrRuntimeAgentUnsupported = errors.New("runtime agent operation unsupported")
 )
 
 type RuntimeAgentClient interface {
@@ -339,6 +340,9 @@ func (c *runtimeAgentHTTPClient) do(ctx context.Context, method, endpoint, path 
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+			return fmt.Errorf("%w: runtime agent status %d: %s", ErrRuntimeAgentUnsupported, resp.StatusCode, string(msg))
+		}
 		if resp.StatusCode == http.StatusConflict {
 			return fmt.Errorf("%w: %s", ErrRuntimeAgentConflict, string(msg))
 		}
