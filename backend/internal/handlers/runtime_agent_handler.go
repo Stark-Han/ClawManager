@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -339,6 +340,12 @@ func (h *RuntimeAgentHandler) ReportGateways(c *gin.Context) {
 			}
 		}
 		if err := h.syncInstanceRuntimeState(c.Request.Context(), gateway, lifecycle); err != nil {
+			// A Gateway snapshot may overlap a user restart or scheduler retry.
+			// That one stale generation must not reject the whole pod snapshot and
+			// make every unrelated Gateway on the Runtime appear offline.
+			if errors.Is(err, repository.ErrStaleRuntimeGeneration) {
+				continue
+			}
 			utils.HandleError(c, err)
 			return
 		}

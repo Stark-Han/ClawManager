@@ -315,6 +315,30 @@ func TestRuntimeAgentHandlerGatewayReportSyncsInstanceRuntimeState(t *testing.T)
 	}
 }
 
+func TestRuntimeAgentHandlerGatewayReportIsolatesStaleInstanceGeneration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	bindingRepo := &runtimeAgentHandlerBindingRepo{bindings: map[int]*models.InstanceRuntimeBinding{
+		10: {InstanceID: 10, RuntimePodID: 9, Generation: 2},
+		11: {InstanceID: 11, RuntimePodID: 9, Generation: 2},
+	}}
+	instanceRepo := &runtimeAgentHandlerInstanceRepo{updateErrors: map[int]error{10: repository.ErrStaleRuntimeGeneration}}
+	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret"}, &runtimeAgentHandlerPodRepo{}, bindingRepo, instanceRepo, &runtimeAgentHandlerEvents{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/runtime-agent/gateways/report", handler.ReportGateways)
+	body := `{"pod_id":9,"gateways":[{"instance_id":10,"gateway_id":"gw-10","gateway_port":20010,"state":"running","generation":2},{"instance_id":11,"gateway_id":"gw-11","gateway_port":20011,"state":"running","generation":2}]}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-agent/gateways/report", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-ClawManager-Agent-Token", "secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", recorder.Code, recorder.Body.String())
+	}
+	if instanceRepo.statusByID[11] != "running" {
+		t.Fatalf("current gateway after stale peer was not processed: %#v", instanceRepo.statusByID)
+	}
+}
+
 func TestRuntimeAgentHandlerReconcilesExactPreviousOpenClawGateway(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	capabilities := `["openclaw.upgrade-preflight-v3"]`
@@ -598,6 +622,7 @@ type runtimeAgentHandlerInstanceRepo struct {
 	generationByID map[int]int
 	messageByID    map[int]*string
 	instancesByID  map[int]*models.Instance
+	updateErrors   map[int]error
 }
 
 func (r *runtimeAgentHandlerInstanceRepo) Create(instance *models.Instance) error {
@@ -657,6 +682,9 @@ func (r *runtimeAgentHandlerInstanceRepo) GetV2Creating(ctx context.Context, lim
 }
 
 func (r *runtimeAgentHandlerInstanceRepo) UpdateRuntimeState(ctx context.Context, id int, status string, generation int, message *string) error {
+	if err := r.updateErrors[id]; err != nil {
+		return err
+	}
 	if r.statusByID == nil {
 		r.statusByID = map[int]string{}
 	}
