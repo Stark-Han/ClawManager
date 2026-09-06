@@ -79,19 +79,34 @@ func (r *instanceRuntimeBindingRepository) ReconcilePreviousGateway(ctx context.
 			return err
 		}
 		expectedConflict := fmt.Sprintf("previous gateway generation is still active: gateway_id=%s generation=%d", binding.GatewayID, binding.Generation)
-		if status != "error" || generation != expectedInstanceGeneration || !strings.Contains(runtimeError.String, expectedConflict) {
+		if status != "error" || generation != expectedInstanceGeneration || (!strings.Contains(runtimeError.String, expectedConflict) && !recoverablePreviousGatewayInfrastructureError(runtimeError.String)) {
 			return nil
 		}
-		var bindingCount int
-		row, err = tx.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM instance_runtime_bindings WHERE instance_id = ?`, binding.InstanceID)
+		var existingID, existingPodID sql.NullInt64
+		var existingGatewayID, existingState sql.NullString
+		var existingGeneration sql.NullInt64
+		row, err = tx.SQL().QueryRowContext(ctx, `
+			SELECT MAX(id), MAX(runtime_pod_id), MAX(gateway_id), MAX(state), MAX(generation)
+			FROM instance_runtime_bindings WHERE instance_id = ?
+			FOR UPDATE
+		`, binding.InstanceID)
 		if err != nil {
 			return err
 		}
-		if err := row.Scan(&bindingCount); err != nil {
+		if err := row.Scan(&existingID, &existingPodID, &existingGatewayID, &existingState, &existingGeneration); err != nil {
 			return err
 		}
-		if bindingCount != 0 {
-			return nil
+		if existingID.Valid {
+			expectedPendingID := fmt.Sprintf("pending-%d-%d", binding.InstanceID, expectedInstanceGeneration)
+			if !existingPodID.Valid || existingPodID.Int64 != binding.RuntimePodID || !existingGeneration.Valid || int(existingGeneration.Int64) != expectedInstanceGeneration || !strings.EqualFold(existingState.String, "creating") || existingGatewayID.String != expectedPendingID {
+				return nil
+			}
+			if _, err := tx.SQL().ExecContext(ctx, `DELETE FROM instance_runtime_bindings WHERE id = ?`, existingID.Int64); err != nil {
+				return err
+			}
+			if _, err := tx.SQL().ExecContext(ctx, `UPDATE runtime_pods SET used_slots = CASE WHEN used_slots > 0 THEN used_slots - 1 ELSE 0 END, updated_at = ? WHERE id = ?`, time.Now().UTC(), binding.RuntimePodID); err != nil {
+				return err
+			}
 		}
 		var portConflicts int
 		row, err = tx.SQL().QueryRowContext(ctx, `
@@ -142,6 +157,16 @@ func (r *instanceRuntimeBindingRepository) ReconcilePreviousGateway(ctx context.
 		return false, fmt.Errorf("reconcile previous gateway binding: %w", err)
 	}
 	return reconciled, nil
+}
+
+func recoverablePreviousGatewayInfrastructureError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "connection reset by peer", "transport is closing"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *instanceRuntimeBindingRepository) GetByInstanceID(ctx context.Context, instanceID int) (*models.InstanceRuntimeBinding, error) {

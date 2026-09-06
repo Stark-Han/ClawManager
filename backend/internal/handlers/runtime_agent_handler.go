@@ -308,7 +308,7 @@ func (h *RuntimeAgentHandler) ReportGateways(c *gin.Context) {
 			utils.HandleError(c, err)
 			return
 		}
-		if binding == nil {
+		if binding == nil || pendingBindingCanYieldToPreviousGateway(binding, podID, gateway) {
 			reconciled, reconcileErr := h.reconcilePreviousOpenClawGateway(c.Request.Context(), podID, gateway)
 			if reconcileErr != nil {
 				utils.HandleError(c, reconcileErr)
@@ -368,6 +368,17 @@ func (h *RuntimeAgentHandler) ReportGateways(c *gin.Context) {
 	utils.Success(c, http.StatusOK, "Runtime gateway report accepted", nil)
 }
 
+func pendingBindingCanYieldToPreviousGateway(binding *models.InstanceRuntimeBinding, podID int64, gateway runtimeAgentGatewayReport) bool {
+	if binding == nil {
+		return false
+	}
+	expectedPendingID := fmt.Sprintf("pending-%d-%d", gateway.InstanceID, gateway.Generation+1)
+	return binding.RuntimePodID == podID &&
+		binding.Generation == gateway.Generation+1 &&
+		strings.EqualFold(strings.TrimSpace(binding.State), services.RuntimeGatewayBindingCreating) &&
+		strings.TrimSpace(binding.GatewayID) == expectedPendingID
+}
+
 func (h *RuntimeAgentHandler) reconcilePreviousOpenClawGateway(ctx context.Context, podID int64, gateway runtimeAgentGatewayReport) (bool, error) {
 	if h == nil || h.instanceRepo == nil || h.podRepo == nil || h.bindingRepo == nil {
 		return false, nil
@@ -397,7 +408,7 @@ func (h *RuntimeAgentHandler) reconcilePreviousOpenClawGateway(ctx context.Conte
 		return false, nil
 	}
 	expectedConflict := fmt.Sprintf("previous gateway generation is still active: gateway_id=%s generation=%d", expectedGatewayID, gateway.Generation)
-	if instance.RuntimeErrorMessage == nil || !strings.Contains(*instance.RuntimeErrorMessage, expectedConflict) {
+	if instance.RuntimeErrorMessage == nil || (!strings.Contains(*instance.RuntimeErrorMessage, expectedConflict) && !isRecoverableGatewayReportInfrastructureError(*instance.RuntimeErrorMessage)) {
 		return false, nil
 	}
 	lifecycle := services.NormalizeRuntimeGatewayLifecycle(gateway.State, gateway.ErrorMessage)
@@ -414,6 +425,16 @@ func (h *RuntimeAgentHandler) reconcilePreviousOpenClawGateway(ctx context.Conte
 		GatewayID: gateway.GatewayID, GatewayPort: gateway.GatewayPort, GatewayPID: gateway.GatewayPID,
 		WorkspacePath: expectedWorkspace, State: services.RuntimeGatewayBindingRunning, Generation: gateway.Generation, LastHealthAt: healthAt,
 	}, instance.RuntimeGeneration, services.RuntimeGatewayPortBlockSize(services.RuntimeTypeOpenClaw))
+}
+
+func isRecoverableGatewayReportInfrastructureError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "connection reset by peer", "transport is closing"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimePodHasCapability(pod models.RuntimePod, required string) bool {

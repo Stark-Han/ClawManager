@@ -1400,6 +1400,15 @@ func (s *RuntimeScheduler) podCanStartGateway(ctx context.Context, podID int64) 
 	if err != nil {
 		return false, fmt.Errorf("list runtime pod %d bindings: %w", podID, err)
 	}
+	if s.podRepo != nil {
+		pod, podErr := s.podRepo.GetByID(ctx, podID)
+		if podErr != nil {
+			return false, fmt.Errorf("get runtime pod %d: %w", podID, podErr)
+		}
+		if pod != nil && pod.RuntimeType == RuntimeTypeOpenClaw && containsString(pod.Capabilities(), "openclaw.upgrade-preflight-v3") && pod.UsedSlots > len(bindings) {
+			return false, nil
+		}
+	}
 	starting := 0
 	for _, binding := range bindings {
 		switch strings.ToLower(strings.TrimSpace(binding.State)) {
