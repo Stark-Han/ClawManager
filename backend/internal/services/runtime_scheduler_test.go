@@ -2529,19 +2529,20 @@ func TestRuntimeSchedulerEmptyOpenClawPoolResetKeepsOldPodAvailable(t *testing.T
 		deployments,
 		time.Second,
 	)
+	sources := `{"runtime-system/openclaw-runtime-u57":"registry/openclaw@sha256:` + strings.Repeat("6", 64) + `"}`
 	rollout := &models.RuntimeRollout{
-		ID:             92,
-		RuntimeType:    RuntimeTypeOpenClaw,
-		TargetImageRef: "registry/openclaw@sha256:" + strings.Repeat("7", 64),
-		Phase:          RuntimeUpgradePhaseEmptyPoolReset,
+		ID:               92,
+		RuntimeType:      RuntimeTypeOpenClaw,
+		TargetImageRef:   "registry/openclaw@sha256:" + strings.Repeat("7", 64),
+		Phase:            RuntimeUpgradePhaseEmptyPoolReset,
+		SourceImagesJSON: &sources,
 	}
-	pods := []models.RuntimePod{{
-		ID:             1,
-		RuntimeType:    RuntimeTypeOpenClaw,
-		Namespace:      "runtime-system",
-		DeploymentName: "openclaw-runtime-u57",
-		State:          "ready",
-	}}
+	pods := []models.RuntimePod{
+		{ID: 1, RuntimeType: RuntimeTypeOpenClaw, Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u57", State: "ready"},
+		// Runtime Agent history can retain a recently deleted deployment. The
+		// persisted live inventory must prevent it becoming a mutation target.
+		{ID: 2, RuntimeType: RuntimeTypeOpenClaw, Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u55", State: "unhealthy"},
+	}
 	if err := scheduler.rolloutRuntimeDeployments(ctx, rollout, pods, 4, 6); err != nil {
 		t.Fatal(err)
 	}
@@ -2551,6 +2552,35 @@ func TestRuntimeSchedulerEmptyOpenClawPoolResetKeepsOldPodAvailable(t *testing.T
 	call := deployments.rolloutImageCalls[0]
 	if call.name != "openclaw-runtime-u57" || call.maxUnavailable != 0 || call.maxSurge != 1 || call.upgradeID != "" {
 		t.Fatalf("empty reset must be an in-place readiness-gated rollout: %+v", call)
+	}
+}
+
+func TestRuntimeSchedulerLegacyRolloutPrefersLiveDeploymentInventory(t *testing.T) {
+	for _, runtimeType := range []string{RuntimeTypeOpenClaw, RuntimeTypeHermes, RuntimeTypeOpenCode, RuntimeTypeDeepSeekHarness} {
+		t.Run(runtimeType, func(t *testing.T) {
+			ctx := context.Background()
+			liveName := defaultRuntimeDeploymentName(runtimeType)
+			if runtimeType == RuntimeTypeOpenClaw {
+				liveName = "openclaw-runtime-u57"
+			}
+			rolloutRepo := &fakeRuntimeRolloutRepo{rollouts: map[int64]*models.RuntimeRollout{
+				93: {ID: 93, RuntimeType: runtimeType, TargetImageRef: "registry/" + runtimeType + ":v2", Status: "pending", BatchSize: 1, MaxUnavailable: 1},
+			}}
+			recent := time.Now().UTC()
+			podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+				1: {ID: 1, RuntimeType: runtimeType, State: "unhealthy", Namespace: "runtime-system", DeploymentName: liveName + "-deleted", LastSeenAt: &recent},
+			}}
+			deployments := &fakeRuntimeDeploymentService{pods: []k8s.RuntimeDeploymentPod{{
+				RuntimeType: runtimeType, Namespace: "runtime-system", DeploymentName: liveName, PodName: liveName + "-pod", State: "ready",
+			}}}
+			scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), rolloutRepo, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second, WithRuntimeSchedulerNamespace("runtime-system"))
+			if err := scheduler.StartRollout(ctx, 93); err != nil {
+				t.Fatal(err)
+			}
+			if len(deployments.rolloutImageCalls) != 1 || deployments.rolloutImageCalls[0].name != liveName {
+				t.Fatalf("rollout mutation targets = %+v, want only live deployment %s", deployments.rolloutImageCalls, liveName)
+			}
+		})
 	}
 }
 

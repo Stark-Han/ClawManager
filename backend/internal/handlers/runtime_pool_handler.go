@@ -337,31 +337,45 @@ func runtimePoolPodListItems(pods []models.RuntimePod, agentReported bool) []run
 }
 
 func mergeRuntimePoolDeploymentPods(items []runtimePoolPodListItem, deploymentPods []models.RuntimePod) []runtimePoolPodListItem {
-	seen := map[string]int{}
-	for index, item := range items {
-		seen[runtimePoolPodKey(item.Namespace, item.PodName)] = index
+	if len(deploymentPods) == 0 {
+		return items
 	}
+	reported := make(map[string]runtimePoolPodListItem, len(items))
+	for _, item := range items {
+		reported[runtimePoolPodKey(item.Namespace, item.PodName)] = item
+	}
+	merged := make([]runtimePoolPodListItem, 0, len(deploymentPods))
+	seen := make(map[string]struct{}, len(deploymentPods))
 	for _, pod := range deploymentPods {
 		key := runtimePoolPodKey(pod.Namespace, pod.PodName)
 		if key == "" {
 			continue
 		}
-		if index, ok := seen[key]; ok {
-			items[index].PoolRole = pod.PoolRole
-			items[index].PoolPurpose = pod.PoolPurpose
-			items[index].UpgradeID = pod.UpgradeID
-			items[index].SourceDeployment = pod.SourceDeployment
-			items[index].SchedulingEnabled = pod.SchedulingEnabled
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[key] = len(items)
-		items = append(items, runtimePoolPodListItem{
+		seen[key] = struct{}{}
+		if item, ok := reported[key]; ok {
+			// Kubernetes owns pod existence and the image actually running. The
+			// Agent owns capabilities, version, occupancy and heartbeat data.
+			item.DeploymentName = pod.DeploymentName
+			item.ImageRef = pod.ImageRef
+			item.ImageDigest = pod.ImageDigest
+			item.PoolRole = pod.PoolRole
+			item.PoolPurpose = pod.PoolPurpose
+			item.UpgradeID = pod.UpgradeID
+			item.SourceDeployment = pod.SourceDeployment
+			item.SchedulingEnabled = pod.SchedulingEnabled
+			merged = append(merged, item)
+			continue
+		}
+		merged = append(merged, runtimePoolPodListItem{
 			RuntimePod:    pod,
 			AgentReported: false,
 			Capabilities:  pod.Capabilities(),
 		})
 	}
-	return items
+	return merged
 }
 
 func runtimePoolPodKey(namespace, podName string) string {

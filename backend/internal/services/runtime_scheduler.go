@@ -289,11 +289,13 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", &startedAt, nil, &message)
 		return err
 	}
+	var deploymentInventory []models.RuntimePod
 	if inventory, inventoryErr := s.RuntimeDeploymentPods(ctx, rollout.RuntimeType); inventoryErr != nil {
 		message := inventoryErr.Error()
 		_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", &startedAt, nil, &message)
 		return inventoryErr
 	} else {
+		deploymentInventory = inventory
 		allPods = annotateRuntimePods(allPods, inventory)
 	}
 	if rollout.RuntimeType != RuntimeTypeOpenClaw || rollout.PreflightID == nil {
@@ -312,7 +314,15 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 	if maxUnavailable <= 0 && (rollout.RuntimeType != RuntimeTypeOpenClaw || rollout.PreflightID == nil) {
 		maxUnavailable = 1
 	}
-	if err := s.rolloutRuntimeDeployments(ctx, rollout, allPods, maxUnavailable, batchSize); err != nil {
+	rolloutPods := allPods
+	// Kubernetes is authoritative for which Deployments still exist. Runtime
+	// Agent rows are retained for health history and can outlive a deleted
+	// Deployment; never turn such rows back into mutation targets. Preserve the
+	// historical fallback only when no deployment inventory is available.
+	if len(deploymentInventory) > 0 {
+		rolloutPods = deploymentInventory
+	}
+	if err := s.rolloutRuntimeDeployments(ctx, rollout, rolloutPods, maxUnavailable, batchSize); err != nil {
 		message := err.Error()
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.AutoRollback {
 			if rollbackErr := s.rollbackOpenClawRollout(ctx, rollout); rollbackErr != nil {
@@ -416,10 +426,11 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		name      string
 	}
 	refs := map[deploymentRef]struct{}{}
-	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
+	usePersistedSources := rollout.RuntimeType == RuntimeTypeOpenClaw && (rollout.PreflightID != nil || isEmptyOpenClawPoolReset(rollout))
+	if usePersistedSources {
 		var sources map[string]string
 		if rollout.SourceImagesJSON == nil || json.Unmarshal([]byte(*rollout.SourceImagesJSON), &sources) != nil || len(sources) == 0 {
-			return fmt.Errorf("OpenClaw data-safe rollout has no immutable deployment inventory")
+			return fmt.Errorf("OpenClaw rollout has no immutable deployment inventory")
 		}
 		for key := range sources {
 			parts := strings.SplitN(key, "/", 2)
@@ -430,7 +441,7 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		}
 	}
 	for _, pod := range pods {
-		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
+		if usePersistedSources {
 			continue
 		}
 		if !runtimePodEligibleForOrdinaryScheduling(pod) {

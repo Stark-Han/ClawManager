@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,11 +215,18 @@ func TestRuntimePoolHandlerListPodsIncludesUnreportedDeploymentPods(t *testing.T
 
 func TestMergeRuntimePoolDeploymentPodsEnrichesAgentRowsWithPoolMetadata(t *testing.T) {
 	disabled := false
-	items := runtimePoolPodListItems([]models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:target", State: "ready"}}, true)
-	discovered := []models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", PoolRole: "upgrade-target", UpgradeID: "48", SourceDeployment: "openclaw-runtime", SchedulingEnabled: &disabled}}
+	digest := "sha256:" + strings.Repeat("8", 64)
+	items := runtimePoolPodListItems([]models.RuntimePod{
+		{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:stale", State: "ready"},
+		{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u55", PodName: "deleted-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:deleted", State: "unhealthy"},
+	}, true)
+	discovered := []models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", ImageRef: "registry/openclaw@" + digest, ImageDigest: &digest, PoolRole: "upgrade-target", UpgradeID: "48", SourceDeployment: "openclaw-runtime", SchedulingEnabled: &disabled}}
 	got := mergeRuntimePoolDeploymentPods(items, discovered)
 	if len(got) != 1 || got[0].PoolRole != "upgrade-target" || got[0].UpgradeID != "48" || got[0].SchedulingEnabled == nil || *got[0].SchedulingEnabled {
 		t.Fatalf("pool metadata was not merged: %#v", got)
+	}
+	if got[0].ImageRef != "registry/openclaw@"+digest || got[0].ImageDigest == nil || *got[0].ImageDigest != digest {
+		t.Fatalf("Kubernetes image did not replace stale Agent image: %#v", got[0])
 	}
 }
 
