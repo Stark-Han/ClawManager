@@ -3797,6 +3797,9 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 			errs = append(errs, memberErr)
 			continue
 		}
+		if releaseErr := s.reconcileTerminalTeamMemberBindings(&team, members, now); releaseErr != nil {
+			errs = append(errs, releaseErr)
+		}
 		for memberIdx := range members {
 			member := members[memberIdx]
 			if isLeaderTeamMember(&member) || !isActiveTeamMember(&member) {
@@ -3864,6 +3867,53 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 				errs = append(errs, createErr)
 			}
 		}
+	}
+	return errors.Join(errs...)
+}
+
+// reconcileTerminalTeamMemberBindings repairs only stale operational pointers.
+// The root task's persisted terminal state is authoritative, and the
+// repository compare-and-clear predicate ensures a late sweep cannot erase a
+// newer assignment that reused the same member.
+func (s *teamService) reconcileTerminalTeamMemberBindings(team *models.Team, members []models.TeamMember, now time.Time) error {
+	if s == nil || s.repo == nil || team == nil {
+		return nil
+	}
+	var errs []error
+	for idx := range members {
+		member := &members[idx]
+		if member.TeamID != team.ID || member.CurrentTaskID == nil || *member.CurrentTaskID <= 0 {
+			continue
+		}
+		taskID := *member.CurrentTaskID
+		task, err := s.repo.GetTaskByID(taskID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if task == nil || task.TeamID != team.ID || !isTerminalTeamTaskStatus(task.Status) {
+			continue
+		}
+		runtimeStatus := models.TeamTaskStatusSucceeded
+		availability := models.TeamMemberAvailabilityIdle
+		progress := 100
+		if task.Status != models.TeamTaskStatusSucceeded {
+			runtimeStatus = models.TeamTaskStatusFailed
+			availability = models.TeamMemberAvailabilityBlocked
+			progress = 0
+		}
+		if _, err := s.repo.ReleaseMemberFromTask(member.ID, taskID, runtimeStatus, availability, progress, now); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		member.Status = models.TeamMemberStatusIdle
+		member.CurrentTaskID = nil
+		member.Progress = progress
+		member.Availability = availability
+		member.RuntimeStatus = &runtimeStatus
+		member.RuntimeTaskID = nil
+		member.RuntimeIntent = nil
+		member.BlockedReason = nil
 	}
 	return errors.Join(errs...)
 }

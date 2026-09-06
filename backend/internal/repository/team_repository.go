@@ -25,6 +25,7 @@ type TeamRepository interface {
 
 	CreateMember(member *models.TeamMember) error
 	UpdateMember(member *models.TeamMember) error
+	ReleaseMemberFromTask(memberID, taskID int, runtimeStatus, availability string, progress int, updatedAt time.Time) (bool, error)
 	GetMemberByID(id int) (*models.TeamMember, error)
 	GetMemberByTeamKey(teamID int, memberKey string) (*models.TeamMember, error)
 	ListMembersByTeamID(teamID int) ([]models.TeamMember, error)
@@ -188,6 +189,30 @@ func (r *teamRepository) UpdateMember(member *models.TeamMember) error {
 		return fmt.Errorf("failed to update team member: %w", err)
 	}
 	return nil
+}
+
+func (r *teamRepository) ReleaseMemberFromTask(memberID, taskID int, runtimeStatus, availability string, progress int, updatedAt time.Time) (bool, error) {
+	if memberID <= 0 || taskID <= 0 {
+		return false, fmt.Errorf("member id and task id are required")
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	result, err := r.sess.SQL().Exec(`
+UPDATE team_members
+SET status = ?, current_task_id = NULL, progress = ?, availability = ?,
+    runtime_status = ?, runtime_task_id = NULL, runtime_intent = NULL,
+    blocked_reason = NULL, updated_at = ?
+WHERE id = ? AND current_task_id = ?
+`, models.TeamMemberStatusIdle, progress, availability, runtimeStatus, updatedAt, memberID, taskID)
+	if err != nil {
+		return false, fmt.Errorf("failed to release team member from terminal task: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect released team member: %w", err)
+	}
+	return affected == 1, nil
 }
 
 func (r *teamRepository) ListMembersByStatus(status string) ([]models.TeamMember, error) {

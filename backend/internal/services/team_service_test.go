@@ -3678,6 +3678,49 @@ func TestMemberOperationalStateClosesStaleRuntimeAfterLastSuccess(t *testing.T) 
 	}
 }
 
+func TestTerminalTaskReconciliationCompareAndClearsOnlyMatchingMembers(t *testing.T) {
+	terminalTaskID := 103
+	newTaskID := 104
+	terminalRuntimeID := "team-12-task-103"
+	newRuntimeID := "team-12-task-104"
+	intent := "work"
+	team := &models.Team{ID: 12, Status: models.TeamStatusRunning, CommunicationMode: teamCommunicationModeLeaderMediated}
+	terminal := &models.TeamTask{ID: terminalTaskID, TeamID: team.ID, Status: models.TeamTaskStatusSucceeded}
+	current := &models.TeamTask{ID: newTaskID, TeamID: team.ID, Status: models.TeamTaskStatusRunning}
+	staleLeader := &models.TeamMember{ID: 51, TeamID: team.ID, MemberKey: "leader", Role: "leader",
+		Status: models.TeamMemberStatusBusy, Availability: models.TeamMemberAvailabilityBusy,
+		CurrentTaskID: &terminalTaskID, RuntimeTaskID: &terminalRuntimeID, RuntimeIntent: &intent}
+	staleWorker := &models.TeamMember{ID: 52, TeamID: team.ID, MemberKey: "worker", Role: "worker",
+		Status: models.TeamMemberStatusBusy, Availability: models.TeamMemberAvailabilityBusy,
+		CurrentTaskID: &terminalTaskID, RuntimeTaskID: &terminalRuntimeID, RuntimeIntent: &intent}
+	newWorker := &models.TeamMember{ID: 53, TeamID: team.ID, MemberKey: "new-worker", Role: "worker",
+		Status: models.TeamMemberStatusBusy, Availability: models.TeamMemberAvailabilityBusy,
+		CurrentTaskID: &newTaskID, RuntimeTaskID: &newRuntimeID, RuntimeIntent: &intent}
+	repo := &teamRepositoryStub{
+		tasksByID: map[int]*models.TeamTask{terminalTaskID: terminal, newTaskID: current},
+		membersByID: map[int]*models.TeamMember{
+			staleLeader.ID: staleLeader,
+			staleWorker.ID: staleWorker,
+			newWorker.ID:   newWorker,
+		},
+	}
+	service := &teamService{repo: repo}
+	if err := service.reconcileTerminalTeamMemberBindings(team, []models.TeamMember{*staleLeader, *staleWorker, *newWorker}, time.Now().UTC()); err != nil {
+		t.Fatalf("reconcileTerminalTeamMemberBindings returned error: %v", err)
+	}
+	for _, member := range []*models.TeamMember{staleLeader, staleWorker} {
+		if member.Status != models.TeamMemberStatusIdle || member.Availability != models.TeamMemberAvailabilityIdle ||
+			member.CurrentTaskID != nil || member.RuntimeTaskID != nil || member.RuntimeIntent != nil ||
+			derefTeamString(member.RuntimeStatus) != models.TeamTaskStatusSucceeded || member.Progress != 100 {
+			t.Fatalf("terminal task member did not converge safely: %#v", member)
+		}
+	}
+	if newWorker.CurrentTaskID == nil || *newWorker.CurrentTaskID != newTaskID ||
+		derefTeamString(newWorker.RuntimeTaskID) != newRuntimeID || newWorker.Status != models.TeamMemberStatusBusy {
+		t.Fatalf("a member on a newer task must not be cleared: %#v", newWorker)
+	}
+}
+
 func TestValidationContractIsGenericAndClosesFromSuccessfulBoundWorkItem(t *testing.T) {
 	team := &models.Team{ID: 103, CommunicationMode: teamCommunicationModeLeaderMediated}
 	task := &models.TeamTask{ID: 213, TeamID: team.ID, TargetMemberID: 501, Status: models.TeamTaskStatusRunning}
@@ -8876,6 +8919,36 @@ func (s *teamRepositoryStub) UpdateMember(member *models.TeamMember) error {
 		return errors.New("forced member update failure")
 	}
 	return nil
+}
+func (s *teamRepositoryStub) ReleaseMemberFromTask(memberID, taskID int, runtimeStatus, availability string, progress int, updatedAt time.Time) (bool, error) {
+	var member *models.TeamMember
+	if s.membersByID != nil {
+		member = s.membersByID[memberID]
+	}
+	if member == nil {
+		for _, candidate := range s.membersByKey {
+			if candidate != nil && candidate.ID == memberID {
+				member = candidate
+				break
+			}
+		}
+	}
+	if member == nil || member.CurrentTaskID == nil || *member.CurrentTaskID != taskID {
+		return false, nil
+	}
+	member.Status = models.TeamMemberStatusIdle
+	member.CurrentTaskID = nil
+	member.Progress = progress
+	member.Availability = availability
+	member.RuntimeStatus = &runtimeStatus
+	member.RuntimeTaskID = nil
+	member.RuntimeIntent = nil
+	member.BlockedReason = nil
+	member.UpdatedAt = updatedAt
+	clone := *member
+	s.updatedMember = &clone
+	s.updatedMembers = append(s.updatedMembers, clone)
+	return true, nil
 }
 func (s *teamRepositoryStub) GetMemberByID(id int) (*models.TeamMember, error) {
 	if s.membersByID != nil {
