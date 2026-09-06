@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"clawreef/internal/models"
@@ -25,6 +26,14 @@ type InstanceRuntimeBindingRepository interface {
 	DeleteByInstanceID(ctx context.Context, instanceID int) error
 	DeleteByInstanceIDAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64) error
 	DeleteRunningByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int) (bool, error)
+}
+
+// PreviousGatewayBindingReconciler repairs one narrowly defined control-plane
+// drift: a Runtime reports the exact previous gateway that an instance error
+// already identified, while the binding row is missing. Keeping this optional
+// avoids changing non-OpenClaw repository consumers and test doubles.
+type PreviousGatewayBindingReconciler interface {
+	ReconcilePreviousGateway(ctx context.Context, binding *models.InstanceRuntimeBinding, expectedInstanceGeneration, portBlockSize int) (bool, error)
 }
 
 type instanceRuntimeBindingRepository struct {
@@ -48,6 +57,91 @@ func (r *instanceRuntimeBindingRepository) Create(ctx context.Context, binding *
 		binding.ID = id
 	}
 	return nil
+}
+
+func (r *instanceRuntimeBindingRepository) ReconcilePreviousGateway(ctx context.Context, binding *models.InstanceRuntimeBinding, expectedInstanceGeneration, portBlockSize int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if binding == nil || binding.InstanceID <= 0 || binding.RuntimePodID <= 0 || binding.Generation <= 0 || expectedInstanceGeneration != binding.Generation+1 || portBlockSize <= 0 {
+		return false, nil
+	}
+	reconciled := false
+	err := r.sess.TxContext(ctx, func(tx db.Session) error {
+		var status string
+		var generation int
+		var runtimeError sql.NullString
+		row, err := tx.SQL().QueryRowContext(ctx, `SELECT status, runtime_generation, runtime_error_message FROM instances WHERE id = ? FOR UPDATE`, binding.InstanceID)
+		if err != nil {
+			return err
+		}
+		if err := row.Scan(&status, &generation, &runtimeError); err != nil {
+			return err
+		}
+		expectedConflict := fmt.Sprintf("previous gateway generation is still active: gateway_id=%s generation=%d", binding.GatewayID, binding.Generation)
+		if status != "error" || generation != expectedInstanceGeneration || !strings.Contains(runtimeError.String, expectedConflict) {
+			return nil
+		}
+		var bindingCount int
+		row, err = tx.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM instance_runtime_bindings WHERE instance_id = ?`, binding.InstanceID)
+		if err != nil {
+			return err
+		}
+		if err := row.Scan(&bindingCount); err != nil {
+			return err
+		}
+		if bindingCount != 0 {
+			return nil
+		}
+		var portConflicts int
+		row, err = tx.SQL().QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM instance_runtime_bindings
+			WHERE runtime_pod_id = ?
+			  AND gateway_port <= ?
+			  AND gateway_port + ? - 1 >= ?
+		`, binding.RuntimePodID, binding.GatewayPort+portBlockSize-1, portBlockSize, binding.GatewayPort)
+		if err != nil {
+			return err
+		}
+		if err := row.Scan(&portConflicts); err != nil {
+			return err
+		}
+		if portConflicts != 0 {
+			return nil
+		}
+		now := time.Now().UTC()
+		if _, err := tx.SQL().ExecContext(ctx, `
+			INSERT INTO instance_runtime_bindings (
+				instance_id, runtime_pod_id, runtime_type, gateway_id, gateway_port,
+				gateway_pid, workspace_path, state, generation, last_health_at,
+				error_message, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, NULL, ?, ?)
+		`, binding.InstanceID, binding.RuntimePodID, binding.RuntimeType, binding.GatewayID, binding.GatewayPort,
+			binding.GatewayPID, binding.WorkspacePath, binding.Generation, binding.LastHealthAt, now, now); err != nil {
+			return err
+		}
+		result, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances
+			SET status = 'running', runtime_generation = ?, runtime_error_message = NULL, updated_at = ?
+			WHERE id = ? AND status = 'error' AND runtime_generation = ?
+		`, binding.Generation, now, binding.InstanceID, expectedInstanceGeneration)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return fmt.Errorf("instance %d changed while reconciling previous gateway", binding.InstanceID)
+		}
+		reconciled = true
+		return nil
+	}, nil)
+	if err != nil {
+		return false, fmt.Errorf("reconcile previous gateway binding: %w", err)
+	}
+	return reconciled, nil
 }
 
 func (r *instanceRuntimeBindingRepository) GetByInstanceID(ctx context.Context, instanceID int) (*models.InstanceRuntimeBinding, error) {

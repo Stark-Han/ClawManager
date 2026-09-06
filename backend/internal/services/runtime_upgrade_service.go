@@ -124,23 +124,25 @@ func newRuntimeUpgradeDetails(rollout *models.RuntimeRollout, items []models.Run
 }
 
 type runtimeUpgradeCandidate struct {
-	InstanceID    int
-	UserID        int
-	RuntimePodID  *int64
-	GatewayID     string
-	Generation    int
-	BindingState  string
-	WorkspacePath string
-	TeamID        *int
-	TeamMemberID  *int
-	MemberKey     string
-	Role          string
-	RuntimeType   string
-	Availability  string
-	MemberStatus  string
-	SourceVersion string
-	AgentEndpoint string
-	Capabilities  []string
+	InstanceID        int
+	UserID            int
+	InstanceStatus    string
+	RuntimeGeneration int
+	RuntimePodID      *int64
+	GatewayID         string
+	Generation        int
+	BindingState      string
+	WorkspacePath     string
+	TeamID            *int
+	TeamMemberID      *int
+	MemberKey         string
+	Role              string
+	RuntimeType       string
+	Availability      string
+	MemberStatus      string
+	SourceVersion     string
+	AgentEndpoint     string
+	Capabilities      []string
 }
 
 type runtimeWorkspaceInventory struct {
@@ -1018,12 +1020,13 @@ func runtimeUpgradeLeaseToken(rolloutID int64, instanceID int) string {
 
 func (s *RuntimeUpgradeService) candidateForUpgradeItem(ctx context.Context, item models.RuntimeUpgradeItem) (runtimeUpgradeCandidate, error) {
 	var userID, generation int
+	var instanceStatus string
 	var workspace sql.NullString
-	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation, workspace_path FROM instances WHERE id = ?`, item.InstanceID)
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation, workspace_path, status FROM instances WHERE id = ?`, item.InstanceID)
 	if err != nil {
 		return runtimeUpgradeCandidate{}, err
 	}
-	if err := row.Scan(&userID, &generation, &workspace); err != nil {
+	if err := row.Scan(&userID, &generation, &workspace, &instanceStatus); err != nil {
 		return runtimeUpgradeCandidate{}, err
 	}
 	expected := RuntimeWorkspacePathWithRoot(s.workspaceRoot, RuntimeTypeOpenClaw, userID, item.InstanceID)
@@ -1034,13 +1037,20 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItem(ctx context.Context, ite
 	if !sameCleanPath(actual, expected) || !pathWithin(s.workspaceRoot, actual) {
 		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d workspace left its fixed managed path", item.InstanceID)
 	}
-	candidate := runtimeUpgradeCandidate{InstanceID: item.InstanceID, UserID: userID, Generation: generation, WorkspacePath: actual, TeamID: item.TeamID, TeamMemberID: item.TeamMemberID}
+	instanceStatus = strings.ToLower(strings.TrimSpace(instanceStatus))
+	candidate := runtimeUpgradeCandidate{InstanceID: item.InstanceID, UserID: userID, InstanceStatus: instanceStatus, RuntimeGeneration: generation, Generation: generation, WorkspacePath: actual, TeamID: item.TeamID, TeamMemberID: item.TeamMemberID}
 	binding, err := s.bindings.GetByInstanceID(ctx, item.InstanceID)
 	if err != nil {
 		return runtimeUpgradeCandidate{}, err
 	}
 	if binding == nil {
+		if instanceStatus != "stopped" {
+			return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d is %s without a Runtime binding; runtime reconciliation is required before migration", item.InstanceID, instanceStatus)
+		}
 		return candidate, nil
+	}
+	if instanceStatus != "running" && instanceStatus != "stopped" {
+		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d runtime state %s is not stable for migration", item.InstanceID, instanceStatus)
 	}
 	candidate.RuntimePodID = &binding.RuntimePodID
 	candidate.GatewayID = strings.TrimSpace(binding.GatewayID)
@@ -1205,6 +1215,19 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 		row, queryErr := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
 		if queryErr != nil || row.Scan(&userID, &generation) != nil {
 			errs = append(errs, fmt.Errorf("restore instance %d: instance identity is unavailable", item.InstanceID))
+			continue
+		}
+		sourceCandidate, candidateErr := s.candidateForUpgradeItem(ctx, item)
+		if candidateErr != nil {
+			errs = append(errs, fmt.Errorf("restore instance %d cannot quiesce its source gateway: %w", item.InstanceID, candidateErr))
+			continue
+		}
+		stopped, stopErr := s.stopCandidateGateway(ctx, sourceCandidate)
+		if stopErr != nil || !stopped {
+			if stopErr == nil {
+				stopErr = errors.New("source gateway stop was not confirmed")
+			}
+			errs = append(errs, fmt.Errorf("restore instance %d cannot quiesce its source gateway: %w", item.InstanceID, stopErr))
 			continue
 		}
 		leaseToken := runtimeUpgradeLeaseToken(rollout.ID, item.InstanceID)
@@ -1721,7 +1744,7 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 		selectedIDs[id] = struct{}{}
 	}
 	rows, err := s.sess.SQL().QueryContext(ctx, `
-		SELECT i.id, i.user_id, i.workspace_path, i.description,
+		SELECT i.id, i.user_id, i.workspace_path, i.description, i.status, i.runtime_generation,
 		       b.runtime_pod_id, b.gateway_id, b.generation, b.state,
 		       tm.id, tm.team_id, tm.member_key, tm.role, tm.runtime_type, tm.availability, tm.status
 		FROM instances i
@@ -1744,13 +1767,15 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 	for rows.Next() {
 		var instanceID, userID int
 		var workspace, description sql.NullString
+		var instanceStatus string
+		var runtimeGeneration int
 		var podID sql.NullInt64
 		var gatewayID sql.NullString
 		var generation sql.NullInt64
 		var bindingState sql.NullString
 		var memberID, teamID sql.NullInt64
 		var memberKey, role, runtimeType, availability, status sql.NullString
-		if err := rows.Scan(&instanceID, &userID, &workspace, &description, &podID, &gatewayID, &generation, &bindingState, &memberID, &teamID, &memberKey, &role, &runtimeType, &availability, &status); err != nil {
+		if err := rows.Scan(&instanceID, &userID, &workspace, &description, &instanceStatus, &runtimeGeneration, &podID, &gatewayID, &generation, &bindingState, &memberID, &teamID, &memberKey, &role, &runtimeType, &availability, &status); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		labInstance := strings.HasPrefix(strings.ToLower(strings.TrimSpace(description.String)), "openclaw-upgrade-lab:")
@@ -1781,10 +1806,11 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 		if _, err := os.Lstat(actual); err != nil {
 			blockers = append(blockers, fmt.Sprintf("instance %d workspace is unavailable: %v", instanceID, err))
 		}
-		candidate := runtimeUpgradeCandidate{InstanceID: instanceID, UserID: userID, GatewayID: strings.TrimSpace(gatewayID.String), Generation: int(generation.Int64), BindingState: strings.ToLower(strings.TrimSpace(bindingState.String)), WorkspacePath: actual, MemberKey: memberKey.String, Role: role.String, RuntimeType: runtimeType.String, Availability: availability.String, MemberStatus: status.String}
+		candidate := runtimeUpgradeCandidate{InstanceID: instanceID, UserID: userID, InstanceStatus: strings.ToLower(strings.TrimSpace(instanceStatus)), RuntimeGeneration: runtimeGeneration, GatewayID: strings.TrimSpace(gatewayID.String), Generation: runtimeGeneration, BindingState: strings.ToLower(strings.TrimSpace(bindingState.String)), WorkspacePath: actual, MemberKey: memberKey.String, Role: role.String, RuntimeType: runtimeType.String, Availability: availability.String, MemberStatus: status.String}
 		if podID.Valid {
 			value := podID.Int64
 			candidate.RuntimePodID = &value
+			candidate.Generation = int(generation.Int64)
 			if pod, ok := podByID[value]; ok {
 				if scope.UpgradeLabRunID != nil {
 					expectedPrefix := fmt.Sprintf("%sr%d-", openClawUpgradeLabDeploymentPrefix, *scope.UpgradeLabRunID)
@@ -1808,6 +1834,12 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 					warnings = append(warnings, fmt.Sprintf("instance %d is a legacy 7.1-compatible source; OpenClaw's transactional session migration archive will be used without copying the workspace", instanceID))
 				}
 			}
+		}
+		if !podID.Valid && candidate.InstanceStatus != "stopped" {
+			blockers = append(blockers, fmt.Sprintf("instance %d is %s without a Runtime binding; wait for runtime reconciliation before upgrading", instanceID, candidate.InstanceStatus))
+		}
+		if podID.Valid && candidate.InstanceStatus != "running" && candidate.InstanceStatus != "stopped" {
+			blockers = append(blockers, fmt.Sprintf("instance %d runtime state %s is not stable for upgrade", instanceID, candidate.InstanceStatus))
 		}
 		if memberID.Valid {
 			value := int(memberID.Int64)

@@ -631,6 +631,7 @@ func TestRuntimeUpgradeInfrastructureRetryable(t *testing.T) {
 		context.DeadlineExceeded,
 		fmt.Errorf("list pods: etcdserver: request timed out"),
 		fmt.Errorf("request: Client.Timeout exceeded while awaiting headers"),
+		fmt.Errorf("restore: runtime reconciliation is required before migration"),
 	} {
 		if !runtimeUpgradeInfrastructureRetryable(err) {
 			t.Fatalf("%v must remain retryable without starting data rollback", err)

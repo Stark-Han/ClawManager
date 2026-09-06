@@ -962,7 +962,7 @@ func runtimeUpgradeInfrastructureRetryable(err error) bool {
 		return true
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "connection reset by peer", "transport is closing"} {
+	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "connection reset by peer", "transport is closing", "runtime reconciliation is required before migration"} {
 		if strings.Contains(message, marker) {
 			return true
 		}

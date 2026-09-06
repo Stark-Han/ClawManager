@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -87,14 +89,15 @@ type runtimeAgentGatewaysRequest struct {
 }
 
 type runtimeAgentGatewayReport struct {
-	InstanceID   int        `json:"instance_id" binding:"required"`
-	GatewayID    string     `json:"gateway_id"`
-	GatewayPort  int        `json:"gateway_port"`
-	GatewayPID   *int       `json:"gateway_pid,omitempty"`
-	State        string     `json:"state" binding:"required"`
-	Generation   int        `json:"generation" binding:"required"`
-	ErrorMessage *string    `json:"error_message,omitempty"`
-	HealthAt     *time.Time `json:"health_at,omitempty"`
+	InstanceID    int        `json:"instance_id" binding:"required"`
+	GatewayID     string     `json:"gateway_id"`
+	GatewayPort   int        `json:"gateway_port"`
+	GatewayPID    *int       `json:"gateway_pid,omitempty"`
+	WorkspacePath string     `json:"workspace_path,omitempty"`
+	State         string     `json:"state" binding:"required"`
+	Generation    int        `json:"generation" binding:"required"`
+	ErrorMessage  *string    `json:"error_message,omitempty"`
+	HealthAt      *time.Time `json:"health_at,omitempty"`
 }
 
 func NewRuntimeAgentHandler(cfg config.RuntimePoolConfig, podRepo repository.RuntimePodRepository, bindingRepo repository.InstanceRuntimeBindingRepository, instanceRepo repository.InstanceRepository, events runtimeEventPublisher, skillService services.SkillService) *RuntimeAgentHandler {
@@ -305,6 +308,21 @@ func (h *RuntimeAgentHandler) ReportGateways(c *gin.Context) {
 			utils.HandleError(c, err)
 			return
 		}
+		if binding == nil {
+			reconciled, reconcileErr := h.reconcilePreviousOpenClawGateway(c.Request.Context(), podID, gateway)
+			if reconcileErr != nil {
+				utils.HandleError(c, reconcileErr)
+				return
+			}
+			if !reconciled {
+				continue
+			}
+			binding, err = h.bindingRepo.GetByInstanceID(c.Request.Context(), gateway.InstanceID)
+			if err != nil {
+				utils.HandleError(c, err)
+				return
+			}
+		}
 		if binding == nil || binding.RuntimePodID != podID || binding.Generation != gateway.Generation {
 			continue
 		}
@@ -348,6 +366,67 @@ func (h *RuntimeAgentHandler) ReportGateways(c *gin.Context) {
 		"gateway_count": len(req.Gateways),
 	})
 	utils.Success(c, http.StatusOK, "Runtime gateway report accepted", nil)
+}
+
+func (h *RuntimeAgentHandler) reconcilePreviousOpenClawGateway(ctx context.Context, podID int64, gateway runtimeAgentGatewayReport) (bool, error) {
+	if h == nil || h.instanceRepo == nil || h.podRepo == nil || h.bindingRepo == nil {
+		return false, nil
+	}
+	reconciler, ok := h.bindingRepo.(repository.PreviousGatewayBindingReconciler)
+	if !ok {
+		return false, nil
+	}
+	pod, err := h.podRepo.GetByID(ctx, podID)
+	if err != nil || pod == nil {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(pod.RuntimeType), services.RuntimeTypeOpenClaw) || !runtimePodHasCapability(*pod, "openclaw.upgrade-preflight-v3") {
+		return false, nil
+	}
+	instance, err := h.instanceRepo.GetByID(gateway.InstanceID)
+	if err != nil || instance == nil {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(instance.Type), services.RuntimeTypeOpenClaw) || !strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModeLite) || !strings.EqualFold(strings.TrimSpace(instance.Status), "error") {
+		return false, nil
+	}
+	expectedGatewayID := fmt.Sprintf("gw-%d-%d", gateway.InstanceID, gateway.Generation)
+	expectedWorkspace := services.RuntimeWorkspacePathWithRoot(h.cfg.WorkspaceRoot, services.RuntimeTypeOpenClaw, instance.UserID, instance.ID)
+	actualWorkspace := strings.TrimSpace(gateway.WorkspacePath)
+	if gateway.Generation <= 0 || instance.RuntimeGeneration != gateway.Generation+1 || strings.TrimSpace(gateway.GatewayID) != expectedGatewayID || actualWorkspace == "" || !sameRuntimePath(actualWorkspace, expectedWorkspace) {
+		return false, nil
+	}
+	expectedConflict := fmt.Sprintf("previous gateway generation is still active: gateway_id=%s generation=%d", expectedGatewayID, gateway.Generation)
+	if instance.RuntimeErrorMessage == nil || !strings.Contains(*instance.RuntimeErrorMessage, expectedConflict) {
+		return false, nil
+	}
+	lifecycle := services.NormalizeRuntimeGatewayLifecycle(gateway.State, gateway.ErrorMessage)
+	if !lifecycle.Running || gateway.GatewayPort <= 0 {
+		return false, nil
+	}
+	healthAt := gateway.HealthAt
+	if healthAt == nil {
+		now := time.Now().UTC()
+		healthAt = &now
+	}
+	return reconciler.ReconcilePreviousGateway(ctx, &models.InstanceRuntimeBinding{
+		InstanceID: gateway.InstanceID, RuntimePodID: podID, RuntimeType: services.RuntimeTypeOpenClaw,
+		GatewayID: gateway.GatewayID, GatewayPort: gateway.GatewayPort, GatewayPID: gateway.GatewayPID,
+		WorkspacePath: expectedWorkspace, State: services.RuntimeGatewayBindingRunning, Generation: gateway.Generation, LastHealthAt: healthAt,
+	}, instance.RuntimeGeneration, services.RuntimeGatewayPortBlockSize(services.RuntimeTypeOpenClaw))
+}
+
+func runtimePodHasCapability(pod models.RuntimePod, required string) bool {
+	for _, capability := range pod.Capabilities() {
+		if strings.TrimSpace(capability) == required {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRuntimePath(left, right string) bool {
+	return filepath.Clean(strings.TrimSpace(left)) == filepath.Clean(strings.TrimSpace(right))
 }
 
 func (h *RuntimeAgentHandler) missingGatewayCleanupEligible(binding models.InstanceRuntimeBinding, now time.Time) bool {
