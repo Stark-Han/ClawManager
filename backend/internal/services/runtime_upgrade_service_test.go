@@ -95,6 +95,19 @@ func TestRuntimeUpgradeScopePersistsLabSelectionWithoutNewRolloutColumns(t *test
 	}
 }
 
+func TestUpgradeGatewayRestartTimeoutOnlyAppliesToActiveRestart(t *testing.T) {
+	now := time.Now().UTC()
+	if !upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-openClawUpgradeGatewayRestartTimeout)}, now) {
+		t.Fatal("expired restart_ready item was allowed to wait forever")
+	}
+	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-time.Minute)}, now) {
+		t.Fatal("fresh gateway restart was timed out")
+	}
+	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "gateway_verified", UpdatedAt: now.Add(-time.Hour)}, now) {
+		t.Fatal("verified gateway was timed out")
+	}
+}
+
 func TestRuntimeUpgradeGuardAppliesOnlyToOpenClaw(t *testing.T) {
 	service := &RuntimeUpgradeService{}
 	for _, runtimeType := range []string{RuntimeTypeHermes, RuntimeTypeOpenCode, RuntimeTypeDeepSeekHarness} {

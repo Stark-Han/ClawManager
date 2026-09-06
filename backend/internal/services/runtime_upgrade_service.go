@@ -32,6 +32,7 @@ import (
 
 const targetOpenClawUpgradeVersion = "2026.8.1"
 const maxOpenClawUpgradeBatchSize = 8
+const openClawUpgradeGatewayRestartTimeout = 5 * time.Minute
 const (
 	RuntimeUpgradeStrategyLegacyRolling    = "legacy_rolling"
 	RuntimeUpgradeStrategyOpenClawDataSafe = "openclaw_8plus_data_safe"
@@ -710,6 +711,9 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if s.gatewayRestarter == nil {
 				return false, fmt.Errorf("OpenClaw upgrade gateway restarter is unavailable")
 			}
+			if upgradeGatewayRestartExpired(item, time.Now().UTC()) {
+				return false, fmt.Errorf("restart upgraded instance %d: gateway did not become healthy within %s", item.InstanceID, openClawUpgradeGatewayRestartTimeout)
+			}
 			if err := s.gatewayRestarter.EnsureUpgradeGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
 				return false, fmt.Errorf("restart upgraded instance %d: %w", item.InstanceID, err)
 			}
@@ -770,6 +774,10 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	now := time.Now().UTC()
 	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'verified', finished_at = ?, updated_at = ? WHERE rollout_id = ?`, now, now, rollout.ID)
 	return true, nil
+}
+
+func upgradeGatewayRestartExpired(item models.RuntimeUpgradeItem, now time.Time) bool {
+	return item.State == "restart_ready" && !item.UpdatedAt.IsZero() && now.Sub(item.UpdatedAt.UTC()) >= openClawUpgradeGatewayRestartTimeout
 }
 
 // validateOpenClawUpgradeAggregateCapacity prevents hundreds of individually
