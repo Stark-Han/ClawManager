@@ -104,6 +104,24 @@ type RuntimeUpgradeDetails struct {
 	Audits  []models.RuntimeUpgradeAudit `json:"audits"`
 }
 
+func newRuntimeUpgradePreflightResult() *RuntimeUpgradePreflightResult {
+	return &RuntimeUpgradePreflightResult{
+		Blockers:             make([]string, 0),
+		Warnings:             make([]string, 0),
+		RequiredCapabilities: make([]string, 0),
+	}
+}
+
+func newRuntimeUpgradeDetails(rollout *models.RuntimeRollout, items []models.RuntimeUpgradeItem, audits []models.RuntimeUpgradeAudit) *RuntimeUpgradeDetails {
+	if items == nil {
+		items = make([]models.RuntimeUpgradeItem, 0)
+	}
+	if audits == nil {
+		audits = make([]models.RuntimeUpgradeAudit, 0)
+	}
+	return &RuntimeUpgradeDetails{Rollout: rollout, Items: items, Audits: audits}
+}
+
 type runtimeUpgradeCandidate struct {
 	InstanceID    int
 	UserID        int
@@ -188,7 +206,11 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 		return nil, fmt.Errorf("runtime upgrade service is not configured")
 	}
 	target := strings.TrimSpace(req.TargetImageRef)
-	result := &RuntimeUpgradePreflightResult{}
+	// API collection fields are part of the wire contract: an empty collection
+	// must be encoded as [] rather than null. Legacy and empty-pool preflights
+	// can return before the normal de-duplication path below, so initialise every
+	// collection eagerly.
+	result := newRuntimeUpgradePreflightResult()
 	if target == "" {
 		result.Blockers = append(result.Blockers, "target_image_ref is required")
 	}
@@ -371,11 +393,11 @@ func (s *RuntimeUpgradeService) Details(ctx context.Context, rolloutID int64) (*
 	if err != nil {
 		return nil, err
 	}
-	var audits []models.RuntimeUpgradeAudit
+	audits := make([]models.RuntimeUpgradeAudit, 0)
 	if err := s.sess.Collection("runtime_upgrade_audits").Find(db.Cond{"rollout_id": rolloutID}).OrderBy("created_at", "id").All(&audits); err != nil {
 		return nil, err
 	}
-	return &RuntimeUpgradeDetails{Rollout: rollout, Items: items, Audits: audits}, nil
+	return newRuntimeUpgradeDetails(rollout, items, audits), nil
 }
 
 func (s *RuntimeUpgradeService) Prepare(ctx context.Context, rollout *models.RuntimeRollout) error {
@@ -2364,9 +2386,14 @@ func (s *RuntimeUpgradeService) insertUpgradeItems(ctx context.Context, rolloutI
 }
 
 func (s *RuntimeUpgradeService) listUpgradeItems(ctx context.Context, rolloutID int64) ([]models.RuntimeUpgradeItem, error) {
-	var items []models.RuntimeUpgradeItem
+	// A legacy rollout and the OpenClaw empty-pool reset intentionally have no
+	// per-instance rows. Keep their JSON representation stable for all clients.
+	items := make([]models.RuntimeUpgradeItem, 0)
 	if err := s.sess.Collection("runtime_upgrade_items").Find(db.Cond{"rollout_id": rolloutID}).OrderBy("team_id", "is_team_leader", "member_order", "id").All(&items); err != nil {
 		return nil, err
+	}
+	if items == nil {
+		items = make([]models.RuntimeUpgradeItem, 0)
 	}
 	return items, nil
 }

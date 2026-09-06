@@ -348,6 +348,28 @@ func TestOpenClawNumericVersionComparison(t *testing.T) {
 	}
 }
 
+func TestRuntimeUpgradeAPICollectionsEncodeAsArrays(t *testing.T) {
+	preflightJSON, err := json.Marshal(newRuntimeUpgradePreflightResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"blockers":[]`, `"warnings":[]`, `"required_capabilities":[]`} {
+		if !strings.Contains(string(preflightJSON), field) {
+			t.Fatalf("preflight JSON %s does not contain %s", preflightJSON, field)
+		}
+	}
+
+	detailsJSON, err := json.Marshal(newRuntimeUpgradeDetails(&models.RuntimeRollout{}, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"items":[]`, `"audits":[]`} {
+		if !strings.Contains(string(detailsJSON), field) {
+			t.Fatalf("details JSON %s does not contain %s", detailsJSON, field)
+		}
+	}
+}
+
 func TestLiteClassificationHonorsExplicitInstanceMode(t *testing.T) {
 	for _, test := range []struct {
 		name    string

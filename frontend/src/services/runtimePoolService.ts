@@ -14,30 +14,53 @@ export const runtimePoolService = {
     const response = await api.get("/admin/runtime-pods", {
       params: runtimeType ? { runtime_type: runtimeType } : undefined,
     });
-    return response.data.data.pods;
+    const pods = response.data.data?.pods;
+    return Array.isArray(pods) ? pods : [];
   },
 
   async listGateways(podId: number): Promise<RuntimeGateway[]> {
     const response = await api.get(`/admin/runtime-pods/${podId}/gateways`);
-    return response.data.data.gateways;
+    const gateways = response.data.data?.gateways;
+    return Array.isArray(gateways) ? gateways : [];
   },
 
   async drainPod(podId: number): Promise<void> {
     await api.post(`/admin/runtime-pods/${podId}/drain`);
   },
 
-	async startRollout(data: StartRuntimeRolloutRequest): Promise<RuntimeRollout> {
-		const response = await api.post("/admin/runtime-rollouts", data);
-		return response.data.data.rollout;
+  async startRollout(data: StartRuntimeRolloutRequest): Promise<RuntimeRollout> {
+    const response = await api.post("/admin/runtime-rollouts", data);
+    const rollout = response.data.data?.rollout as RuntimeRollout | undefined;
+    if (!rollout || typeof rollout.id !== "number") {
+      throw new Error("Runtime rollout response is incomplete");
+    }
+    return rollout;
   },
 
-	async getRollout(id: number): Promise<RuntimeUpgradeDetails> {
-		const response = await api.get(`/admin/runtime-rollouts/${id}`);
-		return response.data.data;
-	},
+  async getRollout(id: number): Promise<RuntimeUpgradeDetails> {
+    const response = await api.get(`/admin/runtime-rollouts/${id}`);
+    const details = response.data.data as RuntimeUpgradeDetails | null | undefined;
+    if (!details?.rollout || typeof details.rollout.id !== "number") {
+      throw new Error("Runtime rollout details response is incomplete");
+    }
+    return {
+      ...details,
+      items: Array.isArray(details.items) ? details.items : [],
+      audits: Array.isArray(details.audits) ? details.audits : [],
+    };
+  },
 
   async preflightOpenClawRollout(data: Omit<StartRuntimeRolloutRequest, "runtime_type" | "preflight_id">): Promise<RuntimeUpgradePreflightResult> {
     const response = await api.post("/admin/runtime-rollouts/preflight", data);
-    return response.data.data;
+    const result = response.data.data as RuntimeUpgradePreflightResult | null | undefined;
+    if (!result || typeof result.passed !== "boolean") {
+      throw new Error("Runtime rollout preflight response is incomplete");
+    }
+    return {
+      ...result,
+      blockers: Array.isArray(result.blockers) ? result.blockers : [],
+      warnings: Array.isArray(result.warnings) ? result.warnings : [],
+      required_capabilities: Array.isArray(result.required_capabilities) ? result.required_capabilities : [],
+    };
   },
 };
