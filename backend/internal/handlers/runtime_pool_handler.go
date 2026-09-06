@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -207,6 +208,9 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		maxUnavailable = 1
 	}
 	startedBy := currentUserIDPtr(c)
+	rolloutPhase := "requested"
+	var sourceImagesJSON *string
+	var targetImageDigest *string
 	if runtimeType == services.RuntimeTypeOpenClaw {
 		if h.upgrade == nil {
 			utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")
@@ -240,16 +244,32 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		// A recognized pre-8.1 OpenClaw target deliberately rejoins the
 		// unchanged generic Lite rolling-update path below.
 		targetImage = classification.ImageRef
+		if classification.EmptyPoolReset {
+			encoded, marshalErr := json.Marshal(classification.SourceImages)
+			if marshalErr != nil {
+				utils.Error(c, http.StatusInternalServerError, "failed to preserve the current OpenClaw pool image inventory")
+				return
+			}
+			value := string(encoded)
+			sourceImagesJSON = &value
+			rolloutPhase = services.RuntimeUpgradePhaseEmptyPoolReset
+		}
+		if classification.ImageDigest != "" {
+			value := classification.ImageDigest
+			targetImageDigest = &value
+		}
 	}
 	rollout := &models.RuntimeRollout{
-		RuntimeType:    runtimeType,
-		TargetImageRef: targetImage,
-		Status:         "pending",
-		Phase:          "requested",
-		BatchSize:      batchSize,
-		MaxUnavailable: maxUnavailable,
-		StartedBy:      startedBy,
-		AutoRollback:   req.AutoRollback == nil || *req.AutoRollback,
+		RuntimeType:       runtimeType,
+		TargetImageRef:    targetImage,
+		SourceImagesJSON:  sourceImagesJSON,
+		TargetImageDigest: targetImageDigest,
+		Status:            "pending",
+		Phase:             rolloutPhase,
+		BatchSize:         batchSize,
+		MaxUnavailable:    maxUnavailable,
+		StartedBy:         startedBy,
+		AutoRollback:      req.AutoRollback == nil || *req.AutoRollback,
 	}
 	if err := h.rolloutRepo.Create(c.Request.Context(), rollout); err != nil {
 		utils.HandleError(c, err)

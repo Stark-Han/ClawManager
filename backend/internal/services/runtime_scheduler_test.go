@@ -2515,6 +2515,81 @@ func TestRuntimeSchedulerLegacyRolloutIsolationAcrossLiteRuntimes(t *testing.T) 
 	}
 }
 
+func TestRuntimeSchedulerEmptyOpenClawPoolResetKeepsOldPodAvailable(t *testing.T) {
+	ctx := context.Background()
+	deployments := &fakeRuntimeDeploymentService{}
+	scheduler := NewRuntimeScheduler(
+		newFakeRuntimeInstanceRepo(),
+		&fakeRuntimePodRepo{},
+		newFakeRuntimeBindingRepo(),
+		&fakeRuntimeRolloutRepo{},
+		&fakeRuntimeAgentClient{},
+		NewRuntimeEventService(nil),
+		nil,
+		deployments,
+		time.Second,
+	)
+	rollout := &models.RuntimeRollout{
+		ID:             92,
+		RuntimeType:    RuntimeTypeOpenClaw,
+		TargetImageRef: "registry/openclaw@sha256:" + strings.Repeat("7", 64),
+		Phase:          RuntimeUpgradePhaseEmptyPoolReset,
+	}
+	pods := []models.RuntimePod{{
+		ID:             1,
+		RuntimeType:    RuntimeTypeOpenClaw,
+		Namespace:      "runtime-system",
+		DeploymentName: "openclaw-runtime-u57",
+		State:          "ready",
+	}}
+	if err := scheduler.rolloutRuntimeDeployments(ctx, rollout, pods, 4, 6); err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments.rolloutImageCalls) != 1 || len(deployments.upgradePoolCalls) != 0 {
+		t.Fatalf("empty reset calls: rollout=%d upgradePool=%d", len(deployments.rolloutImageCalls), len(deployments.upgradePoolCalls))
+	}
+	call := deployments.rolloutImageCalls[0]
+	if call.name != "openclaw-runtime-u57" || call.maxUnavailable != 0 || call.maxSurge != 1 || call.upgradeID != "" {
+		t.Fatalf("empty reset must be an in-place readiness-gated rollout: %+v", call)
+	}
+}
+
+func TestRuntimeDeploymentPodsMergeAgentVersionAndOccupancy(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	version := "2026.8.1"
+	endpoint := "http://10.0.0.8:19090"
+	deployments := &fakeRuntimeDeploymentService{pods: []k8s.RuntimeDeploymentPod{{
+		RuntimeType:    RuntimeTypeOpenClaw,
+		Namespace:      "runtime-system",
+		DeploymentName: "openclaw-runtime-u57",
+		PodName:        "openclaw-runtime-u57-abc",
+		ImageRef:       "registry/openclaw@sha256:" + strings.Repeat("8", 64),
+		State:          "ready",
+	}}}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		8: {
+			ID:              8,
+			RuntimeType:     RuntimeTypeOpenClaw,
+			Namespace:       "runtime-system",
+			DeploymentName:  "openclaw-runtime-u57",
+			PodName:         "openclaw-runtime-u57-abc",
+			OpenClawVersion: &version,
+			AgentEndpoint:   &endpoint,
+			UsedSlots:       3,
+			LastSeenAt:      &now,
+		},
+	}}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second, WithRuntimeSchedulerNamespace("runtime-system"))
+	pods, err := scheduler.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods) != 1 || stringValue(pods[0].OpenClawVersion) != version || stringValue(pods[0].AgentEndpoint) != endpoint || pods[0].UsedSlots != 3 || pods[0].LastSeenAt == nil {
+		t.Fatalf("merged deployment inventory = %+v", pods)
+	}
+}
+
 func TestRuntimeSchedulerRolloutUsesStalePodDeploymentRefWhenNoCurrentPods(t *testing.T) {
 	ctx := context.Background()
 	staleSeen := time.Now().UTC().Add(-5 * time.Minute)

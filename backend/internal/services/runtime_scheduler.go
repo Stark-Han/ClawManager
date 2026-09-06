@@ -266,6 +266,17 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 			return err
 		}
 	}
+	emptyOpenClawPoolReset := isEmptyOpenClawPoolReset(rollout)
+	if emptyOpenClawPoolReset {
+		if s.upgrade == nil {
+			return fmt.Errorf("OpenClaw empty-pool reset service is not configured")
+		}
+		if err := s.upgrade.ValidateEmptyOpenClawPoolReset(ctx, rollout.ID); err != nil {
+			message := err.Error()
+			_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", nil, nil, &message)
+			return fmt.Errorf("OpenClaw empty-pool reset was cancelled before changing the image: %w", err)
+		}
+	}
 
 	startedAt := time.Now().UTC()
 	if err := s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "running", &startedAt, nil, nil); err != nil {
@@ -310,6 +321,12 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		}
 		_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", &startedAt, nil, &message)
 		return err
+	}
+	if emptyOpenClawPoolReset {
+		// There are no gateways to drain. Let Kubernetes keep the old empty pod
+		// Ready until the replacement image is Ready; draining here races the pod
+		// replacement and adds no safety.
+		return nil
 	}
 	unavailable := 0
 	readyCandidates := 0
@@ -389,6 +406,10 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 	targetImage := strings.TrimSpace(rollout.TargetImageRef)
 	if targetImage == "" {
 		return nil
+	}
+	if isEmptyOpenClawPoolReset(rollout) {
+		maxUnavailable = 0
+		maxSurge = 1
 	}
 	type deploymentRef struct {
 		namespace string
@@ -492,6 +513,35 @@ func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeTyp
 			SourceDeployment:  pod.SourceDeployment,
 			SchedulingEnabled: pod.SchedulingEnabled,
 		})
+	}
+	// Kubernetes is authoritative for deployment ownership and the running
+	// image. Runtime Agent heartbeats are authoritative for capabilities,
+	// OpenClaw version and gateway occupancy. Merge them by immutable pod
+	// identity so downgrade decisions cannot silently treat an 8.1 pod as an
+	// unknown legacy source.
+	if s.podRepo != nil {
+		reported, reportErr := s.podRepo.List(ctx, runtimeType)
+		if reportErr != nil {
+			return nil, fmt.Errorf("list Runtime Agent reports for %s deployments: %w", runtimeType, reportErr)
+		}
+		byIdentity := make(map[string]models.RuntimePod, len(reported))
+		for _, pod := range reported {
+			byIdentity[runtimePodIdentity(pod)] = pod
+		}
+		for index := range result {
+			pod, ok := byIdentity[runtimePodIdentity(result[index])]
+			if !ok {
+				continue
+			}
+			result[index].OpenClawVersion = pod.OpenClawVersion
+			result[index].AgentProtocolVersion = pod.AgentProtocolVersion
+			result[index].TeamPluginVersion = pod.TeamPluginVersion
+			result[index].SessionStore = pod.SessionStore
+			result[index].CapabilitiesJSON = pod.CapabilitiesJSON
+			result[index].AgentEndpoint = pod.AgentEndpoint
+			result[index].UsedSlots = pod.UsedSlots
+			result[index].LastSeenAt = pod.LastSeenAt
+		}
 	}
 	return result, nil
 }
@@ -694,6 +744,10 @@ const openClawUpgradeLabDeploymentPrefix = "openclaw-upgrade-lab-"
 
 func isOpenClawUpgradeLabDeployment(name string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), openClawUpgradeLabDeploymentPrefix)
+}
+
+func isEmptyOpenClawPoolReset(rollout *models.RuntimeRollout) bool {
+	return rollout != nil && rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil && strings.EqualFold(strings.TrimSpace(rollout.Phase), RuntimeUpgradePhaseEmptyPoolReset)
 }
 
 func canAutoRollbackOpenClaw(phase string) bool {

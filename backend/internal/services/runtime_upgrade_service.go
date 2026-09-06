@@ -34,6 +34,7 @@ const maxOpenClawUpgradeBatchSize = 8
 const (
 	RuntimeUpgradeStrategyLegacyRolling    = "legacy_rolling"
 	RuntimeUpgradeStrategyOpenClawDataSafe = "openclaw_8plus_data_safe"
+	RuntimeUpgradePhaseEmptyPoolReset      = "empty_pool_reset"
 	openClawDataSafeImageStrategy          = "openclaw-sqlite-v1"
 	openClawDataSafeProtocol               = "openclaw-upgrade-v3"
 )
@@ -84,6 +85,7 @@ type RuntimeUpgradePreflightResult struct {
 	OpenClawTeamMemberCount int                    `json:"openclaw_team_member_count"`
 	HermesTeamMemberCount   int                    `json:"hermes_team_member_count"`
 	RequiredCapabilities    []string               `json:"required_capabilities"`
+	EmptyPoolReset          bool                   `json:"empty_pool_reset,omitempty"`
 }
 
 type OpenClawTargetClassification struct {
@@ -92,6 +94,8 @@ type OpenClawTargetClassification struct {
 	ImageDigest    string
 	RuntimeVersion string
 	Protocol       string
+	EmptyPoolReset bool
+	SourceImages   map[string]string
 }
 
 type RuntimeUpgradeDetails struct {
@@ -197,6 +201,7 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 			result.TargetImageRef = classification.ImageRef
 			result.TargetRuntimeVersion = classification.RuntimeVersion
 			result.TargetUpgradeProtocol = classification.Protocol
+			result.EmptyPoolReset = classification.EmptyPoolReset
 			target = classification.ImageRef
 		}
 	}
@@ -206,7 +211,11 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	}
 	if result.Strategy == RuntimeUpgradeStrategyLegacyRolling {
 		result.Passed = true
-		result.Warnings = []string{"The target is an OpenClaw version before 2026.8.1 and will use the unchanged legacy Lite rolling update path"}
+		if result.EmptyPoolReset {
+			result.Warnings = []string{"The active OpenClaw pool is 2026.8.1 or newer. Its ordinary Lite instance set is empty, so the pool image may be reset through the legacy rolling path without reusing 8.1 user data"}
+		} else {
+			result.Warnings = []string{"The target is an OpenClaw version before 2026.8.1 and will use the unchanged legacy Lite rolling update path"}
+		}
 		return result, nil
 	}
 	if req.BatchSize > maxOpenClawUpgradeBatchSize {
@@ -1337,7 +1346,7 @@ func activeOpenClawRolloutBlocksInstance(phase, rollbackStatus, preflightJSON st
 		return true
 	}
 	switch phase {
-	case "maintenance", "image_rollout", "compatibility_check", "session_migration", "postflight", "rollback_restore":
+	case RuntimeUpgradePhaseEmptyPoolReset, "maintenance", "image_rollout", "compatibility_check", "session_migration", "postflight", "rollback_restore":
 		return true
 	case "gateway_restart":
 		// The upgrade reconciler owns restart_ready placement and targets the
@@ -1368,6 +1377,122 @@ func (s *RuntimeUpgradeService) ValidateInstanceDeletion(ctx context.Context, in
 	}
 	if count > 0 {
 		return fmt.Errorf("instance %d is held by an active data-safe runtime rollout", instanceID)
+	}
+	return nil
+}
+
+// ValidateEmptyOpenClawPoolReset proves that the ordinary OpenClaw Lite pool
+// contains no user lifecycle state before an 8.1+ deployment is allowed to
+// rejoin the pre-8.1 rolling path. Upgrade-lab deployments are intentionally
+// excluded because they are isolated by their Kubernetes ownership labels.
+// The rollout row itself is excluded during the execution-time recheck.
+func (s *RuntimeUpgradeService) ValidateEmptyOpenClawPoolReset(ctx context.Context, excludeRolloutID int64) error {
+	if s == nil || s.sess == nil || s.pods == nil || s.bindings == nil || s.rollouts == nil || s.deployments == nil {
+		return fmt.Errorf("empty OpenClaw pool reset safety dependencies are unavailable")
+	}
+	var blockers []string
+	var instanceCount int
+	var firstInstance sql.NullInt64
+	row, err := s.sess.SQL().QueryRowContext(ctx, `
+		SELECT COUNT(*), MIN(i.id)
+		FROM instances i
+		WHERE LOWER(TRIM(i.type)) = 'openclaw'
+		  AND (CASE
+		    WHEN LOWER(TRIM(i.instance_mode)) IN ('lite','pro') THEN LOWER(TRIM(i.instance_mode))
+		    WHEN LOWER(TRIM(i.runtime_type)) = 'gateway' THEN 'lite'
+		    ELSE 'pro'
+		  END) = 'lite'
+		  AND LOWER(TRIM(COALESCE(i.description, ''))) NOT LIKE 'openclaw-upgrade-lab:%'
+	`)
+	if err != nil {
+		return fmt.Errorf("inspect ordinary OpenClaw Lite instances: %w", err)
+	}
+	if err := row.Scan(&instanceCount, &firstInstance); err != nil {
+		return fmt.Errorf("inspect ordinary OpenClaw Lite instances: %w", err)
+	}
+	if instanceCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d ordinary OpenClaw Lite instance record(s) remain (first instance %d)", instanceCount, firstInstance.Int64))
+	}
+
+	var memberCount int
+	var firstMember sql.NullInt64
+	row, err = s.sess.SQL().QueryRowContext(ctx, `
+		SELECT COUNT(*), MIN(tm.id)
+		FROM team_members tm
+		JOIN instances i ON i.id = tm.instance_id
+		WHERE tm.status NOT IN ('deleted','deleting')
+		  AND LOWER(TRIM(COALESCE(tm.runtime_type, 'openclaw'))) = 'openclaw'
+		  AND LOWER(TRIM(i.type)) = 'openclaw'
+		  AND (CASE
+		    WHEN LOWER(TRIM(i.instance_mode)) IN ('lite','pro') THEN LOWER(TRIM(i.instance_mode))
+		    WHEN LOWER(TRIM(i.runtime_type)) = 'gateway' THEN 'lite'
+		    ELSE 'pro'
+		  END) = 'lite'
+		  AND LOWER(TRIM(COALESCE(i.description, ''))) NOT LIKE 'openclaw-upgrade-lab:%'
+	`)
+	if err != nil {
+		return fmt.Errorf("inspect OpenClaw Team references: %w", err)
+	}
+	if err := row.Scan(&memberCount, &firstMember); err != nil {
+		return fmt.Errorf("inspect OpenClaw Team references: %w", err)
+	}
+	if memberCount > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d active Team member reference(s) remain (first member %d)", memberCount, firstMember.Int64))
+	}
+
+	activeRollouts, err := s.rollouts.ListActive(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return fmt.Errorf("inspect active OpenClaw rollouts: %w", err)
+	}
+	for _, rollout := range activeRollouts {
+		if rollout.ID == excludeRolloutID || runtimeUpgradeScopeFromRollout(&rollout).UpgradeLabRunID != nil {
+			continue
+		}
+		blockers = append(blockers, fmt.Sprintf("OpenClaw rollout %d is still %s", rollout.ID, strings.TrimSpace(rollout.Status)))
+	}
+
+	livePods, err := s.deployments.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return fmt.Errorf("inspect live OpenClaw deployments for empty reset: %w", err)
+	}
+	liveOrdinaryPods := map[string]models.RuntimePod{}
+	for _, pod := range livePods {
+		if !runtimePodEligibleForOrdinaryScheduling(pod) {
+			continue
+		}
+		liveOrdinaryPods[runtimePodIdentity(pod)] = pod
+	}
+	if len(liveOrdinaryPods) == 0 {
+		blockers = append(blockers, "no active ordinary OpenClaw Runtime pod is available for an image-only reset")
+	}
+	reportedPods, err := s.pods.List(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return fmt.Errorf("inspect Runtime Agent reports for empty reset: %w", err)
+	}
+	reportedByIdentity := make(map[string]models.RuntimePod, len(reportedPods))
+	for _, pod := range reportedPods {
+		reportedByIdentity[runtimePodIdentity(pod)] = pod
+	}
+	for identity, livePod := range liveOrdinaryPods {
+		reported, ok := reportedByIdentity[identity]
+		if !ok || reported.LastSeenAt == nil || time.Since(reported.LastSeenAt.UTC()) > 2*time.Minute {
+			blockers = append(blockers, fmt.Sprintf("Runtime pod %s has no current agent report", strings.TrimSpace(livePod.PodName)))
+			continue
+		}
+		if reported.UsedSlots != 0 {
+			blockers = append(blockers, fmt.Sprintf("Runtime pod %s still reports %d used gateway slot(s)", strings.TrimSpace(livePod.PodName), reported.UsedSlots))
+		}
+		bindings, bindingErr := s.bindings.ListByRuntimePodID(ctx, reported.ID)
+		if bindingErr != nil {
+			return fmt.Errorf("inspect Runtime pod %s bindings: %w", strings.TrimSpace(livePod.PodName), bindingErr)
+		}
+		if len(bindings) > 0 {
+			blockers = append(blockers, fmt.Sprintf("Runtime pod %s still has %d gateway binding(s)", strings.TrimSpace(livePod.PodName), len(bindings)))
+		}
+	}
+	blockers = uniqueSortedStrings(blockers)
+	if len(blockers) > 0 {
+		return errors.New(strings.Join(blockers, "; "))
 	}
 	return nil
 }
@@ -2368,12 +2493,20 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 		return nil, fmt.Errorf("inspect live OpenClaw deployments: %w", err)
 	}
 	sourceImages := make(map[string]string)
+	sourceImagePinErrors := make(map[string]error)
 	for _, pod := range livePods {
 		if !runtimePodEligibleForOrdinaryScheduling(pod) {
 			continue
 		}
 		if strings.TrimSpace(pod.ImageRef) != "" {
-			sourceImages[pod.Namespace+"/"+pod.DeploymentName] = pod.ImageRef
+			key := strings.TrimSpace(pod.Namespace) + "/" + strings.TrimSpace(pod.DeploymentName)
+			pinned, pinErr := immutableRuntimeImage(pod.ImageRef, stringValue(pod.ImageDigest))
+			if pinErr != nil {
+				sourceImages[key] = strings.TrimSpace(pod.ImageRef)
+				sourceImagePinErrors[key] = pinErr
+			} else {
+				sourceImages[key] = pinned
+			}
 		}
 	}
 	if len(sourceImages) == 0 {
@@ -2383,14 +2516,48 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 	if err != nil {
 		return nil, err
 	}
+	classification.SourceImages = sourceImages
 	if classification.Strategy == RuntimeUpgradeStrategyLegacyRolling {
+		sourceClassifications := map[string]*OpenClawTargetClassification{}
+		active8Plus := false
 		for _, pod := range livePods {
 			if !runtimePodEligibleForOrdinaryScheduling(pod) {
 				continue
 			}
 			if openClawVersionAtLeast(stringValue(pod.OpenClawVersion), targetOpenClawUpgradeVersion) {
-				return nil, fmt.Errorf("downgrading an active OpenClaw 2026.8.1+ Runtime through the legacy rolling path is unsupported")
+				active8Plus = true
+				continue
 			}
+			key := strings.TrimSpace(pod.Namespace) + "/" + strings.TrimSpace(pod.DeploymentName)
+			source := sourceImages[key]
+			if source == "" {
+				continue
+			}
+			current, inspected := sourceClassifications[source]
+			if !inspected {
+				current, err = inspectOpenClawRegistryImage(ctx, source, sourceImages)
+				if err != nil {
+					return nil, fmt.Errorf("inspect current OpenClaw image %s before downgrade: %w", key, err)
+				}
+				sourceClassifications[source] = current
+			}
+			if openClawVersionAtLeast(current.RuntimeVersion, targetOpenClawUpgradeVersion) {
+				active8Plus = true
+			}
+		}
+		if active8Plus {
+			if len(sourceImagePinErrors) > 0 {
+				keys := make([]string, 0, len(sourceImagePinErrors))
+				for key := range sourceImagePinErrors {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				return nil, fmt.Errorf("empty OpenClaw pool reset requires an immutable source image for %s: %w", keys[0], sourceImagePinErrors[keys[0]])
+			}
+			if err := s.ValidateEmptyOpenClawPoolReset(ctx, 0); err != nil {
+				return nil, fmt.Errorf("downgrading an active OpenClaw 2026.8.1+ Runtime is allowed only after its ordinary Lite pool is empty: %w", err)
+			}
+			classification.EmptyPoolReset = true
 		}
 	}
 	return classification, nil

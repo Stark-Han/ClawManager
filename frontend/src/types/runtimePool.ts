@@ -91,6 +91,7 @@ export interface RuntimeUpgradePreflightResult {
   openclaw_team_member_count: number;
   hermes_team_member_count: number;
   required_capabilities: string[];
+  empty_pool_reset?: boolean;
 }
 
 export interface RuntimeUpgradeItem {

@@ -103,6 +103,7 @@ func TestActiveOpenClawRolloutBlockIsScopedToLabCandidates(t *testing.T) {
 		want           bool
 	}{
 		{name: "production maintenance blocks new OpenClaw", phase: "maintenance", want: true},
+		{name: "empty pool reset blocks new OpenClaw", phase: RuntimeUpgradePhaseEmptyPoolReset, want: true},
 		{name: "production gateway restart blocks missing item", phase: "gateway_restart", want: true},
 		{name: "production candidate restart ready remains upgrade-owned", phase: "gateway_restart", itemExists: true, itemState: "restart_ready", want: true},
 		{name: "lab maintenance ignores ordinary OpenClaw", phase: "maintenance", preflight: lab, want: false},
