@@ -44,15 +44,16 @@ type RuntimeUpgradeAgentClient interface {
 }
 
 type RuntimeAgentWorkspaceRequest struct {
-	RolloutID       string `json:"rollout_id"`
-	SnapshotID      string `json:"snapshot_id,omitempty"`
-	UserID          int    `json:"user_id"`
-	InstanceID      int    `json:"instance_id"`
-	Generation      int    `json:"generation"`
-	LeaseToken      string `json:"lease_token,omitempty"`
-	OfficialDBCheck bool   `json:"official_database_check,omitempty"`
-	UID             int    `json:"uid,omitempty"`
-	GID             int    `json:"gid,omitempty"`
+	RolloutID             string `json:"rollout_id"`
+	SnapshotID            string `json:"snapshot_id,omitempty"`
+	UserID                int    `json:"user_id"`
+	InstanceID            int    `json:"instance_id"`
+	Generation            int    `json:"generation"`
+	LeaseToken            string `json:"lease_token,omitempty"`
+	OfficialDBCheck       bool   `json:"official_database_check,omitempty"`
+	PreserveSessionSQLite bool   `json:"preserve_session_sqlite,omitempty"`
+	UID                   int    `json:"uid,omitempty"`
+	GID                   int    `json:"gid,omitempty"`
 }
 
 type RuntimeAgentWriterLeaseRequest struct {
@@ -134,13 +135,14 @@ type RuntimeAgentUpgradeCompatibility struct {
 }
 
 type RuntimeAgentSessionSQLiteRestore struct {
-	InstanceID       int              `json:"instance_id"`
-	Status           string           `json:"status"`
-	OutputSHA256     string           `json:"output_sha256"`
-	ConfigRestored   bool             `json:"config_restored"`
-	StateRestored    bool             `json:"state_restored"`
-	PhaseDurationsMS map[string]int64 `json:"phase_durations_ms,omitempty"`
-	CompletedAt      time.Time        `json:"completed_at"`
+	InstanceID             int              `json:"instance_id"`
+	Status                 string           `json:"status"`
+	OutputSHA256           string           `json:"output_sha256"`
+	ConfigRestored         bool             `json:"config_restored"`
+	StateRestored          bool             `json:"state_restored"`
+	PreservedSessionSQLite bool             `json:"preserved_session_sqlite"`
+	PhaseDurationsMS       map[string]int64 `json:"phase_durations_ms,omitempty"`
+	CompletedAt            time.Time        `json:"completed_at"`
 }
 
 type RuntimeAgentGatewayState struct {

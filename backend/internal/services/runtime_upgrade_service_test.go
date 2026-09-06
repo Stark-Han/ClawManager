@@ -125,8 +125,14 @@ func TestUpgradeReceiptReconciliationOnlyHandlesAmbiguousTransport(t *testing.T)
 	if !validSessionSQLiteMigration(&RuntimeAgentSessionSQLiteMigration{Status: "validated", OutputSHA256: "output", SessionCatalogSHA256: "catalog"}) {
 		t.Fatal("validated migration evidence was rejected")
 	}
-	if !validSessionSQLiteRestore(&RuntimeAgentSessionSQLiteRestore{Status: "restored", ConfigRestored: true, StateRestored: true}) {
+	if !validSessionSQLiteRestore(&RuntimeAgentSessionSQLiteRestore{Status: "restored", ConfigRestored: true, StateRestored: true}, false) {
 		t.Fatal("validated restore evidence was rejected")
+	}
+	if validSessionSQLiteRestore(&RuntimeAgentSessionSQLiteRestore{Status: "restored", ConfigRestored: true, StateRestored: true}, true) {
+		t.Fatal("legacy archive restore receipt was accepted for an 8.1 SQLite-preserving rollback")
+	}
+	if !validSessionSQLiteRestore(&RuntimeAgentSessionSQLiteRestore{Status: "restored", ConfigRestored: true, StateRestored: true, PreservedSessionSQLite: true}, true) {
+		t.Fatal("SQLite-preserving rollback receipt was rejected")
 	}
 }
 
@@ -219,10 +225,24 @@ func TestOpenClawUpgradeContractExcludesFullWorkspaceSnapshots(t *testing.T) {
 	if strings.Contains(joined, "workspace.snapshot") || strings.Contains(joined, "workspace.atomic-restore") {
 		t.Fatalf("full-workspace capability remained in upgrade contract: %s", joined)
 	}
-	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2", "openclaw.upgrade-preflight-v3"} {
+	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.session-sqlite-preserve-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2", "openclaw.upgrade-preflight-v3"} {
 		if !containsString(openClawUpgradeRequiredCapabilities, required) {
 			t.Fatalf("missing capability %s", required)
 		}
+	}
+}
+
+func TestResolvedSourceOpenClawVersionOnlyTrustsPinnedLegacyDigest(t *testing.T) {
+	reported := "2026.8.1"
+	if got := resolvedSourceOpenClawVersion(models.RuntimePod{OpenClawVersion: &reported}); got != reported {
+		t.Fatalf("reported version = %q", got)
+	}
+	baseline := OpenClawUpgradeLabBaselineDigest
+	if got := resolvedSourceOpenClawVersion(models.RuntimePod{ImageDigest: &baseline}); got != OpenClawUpgradeLabBaselineVersion {
+		t.Fatalf("baseline version = %q", got)
+	}
+	if got := resolvedSourceOpenClawVersion(models.RuntimePod{ImageRef: "registry/openclaw:looks-like-7.1"}); got != "" {
+		t.Fatalf("arbitrary tag inferred version %q", got)
 	}
 }
 

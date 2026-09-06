@@ -50,6 +50,7 @@ var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.workspace.writer-lease",
 	"openclaw.session-sqlite-migrate-v1",
 	"openclaw.session-sqlite-restore-v1",
+	"openclaw.session-sqlite-preserve-v1",
 	"openclaw.session-continuity-v1",
 	"openclaw.runtime-standby-v1",
 	"openclaw.upgrade-capsule-v2",
@@ -1006,8 +1007,8 @@ func validSessionSQLiteMigration(migration *RuntimeAgentSessionSQLiteMigration) 
 	return migration != nil && migration.Status == "validated" && strings.TrimSpace(migration.OutputSHA256) != "" && migration.SessionCount >= 0 && strings.TrimSpace(migration.SessionCatalogSHA256) != ""
 }
 
-func validSessionSQLiteRestore(restored *RuntimeAgentSessionSQLiteRestore) bool {
-	return restored != nil && restored.Status == "restored" && restored.ConfigRestored && restored.StateRestored
+func validSessionSQLiteRestore(restored *RuntimeAgentSessionSQLiteRestore, preserveSessionSQLite bool) bool {
+	return restored != nil && restored.Status == "restored" && restored.ConfigRestored && restored.StateRestored && restored.PreservedSessionSQLite == preserveSessionSQLite
 }
 
 func shouldReconcileUpgradeReceipt(ctx context.Context, err error) bool {
@@ -1221,6 +1222,11 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			errs = append(errs, fmt.Errorf("restore instance %d: instance identity is unavailable", item.InstanceID))
 			continue
 		}
+		if item.SourceRuntimeVersion == nil || strings.TrimSpace(*item.SourceRuntimeVersion) == "" {
+			errs = append(errs, fmt.Errorf("restore instance %d: source OpenClaw version is unavailable; refusing to guess the session rollback format", item.InstanceID))
+			continue
+		}
+		preserveSessionSQLite := openClawVersionAtLeast(*item.SourceRuntimeVersion, targetOpenClawUpgradeVersion)
 		sourceCandidate, candidateErr := s.candidateForUpgradeItemMode(ctx, item, false)
 		if candidateErr != nil {
 			errs = append(errs, fmt.Errorf("restore instance %d cannot quiesce its source gateway: %w", item.InstanceID, candidateErr))
@@ -1235,7 +1241,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			continue
 		}
 		leaseToken := runtimeUpgradeLeaseToken(rollout.ID, item.InstanceID)
-		request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: userID, InstanceID: item.InstanceID, Generation: generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), LeaseToken: leaseToken}
+		request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: userID, InstanceID: item.InstanceID, Generation: generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), LeaseToken: leaseToken, PreserveSessionSQLite: preserveSessionSQLite}
 		lease := RuntimeAgentWriterLeaseRequest{RuntimeAgentWorkspaceRequest: request, Token: leaseToken, TTLSeconds: 3600}
 		endpoints := uniqueSortedStrings(append([]string{strings.TrimSpace(evidence.TargetAgentEndpoint)}, fallbackEndpoints...))
 		if len(endpoints) == 0 {
@@ -1261,7 +1267,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			statusCtx, cancel := context.WithTimeout(ctx, runtimeAgentControlTimeout)
 			persisted, statusErr := upgradeAgent.SessionSQLiteRestoreStatus(statusCtx, endpoint, request)
 			cancel()
-			if statusErr == nil && validSessionSQLiteRestore(persisted) {
+			if statusErr == nil && validSessionSQLiteRestore(persisted, preserveSessionSQLite) {
 				restored = persisted
 				restoreErr = nil
 			}
@@ -1275,7 +1281,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			errs = append(errs, fmt.Errorf("restore instance %d release writer lease: %w", item.InstanceID, releaseErr))
 			continue
 		}
-		if !validSessionSQLiteRestore(restored) {
+		if !validSessionSQLiteRestore(restored, preserveSessionSQLite) {
 			errs = append(errs, fmt.Errorf("restore instance %d returned no verified evidence", item.InstanceID))
 			continue
 		}
@@ -1831,11 +1837,11 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 				if !stateReady || pod.Draining {
 					blockers = append(blockers, fmt.Sprintf("instance %d source Runtime pod is not ready", instanceID))
 				}
-				candidate.SourceVersion = stringValue(pod.OpenClawVersion)
+				candidate.SourceVersion = resolvedSourceOpenClawVersion(pod)
 				candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
 				candidate.Capabilities = pod.Capabilities()
 				if candidate.SourceVersion == "" {
-					warnings = append(warnings, fmt.Sprintf("instance %d is a legacy 7.1-compatible source; OpenClaw's transactional session migration archive will be used without copying the workspace", instanceID))
+					blockers = append(blockers, fmt.Sprintf("instance %d source OpenClaw version is unavailable; publish runtime metadata or use the pinned 7.1 baseline image", instanceID))
 				}
 			}
 		}
@@ -3000,6 +3006,24 @@ func openClawVersionAtLeast(current, required string) bool {
 		}
 	}
 	return true
+}
+
+// resolvedSourceOpenClawVersion never infers a data format from an arbitrary
+// tag. Legacy agents did not report a version, so only the operator-pinned 7.1
+// baseline digest is safe to map. All 8.1+ images must publish their version in
+// the Runtime heartbeat before they can enter the data-safe upgrade path.
+func resolvedSourceOpenClawVersion(pod models.RuntimePod) string {
+	if reported := strings.TrimSpace(stringValue(pod.OpenClawVersion)); reported != "" {
+		return reported
+	}
+	digest := strings.TrimSpace(stringValue(pod.ImageDigest))
+	if digest == "" {
+		digest = imageDigestFromReference(pod.ImageRef)
+	}
+	if strings.EqualFold(digest, OpenClawUpgradeLabBaselineDigest) {
+		return OpenClawUpgradeLabBaselineVersion
+	}
+	return ""
 }
 
 func rolloutTargetMetadata(rollout *models.RuntimeRollout) (string, string) {
