@@ -35,6 +35,15 @@ type RuntimePod struct {
 	LastSeenAt           *time.Time `db:"last_seen_at" json:"last_seen_at,omitempty"`
 	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+	// Pool metadata is discovered from the owning Kubernetes Deployment. It is
+	// deliberately transient: older Runtime Agents and existing database rows do
+	// not need a schema change, while control-plane callers can still distinguish
+	// serving, upgrade and isolated-lab pools.
+	PoolRole          string `db:"-" json:"pool_role,omitempty"`
+	PoolPurpose       string `db:"-" json:"pool_purpose,omitempty"`
+	UpgradeID         string `db:"-" json:"upgrade_id,omitempty"`
+	SourceDeployment  string `db:"-" json:"source_deployment,omitempty"`
+	SchedulingEnabled *bool  `db:"-" json:"scheduling_enabled,omitempty"`
 }
 
 func (p RuntimePod) Capabilities() []string {

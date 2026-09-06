@@ -383,6 +383,9 @@ func TestRuntimeDeploymentServiceCreatesIsolatedUpgradePool(t *testing.T) {
 	if target.Spec.Selector.MatchLabels["app"] != "openclaw-runtime-u81" || target.Labels["clawmanager.io/source-deployment"] != "openclaw-runtime" {
 		t.Fatalf("target labels/selectors are not isolated: labels=%v selector=%v", target.Labels, target.Spec.Selector.MatchLabels)
 	}
+	if target.Labels[runtimeSchedulingLabel] != "false" || target.Spec.Template.Labels[runtimeSchedulingLabel] != "false" {
+		t.Fatalf("upgrade target must start unschedulable: labels=%v template=%v", target.Labels, target.Spec.Template.Labels)
+	}
 	container := target.Spec.Template.Spec.Containers[0]
 	if container.Image != targetImage {
 		t.Fatalf("target runtime image = %s", container.Image)
@@ -395,6 +398,43 @@ func TestRuntimeDeploymentServiceCreatesIsolatedUpgradePool(t *testing.T) {
 	}
 	if unchanged.Spec.Template.Spec.Containers[0].Image != "registry/openclaw:old" {
 		t.Fatalf("source deployment image was mutated: %s", unchanged.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestRuntimeDeploymentServiceActivatesAndSafelyDeletesUpgradePool(t *testing.T) {
+	const namespace = "runtime-system"
+	source := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime", Namespace: namespace, RuntimeType: "openclaw", Image: "registry/openclaw:old", Replicas: 1, WorkspacePVCClaimName: "workspaces"})
+	client := fake.NewSimpleClientset(source)
+	service := NewRuntimeDeploymentService(client)
+	targetImage := "registry/openclaw@sha256:" + strings.Repeat("c", 64)
+	if err := service.EnsureUpgradePool(context.Background(), namespace, source.Name, "openclaw-runtime-u9", targetImage, "9"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetUpgradePoolActive(context.Background(), namespace, source.Name, "openclaw-runtime-u9", "9", true); err != nil {
+		t.Fatal(err)
+	}
+	activeSource, _ := client.AppsV1().Deployments(namespace).Get(context.Background(), source.Name, metav1.GetOptions{})
+	activeTarget, _ := client.AppsV1().Deployments(namespace).Get(context.Background(), "openclaw-runtime-u9", metav1.GetOptions{})
+	if activeSource.Labels[runtimeSchedulingLabel] != "false" || activeTarget.Labels[runtimeSchedulingLabel] != "true" {
+		t.Fatalf("activation labels source=%v target=%v", activeSource.Labels, activeTarget.Labels)
+	}
+	if err := service.SetUpgradePoolActive(context.Background(), namespace, source.Name, "openclaw-runtime-u9", "9", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteUpgradePool(context.Background(), namespace, source.Name, "openclaw-runtime-u9", "9"); err == nil {
+		t.Fatal("expected deletion to fail before target is scaled to zero")
+	}
+	if err := service.Scale(context.Background(), namespace, "openclaw-runtime-u9", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteUpgradePool(context.Background(), namespace, source.Name, "openclaw-runtime-u9", "wrong"); err == nil {
+		t.Fatal("expected ownership mismatch to fail closed")
+	}
+	if err := service.DeleteUpgradePool(context.Background(), namespace, source.Name, "openclaw-runtime-u9", "9"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppsV1().Deployments(namespace).Get(context.Background(), "openclaw-runtime-u9", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("upgrade target still exists: %v", err)
 	}
 }
 

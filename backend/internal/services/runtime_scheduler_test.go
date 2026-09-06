@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,27 @@ import (
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
 )
+
+func TestFilterOrdinaryRuntimePodsPreservesLegacyAndExcludesIsolatedPools(t *testing.T) {
+	enabled, disabled := true, false
+	pods := []models.RuntimePod{
+		{ID: 1, RuntimeType: RuntimeTypeOpenClaw, DeploymentName: "openclaw-runtime"},
+		{ID: 2, RuntimeType: RuntimeTypeHermes, DeploymentName: "hermes-runtime"},
+		{ID: 3, RuntimeType: RuntimeTypeOpenClaw, DeploymentName: "openclaw-upgrade-lab-r4-source", PoolPurpose: "openclaw-upgrade-lab"},
+		{ID: 4, RuntimeType: RuntimeTypeOpenClaw, DeploymentName: "openclaw-runtime-u48", PoolRole: "upgrade-target", SchedulingEnabled: &disabled},
+		{ID: 5, RuntimeType: RuntimeTypeOpenClaw, DeploymentName: "openclaw-runtime-u53", PoolRole: "upgrade-target", SchedulingEnabled: &enabled},
+		{ID: 6, RuntimeType: RuntimeTypeOpenClaw, DeploymentName: "openclaw-runtime-old", SchedulingEnabled: &disabled},
+	}
+	got := filterOrdinaryRuntimePods(pods)
+	var ids []int64
+	for _, pod := range got {
+		ids = append(ids, pod.ID)
+	}
+	want := []int64{1, 2, 5}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("eligible pod ids = %v, want %v", ids, want)
+	}
+}
 
 func TestRuntimeSchedulerAssignsCreatingInstanceToReadyPod(t *testing.T) {
 	ctx := context.Background()
@@ -2952,6 +2974,14 @@ func (s *fakeRuntimeDeploymentService) RolloutImage(ctx context.Context, namespa
 }
 func (s *fakeRuntimeDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
 	s.upgradePoolCalls = append(s.upgradePoolCalls, fakeUpgradePoolCall{namespace: namespace, sourceName: sourceName, targetName: targetName, image: image, upgradeID: upgradeID})
+	return nil
+}
+
+func (s *fakeRuntimeDeploymentService) SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error {
+	return nil
+}
+
+func (s *fakeRuntimeDeploymentService) DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error {
 	return nil
 }
 func (s *fakeRuntimeDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {

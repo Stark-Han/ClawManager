@@ -81,6 +81,13 @@ func TestInspectUpgradeLabLegacySessionsRequiresManualConversation(t *testing.T)
 	if err := os.WriteFile(filepath.Join(sessions, "session-1.jsonl"), []byte(transcript), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	promptCache := filepath.Join(sessions, "skills-prompts", "sha256", "aa")
+	if err := os.MkdirAll(promptCache, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptCache, "cached.txt"), []byte("cached prompt"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	manifest, err := inspectUpgradeLabLegacySessions(workspace)
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +97,9 @@ func TestInspectUpgradeLabLegacySessionsRequiresManualConversation(t *testing.T)
 	}
 	if manifest.CatalogSHA256 == "" || manifest.SourceFilesSHA256 == "" || len(manifest.SourceFiles) != 2 {
 		t.Fatalf("incomplete session evidence: %#v", manifest)
+	}
+	if len(manifest.AncillaryFiles) != 1 || manifest.AncillaryFilesSHA256 == "" {
+		t.Fatalf("session auxiliary evidence was not separated: %#v", manifest)
 	}
 }
 

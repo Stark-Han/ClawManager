@@ -317,19 +317,24 @@ func runtimePoolPodListItems(pods []models.RuntimePod, agentReported bool) []run
 }
 
 func mergeRuntimePoolDeploymentPods(items []runtimePoolPodListItem, deploymentPods []models.RuntimePod) []runtimePoolPodListItem {
-	seen := map[string]struct{}{}
-	for _, item := range items {
-		seen[runtimePoolPodKey(item.Namespace, item.PodName)] = struct{}{}
+	seen := map[string]int{}
+	for index, item := range items {
+		seen[runtimePoolPodKey(item.Namespace, item.PodName)] = index
 	}
 	for _, pod := range deploymentPods {
 		key := runtimePoolPodKey(pod.Namespace, pod.PodName)
 		if key == "" {
 			continue
 		}
-		if _, ok := seen[key]; ok {
+		if index, ok := seen[key]; ok {
+			items[index].PoolRole = pod.PoolRole
+			items[index].PoolPurpose = pod.PoolPurpose
+			items[index].UpgradeID = pod.UpgradeID
+			items[index].SourceDeployment = pod.SourceDeployment
+			items[index].SchedulingEnabled = pod.SchedulingEnabled
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(items)
 		items = append(items, runtimePoolPodListItem{
 			RuntimePod:    pod,
 			AgentReported: false,

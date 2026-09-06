@@ -212,6 +212,16 @@ func TestRuntimePoolHandlerListPodsIncludesUnreportedDeploymentPods(t *testing.T
 	}
 }
 
+func TestMergeRuntimePoolDeploymentPodsEnrichesAgentRowsWithPoolMetadata(t *testing.T) {
+	disabled := false
+	items := runtimePoolPodListItems([]models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:target", State: "ready"}}, true)
+	discovered := []models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", PoolRole: "upgrade-target", UpgradeID: "48", SourceDeployment: "openclaw-runtime", SchedulingEnabled: &disabled}}
+	got := mergeRuntimePoolDeploymentPods(items, discovered)
+	if len(got) != 1 || got[0].PoolRole != "upgrade-target" || got[0].UpgradeID != "48" || got[0].SchedulingEnabled == nil || *got[0].SchedulingEnabled {
+		t.Fatalf("pool metadata was not merged: %#v", got)
+	}
+}
+
 func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rolloutRepo := &runtimePoolHandlerRolloutRepo{}
@@ -515,6 +525,14 @@ func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, 
 }
 
 func (s *runtimePoolHandlerDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
+	return nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error {
+	return nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error {
 	return nil
 }
 func (s *runtimePoolHandlerDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {

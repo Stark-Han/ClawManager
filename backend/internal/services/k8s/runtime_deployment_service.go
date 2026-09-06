@@ -48,15 +48,20 @@ type RuntimeDeploymentSpec struct {
 }
 
 type RuntimeDeploymentPod struct {
-	RuntimeType    string
-	Namespace      string
-	DeploymentName string
-	PodName        string
-	PodIP          *string
-	NodeName       *string
-	ImageRef       string
-	ImageDigest    string
-	State          string
+	RuntimeType       string
+	Namespace         string
+	DeploymentName    string
+	PodName           string
+	PodIP             *string
+	NodeName          *string
+	ImageRef          string
+	ImageDigest       string
+	State             string
+	PoolRole          string
+	PoolPurpose       string
+	UpgradeID         string
+	SourceDeployment  string
+	SchedulingEnabled *bool
 }
 
 type RuntimeDeploymentService interface {
@@ -64,6 +69,8 @@ type RuntimeDeploymentService interface {
 	Scale(ctx context.Context, namespace, name string, replicas int32) error
 	RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error
 	EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error
+	SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error
+	DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error
 	ListPods(ctx context.Context, namespace, runtimeType string) ([]RuntimeDeploymentPod, error)
 }
 
@@ -80,6 +87,10 @@ const (
 	upgradeLabPurposeLabel = "clawmanager.io/purpose"
 	upgradeLabPurposeValue = "openclaw-upgrade-lab"
 	upgradeLabRunLabel     = "clawmanager.io/upgrade-lab-run"
+	runtimePoolRoleLabel   = "clawmanager.io/pool-role"
+	runtimeUpgradeIDLabel  = "clawmanager.io/upgrade-id"
+	runtimeSourceLabel     = "clawmanager.io/source-deployment"
+	runtimeSchedulingLabel = "clawmanager.io/scheduling-enabled"
 )
 
 func (s *runtimeDeploymentService) EnsureUpgradeLabPool(ctx context.Context, namespace, templateName, name, image, runID string, replicas int32) error {
@@ -205,6 +216,7 @@ func (s *runtimeDeploymentService) EnsureUpgradePool(ctx context.Context, namesp
 	target.Labels["clawmanager.io/pool-role"] = "upgrade-target"
 	target.Labels["clawmanager.io/upgrade-id"] = upgradeID
 	target.Labels["clawmanager.io/source-deployment"] = sourceName
+	target.Labels[runtimeSchedulingLabel] = "false"
 	selector := map[string]string{"app": targetName, "clawmanager.io/runtime-type": source.Labels["clawmanager.io/runtime-type"], "clawmanager.io/upgrade-id": upgradeID}
 	target.Spec.Selector = &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}
 	if target.Spec.Template.Labels == nil {
@@ -217,6 +229,7 @@ func (s *runtimeDeploymentService) EnsureUpgradePool(ctx context.Context, namesp
 		target.Spec.Template.Labels[key] = value
 	}
 	target.Spec.Template.Labels["clawmanager.io/pool-role"] = "upgrade-target"
+	target.Spec.Template.Labels[runtimeSchedulingLabel] = "false"
 	target.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 	target.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{MaxSkew: 1, TopologyKey: "kubernetes.io/hostname", WhenUnsatisfiable: corev1.ScheduleAnyway, LabelSelector: &metav1.LabelSelector{MatchLabels: copyStringMap(selector)}}}
 	containerIndex := -1
@@ -238,6 +251,83 @@ func (s *runtimeDeploymentService) EnsureUpgradePool(ctx context.Context, namesp
 	container.ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("agent"), Scheme: corev1.URISchemeHTTP}}, InitialDelaySeconds: 1, PeriodSeconds: 2, TimeoutSeconds: 1, FailureThreshold: 3, SuccessThreshold: 1}
 	if _, err := deployments.Create(ctx, target, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create upgrade runtime pool %s/%s: %w", namespace, targetName, err)
+	}
+	return nil
+}
+
+func (s *runtimeDeploymentService) SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	namespace = strings.TrimSpace(namespace)
+	sourceName = strings.TrimSpace(sourceName)
+	targetName = strings.TrimSpace(targetName)
+	upgradeID = strings.TrimSpace(upgradeID)
+	if namespace == "" || sourceName == "" || targetName == "" || sourceName == targetName || upgradeID == "" {
+		return fmt.Errorf("valid source, target and upgrade id are required")
+	}
+	deployments := s.client.AppsV1().Deployments(namespace)
+	setScheduling := func(name, value string, validateTarget bool) error {
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			deployment, err := deployments.Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if validateTarget && (deployment.Labels[runtimePoolRoleLabel] != "upgrade-target" || deployment.Labels[runtimeUpgradeIDLabel] != upgradeID || deployment.Labels[runtimeSourceLabel] != sourceName) {
+				return fmt.Errorf("deployment %s/%s is not upgrade target %s for source %s", namespace, name, upgradeID, sourceName)
+			}
+			if deployment.Labels == nil {
+				deployment.Labels = map[string]string{}
+			}
+			deployment.Labels[runtimeSchedulingLabel] = value
+			_, err = deployments.Update(ctx, deployment, metav1.UpdateOptions{})
+			return err
+		})
+	}
+	if active {
+		if err := setScheduling(targetName, "true", true); err != nil {
+			return fmt.Errorf("enable upgrade target scheduling: %w", err)
+		}
+		if err := setScheduling(sourceName, "false", false); err != nil {
+			_ = setScheduling(targetName, "false", true)
+			return fmt.Errorf("disable upgrade source scheduling: %w", err)
+		}
+		return nil
+	}
+	if err := setScheduling(sourceName, "true", false); err != nil {
+		return fmt.Errorf("restore upgrade source scheduling: %w", err)
+	}
+	if err := setScheduling(targetName, "false", true); err != nil {
+		return fmt.Errorf("disable failed upgrade target scheduling: %w", err)
+	}
+	return nil
+}
+
+func (s *runtimeDeploymentService) DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("k8s client not initialized")
+	}
+	namespace = strings.TrimSpace(namespace)
+	sourceName = strings.TrimSpace(sourceName)
+	targetName = strings.TrimSpace(targetName)
+	upgradeID = strings.TrimSpace(upgradeID)
+	deployments := s.client.AppsV1().Deployments(namespace)
+	target, err := deployments.Get(ctx, targetName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if target.Labels[runtimePoolRoleLabel] != "upgrade-target" || target.Labels[runtimeUpgradeIDLabel] != upgradeID || target.Labels[runtimeSourceLabel] != sourceName {
+		return fmt.Errorf("refusing to delete deployment %s/%s without matching upgrade ownership", namespace, targetName)
+	}
+	if target.Spec.Replicas != nil && *target.Spec.Replicas != 0 {
+		return fmt.Errorf("refusing to delete upgrade target %s/%s before it is scaled to zero", namespace, targetName)
+	}
+	policy := metav1.DeletePropagationBackground
+	if err := deployments.Delete(ctx, targetName, metav1.DeleteOptions{PropagationPolicy: &policy}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete failed upgrade pool %s/%s: %w", namespace, targetName, err)
 	}
 	return nil
 }
@@ -581,6 +671,12 @@ func (s *runtimeDeploymentService) ListPods(ctx context.Context, namespace, runt
 			return nil, fmt.Errorf("failed to list runtime deployment pods %s/%s: %w", deployment.Namespace, deployment.Name, err)
 		}
 		deploymentImage := runtimeContainerImage(deployment.Spec.Template.Spec.Containers)
+		var schedulingEnabled *bool
+		if raw, ok := deployment.Labels[runtimeSchedulingLabel]; ok {
+			if parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw)); parseErr == nil {
+				schedulingEnabled = &parsed
+			}
+		}
 		for _, pod := range podList.Items {
 			// Deployment selectors also match retained Failed/Evicted pods from
 			// old ReplicaSets. They are audit history, not the live source image
@@ -593,15 +689,20 @@ func (s *runtimeDeploymentService) ListPods(ctx context.Context, namespace, runt
 				image = deploymentImage
 			}
 			pods = append(pods, RuntimeDeploymentPod{
-				RuntimeType:    deploymentRuntimeType,
-				Namespace:      pod.Namespace,
-				DeploymentName: deployment.Name,
-				PodName:        pod.Name,
-				PodIP:          stringPtrIfNotEmpty(pod.Status.PodIP),
-				NodeName:       stringPtrIfNotEmpty(pod.Spec.NodeName),
-				ImageRef:       image,
-				ImageDigest:    runtimeContainerImageID(pod.Status.ContainerStatuses),
-				State:          runtimeK8sPodState(pod),
+				RuntimeType:       deploymentRuntimeType,
+				Namespace:         pod.Namespace,
+				DeploymentName:    deployment.Name,
+				PodName:           pod.Name,
+				PodIP:             stringPtrIfNotEmpty(pod.Status.PodIP),
+				NodeName:          stringPtrIfNotEmpty(pod.Spec.NodeName),
+				ImageRef:          image,
+				ImageDigest:       runtimeContainerImageID(pod.Status.ContainerStatuses),
+				State:             runtimeK8sPodState(pod),
+				PoolRole:          strings.TrimSpace(deployment.Labels[runtimePoolRoleLabel]),
+				PoolPurpose:       strings.TrimSpace(deployment.Labels[upgradeLabPurposeLabel]),
+				UpgradeID:         strings.TrimSpace(deployment.Labels[runtimeUpgradeIDLabel]),
+				SourceDeployment:  strings.TrimSpace(deployment.Labels[runtimeSourceLabel]),
+				SchedulingEnabled: schedulingEnabled,
 			})
 		}
 	}

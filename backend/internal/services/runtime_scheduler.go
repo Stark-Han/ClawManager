@@ -277,6 +277,16 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", &startedAt, nil, &message)
 		return err
 	}
+	if inventory, inventoryErr := s.RuntimeDeploymentPods(ctx, rollout.RuntimeType); inventoryErr != nil {
+		message := inventoryErr.Error()
+		_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", &startedAt, nil, &message)
+		return inventoryErr
+	} else {
+		allPods = annotateRuntimePods(allPods, inventory)
+	}
+	if rollout.RuntimeType != RuntimeTypeOpenClaw || rollout.PreflightID == nil {
+		allPods = filterOrdinaryRuntimePods(allPods)
+	}
 	currentPods := s.currentRuntimePods(allPods, time.Now().UTC())
 	if runtimePodsAlreadyAtImage(currentPods, rollout.RuntimeType, rollout.TargetImageRef) && !(rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil) {
 		finishedAt := time.Now().UTC()
@@ -401,7 +411,7 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
 			continue
 		}
-		if isOpenClawUpgradeLabDeployment(pod.DeploymentName) {
+		if !runtimePodEligibleForOrdinaryScheduling(pod) {
 			continue
 		}
 		if pod.RuntimeType != rollout.RuntimeType {
@@ -462,22 +472,82 @@ func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeTyp
 	result := make([]models.RuntimePod, 0, len(pods))
 	for index, pod := range pods {
 		result = append(result, models.RuntimePod{
-			ID:             -int64(index + 1),
-			RuntimeType:    pod.RuntimeType,
-			Namespace:      pod.Namespace,
-			PodName:        pod.PodName,
-			PodIP:          pod.PodIP,
-			NodeName:       pod.NodeName,
-			DeploymentName: pod.DeploymentName,
-			ImageRef:       pod.ImageRef,
-			ImageDigest:    stringPtrOrNil(pod.ImageDigest),
-			State:          runtimeDeploymentFallbackState(pod.State),
-			Capacity:       s.maxGatewaysPerPod,
-			UsedSlots:      0,
-			Draining:       false,
+			ID:                -int64(index + 1),
+			RuntimeType:       pod.RuntimeType,
+			Namespace:         pod.Namespace,
+			PodName:           pod.PodName,
+			PodIP:             pod.PodIP,
+			NodeName:          pod.NodeName,
+			DeploymentName:    pod.DeploymentName,
+			ImageRef:          pod.ImageRef,
+			ImageDigest:       stringPtrOrNil(pod.ImageDigest),
+			State:             runtimeDeploymentFallbackState(pod.State),
+			Capacity:          s.maxGatewaysPerPod,
+			UsedSlots:         0,
+			Draining:          false,
+			PoolRole:          pod.PoolRole,
+			PoolPurpose:       pod.PoolPurpose,
+			UpgradeID:         pod.UpgradeID,
+			SourceDeployment:  pod.SourceDeployment,
+			SchedulingEnabled: pod.SchedulingEnabled,
 		})
 	}
 	return result, nil
+}
+
+func runtimePodIsUpgradeLab(pod models.RuntimePod) bool {
+	return strings.EqualFold(strings.TrimSpace(pod.PoolPurpose), "openclaw-upgrade-lab") ||
+		strings.EqualFold(strings.TrimSpace(pod.PoolRole), "upgrade-lab") ||
+		isOpenClawUpgradeLabDeployment(pod.DeploymentName)
+}
+
+func runtimePodEligibleForOrdinaryScheduling(pod models.RuntimePod) bool {
+	if runtimePodIsUpgradeLab(pod) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(pod.PoolRole), "upgrade-target") {
+		return pod.SchedulingEnabled != nil && *pod.SchedulingEnabled
+	}
+	return pod.SchedulingEnabled == nil || *pod.SchedulingEnabled
+}
+
+func annotateRuntimePods(pods []models.RuntimePod, inventory []models.RuntimePod) []models.RuntimePod {
+	metadata := make(map[string]models.RuntimePod, len(inventory))
+	for _, pod := range inventory {
+		metadata[strings.TrimSpace(pod.Namespace)+"/"+strings.TrimSpace(pod.DeploymentName)] = pod
+	}
+	for index := range pods {
+		key := strings.TrimSpace(pods[index].Namespace) + "/" + strings.TrimSpace(pods[index].DeploymentName)
+		if discovered, ok := metadata[key]; ok {
+			pods[index].PoolRole = discovered.PoolRole
+			pods[index].PoolPurpose = discovered.PoolPurpose
+			pods[index].UpgradeID = discovered.UpgradeID
+			pods[index].SourceDeployment = discovered.SourceDeployment
+			pods[index].SchedulingEnabled = discovered.SchedulingEnabled
+		}
+	}
+	return pods
+}
+
+func filterOrdinaryRuntimePods(pods []models.RuntimePod) []models.RuntimePod {
+	filtered := make([]models.RuntimePod, 0, len(pods))
+	for _, pod := range pods {
+		if runtimePodEligibleForOrdinaryScheduling(pod) {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered
+}
+
+func (s *RuntimeScheduler) annotateAndFilterOrdinaryRuntimePods(ctx context.Context, runtimeType string, pods []models.RuntimePod) ([]models.RuntimePod, error) {
+	if s == nil || s.deployments == nil {
+		return pods, nil
+	}
+	inventory, err := s.RuntimeDeploymentPods(ctx, runtimeType)
+	if err != nil {
+		return nil, err
+	}
+	return filterOrdinaryRuntimePods(annotateRuntimePods(pods, inventory)), nil
 }
 
 func defaultRuntimeDeploymentName(runtimeType string) string {
@@ -516,6 +586,11 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	if err != nil {
 		return err
 	}
+	if inventory, inventoryErr := s.RuntimeDeploymentPods(ctx, rollout.RuntimeType); inventoryErr != nil {
+		return inventoryErr
+	} else {
+		pods = annotateRuntimePods(pods, inventory)
+	}
 	pods = s.currentRuntimePods(pods, time.Now().UTC())
 	if len(pods) == 0 {
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
@@ -533,11 +608,9 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	dataSafeOpenClaw := rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil
 	if !dataSafeOpenClaw {
+		pods = filterOrdinaryRuntimePods(pods)
 		for _, pod := range pods {
 			if pod.RuntimeType != rollout.RuntimeType {
-				continue
-			}
-			if isOpenClawUpgradeLabDeployment(pod.DeploymentName) {
 				continue
 			}
 			if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
@@ -588,6 +661,10 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 			parts := strings.SplitN(deployment, "/", 2)
 			if len(parts) != 2 {
 				return fmt.Errorf("invalid OpenClaw source deployment entry %q", deployment)
+			}
+			targetName := runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID)
+			if err := s.deployments.SetUpgradePoolActive(ctx, parts[0], parts[1], targetName, strconv.FormatInt(rollout.ID, 10), true); err != nil {
+				return fmt.Errorf("activate committed OpenClaw target pool for %s: %w", deployment, err)
 			}
 			if err := s.deployments.Scale(ctx, parts[0], parts[1], 0); err != nil {
 				return fmt.Errorf("scale committed OpenClaw source pool %s to zero: %w", deployment, err)
@@ -645,6 +722,10 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 		}
 		if err := s.deployments.Scale(ctx, parts[0], runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID), 0); err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if err := s.deployments.SetUpgradePoolActive(ctx, parts[0], parts[1], runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID), strconv.FormatInt(rollout.ID, 10), false); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) == 0 {
@@ -688,11 +769,61 @@ func (s *RuntimeScheduler) rollbackOpenClawRollout(ctx context.Context, rollout 
 			errs = append(errs, err)
 		}
 	}
+	if len(errs) == 0 {
+		for deployment := range sourceImages {
+			parts := strings.SplitN(deployment, "/", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			targetName := runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID)
+			hasBindings, bindingErr := s.runtimeDeploymentHasActiveBindings(ctx, parts[0], targetName)
+			if bindingErr != nil {
+				log.Printf("runtime rollout %d retained failed target %s/%s because binding verification failed: %v", rollout.ID, parts[0], targetName, bindingErr)
+				continue
+			}
+			if hasBindings {
+				log.Printf("runtime rollout %d retained failed target %s/%s because instance bindings remain", rollout.ID, parts[0], targetName)
+				continue
+			}
+			if err := s.deployments.DeleteUpgradePool(ctx, parts[0], parts[1], targetName, strconv.FormatInt(rollout.ID, 10)); err != nil {
+				// Cleanup is deliberately best effort after the durable rollback has
+				// completed. A retained zero-replica Deployment must not turn a
+				// successfully restored user instance into a rollback failure.
+				log.Printf("runtime rollout %d retained failed target %s/%s after restored rollback: %v", rollout.ID, parts[0], targetName, err)
+			}
+		}
+	}
 	joined := errors.Join(errs...)
 	if joined != nil {
 		s.upgrade.FailRollback(ctx, rollout.ID, joined)
 	}
 	return joined
+}
+
+func (s *RuntimeScheduler) runtimeDeploymentHasActiveBindings(ctx context.Context, namespace, deploymentName string) (bool, error) {
+	if s == nil || s.podRepo == nil || s.bindingRepo == nil {
+		return false, fmt.Errorf("runtime binding inventory is unavailable")
+	}
+	pods, err := s.podRepo.List(ctx, RuntimeTypeOpenClaw)
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods {
+		if strings.TrimSpace(pod.Namespace) != strings.TrimSpace(namespace) || strings.TrimSpace(pod.DeploymentName) != strings.TrimSpace(deploymentName) {
+			continue
+		}
+		bindings, err := s.bindingRepo.ListByRuntimePodID(ctx, pod.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, binding := range bindings {
+			state := strings.ToLower(strings.TrimSpace(binding.State))
+			if state != "stopped" && state != "deleted" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (s *RuntimeScheduler) currentRuntimePods(pods []models.RuntimePod, now time.Time) []models.RuntimePod {
@@ -1047,6 +1178,10 @@ func (s *RuntimeScheduler) scaleOutIfBacklogExceedsCapacity(ctx context.Context,
 	if err != nil {
 		return false, fmt.Errorf("list %s runtime pods for backlog scale-out: %w", runtimeType, err)
 	}
+	pods, err = s.annotateAndFilterOrdinaryRuntimePods(ctx, runtimeType, pods)
+	if err != nil {
+		return false, fmt.Errorf("classify %s runtime pods for backlog scale-out: %w", runtimeType, err)
+	}
 	groups := map[string]*runtimeDeploymentCapacity{}
 	for _, pod := range pods {
 		if pod.RuntimeType != runtimeType || pod.State != "ready" || pod.Draining || pod.Capacity <= 0 {
@@ -1140,6 +1275,10 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	if err != nil {
 		return err
 	}
+	pods, err = s.annotateAndFilterOrdinaryRuntimePods(ctx, runtimeType, pods)
+	if err != nil {
+		return fmt.Errorf("classify schedulable %s runtime pods: %w", runtimeType, err)
+	}
 	if len(pods) == 0 {
 		scaled, err := s.scaleOutIfAtCapacity(ctx, runtimeType)
 		if err != nil {
@@ -1216,6 +1355,10 @@ func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType
 	pods, err := s.podRepo.List(ctx, runtimeType)
 	if err != nil {
 		return false, fmt.Errorf("list %s runtime pods for scale-out: %w", runtimeType, err)
+	}
+	pods, err = s.annotateAndFilterOrdinaryRuntimePods(ctx, runtimeType, pods)
+	if err != nil {
+		return false, fmt.Errorf("classify %s runtime pods for scale-out: %w", runtimeType, err)
 	}
 	groups := map[string]*runtimeDeploymentCapacity{}
 	for _, pod := range pods {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlaskConical, Plus, Rocket, Save, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import AdminLayout from '../../components/AdminLayout';
@@ -188,12 +188,22 @@ function resolveCurrentRuntimeImage(pods: RuntimePod[]) {
   const candidates = pods
     .filter((pod) => pod.image_ref?.trim())
     .filter((pod) => !pod.draining && pod.state !== 'deleted')
+	.filter((pod) => pod.pool_purpose !== 'openclaw-upgrade-lab' && pod.pool_role !== 'upgrade-lab')
+	.filter((pod) => pod.pool_role !== 'upgrade-target' || pod.scheduling_enabled === true || pod.used_slots > 0)
+	.filter((pod) => pod.scheduling_enabled !== false || pod.used_slots > 0)
     .sort((a, b) => runtimePodSeenAt(b) - runtimePodSeenAt(a) || b.id - a.id);
   if (candidates.length === 0) {
     return '';
   }
 
-  const images = Array.from(new Set(candidates.map((pod) => pod.image_ref.trim())));
+	const imagesByDigest = new Map<string, string>();
+	for (const pod of candidates) {
+		const key = pod.image_digest?.trim() || pod.image_ref.trim();
+		if (!imagesByDigest.has(key)) {
+			imagesByDigest.set(key, pod.image_ref.trim());
+		}
+	}
+	const images = Array.from(imagesByDigest.values());
   return images.join(', ');
 }
 
@@ -358,6 +368,18 @@ const SystemSettingsPage: React.FC = () => {
     };
   }, [rolloutRuntimeType]);
 
+  const refreshRolloutCurrentImage = useCallback(async (runtimeType: RuntimeType) => {
+    try {
+      setRolloutCurrentLoading(true);
+      const pods = await runtimePoolService.listPods(runtimeType);
+      setRolloutCurrentImage(resolveCurrentRuntimeImage(pods));
+    } catch {
+      setRolloutCurrentImage('');
+    } finally {
+      setRolloutCurrentLoading(false);
+    }
+  }, []);
+
 	useEffect(() => {
 		if (!activeRolloutId) {
 			return undefined;
@@ -394,19 +416,7 @@ const SystemSettingsPage: React.FC = () => {
 			cancelled = true;
 			if (timer !== undefined) window.clearTimeout(timer);
 		};
-	}, [activeRolloutId, t]);
-
-  const refreshRolloutCurrentImage = async (runtimeType: RuntimeType) => {
-    try {
-      setRolloutCurrentLoading(true);
-      const pods = await runtimePoolService.listPods(runtimeType);
-      setRolloutCurrentImage(resolveCurrentRuntimeImage(pods));
-    } catch {
-      setRolloutCurrentImage('');
-    } finally {
-      setRolloutCurrentLoading(false);
-    }
-  };
+	}, [activeRolloutId, refreshRolloutCurrentImage, t]);
 
   const updateCard = (localId: string, patch: Partial<EditableImageCard>) => {
     setCards((current) => current.map((card) =>

@@ -1248,7 +1248,8 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 		return nil, nil, nil, nil, err
 	}
 	podByID := map[int64]models.RuntimePod{}
-	allSourceImages := map[string]string{}
+	liveImages := map[string]string{}
+	fallbackSourceImages := map[string]string{}
 	var candidates []runtimeUpgradeCandidate
 	var warnings, blockers []string
 	for _, pod := range pods {
@@ -1273,10 +1274,13 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 		if pinErr != nil {
 			return nil, nil, nil, nil, fmt.Errorf("deployment %s rollback image is not immutable: %w", key, pinErr)
 		}
-		if prior, exists := allSourceImages[key]; exists && prior != pinned {
+		if prior, exists := liveImages[key]; exists && prior != pinned {
 			return nil, nil, nil, nil, fmt.Errorf("deployment %s has pods with conflicting image digests", key)
 		}
-		allSourceImages[key] = pinned
+		liveImages[key] = pinned
+		if runtimePodEligibleForOrdinaryScheduling(pod) {
+			fallbackSourceImages[key] = pinned
+		}
 	}
 	selectedIDs := make(map[int]struct{})
 	for _, id := range normalizedPositiveIDs(scope.CandidateInstanceIDs) {
@@ -1412,12 +1416,12 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 			continue
 		}
 		key := strings.TrimSpace(pod.Namespace) + "/" + strings.TrimSpace(pod.DeploymentName)
-		if image := allSourceImages[key]; image != "" {
+		if image := liveImages[key]; image != "" {
 			sourceImages[key] = image
 		}
 	}
-	if scope.UpgradeLabRunID == nil && len(selectedIDs) == 0 {
-		sourceImages = allSourceImages
+	if len(sourceImages) == 0 {
+		sourceImages = fallbackSourceImages
 	}
 	return candidates, sourceImages, warnings, blockers, nil
 }
@@ -2235,7 +2239,7 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 	}
 	sourceImages := make(map[string]string)
 	for _, pod := range livePods {
-		if isOpenClawUpgradeLabDeployment(pod.DeploymentName) {
+		if !runtimePodEligibleForOrdinaryScheduling(pod) {
 			continue
 		}
 		if strings.TrimSpace(pod.ImageRef) != "" {
@@ -2251,6 +2255,9 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 	}
 	if classification.Strategy == RuntimeUpgradeStrategyLegacyRolling {
 		for _, pod := range livePods {
+			if !runtimePodEligibleForOrdinaryScheduling(pod) {
+				continue
+			}
 			if openClawVersionAtLeast(stringValue(pod.OpenClawVersion), targetOpenClawUpgradeVersion) {
 				return nil, fmt.Errorf("downgrading an active OpenClaw 2026.8.1+ Runtime through the legacy rolling path is unsupported")
 			}

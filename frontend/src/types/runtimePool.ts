@@ -31,6 +31,11 @@ export interface RuntimePod {
   last_seen_at?: string;
   updated_at?: string;
   agent_reported?: boolean;
+  pool_role?: "upgrade-target" | "upgrade-lab" | string;
+  pool_purpose?: string;
+  upgrade_id?: string;
+  source_deployment?: string;
+  scheduling_enabled?: boolean;
 }
 
 export interface RuntimeGateway {

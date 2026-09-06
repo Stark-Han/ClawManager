@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -85,6 +86,8 @@ type upgradeLabSessionManifest struct {
 	CatalogSHA256               string            `json:"catalog_sha256"`
 	SourceFiles                 map[string]string `json:"source_files"`
 	SourceFilesSHA256           string            `json:"source_files_sha256"`
+	AncillaryFiles              map[string]string `json:"ancillary_files,omitempty"`
+	AncillaryFilesSHA256        string            `json:"ancillary_files_sha256,omitempty"`
 }
 
 type OpenClawUpgradeLabBaselineEvidence struct {
@@ -947,6 +950,8 @@ func (s *OpenClawUpgradeLabService) finalChecks(run *models.OpenClawUpgradeLabRu
 			archiveMessage = archiveErr.Error()
 		}
 		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_session_archive", item.InstanceID), Passed: archiveOK, Expected: strconv.Itoa(len(baseline.SourceFiles)), Actual: strconv.Itoa(archived), Message: archiveMessage})
+		ancillaryOK := maps.Equal(baseline.AncillaryFiles, after[item.InstanceID].Sessions.AncillaryFiles)
+		checks = append(checks, OpenClawUpgradeLabCheck{Name: fmt.Sprintf("instance_%d_session_auxiliary", item.InstanceID), Passed: ancillaryOK, Expected: baseline.AncillaryFilesSHA256, Actual: after[item.InstanceID].Sessions.AncillaryFilesSHA256, Message: "session prompt caches and auxiliary files must remain byte-identical in place"})
 		var evidence struct {
 			Migration RuntimeAgentSessionSQLiteMigration `json:"migration"`
 		}
@@ -1038,7 +1043,7 @@ func inspectUpgradeLabProjectData(workspace string) (upgradeLabDataManifest, err
 }
 
 func inspectUpgradeLabLegacySessions(workspace string) (upgradeLabSessionManifest, error) {
-	manifest := upgradeLabSessionManifest{SourceFiles: map[string]string{}}
+	manifest := upgradeLabSessionManifest{SourceFiles: map[string]string{}, AncillaryFiles: map[string]string{}}
 	root := filepath.Join(filepath.Clean(workspace), "home", ".openclaw", "agents")
 	if !pathWithin(workspace, root) {
 		return manifest, errors.New("upgrade lab session path escaped its workspace")
@@ -1068,7 +1073,12 @@ func inspectUpgradeLabLegacySessions(workspace string) (upgradeLabSessionManifes
 			return err
 		}
 		digest := sha256.Sum256(raw)
-		manifest.SourceFiles[slash] = hex.EncodeToString(digest[:])
+		digestHex := hex.EncodeToString(digest[:])
+		if isUpgradeLabLegacySessionSource(lower) {
+			manifest.SourceFiles[slash] = digestHex
+		} else {
+			manifest.AncillaryFiles[slash] = digestHex
+		}
 		if strings.HasSuffix(lower, "sessions.json") {
 			var entries map[string]struct {
 				SessionID string `json:"sessionId"`
@@ -1093,7 +1103,17 @@ func inspectUpgradeLabLegacySessions(workspace string) (upgradeLabSessionManifes
 	}
 	manifest.SessionCount, manifest.CatalogSHA256 = canonicalUpgradeLabCatalog(catalog)
 	manifest.SourceFilesSHA256 = digestUpgradeLabFiles(manifest.SourceFiles)
+	manifest.AncillaryFilesSHA256 = digestUpgradeLabFiles(manifest.AncillaryFiles)
 	return manifest, nil
+}
+
+func isUpgradeLabLegacySessionSource(lowerPath string) bool {
+	lowerPath = strings.TrimSpace(filepath.ToSlash(lowerPath))
+	base := strings.ToLower(filepath.Base(lowerPath))
+	if base == "sessions.json" {
+		return true
+	}
+	return strings.Contains(lowerPath, "/sessions/") && (strings.HasSuffix(lowerPath, ".jsonl") || strings.HasSuffix(lowerPath, ".json"))
 }
 
 func countUpgradeLabMessages(raw []byte, manifest *upgradeLabSessionManifest) error {
