@@ -19,6 +19,22 @@ type gatewayStateSequence struct {
 	calls  int
 }
 
+type concurrentStopRuntimeAgent struct {
+	*fakeRuntimeAgentClient
+	bindings *fakeRuntimeBindingRepo
+}
+
+func (a *concurrentStopRuntimeAgent) DeleteGateway(ctx context.Context, endpoint, gatewayID string) error {
+	if binding := a.bindings.bindings[209]; binding != nil {
+		binding.State = RuntimeGatewayBindingCreating
+	}
+	return nil
+}
+
+func (a *concurrentStopRuntimeAgent) GatewayState(context.Context, string, string) (*RuntimeAgentGatewayState, error) {
+	return nil, ErrRuntimeAgentNotFound
+}
+
 func (s *gatewayStateSequence) GatewayState(context.Context, string, string) (*RuntimeAgentGatewayState, error) {
 	if s.calls >= len(s.states) {
 		return nil, ErrRuntimeAgentNotFound
@@ -42,6 +58,29 @@ func TestWaitForGatewayStoppedAcceptsRemovedRecord(t *testing.T) {
 		t.Fatalf("confirmed=%v err=%v", confirmed, err)
 	}
 }
+
+func TestStopCandidateGatewayAcceptsConfirmedConcurrentBindingTransition(t *testing.T) {
+	bindingRepo := &fakeRuntimeBindingRepo{
+		bindings: map[int]*models.InstanceRuntimeBinding{
+			209: {InstanceID: 209, RuntimePodID: 9, GatewayID: "gw-209-2", Generation: 2, State: RuntimeGatewayBindingRunning},
+		},
+		deleteAndReleaseCalls: map[int]int{},
+	}
+	agent := &concurrentStopRuntimeAgent{fakeRuntimeAgentClient: &fakeRuntimeAgentClient{}, bindings: bindingRepo}
+	service := &RuntimeUpgradeService{bindings: bindingRepo, agent: agent}
+	stopped, err := service.stopCandidateGateway(context.Background(), runtimeUpgradeCandidate{
+		InstanceID: 209, RuntimePodID: int64Pointer(9), GatewayID: "gw-209-2", Generation: 2,
+		BindingState: RuntimeGatewayBindingRunning, AgentEndpoint: "http://runtime", Capabilities: []string{"openclaw.gateway.stop-confirm"},
+	})
+	if err != nil || !stopped {
+		t.Fatalf("stopped=%v err=%v, want confirmed success", stopped, err)
+	}
+	if bindingRepo.bindings[209] != nil || bindingRepo.deleteAndReleaseCalls[209] != 1 {
+		t.Fatalf("concurrent binding was not released: binding=%#v calls=%d", bindingRepo.bindings[209], bindingRepo.deleteAndReleaseCalls[209])
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestRuntimeUpgradeScopePersistsLabSelectionWithoutNewRolloutColumns(t *testing.T) {
 	runID := int64(17)

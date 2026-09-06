@@ -1019,6 +1019,10 @@ func runtimeUpgradeLeaseToken(rolloutID int64, instanceID int) string {
 }
 
 func (s *RuntimeUpgradeService) candidateForUpgradeItem(ctx context.Context, item models.RuntimeUpgradeItem) (runtimeUpgradeCandidate, error) {
+	return s.candidateForUpgradeItemMode(ctx, item, true)
+}
+
+func (s *RuntimeUpgradeService) candidateForUpgradeItemMode(ctx context.Context, item models.RuntimeUpgradeItem, requireStable bool) (runtimeUpgradeCandidate, error) {
 	var userID, generation int
 	var instanceStatus string
 	var workspace sql.NullString
@@ -1049,7 +1053,7 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItem(ctx context.Context, ite
 		}
 		return candidate, nil
 	}
-	if instanceStatus != "running" && instanceStatus != "stopped" {
+	if requireStable && instanceStatus != "running" && instanceStatus != "stopped" {
 		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d runtime state %s is not stable for migration", item.InstanceID, instanceStatus)
 	}
 	candidate.RuntimePodID = &binding.RuntimePodID
@@ -1217,7 +1221,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			errs = append(errs, fmt.Errorf("restore instance %d: instance identity is unavailable", item.InstanceID))
 			continue
 		}
-		sourceCandidate, candidateErr := s.candidateForUpgradeItem(ctx, item)
+		sourceCandidate, candidateErr := s.candidateForUpgradeItemMode(ctx, item, false)
 		if candidateErr != nil {
 			errs = append(errs, fmt.Errorf("restore instance %d cannot quiesce its source gateway: %w", item.InstanceID, candidateErr))
 			continue
@@ -2092,7 +2096,19 @@ func (s *RuntimeUpgradeService) stopCandidateGateway(ctx context.Context, candid
 				return true, fmt.Errorf("release stopped runtime binding: %w", err)
 			}
 			if !deleted {
-				return true, fmt.Errorf("stopped gateway binding changed concurrently")
+				current, currentErr := s.bindings.GetByInstanceID(ctx, candidate.InstanceID)
+				if currentErr != nil {
+					return true, fmt.Errorf("inspect concurrently stopped gateway binding: %w", currentErr)
+				}
+				if current == nil {
+					return true, nil
+				}
+				if current.RuntimePodID != *candidate.RuntimePodID || current.Generation != candidate.Generation || strings.TrimSpace(current.GatewayID) != candidate.GatewayID {
+					return true, fmt.Errorf("stopped gateway binding changed identity concurrently")
+				}
+				if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID); err != nil {
+					return true, fmt.Errorf("release concurrently stopped gateway binding: %w", err)
+				}
 			}
 		} else if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, candidate.InstanceID, *candidate.RuntimePodID); err != nil {
 			return true, fmt.Errorf("release inactive runtime binding: %w", err)
