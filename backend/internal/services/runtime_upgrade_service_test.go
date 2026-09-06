@@ -56,6 +56,69 @@ func TestRuntimeUpgradeScopePersistsLabSelectionWithoutNewRolloutColumns(t *test
 	}
 }
 
+func TestRuntimeUpgradeGuardAppliesOnlyToOpenClaw(t *testing.T) {
+	service := &RuntimeUpgradeService{}
+	for _, runtimeType := range []string{RuntimeTypeHermes, RuntimeTypeOpenCode, RuntimeTypeDeepSeekHarness} {
+		if service.InstanceBlocked(context.Background(), runtimeType, 17) {
+			t.Fatalf("OpenClaw upgrade guard blocked %s instance", runtimeType)
+		}
+	}
+	if !service.InstanceBlocked(context.Background(), RuntimeTypeOpenClaw, 17) {
+		t.Fatal("OpenClaw guard must fail closed when its database is unavailable")
+	}
+}
+
+func TestUpgradeReceiptReconciliationOnlyHandlesAmbiguousTransport(t *testing.T) {
+	ctx := context.Background()
+	if !shouldReconcileUpgradeReceipt(ctx, context.DeadlineExceeded) {
+		t.Fatal("transport timeout must be reconciled against the durable receipt")
+	}
+	for _, err := range []error{ErrRuntimeAgentConflict, ErrRuntimeAgentNotFound, ErrRuntimeAgentUnsupported} {
+		if shouldReconcileUpgradeReceipt(ctx, err) {
+			t.Fatalf("definitive Runtime Agent error %v was treated as ambiguous", err)
+		}
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if shouldReconcileUpgradeReceipt(cancelled, context.DeadlineExceeded) {
+		t.Fatal("cancelled rollout context started a receipt reconciliation request")
+	}
+	if !validSessionSQLiteMigration(&RuntimeAgentSessionSQLiteMigration{Status: "validated", OutputSHA256: "output", SessionCatalogSHA256: "catalog"}) {
+		t.Fatal("validated migration evidence was rejected")
+	}
+	if !validSessionSQLiteRestore(&RuntimeAgentSessionSQLiteRestore{Status: "restored", ConfigRestored: true, StateRestored: true}) {
+		t.Fatal("validated restore evidence was rejected")
+	}
+}
+
+func TestActiveOpenClawRolloutBlockIsScopedToLabCandidates(t *testing.T) {
+	lab := `{"upgrade_lab_run_id":7,"candidate_instance_ids":[203]}`
+	tests := []struct {
+		name           string
+		phase          string
+		rollbackStatus string
+		preflight      string
+		itemExists     bool
+		itemState      string
+		want           bool
+	}{
+		{name: "production maintenance blocks new OpenClaw", phase: "maintenance", want: true},
+		{name: "production gateway restart blocks missing item", phase: "gateway_restart", want: true},
+		{name: "lab maintenance ignores ordinary OpenClaw", phase: "maintenance", preflight: lab, want: false},
+		{name: "lab rollback ignores ordinary OpenClaw", rollbackStatus: "waiting", preflight: lab, want: false},
+		{name: "lab maintenance blocks candidate", phase: "maintenance", preflight: lab, itemExists: true, want: true},
+		{name: "lab candidate restart ready is released", phase: "gateway_restart", preflight: lab, itemExists: true, itemState: "restart_ready", want: false},
+		{name: "lab candidate restart pending remains blocked", phase: "gateway_restart", preflight: lab, itemExists: true, itemState: "migrated", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := activeOpenClawRolloutBlocksInstance(test.phase, test.rollbackStatus, test.preflight, test.itemExists, test.itemState); got != test.want {
+				t.Fatalf("blocked = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeDeploymentInventoryIsPartitionedBetweenProductionAndLab(t *testing.T) {
 	runID := int64(7)
 	production := runtimeUpgradeScope{}

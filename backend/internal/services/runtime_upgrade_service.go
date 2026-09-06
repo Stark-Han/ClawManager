@@ -912,6 +912,15 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 		return err
 	}
 	migration, migrateErr := upgradeAgent.MigrateSessionSQLite(ctx, targetEndpoint, request)
+	if migrateErr != nil && shouldReconcileUpgradeReceipt(ctx, migrateErr) {
+		statusCtx, cancel := context.WithTimeout(ctx, runtimeAgentControlTimeout)
+		persisted, statusErr := upgradeAgent.SessionSQLiteMigrationStatus(statusCtx, targetEndpoint, request)
+		cancel()
+		if statusErr == nil && validSessionSQLiteMigration(persisted) {
+			migration = persisted
+			migrateErr = nil
+		}
+	}
 	releaseErr := upgradeAgent.ReleaseWriterLease(ctx, targetEndpoint, lease)
 	leaseHeld = releaseErr != nil
 	if migrateErr != nil {
@@ -920,7 +929,7 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 	if releaseErr != nil {
 		return fmt.Errorf("release migration writer lease for instance %d: %w", item.InstanceID, releaseErr)
 	}
-	if migration == nil || migration.Status != "validated" || strings.TrimSpace(migration.OutputSHA256) == "" || migration.SessionCount < 0 || strings.TrimSpace(migration.SessionCatalogSHA256) == "" {
+	if !validSessionSQLiteMigration(migration) {
 		return fmt.Errorf("instance %d session migration did not return validated evidence", item.InstanceID)
 	}
 	postflight, _ := json.Marshal(map[string]any{"migration": migration, "session_inventory": inventory, "target_agent_endpoint": targetEndpoint})
@@ -932,6 +941,18 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 		return fmt.Errorf("instance %d migration state changed concurrently", item.InstanceID)
 	}
 	return nil
+}
+
+func validSessionSQLiteMigration(migration *RuntimeAgentSessionSQLiteMigration) bool {
+	return migration != nil && migration.Status == "validated" && strings.TrimSpace(migration.OutputSHA256) != "" && migration.SessionCount >= 0 && strings.TrimSpace(migration.SessionCatalogSHA256) != ""
+}
+
+func validSessionSQLiteRestore(restored *RuntimeAgentSessionSQLiteRestore) bool {
+	return restored != nil && restored.Status == "restored" && restored.ConfigRestored && restored.StateRestored
+}
+
+func shouldReconcileUpgradeReceipt(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && !errors.Is(err, ErrRuntimeAgentConflict) && !errors.Is(err, ErrRuntimeAgentNotFound) && !errors.Is(err, ErrRuntimeAgentUnsupported)
 }
 
 func runtimeUpgradeLeaseToken(rolloutID int64, instanceID int) string {
@@ -1107,6 +1128,15 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			continue
 		}
 		restored, restoreErr := upgradeAgent.RestoreSessionSQLite(ctx, endpoint, request)
+		if restoreErr != nil && shouldReconcileUpgradeReceipt(ctx, restoreErr) {
+			statusCtx, cancel := context.WithTimeout(ctx, runtimeAgentControlTimeout)
+			persisted, statusErr := upgradeAgent.SessionSQLiteRestoreStatus(statusCtx, endpoint, request)
+			cancel()
+			if statusErr == nil && validSessionSQLiteRestore(persisted) {
+				restored = persisted
+				restoreErr = nil
+			}
+		}
 		releaseErr := upgradeAgent.ReleaseWriterLease(ctx, endpoint, lease)
 		if restoreErr != nil {
 			errs = append(errs, fmt.Errorf("restore instance %d official session archive: %w", item.InstanceID, restoreErr))
@@ -1116,7 +1146,7 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 			errs = append(errs, fmt.Errorf("restore instance %d release writer lease: %w", item.InstanceID, releaseErr))
 			continue
 		}
-		if restored == nil || restored.Status != "restored" || !restored.ConfigRestored || !restored.StateRestored {
+		if !validSessionSQLiteRestore(restored) {
 			errs = append(errs, fmt.Errorf("restore instance %d returned no verified evidence", item.InstanceID))
 			continue
 		}
@@ -1200,24 +1230,67 @@ func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int
 	return err
 }
 
-func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, instanceID int) bool {
+func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, runtimeType string, instanceID int) bool {
+	normalized, ok := NormalizeV2RuntimeType(runtimeType)
+	if !ok || normalized != RuntimeTypeOpenClaw {
+		return false
+	}
 	if s == nil || s.sess == nil || instanceID <= 0 {
 		return true
 	}
-	var count int
-	row, err := s.sess.SQL().QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runtime_rollouts r
+	rows, err := s.sess.SQL().QueryContext(ctx, `
+		SELECT r.phase,
+		       COALESCE(r.rollback_status, ''),
+		       COALESCE(r.preflight_json, ''),
+		       i.id IS NOT NULL,
+		       COALESCE(i.state, '')
+		FROM runtime_rollouts r
 		LEFT JOIN runtime_upgrade_items i ON i.rollout_id = r.id AND i.instance_id = ?
-		WHERE r.runtime_type = 'openclaw' AND r.status IN ('pending','running') AND (
-		  r.phase IN ('maintenance','image_rollout','compatibility_check','session_migration','postflight','rollback_restore')
-		  OR (r.phase = 'gateway_restart' AND (i.id IS NULL OR i.state <> 'restart_ready'))
-		  OR r.rollback_status IN ('starting','waiting')
-		)
+		WHERE r.runtime_type = 'openclaw' AND r.status IN ('pending','running')
 	`, instanceID)
-	if err == nil {
-		err = row.Scan(&count)
+	if err != nil {
+		return true
 	}
-	return err != nil || count > 0
+	defer rows.Close()
+	for rows.Next() {
+		var phase, rollbackStatus, preflightJSON, itemState string
+		var itemExists bool
+		if err := rows.Scan(&phase, &rollbackStatus, &preflightJSON, &itemExists, &itemState); err != nil {
+			return true
+		}
+		if activeOpenClawRolloutBlocksInstance(phase, rollbackStatus, preflightJSON, itemExists, itemState) {
+			return true
+		}
+	}
+	return rows.Err() != nil
+}
+
+func activeOpenClawRolloutBlocksInstance(phase, rollbackStatus, preflightJSON string, itemExists bool, itemState string) bool {
+	preflightJSON = strings.TrimSpace(preflightJSON)
+	var preflight *string
+	if preflightJSON != "" {
+		preflight = &preflightJSON
+	}
+	scope := runtimeUpgradeScopeFromRollout(&models.RuntimeRollout{PreflightJSON: preflight})
+	// An upgrade-lab rollout owns only its persisted candidate items. It must
+	// never pause an ordinary OpenClaw instance, much less another Runtime.
+	if scope.UpgradeLabRunID != nil && !itemExists {
+		return false
+	}
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	rollbackStatus = strings.ToLower(strings.TrimSpace(rollbackStatus))
+	itemState = strings.ToLower(strings.TrimSpace(itemState))
+	if rollbackStatus == "starting" || rollbackStatus == "waiting" {
+		return true
+	}
+	switch phase {
+	case "maintenance", "image_rollout", "compatibility_check", "session_migration", "postflight", "rollback_restore":
+		return true
+	case "gateway_restart":
+		return !itemExists || itemState != "restart_ready"
+	default:
+		return false
+	}
 }
 
 func (s *RuntimeUpgradeService) ValidateInstanceDeletion(ctx context.Context, instanceID int) error {

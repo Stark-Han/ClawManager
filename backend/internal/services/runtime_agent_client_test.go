@@ -94,6 +94,64 @@ func TestRuntimeAgentClientDefaultTimeoutAllowsGatewayStartup(t *testing.T) {
 	if agentClient.httpClient.Timeout != 30*time.Second {
 		t.Fatalf("default timeout = %v, want 30s", agentClient.httpClient.Timeout)
 	}
+	if agentClient.upgradeHTTPClient.Timeout != 16*time.Minute {
+		t.Fatalf("upgrade timeout = %v, want 16m", agentClient.upgradeHTTPClient.Timeout)
+	}
+}
+
+func TestRuntimeAgentClientUsesLongTimeoutOnlyForUpgradeOperations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(75 * time.Millisecond)
+		if r.URL.Path == "/v1/openclaw/session-sqlite/migrate" {
+			_ = json.NewEncoder(w).Encode(RuntimeAgentSessionSQLiteMigration{InstanceID: 7, Status: "validated"})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := &runtimeAgentHTTPClient{
+		controlToken:      "token",
+		httpClient:        &http.Client{Timeout: 20 * time.Millisecond},
+		upgradeHTTPClient: &http.Client{Timeout: 250 * time.Millisecond},
+	}
+	if err := client.Health(context.Background(), server.URL); err == nil {
+		t.Fatal("fast control request unexpectedly ignored its short timeout")
+	}
+	result, err := client.MigrateSessionSQLite(context.Background(), server.URL, RuntimeAgentWorkspaceRequest{})
+	if err != nil {
+		t.Fatalf("long upgrade request used the control timeout: %v", err)
+	}
+	if result.Status != "validated" {
+		t.Fatalf("unexpected migration result: %+v", result)
+	}
+}
+
+func TestRuntimeAgentClientReadsDurableUpgradeReceipts(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/openclaw/session-sqlite/migrate/status":
+			_ = json.NewEncoder(w).Encode(RuntimeAgentSessionSQLiteMigration{InstanceID: 9, Status: "validated", OutputSHA256: "digest", SessionCatalogSHA256: "catalog"})
+		case "/v1/openclaw/session-sqlite/restore/status":
+			_ = json.NewEncoder(w).Encode(RuntimeAgentSessionSQLiteRestore{InstanceID: 9, Status: "restored", ConfigRestored: true, StateRestored: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := NewRuntimeAgentClientWithHTTPClient("token", server.Client()).(RuntimeUpgradeAgentClient)
+	req := RuntimeAgentWorkspaceRequest{RolloutID: "55", UserID: 1, InstanceID: 9, Generation: 2}
+	if _, err := client.SessionSQLiteMigrationStatus(context.Background(), server.URL, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SessionSQLiteRestoreStatus(context.Background(), server.URL, req); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 || paths[0] != "/v1/openclaw/session-sqlite/migrate/status" || paths[1] != "/v1/openclaw/session-sqlite/restore/status" {
+		t.Fatalf("receipt paths = %#v", paths)
+	}
 }
 
 func TestRuntimeAgentClientDeleteGatewayEscapesGatewayID(t *testing.T) {

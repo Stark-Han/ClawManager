@@ -44,6 +44,7 @@ type RuntimeScheduler struct {
 var (
 	errRuntimeScaleOutPending     = errors.New("runtime scale-out pending")
 	errRuntimeGatewayStartPending = errors.New("runtime gateway start pending")
+	errRuntimeUpgradePending      = errors.New("runtime data-safe upgrade pending")
 )
 
 const (
@@ -941,7 +942,7 @@ func (s *RuntimeScheduler) reconcile(ctx context.Context) error {
 				}
 			}
 			if assignErr := s.assignInstance(ctx, instance); assignErr != nil {
-				if errors.Is(assignErr, errRuntimeScaleOutPending) || errors.Is(assignErr, errRuntimeGatewayStartPending) {
+				if isRuntimeAssignmentPending(assignErr) {
 					continue
 				}
 				errs = append(errs, fmt.Errorf("assign desired instance %d: %w", instance.ID, assignErr))
@@ -1009,7 +1010,7 @@ func (s *RuntimeScheduler) reconcileCreatingInstance(ctx context.Context, instan
 		}
 	}
 	if err := s.assignInstance(ctx, instance); err != nil {
-		if errors.Is(err, errRuntimeScaleOutPending) || errors.Is(err, errRuntimeGatewayStartPending) {
+		if isRuntimeAssignmentPending(err) {
 			return nil
 		}
 		errs := []error{fmt.Errorf("assign creating instance %d: %w", instance.ID, err)}
@@ -1151,6 +1152,12 @@ func (s *RuntimeScheduler) scaleOutForPendingBacklog(ctx context.Context, instan
 		if !ok {
 			continue
 		}
+		// A data-safe OpenClaw rollout must not create ordinary OpenClaw
+		// capacity for instances that are intentionally waiting. Other Runtime
+		// types always bypass the OpenClaw guard.
+		if s.upgrade != nil && s.upgrade.InstanceBlocked(ctx, runtimeType, instance.ID) {
+			continue
+		}
 		binding, err := s.bindingRepo.GetByInstanceID(ctx, instance.ID)
 		if err != nil {
 			return fmt.Errorf("get binding for backlog instance %d: %w", instance.ID, err)
@@ -1255,8 +1262,12 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	if !isSchedulerManagedV2Instance(instance) {
 		return fmt.Errorf("instance %d is not scheduler-managed v2", instance.ID)
 	}
-	if s.upgrade != nil && s.upgrade.InstanceBlocked(ctx, instance.ID) {
-		return fmt.Errorf("instance %d is held by an active data-safe runtime rollout", instance.ID)
+	runtimeType, ok := schedulerRuntimeType(instance)
+	if !ok {
+		return fmt.Errorf("unsupported runtime type %q", instance.Type)
+	}
+	if s.upgrade != nil && s.upgrade.InstanceBlocked(ctx, runtimeType, instance.ID) {
+		return fmt.Errorf("%w: instance %d is held by an active data-safe runtime rollout", errRuntimeUpgradePending, instance.ID)
 	}
 	if s.bindingRepo != nil {
 		binding, err := s.bindingRepo.GetByInstanceID(ctx, instance.ID)
@@ -1266,10 +1277,6 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		if binding != nil {
 			return nil
 		}
-	}
-	runtimeType, ok := schedulerRuntimeType(instance)
-	if !ok {
-		return fmt.Errorf("unsupported runtime type %q", instance.Type)
 	}
 	pods, err := s.podRepo.ListSchedulable(ctx, runtimeType)
 	if err != nil {
@@ -1756,7 +1763,14 @@ func isRecoverableRuntimeSchedulingError(instance models.Instance) bool {
 	message := strings.TrimSpace(*instance.RuntimeErrorMessage)
 	return message == fmt.Sprintf("no schedulable %s runtime pod", runtimeType) ||
 		strings.Contains(message, fmt.Sprintf("no schedulable %s runtime pod:", runtimeType)) ||
+		message == fmt.Sprintf("instance %d is held by an active data-safe runtime rollout", instance.ID) ||
 		message == "gateway start failed: exit status 1"
+}
+
+func isRuntimeAssignmentPending(err error) bool {
+	return errors.Is(err, errRuntimeScaleOutPending) ||
+		errors.Is(err, errRuntimeGatewayStartPending) ||
+		errors.Is(err, errRuntimeUpgradePending)
 }
 
 func minInt(a, b int) int {

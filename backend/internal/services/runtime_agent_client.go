@@ -36,8 +36,10 @@ type RuntimeUpgradeAgentClient interface {
 	VerifyWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentSnapshotVerifyRequest) error
 	RestoreWorkspaceSnapshot(ctx context.Context, endpoint string, req RuntimeAgentRestoreRequest) (*RuntimeAgentRestoreResponse, error)
 	MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error)
+	SessionSQLiteMigrationStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error)
 	PreflightUpgradeCompatibility(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentUpgradeCompatibility, error)
 	RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error)
+	SessionSQLiteRestoreStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error)
 	ActivateUpgrade(ctx context.Context, endpoint, rolloutID string) error
 }
 
@@ -100,18 +102,19 @@ type RuntimeAgentRestoreResponse struct {
 }
 
 type RuntimeAgentSessionSQLiteMigration struct {
-	InstanceID           int       `json:"instance_id"`
-	Status               string    `json:"status"`
-	OutputSHA256         string    `json:"output_sha256"`
-	ArchiveBytes         int64     `json:"archive_bytes"`
-	ArchiveFiles         int64     `json:"archive_files"`
-	RollbackAvailable    bool      `json:"rollback_available"`
-	ConfigOriginalSHA256 string    `json:"config_original_sha256,omitempty"`
-	ConfigTargetSHA256   string    `json:"config_target_sha256,omitempty"`
-	StateCapsuleBytes    int64     `json:"state_capsule_bytes,omitempty"`
-	SessionCount         int       `json:"session_count,omitempty"`
-	SessionCatalogSHA256 string    `json:"session_catalog_sha256,omitempty"`
-	CompletedAt          time.Time `json:"completed_at"`
+	InstanceID           int              `json:"instance_id"`
+	Status               string           `json:"status"`
+	OutputSHA256         string           `json:"output_sha256"`
+	ArchiveBytes         int64            `json:"archive_bytes"`
+	ArchiveFiles         int64            `json:"archive_files"`
+	RollbackAvailable    bool             `json:"rollback_available"`
+	ConfigOriginalSHA256 string           `json:"config_original_sha256,omitempty"`
+	ConfigTargetSHA256   string           `json:"config_target_sha256,omitempty"`
+	StateCapsuleBytes    int64            `json:"state_capsule_bytes,omitempty"`
+	SessionCount         int              `json:"session_count,omitempty"`
+	SessionCatalogSHA256 string           `json:"session_catalog_sha256,omitempty"`
+	PhaseDurationsMS     map[string]int64 `json:"phase_durations_ms,omitempty"`
+	CompletedAt          time.Time        `json:"completed_at"`
 }
 
 type RuntimeAgentUpgradeCompatibility struct {
@@ -131,12 +134,13 @@ type RuntimeAgentUpgradeCompatibility struct {
 }
 
 type RuntimeAgentSessionSQLiteRestore struct {
-	InstanceID     int       `json:"instance_id"`
-	Status         string    `json:"status"`
-	OutputSHA256   string    `json:"output_sha256"`
-	ConfigRestored bool      `json:"config_restored"`
-	StateRestored  bool      `json:"state_restored"`
-	CompletedAt    time.Time `json:"completed_at"`
+	InstanceID       int              `json:"instance_id"`
+	Status           string           `json:"status"`
+	OutputSHA256     string           `json:"output_sha256"`
+	ConfigRestored   bool             `json:"config_restored"`
+	StateRestored    bool             `json:"state_restored"`
+	PhaseDurationsMS map[string]int64 `json:"phase_durations_ms,omitempty"`
+	CompletedAt      time.Time        `json:"completed_at"`
 }
 
 type RuntimeAgentGatewayState struct {
@@ -182,27 +186,39 @@ type RuntimeAgentCreateGatewayResponse struct {
 }
 
 type runtimeAgentHTTPClient struct {
-	controlToken string
-	httpClient   *http.Client
+	controlToken      string
+	httpClient        *http.Client
+	upgradeHTTPClient *http.Client
 }
+
+const (
+	runtimeAgentControlTimeout = 30 * time.Second
+	runtimeAgentUpgradeTimeout = 16 * time.Minute
+)
 
 func NewRuntimeAgentClient(controlToken string) RuntimeAgentClient {
 	return NewRuntimeAgentClientWithHTTPClient(controlToken, nil)
 }
 
 func NewRuntimeAgentClientWithHTTPClient(controlToken string, httpClient *http.Client) RuntimeAgentClient {
+	usingDefaults := httpClient == nil
 	if httpClient == nil {
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: runtimeAgentControlTimeout,
 		}
 	}
 	clientCopy := *httpClient
 	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
+	upgradeClientCopy := clientCopy
+	if usingDefaults {
+		upgradeClientCopy.Timeout = runtimeAgentUpgradeTimeout
+	}
 	return &runtimeAgentHTTPClient{
-		controlToken: controlToken,
-		httpClient:   &clientCopy,
+		controlToken:      controlToken,
+		httpClient:        &clientCopy,
+		upgradeHTTPClient: &upgradeClientCopy,
 	}
 }
 
@@ -289,7 +305,15 @@ func (c *runtimeAgentHTTPClient) RestoreWorkspaceSnapshot(ctx context.Context, e
 
 func (c *runtimeAgentHTTPClient) MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
 	var response RuntimeAgentSessionSQLiteMigration
-	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/migrate", req, &response); err != nil {
+	if err := c.doUpgrade(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/migrate", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) SessionSQLiteMigrationStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
+	var response RuntimeAgentSessionSQLiteMigration
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/migrate/status", req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -297,7 +321,7 @@ func (c *runtimeAgentHTTPClient) MigrateSessionSQLite(ctx context.Context, endpo
 
 func (c *runtimeAgentHTTPClient) PreflightUpgradeCompatibility(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentUpgradeCompatibility, error) {
 	var response RuntimeAgentUpgradeCompatibility
-	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/upgrade/preflight", req, &response); err != nil {
+	if err := c.doUpgrade(ctx, http.MethodPost, endpoint, "/v1/openclaw/upgrade/preflight", req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -305,7 +329,15 @@ func (c *runtimeAgentHTTPClient) PreflightUpgradeCompatibility(ctx context.Conte
 
 func (c *runtimeAgentHTTPClient) RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error) {
 	var response RuntimeAgentSessionSQLiteRestore
-	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/restore", req, &response); err != nil {
+	if err := c.doUpgrade(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/restore", req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *runtimeAgentHTTPClient) SessionSQLiteRestoreStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error) {
+	var response RuntimeAgentSessionSQLiteRestore
+	if err := c.do(ctx, http.MethodPost, endpoint, "/v1/openclaw/session-sqlite/restore/status", req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -316,6 +348,14 @@ func (c *runtimeAgentHTTPClient) ActivateUpgrade(ctx context.Context, endpoint, 
 }
 
 func (c *runtimeAgentHTTPClient) do(ctx context.Context, method, endpoint, path string, body any, out any) error {
+	return c.doWithClient(ctx, c.httpClient, method, endpoint, path, body, out)
+}
+
+func (c *runtimeAgentHTTPClient) doUpgrade(ctx context.Context, method, endpoint, path string, body any, out any) error {
+	return c.doWithClient(ctx, c.upgradeHTTPClient, method, endpoint, path, body, out)
+}
+
+func (c *runtimeAgentHTTPClient) doWithClient(ctx context.Context, httpClient *http.Client, method, endpoint, path string, body any, out any) error {
 	endpoint = strings.TrimRight(endpoint, "/")
 	var reader io.Reader
 	if body != nil {
@@ -335,7 +375,7 @@ func (c *runtimeAgentHTTPClient) do(ctx context.Context, method, endpoint, path 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

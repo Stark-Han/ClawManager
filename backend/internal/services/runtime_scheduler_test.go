@@ -152,6 +152,82 @@ func TestRuntimeSchedulerAssignsCreatingInstanceToReadyPod(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchedulerTreatsOpenClawUpgradeGuardAsTransient(t *testing.T) {
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	workspace := "/workspaces/openclaw/user-1/instance-17"
+	instance := models.Instance{
+		ID: 17, UserID: 1, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway,
+		InstanceMode: InstanceModeLite, Status: "creating", WorkspacePath: &workspace,
+	}
+	agent := &fakeRuntimeAgentClient{}
+	scheduler := NewRuntimeScheduler(
+		instanceRepo,
+		&fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}},
+		newFakeRuntimeBindingRepo(),
+		&fakeRuntimeRolloutRepo{},
+		agent,
+		NewRuntimeEventService(nil),
+		nil,
+		&fakeRuntimeDeploymentService{},
+		time.Second,
+		WithRuntimeUpgradeService(&RuntimeUpgradeService{}),
+	)
+
+	if errs := scheduler.reconcileCreatingInstance(context.Background(), instance); len(errs) != 0 {
+		t.Fatalf("upgrade wait returned scheduler errors: %v", errs)
+	}
+	if _, changed := instanceRepo.runtimeStates[instance.ID]; changed {
+		t.Fatal("transient OpenClaw upgrade wait was persisted as an instance error")
+	}
+	if len(agent.createRequests) != 0 {
+		t.Fatal("OpenClaw gateway was created while the data-safe guard was active")
+	}
+}
+
+func TestRuntimeSchedulerRecoversHistoricalHermesUpgradeGuardError(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "http://hermes-agent.runtime"
+	workspace := "/workspaces/hermes/user-1/instance-145"
+	errorMessage := "instance 145 is held by an active data-safe runtime rollout"
+	instance := models.Instance{
+		ID: 145, UserID: 1, Type: RuntimeTypeHermes, RuntimeType: RuntimeBackendGateway,
+		InstanceMode: InstanceModeLite, Status: "error", WorkspacePath: &workspace,
+		RuntimeGeneration: 61, RuntimeErrorMessage: &errorMessage, MemoryGB: 1, DiskGB: 1,
+	}
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.desiredRunning = []models.Instance{instance}
+	instanceRepo.byID[instance.ID] = &instance
+	pod := models.RuntimePod{
+		ID: 9, RuntimeType: RuntimeTypeHermes, Namespace: "runtime-system",
+		DeploymentName: "hermes-runtime", AgentEndpoint: &endpoint, State: "ready", Capacity: 100,
+	}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{pod.ID: &pod}, schedulable: []models.RuntimePod{pod}}
+	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-145", Status: "running"}}
+	scheduler := NewRuntimeScheduler(
+		instanceRepo,
+		podRepo,
+		newFakeRuntimeBindingRepo(),
+		&fakeRuntimeRolloutRepo{},
+		agent,
+		NewRuntimeEventService(nil),
+		nil,
+		&fakeRuntimeDeploymentService{},
+		time.Second,
+		WithRuntimeUpgradeService(&RuntimeUpgradeService{}),
+	)
+
+	if err := scheduler.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile historical Hermes error: %v", err)
+	}
+	state := instanceRepo.runtimeStates[instance.ID]
+	if state.status != "running" || state.message != nil {
+		t.Fatalf("recovered Hermes state = %+v, want running without error", state)
+	}
+	if len(agent.createRequests) != 1 {
+		t.Fatalf("Hermes gateway creates = %d, want 1", len(agent.createRequests))
+	}
+}
+
 func TestRuntimeSchedulerReplacesOlderGenerationBindingForCreatingInstance(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
