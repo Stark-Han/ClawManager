@@ -234,7 +234,7 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 	if result.Strategy == RuntimeUpgradeStrategyLegacyRolling {
 		result.Passed = true
 		if result.EmptyPoolReset {
-			result.Warnings = []string{"The active OpenClaw pool is 2026.8.1 or newer. Its ordinary Lite instance set is empty, so the pool image may be reset through the legacy rolling path without reusing 8.1 user data"}
+			result.Warnings = []string{"The ordinary OpenClaw Lite pool is empty and has no user state to migrate; only the Runtime image will be rolled to the pinned target digest"}
 		} else {
 			result.Warnings = []string{"The target is an OpenClaw version before 2026.8.1 and will use the unchanged legacy Lite rolling update path"}
 		}
@@ -2539,11 +2539,29 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 	if len(sourceImages) == 0 {
 		return nil, fmt.Errorf("no current OpenClaw deployment image is available to authorize the target registry")
 	}
-	classification, err := inspectOpenClawRegistryImage(ctx, target, sourceImages)
+	// With no ordinary Lite instances, Team references, Gateway occupancy,
+	// bindings or active rollout, this is an image-only operation. Version and
+	// migration-contract metadata are not needed because no user state moves.
+	emptyPoolReset := s.ValidateEmptyOpenClawPoolReset(ctx, 0) == nil
+	classification, err := inspectOpenClawRegistryImage(ctx, target, sourceImages, emptyPoolReset)
 	if err != nil {
 		return nil, err
 	}
 	classification.SourceImages = sourceImages
+	if emptyPoolReset {
+		if len(sourceImagePinErrors) > 0 {
+			keys := make([]string, 0, len(sourceImagePinErrors))
+			for key := range sourceImagePinErrors {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			return nil, fmt.Errorf("empty OpenClaw pool reset requires an immutable source image for %s: %w", keys[0], sourceImagePinErrors[keys[0]])
+		}
+		classification.Strategy = RuntimeUpgradeStrategyLegacyRolling
+		classification.Protocol = ""
+		classification.EmptyPoolReset = true
+		return classification, nil
+	}
 	if classification.Strategy == RuntimeUpgradeStrategyLegacyRolling {
 		sourceClassifications := map[string]*OpenClawTargetClassification{}
 		active8Plus := false
@@ -2562,7 +2580,7 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 			}
 			current, inspected := sourceClassifications[source]
 			if !inspected {
-				current, err = inspectOpenClawRegistryImage(ctx, source, sourceImages)
+				current, err = inspectOpenClawRegistryImage(ctx, source, sourceImages, false)
 				if err != nil {
 					return nil, fmt.Errorf("inspect current OpenClaw image %s before downgrade: %w", key, err)
 				}
@@ -2590,7 +2608,7 @@ func (s *RuntimeUpgradeService) ClassifyOpenClawTarget(ctx context.Context, targ
 	return classification, nil
 }
 
-func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImages map[string]string) (*OpenClawTargetClassification, error) {
+func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImages map[string]string, imageOnlyReset bool) (*OpenClawTargetClassification, error) {
 	host, repository, tag, err := splitRegistryImage(target)
 	if err != nil {
 		return nil, err
@@ -2680,13 +2698,13 @@ func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImag
 	if version == "" {
 		version = strings.TrimSpace(env["CLAWMANAGER_OPENCLAW_VERSION"])
 	}
-	version, versionOK := recognizedOpenClawRuntimeVersion(rootDigest, version)
-	if !versionOK {
+	_, versionOK := parseOpenClawNumericVersion(version)
+	if !versionOK && !imageOnlyReset {
 		return nil, fmt.Errorf("target OpenClaw image does not publish a valid runtime version")
 	}
 	strategy := RuntimeUpgradeStrategyLegacyRolling
 	protocol := ""
-	if openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
+	if !imageOnlyReset && openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
 		imageStrategy := strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.strategy"])
 		protocol = strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.protocol"])
 		if imageStrategy != openClawDataSafeImageStrategy || protocol != openClawDataSafeProtocol {
@@ -2698,21 +2716,6 @@ func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImag
 		Strategy: strategy, ImageRef: host + "/" + repository + "@" + rootDigest,
 		ImageDigest: rootDigest, RuntimeVersion: version, Protocol: protocol,
 	}, nil
-}
-
-// recognizedOpenClawRuntimeVersion keeps the general image contract strict.
-// The one exception is the immutable, production-tested 7.1 baseline, which
-// predates version metadata. Matching its content digest is safe across test
-// and production registry hosts; a tag name alone is never trusted.
-func recognizedOpenClawRuntimeVersion(imageDigest, publishedVersion string) (string, bool) {
-	publishedVersion = strings.TrimSpace(publishedVersion)
-	if _, ok := parseOpenClawNumericVersion(publishedVersion); ok {
-		return publishedVersion, true
-	}
-	if strings.EqualFold(strings.TrimSpace(imageDigest), OpenClawUpgradeLabBaselineDigest) {
-		return OpenClawUpgradeLabBaselineVersion, true
-	}
-	return "", false
 }
 
 func safeRegistryClient(host, repository string) (*http.Client, string, error) {

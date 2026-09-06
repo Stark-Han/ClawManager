@@ -281,26 +281,23 @@ func TestInspectOpenClawRegistryImageSelectsUpgradeStrategyFromImageMetadata(t *
 	for _, test := range []struct {
 		name           string
 		version        string
-		manifestDigest string
 		strategy       string
 		protocol       string
 		want           string
-		wantVersion    string
+		imageOnlyReset bool
 		wantErr        bool
 	}{
 		{name: "older labelled OpenClaw keeps generic rolling update", version: "2026.6.5", want: RuntimeUpgradeStrategyLegacyRolling},
 		{name: "legacy 7.1 keeps generic rolling update", version: "2026.7.1-2", want: RuntimeUpgradeStrategyLegacyRolling},
-		{name: "pinned 7.1 baseline accepts missing version metadata", manifestDigest: OpenClawUpgradeLabBaselineDigest, want: RuntimeUpgradeStrategyLegacyRolling, wantVersion: OpenClawUpgradeLabBaselineVersion},
 		{name: "unknown image rejects missing version metadata", wantErr: true},
+		{name: "empty pool accepts missing version metadata", imageOnlyReset: true, want: RuntimeUpgradeStrategyLegacyRolling},
 		{name: "8.1 uses data safe update", version: "2026.8.1", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},
 		{name: "later compatible version uses data safe update", version: "2026.9.0", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},
 		{name: "8.1 without contract is rejected", version: "2026.8.1", wantErr: true},
+		{name: "empty pool does not require 8.1 migration contract", version: "2026.8.1", imageOnlyReset: true, want: RuntimeUpgradeStrategyLegacyRolling},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manifestDigest := "sha256:" + strings.Repeat("c", 64)
-			if test.manifestDigest != "" {
-				manifestDigest = test.manifestDigest
-			}
 			configDigest := "sha256:" + strings.Repeat("d", 64)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -326,7 +323,7 @@ func TestInspectOpenClawRegistryImageSelectsUpgradeStrategyFromImageMetadata(t *
 			defer server.Close()
 			host := strings.TrimPrefix(server.URL, "http://")
 			sources := map[string]string{"runtime/openclaw-runtime": host + "/agentsruntime/openclaw-lite:old"}
-			got, err := inspectOpenClawRegistryImage(context.Background(), host+"/agentsruntime/openclaw-lite:release", sources)
+			got, err := inspectOpenClawRegistryImage(context.Background(), host+"/agentsruntime/openclaw-lite:release", sources, test.imageOnlyReset)
 			if test.wantErr {
 				if err == nil {
 					t.Fatalf("unsupported image was accepted: %+v", got)
@@ -336,11 +333,7 @@ func TestInspectOpenClawRegistryImageSelectsUpgradeStrategyFromImageMetadata(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantVersion := test.wantVersion
-			if wantVersion == "" {
-				wantVersion = test.version
-			}
-			if got.Strategy != test.want || got.RuntimeVersion != wantVersion || got.ImageRef != host+"/agentsruntime/openclaw-lite@"+manifestDigest {
+			if got.Strategy != test.want || got.RuntimeVersion != test.version || got.ImageRef != host+"/agentsruntime/openclaw-lite@"+manifestDigest {
 				t.Fatalf("classification = %+v", got)
 			}
 		})
