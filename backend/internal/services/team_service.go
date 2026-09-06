@@ -9729,6 +9729,10 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.CurrentTaskID = nil
 			member.Progress = 100
 			member.Availability = models.TeamMemberAvailabilityIdle
+			runtimeStatus := models.TeamTaskStatusSucceeded
+			member.RuntimeStatus = &runtimeStatus
+			member.RuntimeTaskID = nil
+			member.RuntimeIntent = nil
 			member.BlockedReason = nil
 		}
 		// Runtime availability is an instantaneous transport observation. The
@@ -9863,6 +9867,14 @@ func reconcileTeamMemberOperationalState(member *models.TeamMember, items []mode
 		setOptionalString(&member.RuntimeStatus, models.TeamTaskStatusSucceeded)
 		if member.CurrentTaskID != nil {
 			member.CurrentTaskID = nil
+			changed = true
+		}
+		if member.RuntimeTaskID != nil {
+			member.RuntimeTaskID = nil
+			changed = true
+		}
+		if member.RuntimeIntent != nil {
+			member.RuntimeIntent = nil
 			changed = true
 		}
 		if member.Progress != 100 {

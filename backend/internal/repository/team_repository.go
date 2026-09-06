@@ -525,6 +525,27 @@ WHERE root_task_id = ? AND (? = 0 OR plan_version = ?)
 `, task.UpdatedAt, task.UpdatedAt, task.ID, task.PlanVersion, task.PlanVersion); err != nil {
 			return fmt.Errorf("failed to complete team workflow phases: %w", err)
 		}
+		// A root completion ends only the members that are still attached to this
+		// exact task. The current_task_id predicate is the compare-and-clear guard:
+		// if a member already started a newer task, a late completion cannot reset
+		// that member back to idle. Keeping this in the same transaction prevents a
+		// succeeded root from leaving 8.1 workers permanently busy after restart.
+		if _, err := sess.SQL().Exec(`
+UPDATE team_members
+SET status = ?, current_task_id = NULL, progress = 100, availability = ?,
+    runtime_status = ?, runtime_task_id = NULL, runtime_intent = NULL,
+    blocked_reason = NULL, updated_at = ?
+WHERE team_id = ? AND current_task_id = ?
+`,
+			models.TeamMemberStatusIdle,
+			models.TeamMemberAvailabilityIdle,
+			models.TeamTaskStatusSucceeded,
+			task.UpdatedAt,
+			task.TeamID,
+			task.ID,
+		); err != nil {
+			return fmt.Errorf("failed to release members from completed team task: %w", err)
+		}
 		txRepo := &teamRepository{sess: sess}
 		if err := txRepo.CreateEvent(event); err != nil && !errors.Is(err, ErrDuplicateTeamEvent) {
 			return err

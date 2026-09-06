@@ -1685,6 +1685,10 @@ func TestProjectTeamEventLeaderPlanningDoesNotCreateLeaderAssignmentLane(t *test
 		CurrentTaskID: &taskID,
 		Availability:  models.TeamMemberAvailabilityBusy,
 	}
+	leaderRuntimeTaskID := "team-31-task-179"
+	leaderRuntimeIntent := "final synthesis"
+	leader.RuntimeTaskID = &leaderRuntimeTaskID
+	leader.RuntimeIntent = &leaderRuntimeIntent
 	repo := &teamRepositoryStub{
 		tasksByID:        map[int]*models.TeamTask{taskID: task},
 		tasksByMessageID: map[string]*models.TeamTask{messageID: task},
@@ -2488,6 +2492,11 @@ func TestProjectTeamEventLeaderMediatedLeaderCompletionAfterAssignmentResultsClo
 	}
 	if repo.updatedTask.ResultJSON == nil || !strings.Contains(*repo.updatedTask.ResultJSON, "designer=1") {
 		t.Fatalf("expected final synthesis result stored, got %#v", repo.updatedTask.ResultJSON)
+	}
+	if repo.updatedMember == nil || repo.updatedMember.Status != models.TeamMemberStatusIdle ||
+		repo.updatedMember.Availability != models.TeamMemberAvailabilityIdle ||
+		repo.updatedMember.CurrentTaskID != nil || repo.updatedMember.RuntimeTaskID != nil || repo.updatedMember.RuntimeIntent != nil {
+		t.Fatalf("accepted root completion must release the Leader's matching runtime assignment: %#v", repo.updatedMember)
 	}
 	if len(repo.outboxRows) != 1 || !strings.Contains(repo.outboxRows[0].Destination, "completion-acks") || !strings.Contains(repo.outboxRows[0].PayloadJSON, `"decision":"accepted"`) {
 		t.Fatalf("accepted root completion must atomically persist its acknowledgement: %#v", repo.outboxRows)
@@ -3652,15 +3661,19 @@ func TestMemberOperationalStateUsesAllPersistedAssignments(t *testing.T) {
 
 func TestMemberOperationalStateClosesStaleRuntimeAfterLastSuccess(t *testing.T) {
 	runtimeRunning := models.TeamTaskStatusRunning
+	runtimeTaskID := "team-12-task-102"
+	runtimeIntent := "finish assignment"
 	member := &models.TeamMember{ID: 42, TeamID: 12, Status: models.TeamMemberStatusIdle,
-		Availability: models.TeamMemberAvailabilityIdle, RuntimeStatus: &runtimeRunning, Progress: 65}
+		Availability: models.TeamMemberAvailabilityIdle, RuntimeStatus: &runtimeRunning,
+		RuntimeTaskID: &runtimeTaskID, RuntimeIntent: &runtimeIntent, Progress: 65}
 	items := []models.TeamWorkItem{{ID: 1, TeamID: member.TeamID, RootTaskID: 102, WorkID: "done", OwnerMemberID: &member.ID,
 		Status: models.TeamTaskStatusSucceeded, UpdatedAt: time.Now().UTC()}}
 	if !reconcileTeamMemberOperationalState(member, items) {
 		t.Fatal("a terminal assignment should repair a stale running runtime status")
 	}
 	if member.Status != models.TeamMemberStatusIdle || member.Availability != models.TeamMemberAvailabilityIdle ||
-		member.CurrentTaskID != nil || derefTeamString(member.RuntimeStatus) != models.TeamTaskStatusSucceeded || member.Progress != 100 {
+		member.CurrentTaskID != nil || member.RuntimeTaskID != nil || member.RuntimeIntent != nil ||
+		derefTeamString(member.RuntimeStatus) != models.TeamTaskStatusSucceeded || member.Progress != 100 {
 		t.Fatalf("the member should converge to a coherent terminal state: %#v", member)
 	}
 }
