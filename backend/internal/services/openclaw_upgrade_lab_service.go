@@ -33,6 +33,8 @@ const (
 	openClawUpgradeLabMaxCases         = 8
 	openClawUpgradeLabReadyTimeout     = 3 * time.Minute
 	openClawUpgradeLabProvisionTimeout = 12 * time.Minute
+	openClawUpgradeLabCleanupTimeout   = 10 * time.Second
+	openClawUpgradeLabCleanupQuiet     = 250 * time.Millisecond
 )
 
 type upgradeLabGatewayEnvBuilder interface {
@@ -52,6 +54,9 @@ type OpenClawUpgradeLabService struct {
 	envBuilder   upgradeLabGatewayEnvBuilder
 	conversation upgradeLabConversationClient
 	cfg          config.RuntimePoolConfig
+	// workspaceRemover is injected only by focused cleanup tests. Production
+	// calls removeUpgradeLabWorkspace, which is rooted beneath WorkspaceRoot.
+	workspaceRemover func(context.Context, string) error
 }
 
 type OpenClawUpgradeLabCheck struct {
@@ -340,6 +345,13 @@ func (s *OpenClawUpgradeLabService) Cleanup(ctx context.Context, id int64, actor
 			return getErr
 		}
 		if instance == nil {
+			// Older cleanup attempts could delete the database row before an NFS
+			// RemoveAll finished. Recover that exact, run-owned canonical path so
+			// retries do not leave an orphan workspace behind.
+			workspace := RuntimeWorkspacePathWithRoot(s.cfg.WorkspaceRoot, RuntimeTypeOpenClaw, *run.ActorUserID, instanceID)
+			if removeErr := s.removeLabWorkspace(ctx, workspace); removeErr != nil {
+				return fmt.Errorf("delete orphaned upgrade lab workspace for instance %d: %w", instanceID, removeErr)
+			}
 			continue
 		}
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(stringValue(instance.Description))), openClawUpgradeLabDescription) {
@@ -552,7 +564,10 @@ func upgradeLabFixtureMarker(runID int64, index int) string {
 // lifecycle.  Lab fixtures use the legacy 7.1 Runtime Agent, whose watcher can
 // win the stop response race.  We accept only a verified absent/stopped
 // gateway, release exactly its binding, delete exactly its fixture row, and
-// remove only its canonical workspace.  No serving Deployment is touched.
+// remove only its canonical workspace. The instance row is deliberately
+// deleted last: stale Runtime reports can still refer to it while an NFS
+// writer is settling, and a failed filesystem cleanup must remain retryable.
+// No serving Deployment is touched.
 func (s *OpenClawUpgradeLabService) deleteLabInstance(ctx context.Context, instance *models.Instance) error {
 	if instance == nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(stringValue(instance.Description))), openClawUpgradeLabDescription) {
 		return fmt.Errorf("instance is not owned by the OpenClaw upgrade lab")
@@ -574,28 +589,146 @@ func (s *OpenClawUpgradeLabService) deleteLabInstance(ctx context.Context, insta
 		if pod != nil && pod.AgentEndpoint != nil && strings.TrimSpace(*pod.AgentEndpoint) != "" && binding.GatewayID != "" {
 			endpoint := strings.TrimSpace(*pod.AgentEndpoint)
 			deleteErr := s.agent.DeleteGateway(ctx, endpoint, binding.GatewayID)
-			if deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) {
-				reader, ok := s.agent.(gatewayStateReader)
-				if !ok {
-					return deleteErr
-				}
-				confirmed, confirmErr := waitForGatewayStopped(ctx, reader, endpoint, binding.GatewayID, 5*time.Second)
+			confirmed := errors.Is(deleteErr, ErrRuntimeAgentNotFound)
+			if reader, ok := s.agent.(gatewayStateReader); ok {
+				var confirmErr error
+				confirmed, confirmErr = waitForGatewayStopped(ctx, reader, endpoint, binding.GatewayID, 5*time.Second)
 				if !confirmed {
 					return errors.Join(deleteErr, confirmErr)
 				}
+			}
+			if deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) && !confirmed {
+				return deleteErr
 			}
 		}
 		if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, instance.ID, binding.RuntimePodID); err != nil {
 			return err
 		}
 	}
+	if workspace != "" {
+		if err := s.removeLabWorkspace(ctx, workspace); err != nil {
+			return err
+		}
+	}
 	if err := s.instances.Delete(instance.ID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		return err
 	}
-	if workspace != "" {
-		return os.RemoveAll(workspace)
+	return nil
+}
+
+type upgradeLabWorkspaceRoot interface {
+	Lstat(name string) (os.FileInfo, error)
+	RemoveAll(name string) error
+}
+
+func (s *OpenClawUpgradeLabService) removeLabWorkspace(ctx context.Context, workspace string) error {
+	rootPath := filepath.Clean(strings.TrimSpace(s.cfg.WorkspaceRoot))
+	targetPath := filepath.Clean(strings.TrimSpace(workspace))
+	if rootPath == "." || targetPath == "." || targetPath == rootPath || !pathWithin(rootPath, targetPath) {
+		return fmt.Errorf("lab workspace failed cleanup safety validation")
+	}
+	relativePath, err := filepath.Rel(rootPath, targetPath)
+	if err != nil || relativePath == "." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("lab workspace failed rooted cleanup validation")
+	}
+	if s.workspaceRemover != nil {
+		return s.workspaceRemover(ctx, targetPath)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return fmt.Errorf("open upgrade lab workspace root: %w", err)
+	}
+	defer root.Close()
+	if err := removeUpgradeLabWorkspaceWithRetry(ctx, root, relativePath, openClawUpgradeLabCleanupTimeout, openClawUpgradeLabCleanupQuiet); err != nil {
+		return fmt.Errorf("remove upgrade lab workspace: %w", err)
 	}
 	return nil
+}
+
+// removeUpgradeLabWorkspaceWithRetry handles the short ENOTEMPTY window seen
+// when a confirmed-stopped process finishes flushing an NFSv4 workspace. It
+// requires two absent observations separated by a quiet period, never retries
+// permission or path-safety failures, and remains bounded by both context and
+// deadline.
+func removeUpgradeLabWorkspaceWithRetry(ctx context.Context, root upgradeLabWorkspaceRoot, relativePath string, timeout, quiet time.Duration) error {
+	if timeout <= 0 {
+		timeout = openClawUpgradeLabCleanupTimeout
+	}
+	if quiet <= 0 {
+		quiet = openClawUpgradeLabCleanupQuiet
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		removeErr := root.RemoveAll(relativePath)
+		if removeErr != nil {
+			lastErr = removeErr
+			if !retryableUpgradeLabRemoveError(removeErr) {
+				return removeErr
+			}
+		} else {
+			absent, statErr := upgradeLabWorkspaceAbsent(root, relativePath)
+			if statErr != nil {
+				return statErr
+			}
+			if absent {
+				if err := waitUpgradeLabCleanup(ctx, quiet, deadline); err != nil {
+					return err
+				}
+				absent, statErr = upgradeLabWorkspaceAbsent(root, relativePath)
+				if statErr != nil {
+					return statErr
+				}
+				if absent {
+					return nil
+				}
+				lastErr = errors.New("workspace reappeared during cleanup quiet period")
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("workspace did not become quiescent within %s: %w", timeout, lastErr)
+		}
+		if err := waitUpgradeLabCleanup(ctx, quiet, deadline); err != nil {
+			return err
+		}
+	}
+}
+
+func upgradeLabWorkspaceAbsent(root upgradeLabWorkspaceRoot, relativePath string) (bool, error) {
+	_, err := root.Lstat(relativePath)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	return false, err
+}
+
+func retryableUpgradeLabRemoveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return os.IsExist(err) || strings.Contains(message, "directory not empty") || strings.Contains(message, "resource busy")
+}
+
+func waitUpgradeLabCleanup(ctx context.Context, delay time.Duration, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("upgrade lab workspace cleanup timed out")
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (s *OpenClawUpgradeLabService) startGateway(ctx context.Context, run *models.OpenClawUpgradeLabRun, instance *models.Instance, pod models.RuntimePod, upgradeID string, index int) error {

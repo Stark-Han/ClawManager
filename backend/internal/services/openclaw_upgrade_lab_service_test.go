@@ -1,15 +1,174 @@
 package services
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"clawreef/internal/config"
 	"clawreef/internal/models"
 )
+
+type scriptedUpgradeLabRoot struct {
+	removeErrors []error
+	lstatErrors  []error
+	removeCalls  int
+	lstatCalls   int
+}
+
+func (r *scriptedUpgradeLabRoot) RemoveAll(string) error {
+	index := r.removeCalls
+	r.removeCalls++
+	if index < len(r.removeErrors) {
+		return r.removeErrors[index]
+	}
+	return nil
+}
+
+func (r *scriptedUpgradeLabRoot) Lstat(string) (os.FileInfo, error) {
+	index := r.lstatCalls
+	r.lstatCalls++
+	if index < len(r.lstatErrors) {
+		return nil, r.lstatErrors[index]
+	}
+	return nil, os.ErrNotExist
+}
+
+type upgradeLabCleanupInstanceRepo struct {
+	*fakeRuntimeInstanceRepo
+	deleteCalls []int
+}
+
+func (r *upgradeLabCleanupInstanceRepo) Delete(id int) error {
+	r.deleteCalls = append(r.deleteCalls, id)
+	delete(r.byID, id)
+	return nil
+}
+
+type upgradeLabCleanupAgent struct {
+	*fakeRuntimeAgentClient
+	stateCalls int
+}
+
+func (a *upgradeLabCleanupAgent) GatewayState(context.Context, string, string) (*RuntimeAgentGatewayState, error) {
+	a.stateCalls++
+	return nil, ErrRuntimeAgentNotFound
+}
+
+func TestRemoveUpgradeLabWorkspaceRetriesTransientNFSNotEmpty(t *testing.T) {
+	root := &scriptedUpgradeLabRoot{
+		removeErrors: []error{errors.New("unlinkat workspace: directory not empty"), nil},
+		lstatErrors:  []error{os.ErrNotExist, os.ErrNotExist},
+	}
+	if err := removeUpgradeLabWorkspaceWithRetry(context.Background(), root, "openclaw/user-1/instance-203", time.Second, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if root.removeCalls != 2 {
+		t.Fatalf("RemoveAll calls = %d, want 2", root.removeCalls)
+	}
+}
+
+func TestRemoveUpgradeLabWorkspaceDoesNotRetryPermissionFailure(t *testing.T) {
+	root := &scriptedUpgradeLabRoot{removeErrors: []error{os.ErrPermission}}
+	err := removeUpgradeLabWorkspaceWithRetry(context.Background(), root, "openclaw/user-1/instance-203", time.Second, time.Millisecond)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("cleanup error = %v, want permission failure", err)
+	}
+	if root.removeCalls != 1 {
+		t.Fatalf("RemoveAll calls = %d, want 1", root.removeCalls)
+	}
+}
+
+func TestRemoveLabWorkspaceIsRootedAndRemovesNestedFixture(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 203)
+	if err := os.MkdirAll(filepath.Join(workspace, "home", ".openclaw"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "home", ".openclaw", "fixture"), []byte("test"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	service := &OpenClawUpgradeLabService{cfg: config.RuntimePoolConfig{WorkspaceRoot: root}}
+	if err := service.removeLabWorkspace(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace still exists: %v", err)
+	}
+	if err := service.removeLabWorkspace(context.Background(), root); err == nil {
+		t.Fatal("cleanup accepted the workspace root")
+	}
+}
+
+func TestDeleteLabInstanceKeepsDatabaseRowUntilWorkspaceCleanupSucceeds(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 203)
+	description := openClawUpgradeLabDescription + "4"
+	instance := &models.Instance{ID: 203, UserID: 1, Description: &description, WorkspacePath: &workspace}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+	instances.byID[instance.ID] = instance
+	service := &OpenClawUpgradeLabService{
+		instances: instances,
+		bindings:  newFakeRuntimeBindingRepo(),
+		cfg:       config.RuntimePoolConfig{WorkspaceRoot: root},
+		workspaceRemover: func(context.Context, string) error {
+			return errors.New("unlinkat workspace: directory not empty")
+		},
+	}
+	if err := service.deleteLabInstance(context.Background(), instance); err == nil {
+		t.Fatal("cleanup unexpectedly succeeded")
+	}
+	if len(instances.deleteCalls) != 0 || instances.byID[instance.ID] == nil {
+		t.Fatal("instance row was deleted before workspace cleanup succeeded")
+	}
+	service.workspaceRemover = func(context.Context, string) error { return nil }
+	if err := service.deleteLabInstance(context.Background(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if len(instances.deleteCalls) != 1 || instances.byID[instance.ID] != nil {
+		t.Fatal("instance row was not deleted after workspace cleanup succeeded")
+	}
+}
+
+func TestDeleteLabInstanceConfirmsGatewayStopBeforeWorkspaceCleanup(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 204)
+	description := openClawUpgradeLabDescription + "5"
+	endpoint := "http://runtime-agent"
+	instance := &models.Instance{ID: 204, UserID: 1, Description: &description, WorkspacePath: &workspace}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+	instances.byID[instance.ID] = instance
+	bindings := newFakeRuntimeBindingRepo()
+	bindings.bindings[instance.ID] = &models.InstanceRuntimeBinding{InstanceID: instance.ID, RuntimePodID: 9, GatewayID: "gateway-204"}
+	agent := &upgradeLabCleanupAgent{fakeRuntimeAgentClient: &fakeRuntimeAgentClient{}}
+	workspaceRemoved := false
+	service := &OpenClawUpgradeLabService{
+		instances: instances,
+		pods:      &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{9: {ID: 9, AgentEndpoint: &endpoint}}},
+		bindings:  bindings,
+		agent:     agent,
+		cfg:       config.RuntimePoolConfig{WorkspaceRoot: root},
+		workspaceRemover: func(context.Context, string) error {
+			if agent.stateCalls == 0 {
+				t.Fatal("workspace cleanup ran before gateway stop confirmation")
+			}
+			workspaceRemoved = true
+			return nil
+		},
+	}
+	if err := service.deleteLabInstance(context.Background(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if agent.stateCalls == 0 || !workspaceRemoved || bindings.bindings[instance.ID] != nil || instances.byID[instance.ID] != nil {
+		t.Fatalf("incomplete cleanup: stateCalls=%d workspaceRemoved=%v binding=%v instance=%v", agent.stateCalls, workspaceRemoved, bindings.bindings[instance.ID], instances.byID[instance.ID])
+	}
+}
 
 func TestInspectUpgradeLabProjectDataIsDeterministicAndDetectsChanges(t *testing.T) {
 	workspace := t.TempDir()
