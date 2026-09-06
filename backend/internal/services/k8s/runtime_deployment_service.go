@@ -66,6 +66,11 @@ type RuntimeDeploymentPod struct {
 	SchedulingEnabled *bool
 }
 
+type RuntimeDeploymentRef struct {
+	Namespace string
+	Name      string
+}
+
 type RuntimeDeploymentService interface {
 	Ensure(ctx context.Context, spec RuntimeDeploymentSpec) error
 	Scale(ctx context.Context, namespace, name string, replicas int32) error
@@ -74,6 +79,7 @@ type RuntimeDeploymentService interface {
 	SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error
 	DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error
 	ListPods(ctx context.Context, namespace, runtimeType string) ([]RuntimeDeploymentPod, error)
+	ListDeploymentPods(ctx context.Context, refs []RuntimeDeploymentRef) ([]RuntimeDeploymentPod, error)
 }
 
 // RuntimeUpgradeLabDeploymentService is deliberately separate from the
@@ -685,54 +691,106 @@ func (s *runtimeDeploymentService) ListPods(ctx context.Context, namespace, runt
 		if runtimeType != "" && deploymentRuntimeType != runtimeType {
 			continue
 		}
-		if deployment.Spec.Selector == nil {
-			return nil, fmt.Errorf("runtime deployment %s/%s has no selector", deployment.Namespace, deployment.Name)
+		// A retained zero-replica pool has no serving pod and must not add a
+		// Kubernetes API dependency to unrelated scheduling or rollout work.
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 && deployment.Status.Replicas == 0 {
+			continue
 		}
-		selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+		deploymentPods, err := s.listDeploymentPods(ctx, &deployment)
 		if err != nil {
-			return nil, fmt.Errorf("runtime deployment %s/%s has invalid selector: %w", deployment.Namespace, deployment.Name, err)
+			return nil, err
 		}
-		podList, err := s.client.CoreV1().Pods(deployment.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-		if err != nil {
-			return nil, fmt.Errorf("failed to list runtime deployment pods %s/%s: %w", deployment.Namespace, deployment.Name, err)
-		}
-		deploymentImage := runtimeContainerImage(deployment.Spec.Template.Spec.Containers)
-		var schedulingEnabled *bool
-		if raw, ok := deployment.Labels[runtimeSchedulingLabel]; ok {
-			if parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw)); parseErr == nil {
-				schedulingEnabled = &parsed
-			}
-		}
-		for _, pod := range podList.Items {
-			// Deployment selectors also match retained Failed/Evicted pods from
-			// old ReplicaSets. They are audit history, not the live source image
-			// inventory used for a data-safe rollback decision.
-			if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-				continue
-			}
-			image := runtimeContainerImage(pod.Spec.Containers)
-			if image == "" {
-				image = deploymentImage
-			}
-			pods = append(pods, RuntimeDeploymentPod{
-				RuntimeType:       deploymentRuntimeType,
-				Namespace:         pod.Namespace,
-				DeploymentName:    deployment.Name,
-				PodName:           pod.Name,
-				PodIP:             stringPtrIfNotEmpty(pod.Status.PodIP),
-				NodeName:          stringPtrIfNotEmpty(pod.Spec.NodeName),
-				ImageRef:          image,
-				ImageDigest:       runtimeContainerImageID(pod.Status.ContainerStatuses),
-				State:             runtimeK8sPodState(pod),
-				PoolRole:          strings.TrimSpace(deployment.Labels[runtimePoolRoleLabel]),
-				PoolPurpose:       strings.TrimSpace(deployment.Labels[upgradeLabPurposeLabel]),
-				UpgradeID:         strings.TrimSpace(deployment.Labels[runtimeUpgradeIDLabel]),
-				SourceDeployment:  strings.TrimSpace(deployment.Labels[runtimeSourceLabel]),
-				SchedulingEnabled: schedulingEnabled,
-			})
-		}
+		pods = append(pods, deploymentPods...)
 	}
 	return pods, nil
+}
+
+// ListDeploymentPods returns only the explicitly named pools. Data-safe
+// OpenClaw reconciliation uses this path so a stale or unhealthy unrelated
+// Runtime Deployment cannot fail or redirect the current rollout.
+func (s *runtimeDeploymentService) ListDeploymentPods(ctx context.Context, refs []RuntimeDeploymentRef) ([]RuntimeDeploymentPod, error) {
+	if s == nil || s.client == nil {
+		return nil, fmt.Errorf("k8s client not initialized")
+	}
+	seen := make(map[string]struct{}, len(refs))
+	var pods []RuntimeDeploymentPod
+	for _, ref := range refs {
+		namespace := strings.TrimSpace(ref.Namespace)
+		name := strings.TrimSpace(ref.Name)
+		if namespace == "" || name == "" {
+			return nil, fmt.Errorf("runtime deployment namespace and name are required")
+		}
+		key := namespace + "/" + name
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deployment, err := s.client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get runtime deployment %s: %w", key, err)
+		}
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 && deployment.Status.Replicas == 0 {
+			continue
+		}
+		deploymentPods, err := s.listDeploymentPods(ctx, deployment)
+		if err != nil {
+			return nil, err
+		}
+		pods = append(pods, deploymentPods...)
+	}
+	return pods, nil
+}
+
+func (s *runtimeDeploymentService) listDeploymentPods(ctx context.Context, deployment *appsv1.Deployment) ([]RuntimeDeploymentPod, error) {
+	if deployment == nil || deployment.Spec.Selector == nil {
+		if deployment == nil {
+			return nil, fmt.Errorf("runtime deployment is required")
+		}
+		return nil, fmt.Errorf("runtime deployment %s/%s has no selector", deployment.Namespace, deployment.Name)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("runtime deployment %s/%s has invalid selector: %w", deployment.Namespace, deployment.Name, err)
+	}
+	podList, err := s.client.CoreV1().Pods(deployment.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list runtime deployment pods %s/%s: %w", deployment.Namespace, deployment.Name, err)
+	}
+	deploymentRuntimeType := strings.ToLower(strings.TrimSpace(deployment.Labels["clawmanager.io/runtime-type"]))
+	deploymentImage := runtimeContainerImage(deployment.Spec.Template.Spec.Containers)
+	var schedulingEnabled *bool
+	if raw, ok := deployment.Labels[runtimeSchedulingLabel]; ok {
+		if parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw)); parseErr == nil {
+			schedulingEnabled = &parsed
+		}
+	}
+	result := make([]RuntimeDeploymentPod, 0, len(podList.Items))
+	for _, pod := range podList.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+			continue
+		}
+		image := runtimeContainerImage(pod.Spec.Containers)
+		if image == "" {
+			image = deploymentImage
+		}
+		result = append(result, RuntimeDeploymentPod{
+			RuntimeType:       deploymentRuntimeType,
+			Namespace:         pod.Namespace,
+			DeploymentName:    deployment.Name,
+			PodName:           pod.Name,
+			PodIP:             stringPtrIfNotEmpty(pod.Status.PodIP),
+			NodeName:          stringPtrIfNotEmpty(pod.Spec.NodeName),
+			ImageRef:          image,
+			ImageDigest:       runtimeContainerImageID(pod.Status.ContainerStatuses),
+			State:             runtimeK8sPodState(pod),
+			PoolRole:          strings.TrimSpace(deployment.Labels[runtimePoolRoleLabel]),
+			PoolPurpose:       strings.TrimSpace(deployment.Labels[upgradeLabPurposeLabel]),
+			UpgradeID:         strings.TrimSpace(deployment.Labels[runtimeUpgradeIDLabel]),
+			SourceDeployment:  strings.TrimSpace(deployment.Labels[runtimeSourceLabel]),
+			SchedulingEnabled: schedulingEnabled,
+		})
+	}
+	return result, nil
 }
 
 func runtimeContainerImageID(statuses []corev1.ContainerStatus) string {

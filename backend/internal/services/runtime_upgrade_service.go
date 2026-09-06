@@ -25,6 +25,7 @@ import (
 
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
+	"clawreef/internal/services/k8s"
 
 	"github.com/upper/db/v4"
 )
@@ -171,6 +172,10 @@ type TeamUpgradeMaintenanceController interface {
 
 type RuntimeDeploymentInventoryProvider interface {
 	RuntimeDeploymentPods(ctx context.Context, runtimeType string) ([]models.RuntimePod, error)
+}
+
+type RuntimeDeploymentScopedInventoryProvider interface {
+	RuntimeDeploymentPodsFor(ctx context.Context, runtimeType string, refs []k8s.RuntimeDeploymentRef) ([]models.RuntimePod, error)
 }
 
 type OpenClawUpgradeGatewayRestarter interface {
@@ -825,7 +830,14 @@ func (s *RuntimeUpgradeService) drainSourceRuntimePods(ctx context.Context, roll
 	if s.deployments == nil {
 		return errors.New("live source runtime inventory is unavailable")
 	}
-	livePods, err := s.deployments.RuntimeDeploymentPods(ctx, RuntimeTypeOpenClaw)
+	refs := make([]k8s.RuntimeDeploymentRef, 0, len(sourceImages))
+	for key := range sourceImages {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) == 2 {
+			refs = append(refs, k8s.RuntimeDeploymentRef{Namespace: parts[0], Name: parts[1]})
+		}
+	}
+	livePods, err := runtimeDeploymentPodsFor(ctx, s.deployments, RuntimeTypeOpenClaw, refs)
 	if err != nil {
 		return err
 	}
@@ -1164,6 +1176,12 @@ func (s *RuntimeUpgradeService) Rollback(ctx context.Context, rollout *models.Ru
 		if item.State == "prepared" || item.State == "compatibility_checked" || item.State == "pending" {
 			continue
 		}
+		// Rollback is deliberately resumable. Once an item was restored (or was
+		// already released for a source restart), a new leader must not replay the
+		// official restore against the same archive.
+		if item.State == "restored" || item.State == "restart_ready" {
+			continue
+		}
 		if item.State == "quiesced" {
 			// The source gateway was stopped, but no target-side mutation began.
 			// CompleteRollback must still explicitly recreate it on the source.
@@ -1297,7 +1315,10 @@ func (s *RuntimeUpgradeService) CompleteRollback(ctx context.Context, rollout *m
 	if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "rollback_complete", "rollback_image", "passed", map[string]any{"instance_count": len(items)}); err != nil {
 		return err
 	}
-	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'restored', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID)
+	// The archive/config restore is durable, but the failed target pool is not
+	// yet disposable. Keep it in waiting until the scheduler proves every
+	// instance is running again on its immutable source deployment.
+	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'waiting', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID)
 	return err
 }
 
@@ -1309,9 +1330,145 @@ func (s *RuntimeUpgradeService) FailRollback(ctx context.Context, rolloutID int6
 	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'error', rollback_error = ?, updated_at = ? WHERE id = ?`, message, time.Now().UTC(), rolloutID)
 }
 
-func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int64) error {
-	_, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET phase = 'rollback_image', rollback_status = 'starting', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rolloutID)
+func (s *RuntimeUpgradeService) RollbackCleanupCandidates(ctx context.Context) ([]models.RuntimeRollout, error) {
+	if s == nil || s.sess == nil {
+		return nil, nil
+	}
+	var rollouts []models.RuntimeRollout
+	err := s.sess.Collection("runtime_rollouts").Find(db.Cond{
+		"runtime_type":       RuntimeTypeOpenClaw,
+		"status":             "error",
+		"rollback_status IN": []string{"waiting", "restored"},
+	}).OrderBy("id").All(&rollouts)
+	if err != nil {
+		return nil, err
+	}
+	completed := map[int64]struct{}{}
+	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT DISTINCT rollout_id FROM runtime_upgrade_audits WHERE action = 'upgrade_pool_cleanup' AND outcome = 'passed' AND rollout_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rolloutID int64
+		if err := rows.Scan(&rolloutID); err != nil {
+			return nil, err
+		}
+		completed[rolloutID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	filtered := make([]models.RuntimeRollout, 0, len(rollouts))
+	for _, rollout := range rollouts {
+		if _, ok := completed[rollout.ID]; !ok {
+			filtered = append(filtered, rollout)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *RuntimeUpgradeService) MarkRollbackPoolCleanupComplete(ctx context.Context, rollout *models.RuntimeRollout) error {
+	if rollout == nil {
+		return nil
+	}
+	return s.audit(ctx, &rollout.ID, rollout.StartedBy, "upgrade_pool_cleanup", "rollback_restore", "passed", map[string]any{"data_deleted": false})
+}
+
+// RollbackRecoveryVerified proves every candidate is serving from the
+// immutable source pool before a failed target Deployment may be deleted.
+// Workspaces, migration receipts and database records are never cleanup
+// targets and remain independent of the Deployment lifecycle.
+func (s *RuntimeUpgradeService) RollbackRecoveryVerified(ctx context.Context, rollout *models.RuntimeRollout) (bool, error) {
+	if s == nil || rollout == nil || rollout.SourceImagesJSON == nil {
+		return false, nil
+	}
+	var sources map[string]string
+	if json.Unmarshal([]byte(*rollout.SourceImagesJSON), &sources) != nil || len(sources) == 0 {
+		return false, fmt.Errorf("rollback source inventory is unavailable")
+	}
+	rows, err := s.sess.SQL().QueryContext(ctx, `
+		SELECT i.id, i.status, b.state, p.namespace, p.deployment_name,
+		       p.image_ref, p.image_digest, p.state, p.draining
+		FROM runtime_upgrade_items ui
+		JOIN instances i ON i.id = ui.instance_id
+		LEFT JOIN instance_runtime_bindings b ON b.instance_id = i.id AND b.state = 'running'
+		LEFT JOIN runtime_pods p ON p.id = b.runtime_pod_id
+		WHERE ui.rollout_id = ?
+	`, rollout.ID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+		var instanceID int
+		var instanceStatus string
+		var bindingState, namespace, deploymentName, imageRef, imageDigest, podState sql.NullString
+		var draining sql.NullBool
+		if err := rows.Scan(&instanceID, &instanceStatus, &bindingState, &namespace, &deploymentName, &imageRef, &imageDigest, &podState, &draining); err != nil {
+			return false, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(instanceStatus), "running") || !bindingState.Valid || bindingState.String != "running" || !podState.Valid || podState.String != "ready" || (draining.Valid && draining.Bool) {
+			return false, nil
+		}
+		key := strings.TrimSpace(namespace.String) + "/" + strings.TrimSpace(deploymentName.String)
+		expectedImage, ok := sources[key]
+		pod := models.RuntimePod{ImageRef: imageRef.String, ImageDigest: stringPtrOrNil(imageDigest.String)}
+		if !ok || !runtimePodMatchesImage(pod, expectedImage) {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return false, nil
+	}
+	if stringValue(rollout.RollbackStatus) != "restored" {
+		if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'restored', rollback_error = NULL, updated_at = ? WHERE id = ?`, time.Now().UTC(), rollout.ID); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func (s *RuntimeUpgradeService) BeginRollback(ctx context.Context, rolloutID int64, cause error) error {
+	var message any
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		message = strings.TrimSpace(cause.Error())
+	}
+	_, err := s.sess.SQL().ExecContext(ctx, `
+		UPDATE runtime_rollouts
+		SET phase = CASE WHEN phase = 'rollback_restore' THEN phase ELSE 'rollback_image' END,
+		    rollback_status = CASE WHEN rollback_status = 'waiting' THEN rollback_status ELSE 'starting' END,
+		    error_message = COALESCE(error_message, ?),
+		    updated_at = ?
+		WHERE id = ?
+	`, message, time.Now().UTC(), rolloutID)
 	return err
+}
+
+func runtimeDeploymentPodsFor(ctx context.Context, provider RuntimeDeploymentInventoryProvider, runtimeType string, refs []k8s.RuntimeDeploymentRef) ([]models.RuntimePod, error) {
+	if scoped, ok := provider.(RuntimeDeploymentScopedInventoryProvider); ok && len(refs) > 0 {
+		return scoped.RuntimeDeploymentPodsFor(ctx, runtimeType, refs)
+	}
+	pods, err := provider.RuntimeDeploymentPods(ctx, runtimeType)
+	if err != nil || len(refs) == 0 {
+		return pods, err
+	}
+	allowed := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		allowed[strings.TrimSpace(ref.Namespace)+"/"+strings.TrimSpace(ref.Name)] = struct{}{}
+	}
+	filtered := make([]models.RuntimePod, 0, len(pods))
+	for _, pod := range pods {
+		if _, ok := allowed[strings.TrimSpace(pod.Namespace)+"/"+strings.TrimSpace(pod.DeploymentName)]; ok {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered, nil
 }
 
 func (s *RuntimeUpgradeService) InstanceBlocked(ctx context.Context, runtimeType string, instanceID int) bool {

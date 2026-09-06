@@ -626,6 +626,21 @@ func TestRuntimeUpgradeReconcileInterruptedOnlyForCanceledOwner(t *testing.T) {
 	}
 }
 
+func TestRuntimeUpgradeInfrastructureRetryable(t *testing.T) {
+	for _, err := range []error{
+		context.DeadlineExceeded,
+		fmt.Errorf("list pods: etcdserver: request timed out"),
+		fmt.Errorf("request: Client.Timeout exceeded while awaiting headers"),
+	} {
+		if !runtimeUpgradeInfrastructureRetryable(err) {
+			t.Fatalf("%v must remain retryable without starting data rollback", err)
+		}
+	}
+	if runtimeUpgradeInfrastructureRetryable(fmt.Errorf("target image lacks required capability")) {
+		t.Fatal("a deterministic compatibility failure must not be retried as infrastructure")
+	}
+}
+
 func TestRuntimeSchedulerMarksInstanceErrorWhenGatewayCreateReturnsErrorStatus(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
@@ -3322,6 +3337,20 @@ func (s *fakeRuntimeDeploymentService) ListPods(ctx context.Context, namespace, 
 			continue
 		}
 		pods = append(pods, pod)
+	}
+	return pods, nil
+}
+
+func (s *fakeRuntimeDeploymentService) ListDeploymentPods(ctx context.Context, refs []k8s.RuntimeDeploymentRef) ([]k8s.RuntimeDeploymentPod, error) {
+	allowed := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		allowed[ref.Namespace+"/"+ref.Name] = struct{}{}
+	}
+	var pods []k8s.RuntimeDeploymentPod
+	for _, pod := range s.pods {
+		if _, ok := allowed[pod.Namespace+"/"+pod.DeploymentName]; ok {
+			pods = append(pods, pod)
+		}
 	}
 	return pods, nil
 }

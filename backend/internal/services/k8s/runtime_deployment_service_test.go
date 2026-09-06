@@ -632,6 +632,54 @@ func TestRuntimeDeploymentServiceListPodsReturnsRuntimeDeploymentPods(t *testing
 	}
 }
 
+func TestRuntimeDeploymentServiceListPodsSkipsRetainedZeroReplicaPool(t *testing.T) {
+	active := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime", Namespace: "runtime-system", RuntimeType: "openclaw", Image: "registry/openclaw:v1", Replicas: 1})
+	retained := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime-u45", Namespace: "runtime-system", RuntimeType: "openclaw", Image: "registry/openclaw:v2", Replicas: 0})
+	retained.Labels[runtimePoolRoleLabel] = "upgrade-target"
+	retained.Labels[runtimeUpgradeIDLabel] = "45"
+	retained.Labels[runtimeSourceLabel] = "openclaw-runtime"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "openclaw-runtime-a", Namespace: "runtime-system", Labels: map[string]string{"app": "openclaw-runtime"}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Image: "registry/openclaw:v1"}}}}
+	client := fake.NewSimpleClientset(active, retained, pod)
+	podLists := 0
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		podLists++
+		return false, nil, nil
+	})
+	service := NewRuntimeDeploymentService(client)
+
+	if _, err := service.ListPods(context.Background(), "runtime-system", "openclaw"); err != nil {
+		t.Fatalf("ListPods returned error: %v", err)
+	}
+	if podLists != 1 {
+		t.Fatalf("pod list calls = %d, want only the active pool", podLists)
+	}
+}
+
+func TestRuntimeDeploymentServiceListDeploymentPodsIsScoped(t *testing.T) {
+	active := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime-u57", Namespace: "runtime-system", RuntimeType: "openclaw", Image: "registry/openclaw:v1", Replicas: 1})
+	unrelated := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "openclaw-runtime-u45", Namespace: "runtime-system", RuntimeType: "openclaw", Image: "registry/openclaw:v2", Replicas: 1})
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "openclaw-runtime-u57-a", Namespace: "runtime-system", Labels: map[string]string{"app": "openclaw-runtime-u57", "clawmanager.io/runtime-type": "openclaw"}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Image: "registry/openclaw:v1"}}}}
+	client := fake.NewSimpleClientset(active, unrelated, pod)
+	podLists := 0
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		podLists++
+		selector := action.(k8stesting.ListAction).GetListRestrictions().Labels.String()
+		if strings.Contains(selector, "openclaw-runtime-u45") {
+			return true, nil, fmt.Errorf("unrelated pool must not be queried")
+		}
+		return false, nil, nil
+	})
+	service := NewRuntimeDeploymentService(client)
+
+	pods, err := service.ListDeploymentPods(context.Background(), []RuntimeDeploymentRef{{Namespace: "runtime-system", Name: "openclaw-runtime-u57"}})
+	if err != nil {
+		t.Fatalf("ListDeploymentPods returned error: %v", err)
+	}
+	if podLists != 1 || len(pods) != 1 || pods[0].DeploymentName != "openclaw-runtime-u57" {
+		t.Fatalf("scoped inventory calls=%d pods=%#v", podLists, pods)
+	}
+}
+
 func requireContainerPort(t *testing.T, container corev1.Container, name string, port int32) {
 	t.Helper()
 	for _, got := range container.Ports {
