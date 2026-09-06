@@ -29,6 +29,7 @@ import (
 const (
 	OpenClawUpgradeLabBaselineTag      = "master-20260824-737ad4c"
 	OpenClawUpgradeLabBaselineDigest   = "sha256:c0905d813cdf22f5ed357d9bd6f61a6798020f1d099022f0aaec4a96c83df125"
+	OpenClawUpgradeLabBaselineVersion  = "2026.7.1-2"
 	openClawUpgradeLabDescription      = "openclaw-upgrade-lab:"
 	openClawUpgradeLabMaxCases         = 8
 	openClawUpgradeLabReadyTimeout     = 3 * time.Minute
@@ -482,7 +483,7 @@ func (s *OpenClawUpgradeLabService) createBaselineInstance(ctx context.Context, 
 	if run.ActorUserID == nil || *run.ActorUserID <= 0 {
 		return nil, fmt.Errorf("upgrade lab owner is unavailable")
 	}
-	instance = &models.Instance{UserID: *run.ActorUserID, Name: fmt.Sprintf("OpenClaw升级测试-%d-%d", run.ID, index+1), Description: &description, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "stopped", CPUCores: 1, MemoryGB: 2, DiskGB: 5, OSType: "linux", OSVersion: "openclaw-2026.7.1-2", ImageRegistry: &image, ImageTag: &imageTag, StorageClass: "shared", MountPath: s.cfg.WorkspaceRoot, RuntimeGeneration: 1, CreatedAt: now, UpdatedAt: now}
+	instance = &models.Instance{UserID: *run.ActorUserID, Name: fmt.Sprintf("OpenClaw升级测试-%d-%d", run.ID, index+1), Description: &description, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "stopped", CPUCores: 1, MemoryGB: 2, DiskGB: 5, OSType: "linux", OSVersion: "openclaw-" + OpenClawUpgradeLabBaselineVersion, ImageRegistry: &image, ImageTag: &imageTag, StorageClass: "shared", MountPath: s.cfg.WorkspaceRoot, RuntimeGeneration: 1, CreatedAt: now, UpdatedAt: now}
 	if err := s.instances.Create(instance); err != nil {
 		return nil, err
 	}
@@ -508,7 +509,7 @@ func (s *OpenClawUpgradeLabService) createBaselineInstance(ctx context.Context, 
 		return nil, err
 	}
 	fixturePath := filepath.Join(workspace, "project", "upgrade-lab-continuity.txt")
-	fixture := []byte(fmt.Sprintf("openclaw-upgrade-lab run=%d case=%d baseline=2026.7.1-2\n", run.ID, index+1))
+	fixture := []byte(fmt.Sprintf("openclaw-upgrade-lab run=%d case=%d baseline=%s\n", run.ID, index+1, OpenClawUpgradeLabBaselineVersion))
 	if err = os.WriteFile(fixturePath, fixture, 0o640); err != nil {
 		return nil, err
 	}
@@ -940,7 +941,7 @@ func (s *OpenClawUpgradeLabService) recoverProvisionedRun(ctx context.Context, r
 			return run
 		}
 		fixturePath := filepath.Join(expectedWorkspace, "project", "upgrade-lab-continuity.txt")
-		fixture := []byte(fmt.Sprintf("openclaw-upgrade-lab run=%d case=%d baseline=2026.7.1-2\n", run.ID, index+1))
+		fixture := []byte(fmt.Sprintf("openclaw-upgrade-lab run=%d case=%d baseline=%s\n", run.ID, index+1, OpenClawUpgradeLabBaselineVersion))
 		if writeErr := os.WriteFile(fixturePath, fixture, 0o640); writeErr != nil {
 			return run
 		}

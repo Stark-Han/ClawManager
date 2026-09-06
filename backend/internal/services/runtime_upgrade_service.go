@@ -2680,7 +2680,8 @@ func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImag
 	if version == "" {
 		version = strings.TrimSpace(env["CLAWMANAGER_OPENCLAW_VERSION"])
 	}
-	if _, ok := parseOpenClawNumericVersion(version); !ok {
+	version, versionOK := recognizedOpenClawRuntimeVersion(rootDigest, version)
+	if !versionOK {
 		return nil, fmt.Errorf("target OpenClaw image does not publish a valid runtime version")
 	}
 	strategy := RuntimeUpgradeStrategyLegacyRolling
@@ -2697,6 +2698,21 @@ func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImag
 		Strategy: strategy, ImageRef: host + "/" + repository + "@" + rootDigest,
 		ImageDigest: rootDigest, RuntimeVersion: version, Protocol: protocol,
 	}, nil
+}
+
+// recognizedOpenClawRuntimeVersion keeps the general image contract strict.
+// The one exception is the immutable, production-tested 7.1 baseline, which
+// predates version metadata. Matching its content digest is safe across test
+// and production registry hosts; a tag name alone is never trusted.
+func recognizedOpenClawRuntimeVersion(imageDigest, publishedVersion string) (string, bool) {
+	publishedVersion = strings.TrimSpace(publishedVersion)
+	if _, ok := parseOpenClawNumericVersion(publishedVersion); ok {
+		return publishedVersion, true
+	}
+	if strings.EqualFold(strings.TrimSpace(imageDigest), OpenClawUpgradeLabBaselineDigest) {
+		return OpenClawUpgradeLabBaselineVersion, true
+	}
+	return "", false
 }
 
 func safeRegistryClient(host, repository string) (*http.Client, string, error) {
