@@ -350,12 +350,12 @@ func main() {
 				runtimeSchedulerOptions...,
 			)
 			runtimeUpgradeService.SetDeploymentInventoryProvider(runtimeScheduler)
+			runtimeUpgradeService.SetUpgradeGatewayRestarter(runtimeScheduler)
 			if labDeployments, ok := runtimeDeployments.(k8s.RuntimeUpgradeLabDeploymentService); ok {
 				if envBuilder, ok := instanceService.(interface {
 					BuildGatewayEnv(*models.Instance) (map[string]string, error)
 				}); ok {
 					labService := services.NewOpenClawUpgradeLabService(database, instanceRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, labDeployments, runtimeScheduler, runtimeUpgradeService, runtimeScheduler, envBuilder, cfg.Runtime)
-					runtimeUpgradeService.SetUpgradeLabRestarter(labService)
 					openClawUpgradeLabHandler = handlers.NewOpenClawUpgradeLabHandler(labService)
 					go func() {
 						recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)

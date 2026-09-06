@@ -131,16 +131,16 @@ type runtimeWorkspaceInventory struct {
 }
 
 type RuntimeUpgradeService struct {
-	sess            db.Session
-	rollouts        repository.RuntimeRolloutRepository
-	pods            repository.RuntimePodRepository
-	bindings        repository.InstanceRuntimeBindingRepository
-	agent           RuntimeAgentClient
-	workspaceRoot   string
-	redisURL        string
-	teamMaintenance TeamUpgradeMaintenanceController
-	deployments     RuntimeDeploymentInventoryProvider
-	labRestarter    OpenClawUpgradeLabRestarter
+	sess             db.Session
+	rollouts         repository.RuntimeRolloutRepository
+	pods             repository.RuntimePodRepository
+	bindings         repository.InstanceRuntimeBindingRepository
+	agent            RuntimeAgentClient
+	workspaceRoot    string
+	redisURL         string
+	teamMaintenance  TeamUpgradeMaintenanceController
+	deployments      RuntimeDeploymentInventoryProvider
+	gatewayRestarter OpenClawUpgradeGatewayRestarter
 }
 
 type TeamUpgradeMaintenanceController interface {
@@ -151,8 +151,8 @@ type RuntimeDeploymentInventoryProvider interface {
 	RuntimeDeploymentPods(ctx context.Context, runtimeType string) ([]models.RuntimePod, error)
 }
 
-type OpenClawUpgradeLabRestarter interface {
-	EnsureUpgradeLabGateway(ctx context.Context, rollout *models.RuntimeRollout, instanceID int, targetPods []models.RuntimePod) error
+type OpenClawUpgradeGatewayRestarter interface {
+	EnsureUpgradeGateway(ctx context.Context, rollout *models.RuntimeRollout, instanceID int, targetPods []models.RuntimePod) error
 }
 
 func (s *RuntimeUpgradeService) SetTeamMaintenanceController(controller TeamUpgradeMaintenanceController) {
@@ -163,8 +163,8 @@ func (s *RuntimeUpgradeService) SetDeploymentInventoryProvider(provider RuntimeD
 	s.deployments = provider
 }
 
-func (s *RuntimeUpgradeService) SetUpgradeLabRestarter(restarter OpenClawUpgradeLabRestarter) {
-	s.labRestarter = restarter
+func (s *RuntimeUpgradeService) SetUpgradeGatewayRestarter(restarter OpenClawUpgradeGatewayRestarter) {
+	s.gatewayRestarter = restarter
 }
 
 func NewRuntimeUpgradeService(sess db.Session, rollouts repository.RuntimeRolloutRepository, pods repository.RuntimePodRepository, bindings repository.InstanceRuntimeBindingRepository, agent RuntimeAgentClient, workspaceRoot, redisURL string) *RuntimeUpgradeService {
@@ -578,7 +578,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 				return false, nil
 			}
 		}
-		batch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "compatibility_checked")
+		batch := nextRuntimeUpgradeMigrationBatch(items, maxInt(rollout.BatchSize, 1))
 		var workers, leaders []models.RuntimeUpgradeItem
 		for _, item := range batch {
 			if item.IsTeamLeader {
@@ -668,13 +668,11 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if item.State != "restart_ready" {
 				return false, fmt.Errorf("instance %d has unexpected restart state %q", item.InstanceID, item.State)
 			}
-			if runtimeUpgradeScopeFromRollout(rollout).UpgradeLabRunID != nil {
-				if s.labRestarter == nil {
-					return false, fmt.Errorf("upgrade lab gateway restarter is unavailable")
-				}
-				if err := s.labRestarter.EnsureUpgradeLabGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
-					return false, fmt.Errorf("restart upgrade lab instance %d: %w", item.InstanceID, err)
-				}
+			if s.gatewayRestarter == nil {
+				return false, fmt.Errorf("OpenClaw upgrade gateway restarter is unavailable")
+			}
+			if err := s.gatewayRestarter.EnsureUpgradeGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
+				return false, fmt.Errorf("restart upgraded instance %d: %w", item.InstanceID, err)
 			}
 			binding, err := s.bindings.GetRunningByInstanceID(ctx, item.InstanceID)
 			if err != nil {
@@ -863,26 +861,36 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 	if err != nil {
 		return err
 	}
-	transitioned, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'quiescing', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'compatibility_checked'`, time.Now().UTC(), rollout.ID, item.InstanceID)
-	if err != nil {
-		return err
-	}
-	if affected, _ := transitioned.RowsAffected(); affected != 1 {
-		return fmt.Errorf("instance %d could not enter quiescing", item.InstanceID)
-	}
-	stopped, err := s.stopCandidateGateway(ctx, candidate)
-	if err != nil {
-		state := "compatibility_checked"
-		if stopped {
-			// The process is confirmed absent even if releasing its stale binding
-			// failed. Rollback must recreate it instead of treating it as untouched.
-			state = "quiesced"
+	state := strings.ToLower(strings.TrimSpace(item.State))
+	if state == "compatibility_checked" {
+		transitioned, transitionErr := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'quiescing', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'compatibility_checked'`, time.Now().UTC(), rollout.ID, item.InstanceID)
+		if transitionErr != nil {
+			return transitionErr
 		}
-		_, _ = s.sess.SQL().ExecContext(context.Background(), `UPDATE runtime_upgrade_items SET state = ?, error_message = ?, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiescing'`, state, err.Error(), time.Now().UTC(), rollout.ID, item.InstanceID)
-		return fmt.Errorf("stop instance %d before session migration: %w", item.InstanceID, err)
+		if affected, _ := transitioned.RowsAffected(); affected != 1 {
+			return fmt.Errorf("instance %d could not enter quiescing", item.InstanceID)
+		}
+		state = "quiescing"
 	}
-	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'quiesced', error_message = NULL, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiescing'`, time.Now().UTC(), rollout.ID, item.InstanceID); err != nil {
-		return err
+	if state == "quiescing" {
+		stopped, stopErr := s.stopCandidateGateway(ctx, candidate)
+		if stopErr != nil {
+			retryState := "compatibility_checked"
+			if stopped {
+				// The process is confirmed absent even if releasing its stale binding
+				// failed. Resume from the stopped state instead of starting a second writer.
+				retryState = "quiesced"
+			}
+			_, _ = s.sess.SQL().ExecContext(context.Background(), `UPDATE runtime_upgrade_items SET state = ?, error_message = ?, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiescing'`, retryState, stopErr.Error(), time.Now().UTC(), rollout.ID, item.InstanceID)
+			return fmt.Errorf("stop instance %d before session migration: %w", item.InstanceID, stopErr)
+		}
+		if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'quiesced', error_message = NULL, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiescing'`, time.Now().UTC(), rollout.ID, item.InstanceID); err != nil {
+			return err
+		}
+		state = "quiesced"
+	}
+	if state != "quiesced" && state != "migration_started" {
+		return fmt.Errorf("instance %d has unsupported resumable migration state %q", item.InstanceID, item.State)
 	}
 	var userID, generation int
 	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT user_id, runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
@@ -908,8 +916,14 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 	if preflightErr != nil {
 		return fmt.Errorf("preflight instance %d session migration: %w", item.InstanceID, preflightErr)
 	}
-	if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'migration_started', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiesced'`, time.Now().UTC(), rollout.ID, item.InstanceID); err != nil {
-		return err
+	if state == "quiesced" {
+		result, transitionErr := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'migration_started', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'quiesced'`, time.Now().UTC(), rollout.ID, item.InstanceID)
+		if transitionErr != nil {
+			return transitionErr
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return fmt.Errorf("instance %d could not enter migration_started", item.InstanceID)
+		}
 	}
 	migration, migrateErr := upgradeAgent.MigrateSessionSQLite(ctx, targetEndpoint, request)
 	if migrateErr != nil && shouldReconcileUpgradeReceipt(ctx, migrateErr) {
@@ -1017,6 +1031,45 @@ func nextRuntimeUpgradeBatch(items []models.RuntimeUpgradeItem, limit int, state
 		var group []models.RuntimeUpgradeItem
 		for _, candidate := range items[index:end] {
 			if candidate.State == state {
+				group = append(group, candidate)
+			}
+		}
+		if len(group) > 0 {
+			if len(batch) > 0 && len(batch)+len(group) > limit {
+				break
+			}
+			batch = append(batch, group...)
+			if len(batch) >= limit {
+				break
+			}
+		}
+		index = end
+	}
+	return batch
+}
+
+func nextRuntimeUpgradeMigrationBatch(items []models.RuntimeUpgradeItem, limit int) []models.RuntimeUpgradeItem {
+	if limit <= 0 {
+		limit = 1
+	}
+	allowed := map[string]bool{
+		"compatibility_checked": true,
+		"quiescing":             true,
+		"quiesced":              true,
+		"migration_started":     true,
+	}
+	var batch []models.RuntimeUpgradeItem
+	for index := 0; index < len(items); {
+		item := items[index]
+		end := index + 1
+		if item.TeamID != nil {
+			for end < len(items) && items[end].TeamID != nil && *items[end].TeamID == *item.TeamID {
+				end++
+			}
+		}
+		var group []models.RuntimeUpgradeItem
+		for _, candidate := range items[index:end] {
+			if allowed[strings.ToLower(strings.TrimSpace(candidate.State))] {
 				group = append(group, candidate)
 			}
 		}
@@ -1287,7 +1340,11 @@ func activeOpenClawRolloutBlocksInstance(phase, rollbackStatus, preflightJSON st
 	case "maintenance", "image_rollout", "compatibility_check", "session_migration", "postflight", "rollback_restore":
 		return true
 	case "gateway_restart":
-		return !itemExists || itemState != "restart_ready"
+		// The upgrade reconciler owns restart_ready placement and targets the
+		// still-isolated rollout pool explicitly. Releasing it to ordinary
+		// scheduling creates a race and cannot work while that pool correctly
+		// remains scheduling-disabled until postflight commits.
+		return true
 	default:
 		return false
 	}

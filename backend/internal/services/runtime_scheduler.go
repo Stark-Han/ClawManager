@@ -625,6 +625,13 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 		}
 		ready, err := s.upgrade.ValidateTargetRuntime(ctx, &rollout, pods)
 		if err != nil {
+			// Losing the control-plane lease cancels this scheduler context. That
+			// is an ownership hand-off, not evidence that the image or user data
+			// failed validation. Persisted item states and Runtime receipts let the
+			// next leader resume the same phase.
+			if runtimeUpgradeReconcileInterrupted(ctx, err) {
+				return nil
+			}
 			if !canAutoRollbackOpenClaw(rollout.Phase) {
 				// The target has crossed the activation boundary. Keep the rollout
 				// active and Team dispatch fenced so reconciliation can forward-repair
@@ -674,6 +681,13 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	finishedAt := time.Now().UTC()
 	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
+}
+
+func runtimeUpgradeReconcileInterrupted(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	return ctx.Err() != nil || errors.Is(err, context.Canceled)
 }
 
 const openClawUpgradeLabDeploymentPrefix = "openclaw-upgrade-lab-"
@@ -1424,6 +1438,118 @@ type runtimeGatewayStart struct {
 	uid             int
 	gid             int
 	reservedBinding *models.InstanceRuntimeBinding
+	upgradeID       string
+}
+
+// EnsureUpgradeGateway starts a migrated OpenClaw instance only on a pod that
+// belongs to the rollout target pool. Both upgrade-lab and ordinary data-safe
+// rollouts use this path, so a standby target never needs to be exposed to the
+// ordinary scheduler before postflight has committed the rollout.
+func (s *RuntimeScheduler) EnsureUpgradeGateway(ctx context.Context, rollout *models.RuntimeRollout, instanceID int, targetPods []models.RuntimePod) error {
+	if s == nil || rollout == nil || rollout.RuntimeType != RuntimeTypeOpenClaw || rollout.PreflightID == nil {
+		return fmt.Errorf("data-safe OpenClaw rollout is required")
+	}
+	if s.instanceRepo == nil || s.podRepo == nil || s.bindingRepo == nil || s.agentClient == nil {
+		return fmt.Errorf("upgrade gateway dependencies are not configured")
+	}
+	if instanceID <= 0 || len(targetPods) == 0 {
+		return fmt.Errorf("upgrade target pod is unavailable")
+	}
+	instance, err := s.instanceRepo.GetByID(instanceID)
+	if err != nil {
+		return err
+	}
+	if instance == nil {
+		return fmt.Errorf("upgrade instance %d not found", instanceID)
+	}
+	runtimeType, ok := schedulerRuntimeType(*instance)
+	if !ok || runtimeType != RuntimeTypeOpenClaw {
+		return fmt.Errorf("upgrade instance %d is not OpenClaw Lite", instanceID)
+	}
+	targetByID := make(map[int64]models.RuntimePod, len(targetPods))
+	for _, pod := range targetPods {
+		if pod.RuntimeType == RuntimeTypeOpenClaw && pod.State == "ready" && !pod.Draining && runtimePodMatchesImage(pod, rollout.TargetImageRef) {
+			targetByID[pod.ID] = pod
+		}
+	}
+	if len(targetByID) == 0 {
+		return fmt.Errorf("no ready pod belongs to rollout %d target pool", rollout.ID)
+	}
+	if binding, bindingErr := s.bindingRepo.GetByInstanceID(ctx, instanceID); bindingErr != nil {
+		return bindingErr
+	} else if binding != nil {
+		if targetPod, expected := targetByID[binding.RuntimePodID]; expected && binding.Generation == instance.RuntimeGeneration {
+			lifecycle := NormalizeRuntimeGatewayLifecycle(binding.State, binding.ErrorMessage)
+			if lifecycle.Running || lifecycle.BindingState == RuntimeGatewayBindingCreating {
+				return nil
+			}
+			if lifecycle.BindingState != RuntimeGatewayBindingError && lifecycle.BindingState != RuntimeGatewayBindingStopped {
+				return fmt.Errorf("instance %d target binding has unresolved state %q", instanceID, binding.State)
+			}
+			if strings.TrimSpace(binding.GatewayID) != "" {
+				endpoint := strings.TrimSpace(stringValue(targetPod.AgentEndpoint))
+				if endpoint == "" {
+					return fmt.Errorf("instance %d failed target binding cannot be confirmed without its Runtime Agent", instanceID)
+				}
+				if deleteErr := s.agentClient.DeleteGateway(ctx, endpoint, binding.GatewayID); deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) {
+					return fmt.Errorf("stop failed target gateway for instance %d: %w", instanceID, deleteErr)
+				}
+			}
+			if deleteErr := s.bindingRepo.DeleteByInstanceIDAndReleaseSlot(ctx, instanceID, binding.RuntimePodID); deleteErr != nil {
+				return fmt.Errorf("release failed target binding for instance %d: %w", instanceID, deleteErr)
+			}
+		} else {
+			return fmt.Errorf("instance %d already has a binding outside rollout %d target pool", instanceID, rollout.ID)
+		}
+	}
+
+	ordered := make([]models.RuntimePod, 0, len(targetByID))
+	for _, pod := range targetPods {
+		if candidate, ok := targetByID[pod.ID]; ok {
+			ordered = append(ordered, candidate)
+		}
+	}
+	var lastErr error
+	for _, pod := range ordered {
+		if pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" {
+			continue
+		}
+		unlock := s.lockGatewayCreateForPod(pod.ID)
+		canStart, startErr := s.podCanStartGateway(ctx, pod.ID)
+		if startErr != nil || !canStart {
+			unlock()
+			if startErr != nil {
+				lastErr = startErr
+			} else {
+				lastErr = errRuntimeGatewayStartPending
+			}
+			continue
+		}
+		claimed, claimErr := s.podRepo.TryClaimSlot(ctx, pod.ID)
+		if claimErr != nil || !claimed {
+			unlock()
+			lastErr = claimErr
+			continue
+		}
+		start, prepareErr := s.prepareGatewayStart(ctx, *instance, runtimeType, pod)
+		unlock()
+		if prepareErr != nil {
+			_ = s.podRepo.ReleaseSlot(ctx, pod.ID)
+			lastErr = prepareErr
+			continue
+		}
+		start.upgradeID = strconv.FormatInt(rollout.ID, 10)
+		if createErr := s.createGatewayOnPodWithPortFallback(ctx, *instance, runtimeType, pod, start); createErr != nil {
+			_ = s.podRepo.ReleaseSlot(ctx, pod.ID)
+			lastErr = createErr
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return fmt.Errorf("no rollout %d target pod accepted instance %d: %w", rollout.ID, instanceID, lastErr)
+	}
+	return fmt.Errorf("no rollout %d target pod accepted instance %d", rollout.ID, instanceID)
 }
 
 func (s *RuntimeScheduler) prepareGatewayStart(ctx context.Context, instance models.Instance, runtimeType string, pod models.RuntimePod) (*runtimeGatewayStart, error) {
@@ -1487,6 +1613,7 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		MemoryMB:    instance.MemoryGB * 1024,
 		DiskQuotaMB: instance.DiskGB * 1024,
 		Generation:  instance.RuntimeGeneration,
+		UpgradeID:   start.upgradeID,
 		Environment: start.environment,
 	})
 	if err != nil {

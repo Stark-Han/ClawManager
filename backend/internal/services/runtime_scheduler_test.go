@@ -487,6 +487,145 @@ func TestRuntimeSchedulerStoresStartingGatewayBindingAsCreating(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchedulerEnsureUpgradeGatewayTargetsStandbyRolloutPool(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "http://upgrade-target.runtime"
+	workspacePath := "/workspaces/openclaw/user-45/instance-205"
+	preflightID := "preflight-57"
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.byID[205] = &models.Instance{
+		ID:                205,
+		UserID:            45,
+		Type:              RuntimeTypeOpenClaw,
+		RuntimeType:       RuntimeBackendGateway,
+		InstanceMode:      InstanceModeLite,
+		Status:            "creating",
+		WorkspacePath:     &workspacePath,
+		RuntimeGeneration: 3,
+	}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}}
+	target := models.RuntimePod{
+		ID:             153,
+		RuntimeType:    RuntimeTypeOpenClaw,
+		AgentEndpoint:  &endpoint,
+		State:          "ready",
+		Capacity:       100,
+		ImageRef:       "registry/openclaw@sha256:target",
+		PoolRole:       "upgrade-target",
+		UpgradeID:      "57",
+		DeploymentName: "openclaw-runtime-u57",
+	}
+	podRepo.pods[target.ID] = &target
+	bindingRepo := newFakeRuntimeBindingRepo()
+	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-205", Status: "running"}}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
+	rollout := &models.RuntimeRollout{ID: 57, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: target.ImageRef, PreflightID: &preflightID}
+
+	if err := scheduler.EnsureUpgradeGateway(ctx, rollout, 205, []models.RuntimePod{target}); err != nil {
+		t.Fatalf("EnsureUpgradeGateway returned error: %v", err)
+	}
+	if len(agent.createRequests) != 1 {
+		t.Fatalf("CreateGateway calls = %d, want 1", len(agent.createRequests))
+	}
+	request := agent.createRequests[0]
+	if request.endpoint != endpoint || request.req.UpgradeID != "57" || request.req.Generation != 3 {
+		t.Fatalf("upgrade gateway request = %+v", request)
+	}
+	if binding := bindingRepo.bindings[205]; binding == nil || binding.RuntimePodID != 153 || binding.State != "running" {
+		t.Fatalf("upgrade binding = %+v, want running on target pod 153", binding)
+	}
+	if err := scheduler.EnsureUpgradeGateway(ctx, rollout, 205, []models.RuntimePod{target}); err != nil {
+		t.Fatalf("idempotent EnsureUpgradeGateway returned error: %v", err)
+	}
+	if len(agent.createRequests) != 1 {
+		t.Fatalf("CreateGateway calls after resume = %d, want 1", len(agent.createRequests))
+	}
+	bindingRepo.bindings[205].State = "error"
+	if err := scheduler.EnsureUpgradeGateway(ctx, rollout, 205, []models.RuntimePod{target}); err != nil {
+		t.Fatalf("failed-binding retry returned error: %v", err)
+	}
+	if len(agent.createRequests) != 2 || len(agent.deleteRequests) != 1 {
+		t.Fatalf("failed target binding was not safely replaced: creates=%d deletes=%d", len(agent.createRequests), len(agent.deleteRequests))
+	}
+}
+
+func TestRuntimeSchedulerEnsureUpgradeGatewayUsesNextTargetPodAtCapacity(t *testing.T) {
+	ctx := context.Background()
+	preflightID := "preflight-58"
+	workspacePath := "/workspaces/openclaw/user-45/instance-206"
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.byID[206] = &models.Instance{ID: 206, UserID: 45, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "creating", WorkspacePath: &workspacePath, RuntimeGeneration: 2}
+	firstEndpoint, secondEndpoint := "http://target-a.runtime", "http://target-b.runtime"
+	targetImage := "registry/openclaw@sha256:target"
+	first := models.RuntimePod{ID: 154, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &firstEndpoint, State: "ready", Capacity: 100, ImageRef: targetImage, PoolRole: "upgrade-target", UpgradeID: "58"}
+	second := models.RuntimePod{ID: 155, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &secondEndpoint, State: "ready", Capacity: 100, ImageRef: targetImage, PoolRole: "upgrade-target", UpgradeID: "58"}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{first.ID: &first, second.ID: &second}, claimDenied: map[int64]bool{first.ID: true}}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-206", Status: "running"}}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
+	rollout := &models.RuntimeRollout{ID: 58, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: targetImage, PreflightID: &preflightID}
+	if err := scheduler.EnsureUpgradeGateway(ctx, rollout, 206, []models.RuntimePod{first, second}); err != nil {
+		t.Fatalf("EnsureUpgradeGateway returned error: %v", err)
+	}
+	if len(agent.createRequests) != 1 || agent.createRequests[0].endpoint != secondEndpoint {
+		t.Fatalf("gateway request = %+v, want second target pod", agent.createRequests)
+	}
+	if binding := bindingRepo.bindings[206]; binding == nil || binding.RuntimePodID != second.ID {
+		t.Fatalf("binding = %+v, want target pod %d", binding, second.ID)
+	}
+}
+
+func TestRuntimeSchedulerEnsureUpgradeGatewayDistributesFiveHundredInstancesWithoutOrdinaryScheduling(t *testing.T) {
+	ctx := context.Background()
+	preflightID := "preflight-500"
+	targetImage := "registry/openclaw@sha256:target500"
+	workspaceRoot := t.TempDir()
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}, claimLimit: map[int64]int{}}
+	targets := make([]models.RuntimePod, 0, 5)
+	for index := 0; index < 5; index++ {
+		endpoint := fmt.Sprintf("http://target-%d.runtime", index+1)
+		pod := models.RuntimePod{ID: int64(200 + index), RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100, ImageRef: targetImage, PoolRole: "upgrade-target", UpgradeID: "500"}
+		targets = append(targets, pod)
+		copy := pod
+		podRepo.pods[pod.ID] = &copy
+		podRepo.claimLimit[pod.ID] = 100
+	}
+	for offset := 0; offset < 500; offset++ {
+		id := 1000 + offset
+		workspace := RuntimeWorkspacePathWithRoot(workspaceRoot, RuntimeTypeOpenClaw, 9, id)
+		instanceRepo.byID[id] = &models.Instance{ID: id, UserID: 9, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "creating", WorkspacePath: &workspace, RuntimeGeneration: 2}
+	}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw", Status: "running"}}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second, WithRuntimeSchedulerWorkspaceRoot(workspaceRoot))
+	rollout := &models.RuntimeRollout{ID: 500, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: targetImage, PreflightID: &preflightID}
+	for id := 1000; id < 1500; id++ {
+		if err := scheduler.EnsureUpgradeGateway(ctx, rollout, id, targets); err != nil {
+			t.Fatalf("instance %d: %v", id, err)
+		}
+	}
+	if len(agent.createRequests) != 500 || len(bindingRepo.bindings) != 500 {
+		t.Fatalf("created=%d bindings=%d, want 500", len(agent.createRequests), len(bindingRepo.bindings))
+	}
+	for _, pod := range targets {
+		if podRepo.claims[pod.ID] != 100 {
+			t.Fatalf("pod %d claimed %d slots, want 100", pod.ID, podRepo.claims[pod.ID])
+		}
+	}
+}
+
+func TestRuntimeUpgradeReconcileInterruptedOnlyForCanceledOwner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !runtimeUpgradeReconcileInterrupted(ctx, context.Canceled) {
+		t.Fatal("canceled leader context must be treated as a resumable ownership hand-off")
+	}
+	if runtimeUpgradeReconcileInterrupted(context.Background(), context.DeadlineExceeded) {
+		t.Fatal("an operation timeout under a live leader must remain a real failure")
+	}
+}
+
 func TestRuntimeSchedulerMarksInstanceErrorWhenGatewayCreateReturnsErrorStatus(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
@@ -2665,6 +2804,8 @@ type fakeRuntimePodRepo struct {
 	marked       map[int64]fakePodMark
 	releaseCount int
 	getErr       error
+	claimDenied  map[int64]bool
+	claimLimit   map[int64]int
 }
 
 type fakePodMark struct {
@@ -2701,6 +2842,12 @@ func (r *fakeRuntimePodRepo) TryClaimSlot(ctx context.Context, podID int64) (boo
 	defer r.mu.Unlock()
 	if r.claims == nil {
 		r.claims = map[int64]int{}
+	}
+	if r.claimDenied[podID] {
+		return false, nil
+	}
+	if limit := r.claimLimit[podID]; limit > 0 && r.claims[podID] >= limit {
+		return false, nil
 	}
 	r.claims[podID]++
 	return true, nil

@@ -104,10 +104,11 @@ func TestActiveOpenClawRolloutBlockIsScopedToLabCandidates(t *testing.T) {
 	}{
 		{name: "production maintenance blocks new OpenClaw", phase: "maintenance", want: true},
 		{name: "production gateway restart blocks missing item", phase: "gateway_restart", want: true},
+		{name: "production candidate restart ready remains upgrade-owned", phase: "gateway_restart", itemExists: true, itemState: "restart_ready", want: true},
 		{name: "lab maintenance ignores ordinary OpenClaw", phase: "maintenance", preflight: lab, want: false},
 		{name: "lab rollback ignores ordinary OpenClaw", rollbackStatus: "waiting", preflight: lab, want: false},
 		{name: "lab maintenance blocks candidate", phase: "maintenance", preflight: lab, itemExists: true, want: true},
-		{name: "lab candidate restart ready is released", phase: "gateway_restart", preflight: lab, itemExists: true, itemState: "restart_ready", want: false},
+		{name: "lab candidate restart ready remains upgrade-owned", phase: "gateway_restart", preflight: lab, itemExists: true, itemState: "restart_ready", want: true},
 		{name: "lab candidate restart pending remains blocked", phase: "gateway_restart", preflight: lab, itemExists: true, itemState: "migrated", want: true},
 	}
 	for _, test := range tests {
@@ -213,6 +214,25 @@ func TestNextRuntimeUpgradeBatchKeepsTeamAtomicAndWorkerBeforeLeader(t *testing.
 	batch = nextRuntimeUpgradeBatch(items[1:], 1, "prepared")
 	if len(batch) != 2 || batch[0].InstanceID != 2 || batch[1].InstanceID != 3 {
 		t.Fatalf("Team batch = %+v, want worker and leader together", batch)
+	}
+}
+
+func TestNextRuntimeUpgradeMigrationBatchResumesEveryDurableIntermediateState(t *testing.T) {
+	items := []models.RuntimeUpgradeItem{
+		{InstanceID: 1, State: "compatibility_checked"},
+		{InstanceID: 2, State: "quiescing"},
+		{InstanceID: 3, State: "quiesced"},
+		{InstanceID: 4, State: "migration_started"},
+		{InstanceID: 5, State: "migrated"},
+	}
+	batch := nextRuntimeUpgradeMigrationBatch(items, 8)
+	if len(batch) != 4 {
+		t.Fatalf("migration resume batch = %+v, want four incomplete states", batch)
+	}
+	for index, want := range []int{1, 2, 3, 4} {
+		if batch[index].InstanceID != want {
+			t.Fatalf("migration resume batch[%d] = %d, want %d", index, batch[index].InstanceID, want)
+		}
 	}
 }
 
