@@ -686,6 +686,16 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		if !allTargetsReady {
 			return false, nil
 		}
+		reopened, err := s.reopenMissingVerifiedUpgradeGateway(ctx, rollout, items, pods)
+		if err != nil {
+			return false, err
+		}
+		if reopened {
+			// A target Deployment can be replaced during a forward repair after an
+			// instance was already verified.  Re-run only the gateway placement
+			// check; the session migration and runtime generation remain intact.
+			return false, nil
+		}
 		activeBatch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "restart_ready")
 		if len(activeBatch) == 0 {
 			nextBatch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "migrated")
@@ -711,7 +721,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if s.gatewayRestarter == nil {
 				return false, fmt.Errorf("OpenClaw upgrade gateway restarter is unavailable")
 			}
-			if upgradeGatewayRestartExpired(item, time.Now().UTC()) {
+			if upgradeGatewayRestartExpired(item, gatewayRestartNotBefore(*rollout, targetPods), time.Now().UTC()) {
 				return false, fmt.Errorf("restart upgraded instance %d: gateway did not become healthy within %s", item.InstanceID, openClawUpgradeGatewayRestartTimeout)
 			}
 			if err := s.gatewayRestarter.EnsureUpgradeGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
@@ -776,8 +786,83 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 	return true, nil
 }
 
-func upgradeGatewayRestartExpired(item models.RuntimeUpgradeItem, now time.Time) bool {
-	return item.State == "restart_ready" && !item.UpdatedAt.IsZero() && now.Sub(item.UpdatedAt.UTC()) >= openClawUpgradeGatewayRestartTimeout
+func gatewayRestartNotBefore(rollout models.RuntimeRollout, targetPods []models.RuntimePod) time.Time {
+	startedAt := rollout.UpdatedAt.UTC()
+	for _, pod := range targetPods {
+		createdAt := pod.CreatedAt.UTC()
+		if createdAt.After(startedAt) {
+			startedAt = createdAt
+		}
+	}
+	return startedAt
+}
+
+func upgradeGatewayRestartExpired(item models.RuntimeUpgradeItem, notBefore, now time.Time) bool {
+	startedAt := item.UpdatedAt.UTC()
+	if notBefore.After(startedAt) {
+		startedAt = notBefore
+	}
+	return item.State == "restart_ready" && !startedAt.IsZero() && now.Sub(startedAt) >= openClawUpgradeGatewayRestartTimeout
+}
+
+func (s *RuntimeUpgradeService) reopenMissingVerifiedUpgradeGateway(ctx context.Context, rollout *models.RuntimeRollout, items []models.RuntimeUpgradeItem, pods []models.RuntimePod) (bool, error) {
+	for _, item := range items {
+		if item.State != "gateway_verified" {
+			continue
+		}
+		binding, err := s.bindings.GetRunningByInstanceID(ctx, item.InstanceID)
+		if err != nil {
+			return false, err
+		}
+		reason := "verified target gateway binding is absent"
+		if binding != nil {
+			var expectedGeneration int
+			row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
+			if err != nil {
+				return false, err
+			}
+			if err := row.Scan(&expectedGeneration); err != nil {
+				return false, err
+			}
+			if verifiedUpgradeBindingOnTarget(binding, expectedGeneration, pods, rollout.TargetImageRef) {
+				continue
+			}
+			reason = "verified gateway binding no longer belongs to the ready target"
+		}
+
+		now := time.Now().UTC()
+		result, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'restart_ready', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'gateway_verified'`, now, rollout.ID, item.InstanceID)
+		if err != nil {
+			return false, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if affected != 1 {
+			continue
+		}
+		if _, err := s.sess.SQL().ExecContext(ctx, `UPDATE instances SET status = 'creating', runtime_error_message = NULL, updated_at = ? WHERE id = ? AND LOWER(TRIM(status)) <> 'deleting'`, now, item.InstanceID); err != nil {
+			return false, err
+		}
+		if err := s.audit(ctx, &rollout.ID, rollout.StartedBy, "instance_gateway_revalidation_required", "gateway_restart", "pending", map[string]any{"instance_id": item.InstanceID, "reason": reason}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func verifiedUpgradeBindingOnTarget(binding *models.InstanceRuntimeBinding, expectedGeneration int, pods []models.RuntimePod, targetImage string) bool {
+	if binding == nil || binding.Generation != expectedGeneration {
+		return false
+	}
+	for _, pod := range pods {
+		if pod.ID == binding.RuntimePodID && runtimePodMatchesImage(pod, targetImage) && pod.State == "ready" && !pod.Draining {
+			return true
+		}
+	}
+	return false
 }
 
 // validateOpenClawUpgradeAggregateCapacity prevents hundreds of individually

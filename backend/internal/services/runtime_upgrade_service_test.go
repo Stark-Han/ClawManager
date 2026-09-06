@@ -97,14 +97,45 @@ func TestRuntimeUpgradeScopePersistsLabSelectionWithoutNewRolloutColumns(t *test
 
 func TestUpgradeGatewayRestartTimeoutOnlyAppliesToActiveRestart(t *testing.T) {
 	now := time.Now().UTC()
-	if !upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-openClawUpgradeGatewayRestartTimeout)}, now) {
+	if !upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-openClawUpgradeGatewayRestartTimeout)}, time.Time{}, now) {
 		t.Fatal("expired restart_ready item was allowed to wait forever")
 	}
-	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-time.Minute)}, now) {
+	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-time.Minute)}, time.Time{}, now) {
 		t.Fatal("fresh gateway restart was timed out")
 	}
-	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "gateway_verified", UpdatedAt: now.Add(-time.Hour)}, now) {
+	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "gateway_verified", UpdatedAt: now.Add(-time.Hour)}, time.Time{}, now) {
 		t.Fatal("verified gateway was timed out")
+	}
+	if upgradeGatewayRestartExpired(models.RuntimeUpgradeItem{State: "restart_ready", UpdatedAt: now.Add(-time.Hour)}, now.Add(-time.Minute), now) {
+		t.Fatal("replacement target pod did not restart the health window")
+	}
+}
+
+func TestGatewayRestartNotBeforeUsesNewestTargetPodCreation(t *testing.T) {
+	now := time.Now().UTC()
+	rollout := models.RuntimeRollout{UpdatedAt: now.Add(-10 * time.Minute)}
+	pods := []models.RuntimePod{{CreatedAt: now.Add(-8 * time.Minute)}, {CreatedAt: now.Add(-2 * time.Minute)}}
+	if got := gatewayRestartNotBefore(rollout, pods); !got.Equal(now.Add(-2 * time.Minute)) {
+		t.Fatalf("restart not-before = %s", got)
+	}
+}
+
+func TestVerifiedUpgradeBindingMustStillBelongToReadyTarget(t *testing.T) {
+	target := "registry/openclaw@sha256:" + strings.Repeat("a", 64)
+	binding := &models.InstanceRuntimeBinding{RuntimePodID: 17, Generation: 4}
+	pods := []models.RuntimePod{{ID: 17, ImageDigest: stringPtrOrNil("sha256:" + strings.Repeat("a", 64)), State: "ready"}}
+	if !verifiedUpgradeBindingOnTarget(binding, 4, pods, target) {
+		t.Fatal("current target binding was rejected")
+	}
+	if verifiedUpgradeBindingOnTarget(binding, 5, pods, target) {
+		t.Fatal("stale generation was accepted")
+	}
+	pods[0].Draining = true
+	if verifiedUpgradeBindingOnTarget(binding, 4, pods, target) {
+		t.Fatal("draining target binding was accepted")
+	}
+	if verifiedUpgradeBindingOnTarget(nil, 4, pods, target) {
+		t.Fatal("missing binding was accepted")
 	}
 }
 
