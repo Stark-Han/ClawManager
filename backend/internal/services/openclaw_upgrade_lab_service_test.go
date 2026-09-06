@@ -43,11 +43,32 @@ func (r *scriptedUpgradeLabRoot) Lstat(string) (os.FileInfo, error) {
 type upgradeLabCleanupInstanceRepo struct {
 	*fakeRuntimeInstanceRepo
 	deleteCalls []int
+	events      *[]string
 }
 
 func (r *upgradeLabCleanupInstanceRepo) Delete(id int) error {
 	r.deleteCalls = append(r.deleteCalls, id)
+	if r.events != nil {
+		*r.events = append(*r.events, "instance")
+	}
 	delete(r.byID, id)
+	return nil
+}
+
+type upgradeLabCleanupDeployments struct {
+	deleted []string
+	events  *[]string
+}
+
+func (*upgradeLabCleanupDeployments) EnsureUpgradeLabPool(context.Context, string, string, string, string, string, int32) error {
+	return nil
+}
+
+func (d *upgradeLabCleanupDeployments) DeleteUpgradeLabPool(_ context.Context, _, name, _ string) error {
+	d.deleted = append(d.deleted, name)
+	if d.events != nil {
+		*d.events = append(*d.events, name)
+	}
 	return nil
 }
 
@@ -167,6 +188,129 @@ func TestDeleteLabInstanceConfirmsGatewayStopBeforeWorkspaceCleanup(t *testing.T
 	}
 	if agent.stateCalls == 0 || !workspaceRemoved || bindings.bindings[instance.ID] != nil || instances.byID[instance.ID] != nil {
 		t.Fatalf("incomplete cleanup: stateCalls=%d workspaceRemoved=%v binding=%v instance=%v", agent.stateCalls, workspaceRemoved, bindings.bindings[instance.ID], instances.byID[instance.ID])
+	}
+}
+
+func TestDeleteLabInstanceDoesNotReleaseUnaddressableGatewayBinding(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 206)
+	description := openClawUpgradeLabDescription + "7"
+	instance := &models.Instance{ID: 206, UserID: 1, Description: &description, WorkspacePath: &workspace}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+	instances.byID[instance.ID] = instance
+	bindings := newFakeRuntimeBindingRepo()
+	bindings.bindings[instance.ID] = &models.InstanceRuntimeBinding{InstanceID: instance.ID, RuntimePodID: 12, GatewayID: "gateway-206"}
+	workspaceRemoved := false
+	service := &OpenClawUpgradeLabService{
+		instances: instances,
+		pods:      &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}},
+		bindings:  bindings,
+		agent:     &fakeRuntimeAgentClient{},
+		cfg:       config.RuntimePoolConfig{WorkspaceRoot: root},
+		workspaceRemover: func(context.Context, string) error {
+			workspaceRemoved = true
+			return nil
+		},
+	}
+	if err := service.deleteLabInstance(context.Background(), instance); err == nil || !strings.Contains(err.Error(), "addressable") {
+		t.Fatalf("unaddressable cleanup error = %v", err)
+	}
+	if bindings.bindings[instance.ID] == nil || instances.byID[instance.ID] == nil || workspaceRemoved {
+		t.Fatal("unaddressable gateway cleanup released durable state")
+	}
+}
+
+func TestCleanupRunResourcesDeletesIsolatedPoolsBeforeWorkspaceAndRow(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 203)
+	description := openClawUpgradeLabDescription + "4"
+	instance := &models.Instance{ID: 203, UserID: 1, Description: &description, WorkspacePath: &workspace}
+	events := []string{}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo(), events: &events}
+	instances.byID[instance.ID] = instance
+	deployments := &upgradeLabCleanupDeployments{events: &events}
+	service := &OpenClawUpgradeLabService{
+		instances:   instances,
+		pods:        &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}},
+		bindings:    newFakeRuntimeBindingRepo(),
+		deployments: deployments,
+		cfg:         config.RuntimePoolConfig{Namespace: "test", WorkspaceRoot: root},
+		workspaceRemover: func(context.Context, string) error {
+			events = append(events, "workspace")
+			return nil
+		},
+	}
+	actorID := 1
+	rolloutID := int64(52)
+	instanceIDs := "[203]"
+	run := &models.OpenClawUpgradeLabRun{ID: 4, ActorUserID: &actorID, SourceDeployment: "openclaw-upgrade-lab-r4-source", RolloutID: &rolloutID, InstanceIDsJSON: &instanceIDs}
+	if err := service.cleanupRunResources(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"openclaw-upgrade-lab-r4-source-u52", "openclaw-upgrade-lab-r4-source", "workspace", "instance"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("cleanup order = %v, want %v", events, want)
+	}
+}
+
+func TestCleanupRunResourcesRecoversMissingInstanceAfterPoolsStop(t *testing.T) {
+	root := t.TempDir()
+	events := []string{}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo(), events: &events}
+	deployments := &upgradeLabCleanupDeployments{events: &events}
+	service := &OpenClawUpgradeLabService{
+		instances:   instances,
+		pods:        &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}},
+		bindings:    newFakeRuntimeBindingRepo(),
+		deployments: deployments,
+		cfg:         config.RuntimePoolConfig{Namespace: "test", WorkspaceRoot: root},
+		workspaceRemover: func(_ context.Context, target string) error {
+			events = append(events, "workspace")
+			want := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 203)
+			if !sameCleanPath(target, want) {
+				t.Fatalf("orphan workspace = %q, want %q", target, want)
+			}
+			return nil
+		},
+	}
+	actorID := 1
+	rolloutID := int64(52)
+	instanceIDs := "[203]"
+	run := &models.OpenClawUpgradeLabRun{ID: 4, ActorUserID: &actorID, SourceDeployment: "openclaw-upgrade-lab-r4-source", RolloutID: &rolloutID, InstanceIDsJSON: &instanceIDs}
+	if err := service.cleanupRunResources(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"openclaw-upgrade-lab-r4-source-u52", "openclaw-upgrade-lab-r4-source", "workspace"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("partial cleanup order = %v, want %v", events, want)
+	}
+}
+
+func TestCleanupRunResourcesRejectsBindingOutsideLabBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	workspace := RuntimeWorkspacePathWithRoot(root, RuntimeTypeOpenClaw, 1, 205)
+	description := openClawUpgradeLabDescription + "6"
+	instance := &models.Instance{ID: 205, UserID: 1, Description: &description, WorkspacePath: &workspace}
+	instances := &upgradeLabCleanupInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+	instances.byID[instance.ID] = instance
+	bindings := newFakeRuntimeBindingRepo()
+	bindings.bindings[instance.ID] = &models.InstanceRuntimeBinding{InstanceID: instance.ID, RuntimePodID: 11, GatewayID: "gateway-205"}
+	deployments := &upgradeLabCleanupDeployments{}
+	service := &OpenClawUpgradeLabService{
+		instances:   instances,
+		pods:        &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{11: {ID: 11, DeploymentName: "openclaw-runtime"}}},
+		bindings:    bindings,
+		deployments: deployments,
+		cfg:         config.RuntimePoolConfig{Namespace: "test", WorkspaceRoot: root},
+	}
+	actorID := 1
+	instanceIDs := "[205]"
+	run := &models.OpenClawUpgradeLabRun{ID: 6, ActorUserID: &actorID, SourceDeployment: "openclaw-upgrade-lab-r6-source", InstanceIDsJSON: &instanceIDs}
+	if err := service.cleanupRunResources(context.Background(), run); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("outside binding cleanup error = %v", err)
+	}
+	if len(deployments.deleted) != 0 || len(instances.deleteCalls) != 0 {
+		t.Fatal("cleanup mutated resources before rejecting an outside binding")
 	}
 }
 

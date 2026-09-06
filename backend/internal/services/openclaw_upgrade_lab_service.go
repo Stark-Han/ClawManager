@@ -112,6 +112,12 @@ type upgradeLabProvisionPlan struct {
 	InstanceCount int `json:"instance_count"`
 }
 
+type upgradeLabCleanupItem struct {
+	id        int
+	instance  *models.Instance
+	workspace string
+}
+
 func NewOpenClawUpgradeLabService(sess db.Session, instances repository.InstanceRepository, pods repository.RuntimePodRepository, bindings repository.InstanceRuntimeBindingRepository, agent RuntimeAgentClient, deployments k8s.RuntimeUpgradeLabDeploymentService, inventory RuntimeDeploymentInventoryProvider, upgrade *RuntimeUpgradeService, scheduler *RuntimeScheduler, envBuilder upgradeLabGatewayEnvBuilder, cfg config.RuntimePoolConfig) *OpenClawUpgradeLabService {
 	return &OpenClawUpgradeLabService{sess: sess, instances: instances, pods: pods, bindings: bindings, agent: agent, deployments: deployments, inventory: inventory, upgrade: upgrade, scheduler: scheduler, envBuilder: envBuilder, conversation: openClawUpgradeLabConversationClient{}, cfg: cfg}
 }
@@ -338,42 +344,101 @@ func (s *OpenClawUpgradeLabService) Cleanup(ctx context.Context, id int64, actor
 			}
 		}
 	}
+	if err := s.cleanupRunResources(ctx, run); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'cleaned', phase = 'cleaned', finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE id = ?`, now, now, run.ID)
+	return err
+}
+
+func (s *OpenClawUpgradeLabService) cleanupRunResources(ctx context.Context, run *models.OpenClawUpgradeLabRun) error {
+	if run == nil || run.ActorUserID == nil || *run.ActorUserID <= 0 {
+		return fmt.Errorf("upgrade lab cleanup owner is unavailable")
+	}
 	ids := decodeLabInstanceIDs(run.InstanceIDsJSON)
+	targetDeployment := ""
+	if run.RolloutID != nil {
+		targetDeployment = runtimeUpgradeTargetDeploymentName(run.SourceDeployment, *run.RolloutID)
+	}
+	ownedDeployments := map[string]bool{strings.TrimSpace(run.SourceDeployment): true}
+	if targetDeployment != "" {
+		ownedDeployments[targetDeployment] = true
+	}
+	items := make([]upgradeLabCleanupItem, 0, len(ids))
+	// Validate every database object before deleting either isolated pool. This
+	// makes a wrong binding or path a hard stop before any mutation occurs.
 	for _, instanceID := range ids {
 		instance, getErr := s.instances.GetByID(instanceID)
 		if getErr != nil {
 			return getErr
 		}
 		if instance == nil {
-			// Older cleanup attempts could delete the database row before an NFS
-			// RemoveAll finished. Recover that exact, run-owned canonical path so
-			// retries do not leave an orphan workspace behind.
-			workspace := RuntimeWorkspacePathWithRoot(s.cfg.WorkspaceRoot, RuntimeTypeOpenClaw, *run.ActorUserID, instanceID)
-			if removeErr := s.removeLabWorkspace(ctx, workspace); removeErr != nil {
-				return fmt.Errorf("delete orphaned upgrade lab workspace for instance %d: %w", instanceID, removeErr)
-			}
+			items = append(items, upgradeLabCleanupItem{id: instanceID, workspace: RuntimeWorkspacePathWithRoot(s.cfg.WorkspaceRoot, RuntimeTypeOpenClaw, *run.ActorUserID, instanceID)})
 			continue
 		}
 		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(stringValue(instance.Description))), openClawUpgradeLabDescription) {
 			return fmt.Errorf("refusing to clean non-lab instance %d", instanceID)
 		}
-		if deleteErr := s.deleteLabInstance(ctx, instance); deleteErr != nil {
-			return fmt.Errorf("delete upgrade lab instance %d: %w", instanceID, deleteErr)
+		workspace := strings.TrimSpace(stringValue(instance.WorkspacePath))
+		expectedWorkspace := RuntimeWorkspacePathWithRoot(s.cfg.WorkspaceRoot, RuntimeTypeOpenClaw, instance.UserID, instance.ID)
+		if workspace == "" || !sameCleanPath(workspace, expectedWorkspace) || !pathWithin(s.cfg.WorkspaceRoot, workspace) {
+			return fmt.Errorf("refusing to clean instance %d with a non-canonical lab workspace", instanceID)
 		}
+		binding, bindingErr := s.bindings.GetByInstanceID(ctx, instanceID)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if binding != nil {
+			pod, podErr := s.pods.GetByID(ctx, binding.RuntimePodID)
+			if podErr != nil {
+				return podErr
+			}
+			if pod == nil || !ownedDeployments[strings.TrimSpace(pod.DeploymentName)] {
+				return fmt.Errorf("refusing to clean instance %d bound outside its upgrade lab pools", instanceID)
+			}
+		}
+		items = append(items, upgradeLabCleanupItem{id: instanceID, instance: instance, workspace: workspace})
 	}
 	runToken := upgradeLabRunToken(run.ID)
-	if run.RolloutID != nil {
-		target := runtimeUpgradeTargetDeploymentName(run.SourceDeployment, *run.RolloutID)
-		if err := s.deployments.DeleteUpgradeLabPool(ctx, s.cfg.Namespace, target, runToken); err != nil {
+	// Delete the strictly run-owned isolated pools first and wait for their Pods
+	// to disappear. This is the only reliable way to close untracked descendant
+	// processes and their NFS silly-renamed (.nfs*) file handles.
+	if targetDeployment != "" {
+		if err := s.deployments.DeleteUpgradeLabPool(ctx, s.cfg.Namespace, targetDeployment, runToken); err != nil {
 			return err
 		}
 	}
 	if err := s.deployments.DeleteUpgradeLabPool(ctx, s.cfg.Namespace, run.SourceDeployment, runToken); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	_, err = s.sess.SQL().ExecContext(ctx, `UPDATE openclaw_upgrade_lab_runs SET status = 'cleaned', phase = 'cleaned', finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE id = ?`, now, now, run.ID)
-	return err
+	for _, item := range items {
+		binding, bindingErr := s.bindings.GetByInstanceID(ctx, item.id)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if binding != nil {
+			pod, podErr := s.pods.GetByID(ctx, binding.RuntimePodID)
+			if podErr != nil {
+				return podErr
+			}
+			if pod == nil || !ownedDeployments[strings.TrimSpace(pod.DeploymentName)] {
+				return fmt.Errorf("refusing to release instance %d binding outside its upgrade lab pools", item.id)
+			}
+			if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, item.id, binding.RuntimePodID); err != nil {
+				return err
+			}
+		}
+		if removeErr := s.removeLabWorkspace(ctx, item.workspace); removeErr != nil {
+			return fmt.Errorf("delete upgrade lab workspace for instance %d: %w", item.id, removeErr)
+		}
+		if item.instance != nil {
+			if deleteErr := s.instances.Delete(item.id); deleteErr != nil && !strings.Contains(strings.ToLower(deleteErr.Error()), "not found") {
+				return fmt.Errorf("delete upgrade lab instance %d: %w", item.id, deleteErr)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *OpenClawUpgradeLabService) EnsureUpgradeLabGateway(ctx context.Context, rollout *models.RuntimeRollout, instanceID int, targetPods []models.RuntimePod) error {
@@ -586,20 +651,21 @@ func (s *OpenClawUpgradeLabService) deleteLabInstance(ctx context.Context, insta
 		if podErr != nil {
 			return podErr
 		}
-		if pod != nil && pod.AgentEndpoint != nil && strings.TrimSpace(*pod.AgentEndpoint) != "" && binding.GatewayID != "" {
-			endpoint := strings.TrimSpace(*pod.AgentEndpoint)
-			deleteErr := s.agent.DeleteGateway(ctx, endpoint, binding.GatewayID)
-			confirmed := errors.Is(deleteErr, ErrRuntimeAgentNotFound)
-			if reader, ok := s.agent.(gatewayStateReader); ok {
-				var confirmErr error
-				confirmed, confirmErr = waitForGatewayStopped(ctx, reader, endpoint, binding.GatewayID, 5*time.Second)
-				if !confirmed {
-					return errors.Join(deleteErr, confirmErr)
-				}
+		if pod == nil || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" || binding.GatewayID == "" {
+			return fmt.Errorf("cannot release upgrade lab binding before its gateway stop is addressable")
+		}
+		endpoint := strings.TrimSpace(*pod.AgentEndpoint)
+		deleteErr := s.agent.DeleteGateway(ctx, endpoint, binding.GatewayID)
+		confirmed := errors.Is(deleteErr, ErrRuntimeAgentNotFound)
+		if reader, ok := s.agent.(gatewayStateReader); ok {
+			var confirmErr error
+			confirmed, confirmErr = waitForGatewayStopped(ctx, reader, endpoint, binding.GatewayID, 5*time.Second)
+			if !confirmed {
+				return errors.Join(deleteErr, confirmErr)
 			}
-			if deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) && !confirmed {
-				return deleteErr
-			}
+		}
+		if deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) && !confirmed {
+			return deleteErr
 		}
 		if err := s.bindings.DeleteByInstanceIDAndReleaseSlot(ctx, instance.ID, binding.RuntimePodID); err != nil {
 			return err

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 )
@@ -169,7 +171,7 @@ func (s *runtimeDeploymentService) DeleteUpgradeLabPool(ctx context.Context, nam
 	deployments := s.client.AppsV1().Deployments(namespace)
 	existing, err := deployments.Get(ctx, name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		return nil
+		return s.waitForUpgradeLabPoolGone(ctx, namespace, name)
 	}
 	if err != nil {
 		return err
@@ -177,8 +179,32 @@ func (s *runtimeDeploymentService) DeleteUpgradeLabPool(ctx context.Context, nam
 	if existing.Labels[upgradeLabPurposeLabel] != upgradeLabPurposeValue || existing.Labels[upgradeLabRunLabel] != strings.TrimSpace(runID) {
 		return fmt.Errorf("refusing to delete non-lab deployment %s/%s", namespace, name)
 	}
-	if err := deployments.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+	foreground := metav1.DeletePropagationForeground
+	if err := deployments.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &foreground}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete upgrade lab pool %s/%s: %w", namespace, name, err)
+	}
+	// A successful Deployment DELETE is asynchronous. Waiting for foreground
+	// deletion prevents the caller from removing NFS workspaces while an
+	// orphaned process in the terminating Runtime Pod still owns file handles.
+	return s.waitForUpgradeLabPoolGone(ctx, namespace, name)
+}
+
+func (s *runtimeDeploymentService) waitForUpgradeLabPoolGone(ctx context.Context, namespace, name string) error {
+	deployments := s.client.AppsV1().Deployments(namespace)
+	if err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		_, getErr := deployments.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil && !errors.IsNotFound(getErr) {
+			return false, getErr
+		}
+		pods, listErr := s.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labels.Set{"app": name}.AsSelector().String(),
+		})
+		if listErr != nil {
+			return false, listErr
+		}
+		return errors.IsNotFound(getErr) && len(pods.Items) == 0, nil
+	}); err != nil {
+		return fmt.Errorf("wait for upgrade lab pool %s/%s deletion: %w", namespace, name, err)
 	}
 	return nil
 }
