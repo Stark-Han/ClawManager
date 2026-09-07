@@ -181,6 +181,47 @@ func TestRuntimeAgentHandlerHeartbeatUsesConfiguredCapacity(t *testing.T) {
 	}
 }
 
+func TestRuntimeAgentHandlerUsesServerReceiveTimeForLiveness(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	podRepo := &runtimeAgentHandlerPodRepo{}
+	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret"}, podRepo, &runtimeAgentHandlerBindingRepo{}, nil, &runtimeAgentHandlerEvents{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/runtime-agent/register", handler.Register)
+	router.POST("/api/v1/runtime-agent/heartbeat", handler.Heartbeat)
+	router.POST("/api/v1/runtime-agent/metrics/report", handler.ReportMetrics)
+	reportedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+
+	before := time.Now().UTC()
+	registerBody := `{"runtime_type":"openclaw","namespace":"clawmanager-system","pod_name":"openclaw-runtime-test","deployment_name":"openclaw-runtime","image_ref":"registry/openclaw:v1","reported_at":"` + reportedAt + `"}`
+	serveRuntimeAgentRequest(t, router, "/api/v1/runtime-agent/register", registerBody)
+	registered := podRepo.podsByID[1]
+	if registered == nil || registered.LastSeenAt == nil || registered.LastSeenAt.Before(before) {
+		t.Fatalf("register last_seen_at = %v, want server receive time after %s", registered, before)
+	}
+
+	serveRuntimeAgentRequest(t, router, "/api/v1/runtime-agent/heartbeat", `{"pod_id":1,"state":"ready","reported_at":"`+reportedAt+`"}`)
+	if podRepo.lastHeartbeatAt.Before(before) {
+		t.Fatalf("heartbeat last_seen_at = %s, want server receive time after %s", podRepo.lastHeartbeatAt, before)
+	}
+
+	serveRuntimeAgentRequest(t, router, "/api/v1/runtime-agent/metrics/report", `{"pod_id":1,"reported_at":"`+reportedAt+`"}`)
+	if podRepo.lastMetrics.LastSeenAt == nil || podRepo.lastMetrics.LastSeenAt.Before(before) {
+		t.Fatalf("metrics last_seen_at = %v, want server receive time after %s", podRepo.lastMetrics.LastSeenAt, before)
+	}
+}
+
+func serveRuntimeAgentRequest(t *testing.T, router http.Handler, path, body string) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-ClawManager-Agent-Token", "secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("POST %s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestRuntimeAgentHandlerMetricsReportUpdatesPodAndPublishesEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	podRepo := &runtimeAgentHandlerPodRepo{}
@@ -464,6 +505,7 @@ type runtimeAgentHandlerPodRepo struct {
 	updatedPodID          int64
 	lastMetrics           repository.RuntimePodMetricsUpdate
 	lastHeartbeatCapacity int
+	lastHeartbeatAt       time.Time
 	updateMetricsCalls    int
 	podsByID              map[int64]*models.RuntimePod
 }
@@ -519,6 +561,7 @@ func (r *runtimeAgentHandlerPodRepo) MarkState(ctx context.Context, podID int64,
 func (r *runtimeAgentHandlerPodRepo) UpdateHeartbeat(ctx context.Context, podID int64, state string, usedSlots int, capacity int, draining bool, lastSeenAt time.Time) error {
 	r.updatedPodID = podID
 	r.lastHeartbeatCapacity = capacity
+	r.lastHeartbeatAt = lastSeenAt
 	return nil
 }
 

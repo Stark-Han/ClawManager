@@ -131,10 +131,11 @@ func (h *RuntimeAgentHandler) Register(c *gin.Context) {
 		state = "ready"
 	}
 	capacity := runtimePodCapacityFromReport(req.Capacity, h.cfg.MaxGatewaysPerPod)
+	// Liveness is measured at the control plane. Agent clocks may drift and a
+	// request can sit behind a slow database or network path before it arrives.
+	// Using reported_at here can make a newly received report look stale and
+	// trigger a destructive failover immediately.
 	lastSeen := time.Now().UTC()
-	if req.ReportedAt != nil && !req.ReportedAt.IsZero() {
-		lastSeen = req.ReportedAt.UTC()
-	}
 	var metricsJSON *string
 	if len(req.Metrics) > 0 {
 		if !json.Valid(req.Metrics) {
@@ -196,6 +197,7 @@ func (h *RuntimeAgentHandler) Register(c *gin.Context) {
 		"capacity":     capacity,
 		"draining":     req.Draining,
 		"last_seen_at": lastSeen,
+		"reported_at":  req.ReportedAt,
 	})
 	utils.Success(c, http.StatusOK, "Runtime pod registered successfully", gin.H{"pod": pod})
 }
@@ -214,9 +216,6 @@ func (h *RuntimeAgentHandler) Heartbeat(c *gin.Context) {
 		return
 	}
 	lastSeen := time.Now().UTC()
-	if req.ReportedAt != nil && !req.ReportedAt.IsZero() {
-		lastSeen = req.ReportedAt.UTC()
-	}
 	capacity := runtimePodCapacityFromReport(0, h.cfg.MaxGatewaysPerPod)
 	if err := h.podRepo.UpdateHeartbeat(c.Request.Context(), podID, strings.TrimSpace(req.State), req.UsedSlots, capacity, req.Draining, lastSeen); err != nil {
 		utils.HandleError(c, err)
@@ -229,6 +228,7 @@ func (h *RuntimeAgentHandler) Heartbeat(c *gin.Context) {
 		"capacity":     capacity,
 		"draining":     req.Draining,
 		"last_seen_at": lastSeen,
+		"reported_at":  req.ReportedAt,
 	})
 	utils.Success(c, http.StatusOK, "Runtime pod heartbeat accepted", nil)
 }
@@ -256,9 +256,6 @@ func (h *RuntimeAgentHandler) ReportMetrics(c *gin.Context) {
 		metricsJSON = &raw
 	}
 	lastSeen := time.Now().UTC()
-	if req.ReportedAt != nil && !req.ReportedAt.IsZero() {
-		lastSeen = req.ReportedAt.UTC()
-	}
 	update := repository.RuntimePodMetricsUpdate{
 		CPUMillisUsed:   req.CPUMillisUsed,
 		MemoryBytesUsed: req.MemoryBytesUsed,
@@ -280,6 +277,7 @@ func (h *RuntimeAgentHandler) ReportMetrics(c *gin.Context) {
 		"network_rx_bytes":  req.NetworkRXBytes,
 		"network_tx_bytes":  req.NetworkTXBytes,
 		"last_seen_at":      lastSeen,
+		"reported_at":       req.ReportedAt,
 	}
 	if metricsJSON != nil {
 		payload["metrics"] = json.RawMessage(*metricsJSON)

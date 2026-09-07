@@ -44,6 +44,7 @@ type RuntimePod struct {
 	UpgradeID         string `db:"-" json:"upgrade_id,omitempty"`
 	SourceDeployment  string `db:"-" json:"source_deployment,omitempty"`
 	SchedulingEnabled *bool  `db:"-" json:"scheduling_enabled,omitempty"`
+	DesiredReplicas   int32  `db:"-" json:"desired_replicas,omitempty"`
 }
 
 func (p RuntimePod) Capabilities() []string {

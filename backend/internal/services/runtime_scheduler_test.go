@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -629,6 +630,7 @@ func TestRuntimeUpgradeReconcileInterruptedOnlyForCanceledOwner(t *testing.T) {
 func TestRuntimeUpgradeInfrastructureRetryable(t *testing.T) {
 	for _, err := range []error{
 		context.DeadlineExceeded,
+		io.EOF,
 		fmt.Errorf("list pods: etcdserver: request timed out"),
 		fmt.Errorf("request: Client.Timeout exceeded while awaiting headers"),
 		fmt.Errorf("restore: runtime reconciliation is required before migration"),
@@ -1313,6 +1315,22 @@ func TestRuntimeSchedulerNoSchedulablePodReturnsErrorAndReleasesNothing(t *testi
 	}
 }
 
+func TestRuntimeSchedulerTreatsControlPlaneTimeoutAsPendingWithoutMutatingInstance(t *testing.T) {
+	ctx := context.Background()
+	workspace := "/workspaces/openclaw/user-2/instance-1"
+	instance := models.Instance{ID: 1, UserID: 2, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "creating", WorkspacePath: &workspace, RuntimeGeneration: 3}
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	podRepo := &fakeRuntimePodRepo{schedulableErr: context.DeadlineExceeded}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, &fakeRuntimeDeploymentService{}, time.Second)
+
+	if errs := scheduler.reconcileCreatingInstance(ctx, instance); len(errs) != 0 {
+		t.Fatalf("reconcileCreatingInstance errors = %v, want retryable pending", errs)
+	}
+	if len(instanceRepo.runtimeStates) != 0 {
+		t.Fatalf("control-plane timeout mutated instance state: %#v", instanceRepo.runtimeStates)
+	}
+}
+
 func TestRuntimeSchedulerScalesOutWhenAllReadyPodsAtCapacity(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://pod-1.runtime"
@@ -1372,6 +1390,93 @@ func TestRuntimeSchedulerScalesOutWhenAllReadyPodsAtCapacity(t *testing.T) {
 	}
 	if state, ok := instanceRepo.runtimeStates[27]; ok {
 		t.Fatalf("instance runtime state = %+v, want unchanged while waiting for scale-out pod", state)
+	}
+}
+
+func TestRuntimeSchedulerScaleOutCountsDrainingReplicaInDeploymentBaseline(t *testing.T) {
+	ctx := context.Background()
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}}
+	for id := int64(1); id <= 6; id++ {
+		podRepo.pods[id] = &models.RuntimePod{
+			ID: id, RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system",
+			PodName: fmt.Sprintf("openclaw-runtime-%d", id), DeploymentName: "openclaw-runtime",
+			State: "ready", Capacity: 100, UsedSlots: 100, DesiredReplicas: 6,
+		}
+	}
+	podRepo.pods[6].Draining = true
+	deployments := &fakeRuntimeDeploymentService{}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
+
+	scaled, err := scheduler.scaleOutIfAtCapacity(ctx, RuntimeTypeOpenClaw)
+	if err != nil || !scaled {
+		t.Fatalf("scaleOutIfAtCapacity = (%t, %v), want (true, nil)", scaled, err)
+	}
+	if len(deployments.scales) != 1 || deployments.scales[0].replicas != 7 {
+		t.Fatalf("scale calls = %#v, want one request for 7 replicas", deployments.scales)
+	}
+}
+
+func TestRuntimeSchedulerScaleOutReplacesSoleDrainingReplica(t *testing.T) {
+	ctx := context.Background()
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		1: {
+			ID: 1, RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system",
+			PodName: "openclaw-runtime-1", DeploymentName: "openclaw-runtime",
+			State: "ready", Draining: true, Capacity: 100, DesiredReplicas: 1,
+		},
+	}}
+	deployments := &fakeRuntimeDeploymentService{}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
+
+	scaled, err := scheduler.scaleOutIfAtCapacity(ctx, RuntimeTypeOpenClaw)
+	if err != nil || !scaled {
+		t.Fatalf("scaleOutIfAtCapacity = (%t, %v), want replacement scale-out", scaled, err)
+	}
+	if len(deployments.scales) != 1 || deployments.scales[0].replicas != 2 {
+		t.Fatalf("scale calls = %#v, want one request for 2 replicas", deployments.scales)
+	}
+}
+
+func TestRuntimeSchedulerBacklogReplacesSoleDrainingReplica(t *testing.T) {
+	ctx := context.Background()
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		1: {
+			ID: 1, RuntimeType: RuntimeTypeHermes, Namespace: "clawmanager-system",
+			PodName: "hermes-runtime-1", DeploymentName: "hermes-runtime",
+			State: "ready", Draining: true, Capacity: 100, DesiredReplicas: 1,
+		},
+	}}
+	deployments := &fakeRuntimeDeploymentService{}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
+
+	scaled, err := scheduler.scaleOutIfBacklogExceedsCapacity(ctx, RuntimeTypeHermes, 1)
+	if err != nil || !scaled {
+		t.Fatalf("scaleOutIfBacklogExceedsCapacity = (%t, %v), want replacement scale-out", scaled, err)
+	}
+	if len(deployments.scales) != 1 || deployments.scales[0].replicas != 2 {
+		t.Fatalf("scale calls = %#v, want one request for 2 replicas", deployments.scales)
+	}
+}
+
+func TestRuntimeSchedulerScaleOutDoesNotRacePendingReplicaCreation(t *testing.T) {
+	ctx := context.Background()
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{}}
+	for id := int64(1); id <= 6; id++ {
+		podRepo.pods[id] = &models.RuntimePod{
+			ID: id, RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system",
+			PodName: fmt.Sprintf("openclaw-runtime-%d", id), DeploymentName: "openclaw-runtime",
+			State: "ready", Capacity: 100, UsedSlots: 100, DesiredReplicas: 7,
+		}
+	}
+	deployments := &fakeRuntimeDeploymentService{}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, newFakeRuntimeBindingRepo(), &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, NewRuntimeEventService(nil), nil, deployments, time.Second)
+
+	scaled, err := scheduler.scaleOutIfAtCapacity(ctx, RuntimeTypeOpenClaw)
+	if err != nil || !scaled {
+		t.Fatalf("scaleOutIfAtCapacity = (%t, %v), want pending scale-out", scaled, err)
+	}
+	if len(deployments.scales) != 0 {
+		t.Fatalf("scale calls = %#v, want none while replica 7 is already pending", deployments.scales)
 	}
 }
 
@@ -2281,7 +2386,9 @@ func TestRuntimeSchedulerFailoverLeavesBindingAndSlotWhenInstanceUpdateFails(t *
 
 func TestRuntimeSchedulerReconcileFailoversStalePod(t *testing.T) {
 	ctx := context.Background()
-	staleSeen := time.Now().UTC().Add(-30 * time.Second)
+	staleSeen := time.Now().UTC().Add(-31 * time.Second)
+	podUID := "pod-uid-9"
+	endpoint := "http://stale.runtime"
 	instanceRepo := newFakeRuntimeInstanceRepo()
 	instanceRepo.byID[17] = &models.Instance{ID: 17, RuntimeGeneration: 3}
 	bindingRepo := newFakeRuntimeBindingRepo()
@@ -2293,18 +2400,23 @@ func TestRuntimeSchedulerReconcileFailoversStalePod(t *testing.T) {
 	}
 	podRepo := &fakeRuntimePodRepo{
 		pods: map[int64]*models.RuntimePod{
-			9: {ID: 9, RuntimeType: RuntimeTypeOpenClaw, State: "ready", LastSeenAt: &staleSeen},
+			9: {ID: 9, RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system", DeploymentName: "openclaw-runtime", PodName: "openclaw-runtime-old", PodUID: &podUID, AgentEndpoint: &endpoint, State: "ready", LastSeenAt: &staleSeen},
 		},
 	}
+	deployments := &fakeRuntimeDeploymentService{pods: []k8s.RuntimeDeploymentPod{{
+		RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system", DeploymentName: "openclaw-runtime",
+		PodName: "openclaw-runtime-old", PodUID: podUID, State: "unhealthy",
+	}}}
+	agent := &fakeRuntimeAgentClient{healthErr: errors.New("connection refused")}
 	scheduler := NewRuntimeScheduler(
 		instanceRepo,
 		podRepo,
 		bindingRepo,
 		&fakeRuntimeRolloutRepo{},
-		&fakeRuntimeAgentClient{},
+		agent,
 		NewRuntimeEventService(nil),
 		nil,
-		&fakeRuntimeDeploymentService{},
+		deployments,
 		time.Second,
 		WithRuntimeSchedulerHeartbeatTimeout(10*time.Second),
 	)
@@ -2328,6 +2440,81 @@ func TestRuntimeSchedulerReconcileFailoversStalePod(t *testing.T) {
 	}
 	if state.message == nil || !strings.Contains(*state.message, "runtime pod heartbeat lost") {
 		t.Fatalf("runtime state message = %v, want heartbeat lost reason", state.message)
+	}
+	if len(agent.healthCalls) != 1 || agent.healthCalls[0] != endpoint {
+		t.Fatalf("agent health calls = %#v, want one independent probe", agent.healthCalls)
+	}
+}
+
+func TestRuntimeSchedulerKeepsStaleBindingWhileSameKubernetesPodIsReady(t *testing.T) {
+	ctx := context.Background()
+	staleSeen := time.Now().UTC().Add(-time.Minute)
+	podUID := "pod-uid-9"
+	endpoint := "http://ready.runtime"
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[17] = &models.InstanceRuntimeBinding{InstanceID: 17, RuntimePodID: 9, Generation: 3, State: "running"}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system", DeploymentName: "openclaw-runtime", PodName: "openclaw-runtime-live", PodUID: &podUID, AgentEndpoint: &endpoint, State: "ready", LastSeenAt: &staleSeen},
+	}}
+	deployments := &fakeRuntimeDeploymentService{pods: []k8s.RuntimeDeploymentPod{{
+		RuntimeType: RuntimeTypeOpenClaw, Namespace: "clawmanager-system", DeploymentName: "openclaw-runtime",
+		PodName: "openclaw-runtime-live", PodUID: podUID, State: "ready",
+	}}}
+	agent := &fakeRuntimeAgentClient{healthErr: errors.New("probe must not be needed")}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, NewRuntimeEventService(nil), nil, deployments, time.Second, WithRuntimeSchedulerHeartbeatTimeout(10*time.Second))
+
+	if err := scheduler.failoverStalePods(ctx); err != nil {
+		t.Fatalf("failoverStalePods returned error: %v", err)
+	}
+	if bindingRepo.bindings[17] == nil || podRepo.releases[9] != 0 || len(podRepo.marked) != 0 {
+		t.Fatalf("ready Kubernetes pod lost state: binding=%#v releases=%d marked=%#v", bindingRepo.bindings[17], podRepo.releases[9], podRepo.marked)
+	}
+	if len(agent.healthCalls) != 0 {
+		t.Fatalf("agent health calls = %#v, want none while Kubernetes confirms Ready", agent.healthCalls)
+	}
+}
+
+func TestRuntimeSchedulerKeepsStaleBindingWhenAgentStillResponds(t *testing.T) {
+	ctx := context.Background()
+	staleSeen := time.Now().UTC().Add(-time.Minute)
+	endpoint := "http://responding.runtime"
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[17] = &models.InstanceRuntimeBinding{InstanceID: 17, RuntimePodID: 9, Generation: 3, State: "running"}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: RuntimeTypeHermes, Namespace: "clawmanager-system", DeploymentName: "hermes-runtime", PodName: "hermes-runtime-old", AgentEndpoint: &endpoint, State: "ready", LastSeenAt: &staleSeen},
+	}}
+	deployments := &fakeRuntimeDeploymentService{}
+	agent := &fakeRuntimeAgentClient{}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, NewRuntimeEventService(nil), nil, deployments, time.Second, WithRuntimeSchedulerHeartbeatTimeout(10*time.Second))
+
+	if err := scheduler.failoverStalePods(ctx); err != nil {
+		t.Fatalf("failoverStalePods returned error: %v", err)
+	}
+	if bindingRepo.bindings[17] == nil || podRepo.releases[9] != 0 || len(podRepo.marked) != 0 {
+		t.Fatalf("responding Runtime Agent lost state: binding=%#v releases=%d marked=%#v", bindingRepo.bindings[17], podRepo.releases[9], podRepo.marked)
+	}
+	if len(agent.healthCalls) != 1 {
+		t.Fatalf("agent health calls = %#v, want one", agent.healthCalls)
+	}
+}
+
+func TestRuntimeSchedulerKeepsBindingsWhenKubernetesConfirmationFails(t *testing.T) {
+	ctx := context.Background()
+	staleSeen := time.Now().UTC().Add(-time.Minute)
+	endpoint := "http://unknown.runtime"
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[17] = &models.InstanceRuntimeBinding{InstanceID: 17, RuntimePodID: 9, Generation: 3, State: "running"}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: RuntimeTypeOpenCode, Namespace: "clawmanager-system", DeploymentName: "opencode-runtime", PodName: "opencode-runtime-old", AgentEndpoint: &endpoint, State: "ready", LastSeenAt: &staleSeen},
+	}}
+	deployments := &fakeRuntimeDeploymentService{listErr: context.DeadlineExceeded}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{healthErr: errors.New("connection refused")}, NewRuntimeEventService(nil), nil, deployments, time.Second, WithRuntimeSchedulerHeartbeatTimeout(10*time.Second))
+
+	if err := scheduler.failoverStalePods(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("failoverStalePods error = %v, want Kubernetes deadline", err)
+	}
+	if bindingRepo.bindings[17] == nil || podRepo.releases[9] != 0 || len(podRepo.marked) != 0 {
+		t.Fatalf("Kubernetes outage destroyed binding state: binding=%#v releases=%d marked=%#v", bindingRepo.bindings[17], podRepo.releases[9], podRepo.marked)
 	}
 }
 
@@ -2917,16 +3104,17 @@ func (r *fakeRuntimeInstanceRepo) Update(instance *models.Instance) error { retu
 func (r *fakeRuntimeInstanceRepo) Delete(id int) error                    { return nil }
 
 type fakeRuntimePodRepo struct {
-	mu           sync.Mutex
-	pods         map[int64]*models.RuntimePod
-	schedulable  []models.RuntimePod
-	claims       map[int64]int
-	releases     map[int64]int
-	marked       map[int64]fakePodMark
-	releaseCount int
-	getErr       error
-	claimDenied  map[int64]bool
-	claimLimit   map[int64]int
+	mu             sync.Mutex
+	pods           map[int64]*models.RuntimePod
+	schedulable    []models.RuntimePod
+	claims         map[int64]int
+	releases       map[int64]int
+	marked         map[int64]fakePodMark
+	releaseCount   int
+	getErr         error
+	schedulableErr error
+	claimDenied    map[int64]bool
+	claimLimit     map[int64]int
 }
 
 type fakePodMark struct {
@@ -2956,6 +3144,9 @@ func (r *fakeRuntimePodRepo) List(ctx context.Context, runtimeType string) ([]mo
 	return pods, nil
 }
 func (r *fakeRuntimePodRepo) ListSchedulable(ctx context.Context, runtimeType string) ([]models.RuntimePod, error) {
+	if r.schedulableErr != nil {
+		return nil, r.schedulableErr
+	}
 	return r.schedulable, nil
 }
 func (r *fakeRuntimePodRepo) TryClaimSlot(ctx context.Context, podID int64) (bool, error) {
@@ -3185,6 +3376,8 @@ type fakeRuntimeAgentClient struct {
 	createRequests []fakeCreateGatewayRequest
 	deleteRequests []fakeDeleteGatewayRequest
 	drainEndpoints []string
+	healthErr      error
+	healthCalls    []string
 
 	activeCreates    int32
 	maxActiveCreates int32
@@ -3200,7 +3393,10 @@ type fakeDeleteGatewayRequest struct {
 	gatewayID string
 }
 
-func (c *fakeRuntimeAgentClient) Health(ctx context.Context, endpoint string) error { return nil }
+func (c *fakeRuntimeAgentClient) Health(ctx context.Context, endpoint string) error {
+	c.healthCalls = append(c.healthCalls, endpoint)
+	return c.healthErr
+}
 func (c *fakeRuntimeAgentClient) CreateGateway(ctx context.Context, endpoint string, req RuntimeAgentCreateGatewayRequest) (*RuntimeAgentCreateGatewayResponse, error) {
 	active := atomic.AddInt32(&c.activeCreates, 1)
 	defer atomic.AddInt32(&c.activeCreates, -1)
@@ -3275,6 +3471,7 @@ type fakeRuntimeDeploymentService struct {
 	rolloutImageCalls []fakeRolloutImageCall
 	upgradePoolCalls  []fakeUpgradePoolCall
 	pods              []k8s.RuntimeDeploymentPod
+	listErr           error
 }
 
 type fakeUpgradePoolCall struct {
@@ -3329,6 +3526,9 @@ func (s *fakeRuntimeDeploymentService) DeleteUpgradePool(ctx context.Context, na
 	return nil
 }
 func (s *fakeRuntimeDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	var pods []k8s.RuntimeDeploymentPod
 	for _, pod := range s.pods {
 		if namespace != "" && pod.Namespace != namespace {

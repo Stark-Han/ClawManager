@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -49,10 +50,13 @@ var (
 	errRuntimeScaleOutPending     = errors.New("runtime scale-out pending")
 	errRuntimeGatewayStartPending = errors.New("runtime gateway start pending")
 	errRuntimeUpgradePending      = errors.New("runtime data-safe upgrade pending")
+	errRuntimeControlPlanePending = errors.New("runtime control plane temporarily unavailable")
 )
 
 const (
 	runtimeRolloutStaleWindowMultiplier     = 3
+	runtimeHeartbeatFailoverMultiplier      = 3
+	runtimeHeartbeatProbeTimeout            = 2 * time.Second
 	defaultRuntimeGatewayStartInFlightLimit = 32
 	runtimeSchedulerBatchLimit              = 1000
 )
@@ -599,6 +603,7 @@ func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeTyp
 			RuntimeType:       pod.RuntimeType,
 			Namespace:         pod.Namespace,
 			PodName:           pod.PodName,
+			PodUID:            stringPtrOrNil(pod.PodUID),
 			PodIP:             pod.PodIP,
 			NodeName:          pod.NodeName,
 			DeploymentName:    pod.DeploymentName,
@@ -613,6 +618,7 @@ func (s *RuntimeScheduler) RuntimeDeploymentPods(ctx context.Context, runtimeTyp
 			UpgradeID:         pod.UpgradeID,
 			SourceDeployment:  pod.SourceDeployment,
 			SchedulingEnabled: pod.SchedulingEnabled,
+			DesiredReplicas:   pod.DesiredReplicas,
 		})
 	}
 	// Kubernetes is authoritative for deployment ownership and the running
@@ -662,11 +668,12 @@ func (s *RuntimeScheduler) RuntimeDeploymentPodsFor(ctx context.Context, runtime
 		}
 		result = append(result, models.RuntimePod{
 			ID: -int64(index + 1), RuntimeType: pod.RuntimeType, Namespace: pod.Namespace,
-			PodName: pod.PodName, PodIP: pod.PodIP, NodeName: pod.NodeName,
+			PodName: pod.PodName, PodUID: stringPtrOrNil(pod.PodUID), PodIP: pod.PodIP, NodeName: pod.NodeName,
 			DeploymentName: pod.DeploymentName, ImageRef: pod.ImageRef,
 			ImageDigest: stringPtrOrNil(pod.ImageDigest), State: runtimeDeploymentFallbackState(pod.State),
 			Capacity: s.maxGatewaysPerPod, PoolRole: pod.PoolRole, PoolPurpose: pod.PoolPurpose,
 			UpgradeID: pod.UpgradeID, SourceDeployment: pod.SourceDeployment, SchedulingEnabled: pod.SchedulingEnabled,
+			DesiredReplicas: pod.DesiredReplicas,
 		})
 	}
 	if s.podRepo == nil {
@@ -749,6 +756,7 @@ func annotateRuntimePods(pods []models.RuntimePod, inventory []models.RuntimePod
 			pods[index].UpgradeID = discovered.UpgradeID
 			pods[index].SourceDeployment = discovered.SourceDeployment
 			pods[index].SchedulingEnabled = discovered.SchedulingEnabled
+			pods[index].DesiredReplicas = discovered.DesiredReplicas
 		}
 	}
 	return pods
@@ -954,7 +962,7 @@ func runtimeUpgradeInfrastructureRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return true
 	}
 	var networkErr net.Error
@@ -962,7 +970,7 @@ func runtimeUpgradeInfrastructureRetryable(err error) bool {
 		return true
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "connection reset by peer", "transport is closing", "runtime reconciliation is required before migration"} {
+	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "i/o timeout", "connection refused", "connection reset by peer", "transport is closing", "unexpected eof", "runtime reconciliation is required before migration"} {
 		if strings.Contains(message, marker) {
 			return true
 		}
@@ -1356,7 +1364,12 @@ func (s *RuntimeScheduler) failoverStalePods(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list runtime pods for heartbeat failover: %w", err)
 	}
-	cutoff := time.Now().UTC().Add(-s.heartbeatTimeout)
+	// A heartbeat timeout is only a suspicion threshold. Destructive failover
+	// requires a longer continuous absence plus independent Kubernetes and
+	// Runtime Agent evidence. This protects bindings while MySQL, etcd or the
+	// control-plane Service is temporarily slow.
+	cutoff := time.Now().UTC().Add(-time.Duration(runtimeHeartbeatFailoverMultiplier) * s.heartbeatTimeout)
+	kubernetesPodsByType := map[string][]k8s.RuntimeDeploymentPod{}
 	var errs []error
 	for _, pod := range pods {
 		if pod.State == "unhealthy" || pod.State == "pending" {
@@ -1365,12 +1378,52 @@ func (s *RuntimeScheduler) failoverStalePods(ctx context.Context) error {
 		if pod.LastSeenAt == nil || !pod.LastSeenAt.Before(cutoff) {
 			continue
 		}
+		if s.deployments == nil || s.agentClient == nil || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" {
+			// Without independent evidence, retaining a possibly live writer is
+			// safer than deleting its binding and starting a duplicate.
+			continue
+		}
+		runtimeType := strings.TrimSpace(pod.RuntimeType)
+		inventory, loaded := kubernetesPodsByType[runtimeType]
+		if !loaded {
+			inventory, err = s.deployments.ListPods(ctx, s.runtimeNamespace, runtimeType)
+			if err != nil {
+				return fmt.Errorf("confirm stale %s runtime pods with Kubernetes: %w", runtimeType, err)
+			}
+			kubernetesPodsByType[runtimeType] = inventory
+		}
+		if runtimePodStillReadyInKubernetes(pod, inventory) {
+			continue
+		}
+		probeTimeout := runtimeHeartbeatProbeTimeout
+		if s.heartbeatTimeout > 0 && s.heartbeatTimeout/2 < probeTimeout {
+			probeTimeout = s.heartbeatTimeout / 2
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+		probeErr := s.agentClient.Health(probeCtx, strings.TrimSpace(*pod.AgentEndpoint))
+		cancel()
+		if probeErr == nil {
+			continue
+		}
 		reason := fmt.Sprintf("runtime pod heartbeat lost since %s", pod.LastSeenAt.UTC().Format(time.RFC3339))
 		if err := s.FailoverPod(ctx, pod.ID, reason); err != nil {
 			errs = append(errs, fmt.Errorf("failover stale runtime pod %d: %w", pod.ID, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func runtimePodStillReadyInKubernetes(reported models.RuntimePod, inventory []k8s.RuntimeDeploymentPod) bool {
+	for _, live := range inventory {
+		if strings.TrimSpace(live.Namespace) != strings.TrimSpace(reported.Namespace) || strings.TrimSpace(live.PodName) != strings.TrimSpace(reported.PodName) {
+			continue
+		}
+		if reported.PodUID != nil && strings.TrimSpace(*reported.PodUID) != "" && strings.TrimSpace(live.PodUID) != strings.TrimSpace(*reported.PodUID) {
+			return false
+		}
+		return strings.EqualFold(strings.TrimSpace(live.State), "ready")
+	}
+	return false
 }
 
 func (s *RuntimeScheduler) lockGatewayCreateForPod(podID int64) func() {
@@ -1474,7 +1527,7 @@ func (s *RuntimeScheduler) scaleOutIfBacklogExceedsCapacity(ctx context.Context,
 	}
 	groups := map[string]*runtimeDeploymentCapacity{}
 	for _, pod := range pods {
-		if pod.RuntimeType != runtimeType || pod.State != "ready" || pod.Draining || pod.Capacity <= 0 {
+		if pod.RuntimeType != runtimeType || pod.Capacity <= 0 {
 			continue
 		}
 		namespace := strings.TrimSpace(pod.Namespace)
@@ -1488,13 +1541,22 @@ func (s *RuntimeScheduler) scaleOutIfBacklogExceedsCapacity(ctx context.Context,
 			group = &runtimeDeploymentCapacity{namespace: namespace, name: name}
 			groups[key] = group
 		}
+		group.observed++
+		group.desiredReplicas = maxInt(group.desiredReplicas, int(pod.DesiredReplicas))
+		group.capacityPerPod = maxInt(group.capacityPerPod, pod.Capacity)
+		if pod.Draining {
+			group.draining++
+		}
+		if pod.State != "ready" || pod.Draining {
+			continue
+		}
 		group.active++
 		group.capacityTotal += pod.Capacity
 		group.usedSlots += minInt(pod.UsedSlots, pod.Capacity)
 	}
 	var target *runtimeDeploymentCapacity
 	for _, group := range groups {
-		if group.active == 0 || group.capacityTotal <= 0 {
+		if (group.active == 0 && group.draining == 0) || group.capacityPerPod <= 0 {
 			continue
 		}
 		if target == nil || group.active > target.active {
@@ -1504,11 +1566,17 @@ func (s *RuntimeScheduler) scaleOutIfBacklogExceedsCapacity(ctx context.Context,
 	if target == nil {
 		return false, nil
 	}
+	if target.desiredReplicas > target.observed {
+		return true, nil
+	}
 	desiredSlots := target.usedSlots + backlog
 	if desiredSlots <= target.capacityTotal {
 		return false, nil
 	}
-	capacityPerPod := target.capacityTotal / target.active
+	capacityPerPod := target.capacityPerPod
+	if target.active > 0 && target.capacityTotal > 0 {
+		capacityPerPod = target.capacityTotal / target.active
+	}
 	if capacityPerPod <= 0 {
 		capacityPerPod = s.maxGatewaysPerPod
 	}
@@ -1516,11 +1584,12 @@ func (s *RuntimeScheduler) scaleOutIfBacklogExceedsCapacity(ctx context.Context,
 		capacityPerPod = RuntimePodCapacity
 	}
 	targetReplicas := (desiredSlots + capacityPerPod - 1) / capacityPerPod
-	if targetReplicas <= target.active {
-		targetReplicas = target.active + 1
+	baselineReplicas := maxInt(target.observed, target.desiredReplicas)
+	if targetReplicas <= baselineReplicas {
+		targetReplicas = baselineReplicas + 1
 	}
 	// Scale one replica at a time so a large batch cannot stampede the node.
-	replicas := int32(minInt(targetReplicas, target.active+1))
+	replicas := int32(minInt(targetReplicas, baselineReplicas+1))
 	if err := s.deployments.Scale(ctx, target.namespace, target.name, replicas); err != nil {
 		return false, err
 	}
@@ -1555,6 +1624,9 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	if s.bindingRepo != nil {
 		binding, err := s.bindingRepo.GetByInstanceID(ctx, instance.ID)
 		if err != nil {
+			if runtimeUpgradeInfrastructureRetryable(err) {
+				return fmt.Errorf("%w: check existing binding: %v", errRuntimeControlPlanePending, err)
+			}
 			return fmt.Errorf("failed to check existing binding: %w", err)
 		}
 		if binding != nil {
@@ -1563,15 +1635,24 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	}
 	pods, err := s.podRepo.ListSchedulable(ctx, runtimeType)
 	if err != nil {
+		if runtimeUpgradeInfrastructureRetryable(err) {
+			return fmt.Errorf("%w: list schedulable runtime pods: %v", errRuntimeControlPlanePending, err)
+		}
 		return err
 	}
 	pods, err = s.annotateAndFilterOrdinaryRuntimePods(ctx, runtimeType, pods)
 	if err != nil {
+		if runtimeUpgradeInfrastructureRetryable(err) {
+			return fmt.Errorf("%w: classify schedulable runtime pods: %v", errRuntimeControlPlanePending, err)
+		}
 		return fmt.Errorf("classify schedulable %s runtime pods: %w", runtimeType, err)
 	}
 	if len(pods) == 0 {
 		scaled, err := s.scaleOutIfAtCapacity(ctx, runtimeType)
 		if err != nil {
+			if runtimeUpgradeInfrastructureRetryable(err) {
+				return fmt.Errorf("%w: scale out runtime deployment: %v", errRuntimeControlPlanePending, err)
+			}
 			return fmt.Errorf("scale out %s runtime deployment: %w", runtimeType, err)
 		}
 		if scaled {
@@ -1624,18 +1705,25 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		return nil
 	}
 	if lastErr != nil {
+		if runtimeUpgradeInfrastructureRetryable(lastErr) {
+			return fmt.Errorf("%w: runtime assignment probe: %v", errRuntimeControlPlanePending, lastErr)
+		}
 		return fmt.Errorf("no schedulable %s runtime pod: %w", runtimeType, lastErr)
 	}
 	return fmt.Errorf("no schedulable %s runtime pod", runtimeType)
 }
 
 type runtimeDeploymentCapacity struct {
-	namespace     string
-	name          string
-	active        int
-	full          int
-	capacityTotal int
-	usedSlots     int
+	namespace       string
+	name            string
+	active          int
+	observed        int
+	draining        int
+	full            int
+	capacityTotal   int
+	capacityPerPod  int
+	usedSlots       int
+	desiredReplicas int
 }
 
 func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType string) (bool, error) {
@@ -1652,7 +1740,7 @@ func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType
 	}
 	groups := map[string]*runtimeDeploymentCapacity{}
 	for _, pod := range pods {
-		if pod.RuntimeType != runtimeType || pod.State != "ready" || pod.Draining || pod.Capacity <= 0 {
+		if pod.RuntimeType != runtimeType || pod.Capacity <= 0 {
 			continue
 		}
 		namespace := strings.TrimSpace(pod.Namespace)
@@ -1666,6 +1754,15 @@ func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType
 			group = &runtimeDeploymentCapacity{namespace: namespace, name: name}
 			groups[key] = group
 		}
+		group.observed++
+		group.desiredReplicas = maxInt(group.desiredReplicas, int(pod.DesiredReplicas))
+		group.capacityPerPod = maxInt(group.capacityPerPod, pod.Capacity)
+		if pod.Draining {
+			group.draining++
+		}
+		if pod.State != "ready" || pod.Draining {
+			continue
+		}
 		group.active++
 		if pod.UsedSlots >= pod.Capacity {
 			group.full++
@@ -1673,7 +1770,10 @@ func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType
 	}
 	var target *runtimeDeploymentCapacity
 	for _, group := range groups {
-		if group.active == 0 || group.active != group.full {
+		if group.active == 0 && group.draining == 0 {
+			continue
+		}
+		if group.active > 0 && group.active != group.full {
 			continue
 		}
 		if target == nil || group.active > target.active {
@@ -1683,7 +1783,10 @@ func (s *RuntimeScheduler) scaleOutIfAtCapacity(ctx context.Context, runtimeType
 	if target == nil {
 		return false, nil
 	}
-	replicas := int32(target.active + 1)
+	if target.desiredReplicas > target.observed {
+		return true, nil
+	}
+	replicas := int32(maxInt(target.observed, target.desiredReplicas) + 1)
 	if err := s.deployments.Scale(ctx, target.namespace, target.name, replicas); err != nil {
 		return false, err
 	}
@@ -2166,7 +2269,8 @@ func isRecoverableRuntimeSchedulingError(instance models.Instance) bool {
 func isRuntimeAssignmentPending(err error) bool {
 	return errors.Is(err, errRuntimeScaleOutPending) ||
 		errors.Is(err, errRuntimeGatewayStartPending) ||
-		errors.Is(err, errRuntimeUpgradePending)
+		errors.Is(err, errRuntimeUpgradePending) ||
+		errors.Is(err, errRuntimeControlPlanePending)
 }
 
 func minInt(a, b int) int {

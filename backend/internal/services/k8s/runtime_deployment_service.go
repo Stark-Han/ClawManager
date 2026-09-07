@@ -54,6 +54,7 @@ type RuntimeDeploymentPod struct {
 	Namespace         string
 	DeploymentName    string
 	PodName           string
+	PodUID            string
 	PodIP             *string
 	NodeName          *string
 	ImageRef          string
@@ -64,6 +65,7 @@ type RuntimeDeploymentPod struct {
 	UpgradeID         string
 	SourceDeployment  string
 	SchedulingEnabled *bool
+	DesiredReplicas   int32
 }
 
 type RuntimeDeploymentRef struct {
@@ -765,6 +767,10 @@ func (s *runtimeDeploymentService) listDeploymentPods(ctx context.Context, deplo
 		}
 	}
 	result := make([]RuntimeDeploymentPod, 0, len(podList.Items))
+	desiredReplicas := int32(0)
+	if deployment.Spec.Replicas != nil {
+		desiredReplicas = *deployment.Spec.Replicas
+	}
 	for _, pod := range podList.Items {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			continue
@@ -778,6 +784,7 @@ func (s *runtimeDeploymentService) listDeploymentPods(ctx context.Context, deplo
 			Namespace:         pod.Namespace,
 			DeploymentName:    deployment.Name,
 			PodName:           pod.Name,
+			PodUID:            string(pod.UID),
 			PodIP:             stringPtrIfNotEmpty(pod.Status.PodIP),
 			NodeName:          stringPtrIfNotEmpty(pod.Spec.NodeName),
 			ImageRef:          image,
@@ -788,6 +795,7 @@ func (s *runtimeDeploymentService) listDeploymentPods(ctx context.Context, deplo
 			UpgradeID:         strings.TrimSpace(deployment.Labels[runtimeUpgradeIDLabel]),
 			SourceDeployment:  strings.TrimSpace(deployment.Labels[runtimeSourceLabel]),
 			SchedulingEnabled: schedulingEnabled,
+			DesiredReplicas:   desiredReplicas,
 		})
 	}
 	return result, nil
