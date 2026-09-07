@@ -387,7 +387,7 @@ func TestRuntimeAgentHandlerReconcilesExactPreviousOpenClawGateway(t *testing.T)
 		9: {ID: 9, RuntimeType: services.RuntimeTypeOpenClaw, CapabilitiesJSON: &capabilities},
 	}}
 	bindingRepo := &runtimeAgentHandlerBindingRepo{bindings: map[int]*models.InstanceRuntimeBinding{}}
-	errorMessage := "no schedulable openclaw runtime pod: runtime agent conflict: previous gateway generation is still active: gateway_id=gw-209-2 generation=2"
+	errorMessage := "no schedulable openclaw runtime pod"
 	workspace := "/workspaces/openclaw/user-1/instance-209"
 	instanceRepo := &runtimeAgentHandlerInstanceRepo{instancesByID: map[int]*models.Instance{
 		209: {ID: 209, UserID: 1, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite, Status: "error", RuntimeGeneration: 3, RuntimeErrorMessage: &errorMessage, WorkspacePath: &workspace},
@@ -413,7 +413,61 @@ func TestRuntimeAgentHandlerReconcilesExactPreviousOpenClawGateway(t *testing.T)
 	}
 }
 
-func TestRuntimeAgentHandlerDoesNotReconcileUnmatchedGatewayDrift(t *testing.T) {
+func TestRuntimeAgentHandlerReconcilesExactCurrentOpenClawGateway(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	capabilities := `["openclaw.upgrade-preflight-v3"]`
+	podRepo := &runtimeAgentHandlerPodRepo{podsByID: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: services.RuntimeTypeOpenClaw, CapabilitiesJSON: &capabilities},
+	}}
+	bindingRepo := &runtimeAgentHandlerBindingRepo{bindings: map[int]*models.InstanceRuntimeBinding{}}
+	workspace := "/workspaces/openclaw/user-1/instance-210"
+	instanceRepo := &runtimeAgentHandlerInstanceRepo{instancesByID: map[int]*models.Instance{
+		210: {ID: 210, UserID: 1, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite, Status: "creating", RuntimeGeneration: 3, WorkspacePath: &workspace},
+	}}
+	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret", WorkspaceRoot: "/workspaces"}, podRepo, bindingRepo, instanceRepo, &runtimeAgentHandlerEvents{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/runtime-agent/gateways/report", handler.ReportGateways)
+	body := `{"pod_id":9,"gateways":[{"instance_id":210,"gateway_id":"gw-210-3","gateway_port":20009,"workspace_path":"/workspaces/openclaw/user-1/instance-210","state":"running","generation":3}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-agent/gateways/report", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ClawManager-Agent-Token", "secret")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || bindingRepo.reconcileCalls != 1 || bindingRepo.bindings[210] == nil {
+		t.Fatalf("current Gateway was not reconciled: status=%d calls=%d binding=%#v", rec.Code, bindingRepo.reconcileCalls, bindingRepo.bindings[210])
+	}
+	if instanceRepo.statusByID[210] != "running" || instanceRepo.generationByID[210] != 3 {
+		t.Fatalf("reconciled lifecycle = %q/%d, want running/3", instanceRepo.statusByID[210], instanceRepo.generationByID[210])
+	}
+}
+
+func TestRuntimeAgentHandlerDoesNotApplyEightOneReconciliationToLegacyOpenClaw(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	podRepo := &runtimeAgentHandlerPodRepo{podsByID: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: services.RuntimeTypeOpenClaw},
+	}}
+	bindingRepo := &runtimeAgentHandlerBindingRepo{bindings: map[int]*models.InstanceRuntimeBinding{}}
+	workspace := "/workspaces/openclaw/user-1/instance-210"
+	instanceRepo := &runtimeAgentHandlerInstanceRepo{instancesByID: map[int]*models.Instance{
+		210: {ID: 210, UserID: 1, Type: services.RuntimeTypeOpenClaw, InstanceMode: services.InstanceModeLite, Status: "error", RuntimeGeneration: 2, WorkspacePath: &workspace},
+	}}
+	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret", WorkspaceRoot: "/workspaces"}, podRepo, bindingRepo, instanceRepo, &runtimeAgentHandlerEvents{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/runtime-agent/gateways/report", handler.ReportGateways)
+	body := `{"pod_id":9,"gateways":[{"instance_id":210,"gateway_id":"gw-210-2","gateway_port":20009,"workspace_path":"/workspaces/openclaw/user-1/instance-210","state":"running","generation":2}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-agent/gateways/report", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ClawManager-Agent-Token", "secret")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || bindingRepo.reconcileCalls != 0 || bindingRepo.bindings[210] != nil {
+		t.Fatalf("legacy OpenClaw unexpectedly used 8.1 reconciliation: status=%d calls=%d binding=%#v", rec.Code, bindingRepo.reconcileCalls, bindingRepo.bindings[210])
+	}
+}
+
+func TestRuntimeAgentHandlerDoesNotReconcileMismatchedGatewayIdentity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	capabilities := `["openclaw.upgrade-preflight-v3"]`
 	podRepo := &runtimeAgentHandlerPodRepo{podsByID: map[int64]*models.RuntimePod{
@@ -428,7 +482,7 @@ func TestRuntimeAgentHandlerDoesNotReconcileUnmatchedGatewayDrift(t *testing.T) 
 	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret", WorkspaceRoot: "/workspaces"}, podRepo, bindingRepo, instanceRepo, &runtimeAgentHandlerEvents{}, nil)
 	router := gin.New()
 	router.POST("/api/v1/runtime-agent/gateways/report", handler.ReportGateways)
-	body := `{"pod_id":9,"gateways":[{"instance_id":209,"gateway_id":"gw-209-2","gateway_port":20000,"workspace_path":"/workspaces/openclaw/user-1/instance-209","state":"running","generation":2}]}`
+	body := `{"pod_id":9,"gateways":[{"instance_id":209,"gateway_id":"gw-209-2","gateway_port":20000,"workspace_path":"/workspaces/openclaw/user-2/instance-209","state":"running","generation":2}]}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-agent/gateways/report", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -498,6 +552,34 @@ func TestRuntimeAgentHandlerGatewayReportDoesNotDeleteFreshBindingFromFirstEmpty
 	}
 	if bindingRepo.bindings[10] == nil {
 		t.Fatal("fresh binding was removed")
+	}
+}
+
+func TestRuntimeAgentHandlerGatewayReportReleasesOnlyExpiredPendingBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	old := time.Now().UTC().Add(-time.Minute)
+	fresh := time.Now().UTC()
+	bindingRepo := &runtimeAgentHandlerBindingRepo{bindings: map[int]*models.InstanceRuntimeBinding{
+		10: {InstanceID: 10, RuntimePodID: 9, GatewayID: "pending-10-3", Generation: 3, State: "creating", UpdatedAt: old},
+		11: {InstanceID: 11, RuntimePodID: 9, GatewayID: "pending-11-3", Generation: 3, State: "creating", UpdatedAt: fresh},
+	}}
+	handler := NewRuntimeAgentHandler(config.RuntimePoolConfig{AgentReportToken: "secret", HeartbeatTimeout: 10 * time.Second}, &runtimeAgentHandlerPodRepo{}, bindingRepo, nil, &runtimeAgentHandlerEvents{}, nil)
+	router := gin.New()
+	router.POST("/api/v1/runtime-agent/gateways/report", handler.ReportGateways)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-agent/gateways/report", bytes.NewBufferString(`{"pod_id":9,"gateways":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ClawManager-Agent-Token", "secret")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got, want := bindingRepo.deletedInstanceIDs, []int{10}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("released pending instances = %v, want %v", got, want)
+	}
+	if bindingRepo.bindings[11] == nil {
+		t.Fatal("fresh pending binding was released by the first empty snapshot")
 	}
 }
 
@@ -585,13 +667,24 @@ type runtimeAgentHandlerBindingRepo struct {
 	reconcileCalls       int
 }
 
-func (r *runtimeAgentHandlerBindingRepo) ReconcilePreviousGateway(ctx context.Context, binding *models.InstanceRuntimeBinding, expectedInstanceGeneration, portBlockSize int) (bool, error) {
+func (r *runtimeAgentHandlerBindingRepo) ReconcileReportedGateway(ctx context.Context, binding *models.InstanceRuntimeBinding, expectedInstanceGeneration, portBlockSize int) (bool, error) {
 	r.reconcileCalls++
 	if r.bindings == nil {
 		r.bindings = map[int]*models.InstanceRuntimeBinding{}
 	}
 	cp := *binding
 	r.bindings[binding.InstanceID] = &cp
+	return true, nil
+}
+
+func (r *runtimeAgentHandlerBindingRepo) DeletePendingByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int, updatedBefore time.Time) (bool, error) {
+	binding := r.bindings[instanceID]
+	if binding == nil || binding.RuntimePodID != runtimePodID || binding.Generation != generation || binding.State != "creating" || binding.UpdatedAt.After(updatedBefore) {
+		return false, nil
+	}
+	r.deletedInstanceIDs = append(r.deletedInstanceIDs, instanceID)
+	r.deletedRuntimePodIDs = append(r.deletedRuntimePodIDs, runtimePodID)
+	delete(r.bindings, instanceID)
 	return true, nil
 }
 

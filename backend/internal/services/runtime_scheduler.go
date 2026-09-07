@@ -1453,15 +1453,6 @@ func (s *RuntimeScheduler) podCanStartGateway(ctx context.Context, podID int64) 
 	if err != nil {
 		return false, fmt.Errorf("list runtime pod %d bindings: %w", podID, err)
 	}
-	if s.podRepo != nil {
-		pod, podErr := s.podRepo.GetByID(ctx, podID)
-		if podErr != nil {
-			return false, fmt.Errorf("get runtime pod %d: %w", podID, podErr)
-		}
-		if pod != nil && pod.RuntimeType == RuntimeTypeOpenClaw && containsString(pod.Capabilities(), "openclaw.upgrade-preflight-v3") && pod.UsedSlots > len(bindings) {
-			return false, nil
-		}
-	}
 	starting := 0
 	for _, binding := range bindings {
 		switch strings.ToLower(strings.TrimSpace(binding.State)) {
@@ -1696,6 +1687,9 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 			continue
 		}
 		if err := s.createGatewayOnPodWithPortFallback(ctx, instance, runtimeType, pod, start); err != nil {
+			if isRuntimeAssignmentPending(err) {
+				return err
+			}
 			if releaseErr := s.podRepo.ReleaseSlot(ctx, pod.ID); releaseErr != nil {
 				return errors.Join(err, releaseErr)
 			}
@@ -1912,6 +1906,9 @@ func (s *RuntimeScheduler) EnsureUpgradeGateway(ctx context.Context, rollout *mo
 		}
 		start.upgradeID = strconv.FormatInt(rollout.ID, 10)
 		if createErr := s.createGatewayOnPodWithPortFallback(ctx, *instance, runtimeType, pod, start); createErr != nil {
+			if isRuntimeAssignmentPending(createErr) {
+				return createErr
+			}
 			_ = s.podRepo.ReleaseSlot(ctx, pod.ID)
 			lastErr = createErr
 			continue
@@ -1989,10 +1986,13 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		Environment: start.environment,
 	})
 	if err != nil {
+		if runtimeGatewayCreateOutcomeUncertain(err) {
+			return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, err)
+		}
 		return s.cleanupGatewayAfterAssignFailure(ctx, start.endpoint, instance.ID, "", true, err)
 	}
 	if resp == nil {
-		return s.cleanupGatewayAfterAssignFailure(ctx, start.endpoint, instance.ID, "", true, fmt.Errorf("runtime agent returned empty gateway response"))
+		return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, fmt.Errorf("runtime agent returned empty gateway response"))
 	}
 	if resp.Port != start.reservedBinding.GatewayPort {
 		cause := fmt.Errorf("runtime agent returned gateway port %d, want control-plane allocation %d", resp.Port, start.reservedBinding.GatewayPort)
@@ -2006,7 +2006,7 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		lastHealthAt = &now
 	}
 	if err := s.bindingRepo.UpdateGatewayAssignment(ctx, instance.ID, instance.RuntimeGeneration, resp.GatewayID, resp.PID, lifecycle.BindingState, lastHealthAt); err != nil {
-		return s.cleanupGatewayAfterAssignFailure(ctx, start.endpoint, instance.ID, resp.GatewayID, true, err)
+		return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, fmt.Errorf("persist runtime gateway assignment: %w", err))
 	}
 	if !lifecycle.CreateAccepted() {
 		cause := fmt.Errorf("runtime gateway %s returned status %q", resp.GatewayID, strings.TrimSpace(resp.Status))
@@ -2019,10 +2019,10 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		return errors.Join(errs...)
 	}
 	if err := s.instanceRepo.SetWorkspacePath(ctx, instance.ID, start.workspacePath); err != nil {
-		return s.cleanupGatewayAfterAssignFailure(ctx, start.endpoint, instance.ID, resp.GatewayID, true, err)
+		return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, fmt.Errorf("persist runtime workspace: %w", err))
 	}
 	if err := s.instanceRepo.UpdateRuntimeState(ctx, instance.ID, lifecycle.InstanceState, instance.RuntimeGeneration, lifecycle.Message); err != nil {
-		return s.cleanupGatewayAfterAssignFailure(ctx, start.endpoint, instance.ID, resp.GatewayID, true, err)
+		return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, fmt.Errorf("persist runtime instance state: %w", err))
 	}
 	if s.events != nil {
 		if err := s.events.Publish(ctx, lifecycle.EventType, map[string]any{
@@ -2211,8 +2211,16 @@ func (s *RuntimeScheduler) gatewayEnvironment(instance *models.Instance) (map[st
 func (s *RuntimeScheduler) cleanupGatewayAfterAssignFailure(ctx context.Context, endpoint string, instanceID int, gatewayID string, bindingCreated bool, cause error) error {
 	errs := []error{cause}
 	if gatewayID != "" && s.agentClient != nil {
-		if err := s.agentClient.DeleteGateway(ctx, endpoint, gatewayID); err != nil {
-			errs = append(errs, fmt.Errorf("delete gateway %s: %w", gatewayID, err))
+		// The request context may already have expired. Only release the
+		// reservation after the Agent confirms that the writer is gone; an
+		// unconfirmed delete must remain instance-local and be reconciled by a
+		// later authoritative Gateway snapshot.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), runtimeHeartbeatProbeTimeout)
+		deleteErr := s.agentClient.DeleteGateway(cleanupCtx, endpoint, gatewayID)
+		cancel()
+		if deleteErr != nil && !errors.Is(deleteErr, ErrRuntimeAgentNotFound) {
+			errs = append(errs, fmt.Errorf("delete gateway %s was not confirmed: %w", gatewayID, deleteErr))
+			return s.preservePendingGatewayStart(ctx, instanceID, 0, errors.Join(errs...))
 		}
 	}
 	if bindingCreated && s.bindingRepo != nil {
@@ -2221,6 +2229,30 @@ func (s *RuntimeScheduler) cleanupGatewayAfterAssignFailure(ctx context.Context,
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func runtimeGatewayCreateOutcomeUncertain(err error) bool {
+	if err == nil {
+		return false
+	}
+	if runtimeUpgradeInfrastructureRetryable(err) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "runtime agent status 5") || strings.Contains(message, "runtime agent status 429")
+}
+
+func (s *RuntimeScheduler) preservePendingGatewayStart(ctx context.Context, instanceID, generation int, cause error) error {
+	if cause == nil {
+		cause = errors.New("runtime gateway start outcome is unknown")
+	}
+	message := cause.Error()
+	if s != nil && s.bindingRepo != nil && generation > 0 {
+		if err := s.bindingRepo.UpdateState(ctx, instanceID, generation, RuntimeGatewayBindingCreating, &message); err != nil && !errors.Is(err, repository.ErrStaleRuntimeGeneration) {
+			cause = errors.Join(cause, fmt.Errorf("preserve pending binding for instance %d: %w", instanceID, err))
+		}
+	}
+	return fmt.Errorf("instance %d Gateway start awaits Agent reconciliation: %w", instanceID, errors.Join(errRuntimeGatewayStartPending, cause))
 }
 
 func (s *RuntimeScheduler) markInstanceError(ctx context.Context, instance models.Instance, cause error, errs *[]error) {

@@ -792,6 +792,50 @@ func TestRuntimeSchedulerThrottlesGatewayStartsWhenPodHasCreatingBinding(t *test
 		t.Fatalf("pod claims = %d, want 0", podRepo.claims[9])
 	}
 }
+
+func TestRuntimeSchedulerDoesNotBlockWholeOpenClawPodForUnboundReportedSlot(t *testing.T) {
+	ctx := context.Background()
+	capabilities := `["openclaw.upgrade-preflight-v3"]`
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{
+		9: {ID: 9, RuntimeType: RuntimeTypeOpenClaw, UsedSlots: 7, Capacity: 100, CapabilitiesJSON: &capabilities},
+	}}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	for id := 1; id <= 6; id++ {
+		bindingRepo.bindings[id] = &models.InstanceRuntimeBinding{InstanceID: id, RuntimePodID: 9, State: "running", Generation: 1}
+	}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, &fakeRuntimeAgentClient{}, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
+
+	canStart, err := scheduler.podCanStartGateway(ctx, 9)
+	if err != nil {
+		t.Fatalf("podCanStartGateway returned error: %v", err)
+	}
+	if !canStart {
+		t.Fatal("one unbound reported Gateway blocked every unrelated instance on the Runtime Pod")
+	}
+}
+
+func TestRuntimeSchedulerPreservesPendingBindingWhenCreateOutcomeIsUnknown(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "http://agent.runtime"
+	pod := models.RuntimePod{ID: 9, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100}
+	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{9: &pod}, schedulable: []models.RuntimePod{pod}}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	agent := &fakeRuntimeAgentClient{createErr: context.DeadlineExceeded}
+	scheduler := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
+	workspace := "/workspaces/openclaw/user-45/instance-91"
+
+	err := scheduler.assignInstance(ctx, models.Instance{ID: 91, UserID: 45, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "creating", WorkspacePath: &workspace, RuntimeGeneration: 3})
+	if !errors.Is(err, errRuntimeGatewayStartPending) {
+		t.Fatalf("assignInstance error = %v, want pending reconciliation", err)
+	}
+	binding := bindingRepo.bindings[91]
+	if binding == nil || binding.GatewayID != "pending-91-3" || binding.State != RuntimeGatewayBindingCreating {
+		t.Fatalf("pending binding = %+v, want exact instance/generation reservation", binding)
+	}
+	if podRepo.releases[9] != 0 {
+		t.Fatalf("pod slot releases = %d, want 0 while the writer outcome is unknown", podRepo.releases[9])
+	}
+}
 func TestRuntimeSchedulerReconcileWaitsWhenGatewayStartInFlight(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
@@ -2164,7 +2208,7 @@ func TestRuntimeSchedulerDoesNotClearStartingBindingOnGatewayPortConflict(t *tes
 		t.Fatalf("starting binding was removed or changed: %+v", bindingRepo.bindings[218])
 	}
 }
-func TestRuntimeSchedulerCleansUpGatewayBindingAndSlotWhenWorkspacePathUpdateFails(t *testing.T) {
+func TestRuntimeSchedulerPreservesGatewayBindingAndSlotWhenWorkspacePathUpdateFails(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
 	workspaceErr := errors.New("workspace path update failed")
@@ -2208,23 +2252,20 @@ func TestRuntimeSchedulerCleansUpGatewayBindingAndSlotWhenWorkspacePathUpdateFai
 	if err == nil {
 		t.Fatal("assignInstance returned nil error")
 	}
-	if !errors.Is(err, workspaceErr) {
-		t.Fatalf("assignInstance error = %v, want workspace update error", err)
+	if !errors.Is(err, errRuntimeGatewayStartPending) || !errors.Is(err, workspaceErr) {
+		t.Fatalf("assignInstance error = %v, want pending workspace update error", err)
 	}
-	if got := len(agent.deleteRequests); got != 1 {
-		t.Fatalf("DeleteGateway calls = %d, want 1", got)
+	if got := len(agent.deleteRequests); got != 0 {
+		t.Fatalf("DeleteGateway calls = %d, want 0", got)
 	}
-	if agent.deleteRequests[0].gatewayID != "gw-23" {
-		t.Fatalf("deleted gateway = %q, want gw-23", agent.deleteRequests[0].gatewayID)
+	if bindingRepo.deleteCalls[23] != 0 {
+		t.Fatalf("binding delete calls = %d, want 0", bindingRepo.deleteCalls[23])
 	}
-	if bindingRepo.deleteCalls[23] != 1 {
-		t.Fatalf("binding delete calls = %d, want 1", bindingRepo.deleteCalls[23])
+	if bindingRepo.bindings[23] == nil {
+		t.Fatal("binding was removed while the started Gateway may still be alive")
 	}
-	if bindingRepo.bindings[23] != nil {
-		t.Fatal("binding remains after workspace update failure")
-	}
-	if podRepo.releases[9] != 1 {
-		t.Fatalf("pod releases = %d, want 1", podRepo.releases[9])
+	if podRepo.releases[9] != 0 {
+		t.Fatalf("pod releases = %d, want 0", podRepo.releases[9])
 	}
 }
 
