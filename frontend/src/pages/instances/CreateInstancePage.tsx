@@ -51,6 +51,7 @@ const supportsSkillSelection = (type: string) =>
   supportsRuntimeInjection(type) || type === "deepseek-harness";
 const isProOnlyInstanceType = (type: string) =>
   type === "custom" || type === "workbuddy";
+const isLiteOnlyInstanceType = (type: string) => type === "opencode";
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
   labelKey: string;
@@ -565,7 +566,10 @@ const CreateInstancePage: React.FC = () => {
   const selectedMode = formData.mode ?? "lite";
   const selectedRuntimeType = selectedMode === "lite" ? "gateway" : "desktop";
   const availableTypesForMode = availableTypes.filter(
-    (item) => selectedMode === "pro" || !isProOnlyInstanceType(item.id),
+    (item) =>
+      selectedMode === "pro"
+        ? !isLiteOnlyInstanceType(item.id)
+        : !isProOnlyInstanceType(item.id),
   );
   const selectedType = availableTypesForMode.find(
     (item) => item.id === formData.type,
@@ -1459,7 +1463,7 @@ const CreateInstancePage: React.FC = () => {
               onClick={() => setError(null)}
               className="float-right text-red-500 hover:text-red-700"
             >
-              \u00d7
+              ×
             </button>
           </div>
         )}

@@ -63,6 +63,42 @@ func TestRuntimeManifestsExposeDeepSeekHarnessPublicURLTemplate(t *testing.T) {
 	}
 }
 
+func TestRuntimeManifestsExposeOpenCodePublicURLTemplate(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	for _, manifest := range deploymentRuntimeManifests(repoRoot) {
+		t.Run(manifest, func(t *testing.T) {
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			if !strings.Contains(string(raw), "name: CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE") {
+				t.Fatalf("manifest %s must expose the OpenCode public URL template", manifest)
+			}
+		})
+	}
+}
+
+func TestNginxRoutesOpenCodePerInstanceOrigins(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	for _, required := range []string{
+		"server_name ~^opencode-(?<runtime_inst_id>[0-9]+)\\..+$;",
+		"X-ClawManager-Runtime-Origin opencode",
+		"/api/v1/instances/$runtime_inst_id/proxy$1",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("nginx config must contain %q", required)
+		}
+	}
+	if got := strings.Count(text, "proxy_set_header X-ClawManager-Runtime-Origin \"\";"); got < 2 {
+		t.Fatalf("public nginx routes must clear the dedicated-origin marker, got %d guards", got)
+	}
+}
+
 func TestDesktopAuthAcceptsDedicatedRuntimeInstanceVariable(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "njs", "desktop_auth.js"))
@@ -72,6 +108,24 @@ func TestDesktopAuthAcceptsDedicatedRuntimeInstanceVariable(t *testing.T) {
 	text := string(raw)
 	if !strings.Contains(text, "r.variables.inst_id || r.variables.runtime_inst_id") {
 		t.Fatal("desktop auth must accept both path-based and dedicated-origin instance variables")
+	}
+}
+
+func TestDesktopAuthAllowsDedicatedOriginTokenRotation(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "njs", "desktop_auth.js"))
+	if err != nil {
+		t.Fatalf("read desktop auth script: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"return [readQueryToken(r), readCookieToken(r)]",
+		"validatedAccessPayload(r, candidates[i], key, false)",
+		"validatedAccessPayload(r, queryToken, key, true)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("desktop auth must support managed query-token rotation; missing %q", want)
+		}
 	}
 }
 

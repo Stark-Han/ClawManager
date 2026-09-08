@@ -104,11 +104,35 @@ grep -n 'image:' clawmanager.yaml | head -n 40
 If this is an offline or private-registry deployment, load or push the images to
 the registry used by the manifest before continuing.
 
+Before applying the manifest, set
+`CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE` in `clawmanager-app`. Use the
+`nip.io` template for connected clients or the BIND-backed template for offline
+clients. DNS, TLS, and verification requirements are documented in the
+[OpenCode Lite public-origin strategy](../../../docs/deployment.md#opencode-lite-public-origin-strategy).
+
 ### 6. Apply The Manifest
 
 ```sh
 kubectl apply -f clawmanager.yaml
 ```
+
+For a Docker Desktop installation exposed on `localhost:8443`, generate and
+install a self-signed certificate covering `*.127-0-0-1.nip.io` from Windows
+PowerShell:
+
+```powershell
+..\install-local-nipio-tls.ps1
+```
+
+To also trust that self-signed certificate for the current Windows user:
+
+```powershell
+..\install-local-nipio-tls.ps1 -TrustCurrentUser
+```
+
+The script backs up the existing `clawmanager-tls` Secret under the current
+user's temporary directory, updates the Secret, and restarts every Deployment
+in `clawmanager-system` that directly mounts it.
 
 ### 7. Check ClawManager
 

@@ -62,13 +62,17 @@ type serviceLookupCall struct {
 
 const (
 	defaultServiceCacheTTL                 = 30 * time.Second
+	openCodePublicURLTemplateEnvVar        = "CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE"
 	deepSeekHarnessPublicURLTemplateEnvVar = "CLAWMANAGER_DEEPSEEK_HARNESS_PUBLIC_URL_TEMPLATE"
 )
 
 // DedicatedRuntimeOriginHeader marks requests routed through a runtime-specific browser origin.
 const DedicatedRuntimeOriginHeader = "X-ClawManager-Runtime-Origin"
 
-var ErrInstanceGatewayUnavailable = errors.New("instance gateway is not available")
+var (
+	ErrInstanceGatewayUnavailable      = errors.New("instance gateway is not available")
+	ErrOpenCodeDedicatedOriginRequired = errors.New("OpenCode Lite requires its dedicated instance origin")
+)
 
 type InstanceProxyServiceOption func(*InstanceProxyService)
 
@@ -142,6 +146,10 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 
 	effectiveRequestPath := canonicalProxyEntryRequestPath(r.URL.Path, accessToken, instanceID)
 	dedicatedRuntimeOrigin := isDedicatedRuntimeOriginRequest(r, accessToken.InstanceType)
+	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
+	if opencodeLite && !dedicatedRuntimeOrigin {
+		return ErrOpenCodeDedicatedOriginRequired
+	}
 
 	// Extract the actual path from the request (remove the proxy prefix)
 	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType)
@@ -157,14 +165,23 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	managedGatewayToken := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType)
 	proxyPrefix := hermesProxyPrefix(instanceID)
 	hermesLite := s.isHermesLiteProxyInstance(instanceID, accessToken.InstanceType)
-	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
 	bootstrapPath := stripInstanceProxyPrefix(targetPath, instanceID)
 
 	// Copy query parameters, excluding ClawManager-owned proxy/gateway tokens.
+	// DSH's plugin loader uses a significant leading '?' inside RawQuery
+	// (`/plugins/??module&rev=...`). Parsing and re-encoding that query changes
+	// the module key and makes the upstream loader return 404.
+	preserveDeepSeekRawQuery := dedicatedRuntimeOrigin && isDeepSeekHarnessRuntimeType(accessToken.InstanceType)
 	queryParams := r.URL.Query()
-	s.removeProxyAccessTokenQuery(queryParams, token, managedGatewayToken)
-	if len(queryParams) > 0 {
-		targetURL.RawQuery = queryParams.Encode()
+	openCodeProjectSearchRewritten := false
+	if preserveDeepSeekRawQuery {
+		targetURL.RawQuery = s.filterProxyAccessTokenRawQuery(r.URL.RawQuery, token, managedGatewayToken)
+	} else {
+		s.removeProxyAccessTokenQuery(queryParams, token, managedGatewayToken)
+		openCodeProjectSearchRewritten = s.rewriteOpenCodeProjectSearchDirectory(ctx, instanceID, accessToken.InstanceType, bootstrapPath, queryParams)
+		if len(queryParams) > 0 {
+			targetURL.RawQuery = queryParams.Encode()
+		}
 	}
 
 	// OpenCode uses a long-lived SSE stream at /global/event to initialize and
@@ -229,13 +246,20 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", requestScheme(r))
-	proxyReq.Header.Set("X-Forwarded-Prefix", proxyPrefix)
+	if dedicatedRuntimeOrigin {
+		proxyReq.Header.Del("X-Forwarded-Prefix")
+	} else {
+		proxyReq.Header.Set("X-Forwarded-Prefix", proxyPrefix)
+	}
 	if opencodeLite {
 		setOpenCodeServerBasicAuthHeaders(proxyReq.Header, managedGatewayToken)
 	} else if !isHermesDashboardPublicAuthPath(bootstrapPath) {
 		setManagedRuntimeGatewayAuthHeaders(proxyReq.Header, managedGatewayToken)
 	}
 	if shouldRewriteHTML {
+		proxyReq.Header.Del("Accept-Encoding")
+	}
+	if openCodeProjectSearchRewritten {
 		proxyReq.Header.Del("Accept-Encoding")
 	}
 
@@ -255,6 +279,29 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 
 	if location := resp.Header.Get("Location"); location != "" && !dedicatedRuntimeOrigin {
 		resp.Header.Set("Location", s.rewriteRedirectLocation(instanceID, location))
+	}
+	// OpenCode is authenticated on the internal hop. Never expose its Basic
+	// challenge to the browser, where it would open a native login dialog.
+	if opencodeLite {
+		resp.Header.Del("WWW-Authenticate")
+	}
+
+	if openCodeProjectSearchRewritten && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("failed to read OpenCode file search response: %w", readErr)
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return fmt.Errorf("failed to close OpenCode file search response: %w", closeErr)
+		}
+		if modifiedBody, changed := rewriteOpenCodeFileSearchResponse(bootstrapPath, body); changed {
+			body = modifiedBody
+			resp.Header.Del("ETag")
+			resp.Header.Del("Last-Modified")
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 
 	if shouldRewriteHTML && strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
@@ -364,6 +411,10 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 		return fmt.Errorf("token does not match instance")
 	}
 	dedicatedRuntimeOrigin := isDedicatedRuntimeOriginRequest(r, accessToken.InstanceType)
+	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
+	if opencodeLite && !dedicatedRuntimeOrigin {
+		return ErrOpenCodeDedicatedOriginRequired
+	}
 
 	// Extract the actual path from the request
 	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
@@ -377,14 +428,18 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	managedGatewayToken := s.managedRuntimeGatewayBearerToken(ctx, instanceID, accessToken.InstanceType)
 	upstreamPath := stripInstanceProxyPrefix(targetPath, instanceID)
 	hermesLite := s.isHermesLiteProxyInstance(instanceID, accessToken.InstanceType)
-	opencodeLite := s.isOpenCodeLiteProxyInstance(instanceID, accessToken.InstanceType)
 	skipManagedWSAuth := hermesLite && isHermesDashboardTicketWebSocket(upstreamPath, r.URL.Query())
 
 	// Copy query parameters, excluding ClawManager-owned proxy/gateway tokens.
+	// Preserve DSH's significant leading '?' in plugin-loader batch queries.
 	queryParams := r.URL.Query()
-	s.removeProxyAccessTokenQuery(queryParams, token, managedGatewayToken)
-	if len(queryParams) > 0 {
-		targetURL.RawQuery = queryParams.Encode()
+	if dedicatedRuntimeOrigin && isDeepSeekHarnessRuntimeType(accessToken.InstanceType) {
+		targetURL.RawQuery = s.filterProxyAccessTokenRawQuery(r.URL.RawQuery, token, managedGatewayToken)
+	} else {
+		s.removeProxyAccessTokenQuery(queryParams, token, managedGatewayToken)
+		if len(queryParams) > 0 {
+			targetURL.RawQuery = queryParams.Encode()
+		}
 	}
 
 	upstreamHeader := http.Header{}
@@ -402,7 +457,11 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	upstreamHeader.Set("X-Forwarded-For", r.RemoteAddr)
 	upstreamHeader.Set("X-Forwarded-Host", r.Host)
 	upstreamHeader.Set("X-Forwarded-Proto", requestScheme(r))
-	upstreamHeader.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
+	if dedicatedRuntimeOrigin {
+		upstreamHeader.Del("X-Forwarded-Prefix")
+	} else {
+		upstreamHeader.Set("X-Forwarded-Prefix", fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID))
+	}
 	// Hermes dashboard chat uses cookie + ticket query auth. Do not inject
 	// managed Bearer/API-Key headers or rewrite Origin for those sockets.
 	if skipManagedWSAuth {
@@ -558,7 +617,7 @@ func isDedicatedRuntimeOriginRequest(r *http.Request, instanceType string) bool 
 	if !managed || !originManaged || runtimeType != originRuntimeType {
 		return false
 	}
-	return runtimeType == RuntimeTypeDeepSeekHarness
+	return runtimeType == RuntimeTypeOpenCode || runtimeType == RuntimeTypeDeepSeekHarness
 }
 
 func setOpenCodeServerBasicAuthHeaders(header http.Header, token string) {
@@ -579,6 +638,11 @@ func setOpenCodeServerBasicAuthHeaders(header http.Header, token string) {
 
 func hermesProxyPrefix(instanceID int) string {
 	return fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+}
+
+func isOpenCodeRuntimeType(instanceType string) bool {
+	runtimeType, managed := NormalizeV2RuntimeType(instanceType)
+	return managed && runtimeType == RuntimeTypeOpenCode
 }
 
 func (s *InstanceProxyService) isOpenCodeLiteProxyInstance(instanceID int, instanceType string) bool {
@@ -603,6 +667,143 @@ func (s *InstanceProxyService) isHermesLiteProxyInstance(instanceID int, instanc
 	}
 	runtimeType, ok := v2RuntimeTypeForInstance(instance)
 	return ok && runtimeType == RuntimeTypeHermes
+}
+
+// rewriteOpenCodeProjectSearchDirectory keeps OpenCode's web project picker
+// away from the instance HOME directory. OpenCode 1.18.x uses FFF for this
+// endpoint, and FFF refuses to index HOME. The ClawManager workspace browser
+// stores uploaded user projects directly under the instance workspace root,
+// alongside the internal home directory.
+func (s *InstanceProxyService) rewriteOpenCodeProjectSearchDirectory(ctx context.Context, instanceID int, instanceType, targetPath string, query url.Values) bool {
+	if s == nil || s.bindingRepo == nil || !isOpenCodeRuntimeType(instanceType) {
+		return false
+	}
+	binding, err := s.bindingRepo.GetRunningByInstanceID(ctx, instanceID)
+	if err != nil || binding == nil {
+		return false
+	}
+	return rewriteOpenCodeFileSearchDirectory(targetPath, binding.WorkspacePath, query)
+}
+
+func rewriteOpenCodeFileSearchDirectory(targetPath, workspaceRoot string, query url.Values) bool {
+	if query == nil {
+		return false
+	}
+	root := strings.TrimRight(strings.TrimSpace(workspaceRoot), "/")
+	if root == "" {
+		return false
+	}
+	var key string
+	switch strings.TrimSpace(targetPath) {
+	case "/api/fs/find":
+		key = "location[directory]"
+	case "/find/file":
+		key = "directory"
+	default:
+		return false
+	}
+	if strings.TrimRight(strings.TrimSpace(query.Get(key)), "/") != root+"/home" {
+		return false
+	}
+	query.Set(key, root)
+	return true
+}
+
+type openCodeFileSearchItem struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
+type openCodeFileSearchPayload struct {
+	Location json.RawMessage          `json:"location"`
+	Data     []openCodeFileSearchItem `json:"data"`
+}
+
+// OpenCode's FFF directory results contain matching descendants but can omit
+// their top-level project directory. The project picker needs that parent to
+// open the project itself. Internal HOME descendants are not user projects.
+func rewriteOpenCodeFileSearchResponse(targetPath string, body []byte) ([]byte, bool) {
+	if strings.TrimSpace(targetPath) == "/find/file" {
+		return rewriteOpenCodeFindFileResponse(body)
+	}
+	if strings.TrimSpace(targetPath) != "/api/fs/find" {
+		return body, false
+	}
+
+	var payload openCodeFileSearchPayload
+	if err := json.Unmarshal(body, &payload); err != nil || payload.Data == nil {
+		return body, false
+	}
+
+	result := make([]openCodeFileSearchItem, 0, len(payload.Data)*2)
+	seen := make(map[string]struct{}, len(payload.Data)*2)
+	appendItem := func(item openCodeFileSearchItem) {
+		if _, exists := seen[item.Path]; exists {
+			return
+		}
+		seen[item.Path] = struct{}{}
+		result = append(result, item)
+	}
+
+	for _, item := range payload.Data {
+		cleanPath := strings.TrimLeft(strings.TrimSpace(item.Path), "/")
+		if cleanPath == "" || cleanPath == "home/" || strings.HasPrefix(cleanPath, "home/") {
+			continue
+		}
+		topLevel := strings.SplitN(cleanPath, "/", 2)[0] + "/"
+		appendItem(openCodeFileSearchItem{Path: topLevel, Type: "directory"})
+		item.Path = cleanPath
+		appendItem(item)
+	}
+
+	if len(result) == 0 && len(payload.Data) == 0 {
+		return body, false
+	}
+	payload.Data = result
+	modified, err := json.Marshal(payload)
+	if err != nil {
+		return body, false
+	}
+	return modified, true
+}
+
+// OpenCode 1.18.x's current web UI uses /find/file rather than /api/fs/find.
+// It returns matching descendant paths as a string array and omits the parent
+// project directory, so add each visible top-level project root and hide the
+// internal HOME tree.
+func rewriteOpenCodeFindFileResponse(body []byte) ([]byte, bool) {
+	var paths []string
+	if err := json.Unmarshal(body, &paths); err != nil || paths == nil {
+		return body, false
+	}
+
+	result := make([]string, 0, len(paths)*2)
+	seen := make(map[string]struct{}, len(paths)*2)
+	appendPath := func(path string) {
+		if _, exists := seen[path]; exists {
+			return
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+
+	for _, path := range paths {
+		cleanPath := strings.TrimLeft(strings.TrimSpace(path), "/")
+		if cleanPath == "" || cleanPath == "home/" || strings.HasPrefix(cleanPath, "home/") {
+			continue
+		}
+		topLevel := strings.SplitN(cleanPath, "/", 2)[0] + "/"
+		appendPath(topLevel)
+		if strings.HasSuffix(cleanPath, "/") {
+			appendPath(cleanPath)
+		}
+	}
+
+	modified, err := json.Marshal(result)
+	if err != nil {
+		return body, false
+	}
+	return modified, true
 }
 
 func isHermesDashboardPublicAuthPath(targetPath string) bool {
@@ -1153,6 +1354,12 @@ func (s *InstanceProxyService) GetProxyURLForInstance(instance *models.Instance,
 	if instance == nil {
 		return ""
 	}
+	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeOpenCode {
+		// OpenCode's web UI owns the root of its origin. Do not fall back to the
+		// legacy /instances/{id}/proxy subpath when the deployment forgot its
+		// dedicated-origin template; fail access generation instead.
+		return managedRuntimePublicURL(runtimeType, instance.ID, token)
+	}
 	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeDeepSeekHarness {
 		if publicURL := managedRuntimePublicURL(runtimeType, instance.ID, token); publicURL != "" {
 			return publicURL
@@ -1170,6 +1377,8 @@ func managedRuntimePublicURL(runtimeType string, instanceID int, token string) s
 	// wildcard DNS (for example nip.io) and an offline authoritative DNS zone.
 	var envVar string
 	switch runtimeType {
+	case RuntimeTypeOpenCode:
+		envVar = openCodePublicURLTemplateEnvVar
 	case RuntimeTypeDeepSeekHarness:
 		envVar = deepSeekHarnessPublicURLTemplateEnvVar
 	default:
@@ -1403,6 +1612,31 @@ func (s *InstanceProxyService) removeProxyAccessTokenQuery(query url.Values, acc
 		return
 	}
 	query["token"] = filtered
+}
+
+// filterProxyAccessTokenRawQuery removes only ClawManager-owned token fields
+// while preserving every other raw query segment byte-for-byte. DeepSeek
+// Harness relies on a leading '?' in its plugin batch key, which url.Values
+// would percent-encode and normalize.
+func (s *InstanceProxyService) filterProxyAccessTokenRawQuery(rawQuery, accessToken, managedGatewayToken string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	segments := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		rawKey, rawValue, hasValue := strings.Cut(segment, "=")
+		key, err := url.QueryUnescape(rawKey)
+		if err != nil || key != "token" || !hasValue {
+			kept = append(kept, segment)
+			continue
+		}
+		value, err := url.QueryUnescape(rawValue)
+		if err != nil || !s.shouldRemoveProxyTokenQueryValue(value, accessToken, managedGatewayToken) {
+			kept = append(kept, segment)
+		}
+	}
+	return strings.Join(kept, "&")
 }
 
 func (s *InstanceProxyService) shouldRemoveProxyTokenQueryValue(value, accessToken, managedGatewayToken string) bool {

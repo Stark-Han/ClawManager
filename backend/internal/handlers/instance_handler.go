@@ -1644,23 +1644,37 @@ func (h *InstanceHandler) ProxyInstance(c *gin.Context) {
 
 func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool) {
 	cookieName := fmt.Sprintf("instance_access_%d", id)
+	queryToken := strings.TrimSpace(c.Query("token"))
+	if queryToken != "" {
+		if accessToken, validateErr := h.accessService.ValidateToken(queryToken); validateErr == nil && accessToken.InstanceID == id {
+			dedicatedOrigin := h.promoteProxyAccessTokenCookie(c, id, cookieName, queryToken, accessToken)
+			originRuntimeType, _ := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
+			if dedicatedOrigin && originRuntimeType == services.RuntimeTypeOpenCode &&
+				(c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) {
+				// Promote the one-time query token to the dedicated origin's cookie and
+				// immediately remove it from the visible browser URL.
+				c.Redirect(http.StatusTemporaryRedirect, dedicatedRuntimeCleanLocation(c.Request.URL, id, queryToken))
+				return "", false
+			}
+			return queryToken, true
+		}
+	}
+
 	if cookieToken, err := c.Cookie(cookieName); err == nil && strings.TrimSpace(cookieToken) != "" {
 		if accessToken, validateErr := h.accessService.ValidateToken(cookieToken); validateErr == nil && accessToken.InstanceID == id {
 			return cookieToken, true
 		}
 	}
 
-	queryToken := strings.TrimSpace(c.Query("token"))
 	if queryToken == "" {
 		utils.Error(c, http.StatusBadRequest, "Access token required")
 		return "", false
 	}
-	accessToken, err := h.accessService.ValidateToken(queryToken)
-	if err != nil || accessToken.InstanceID != id {
-		utils.Error(c, http.StatusUnauthorized, "Access token expired or invalid")
-		return "", false
-	}
+	utils.Error(c, http.StatusUnauthorized, "Access token expired or invalid")
+	return "", false
+}
 
+func (h *InstanceHandler) promoteProxyAccessTokenCookie(c *gin.Context, id int, cookieName, queryToken string, accessToken *services.AccessToken) bool {
 	// Promote only a validated ClawManager access token. Runtime applications may
 	// also use a token query parameter for their own websocket/session protocol.
 	cookiePath := fmt.Sprintf("/api/v1/instances/%d/proxy", id)
@@ -1668,7 +1682,7 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 	originRuntimeType, originManaged := services.NormalizeV2RuntimeType(c.GetHeader(services.DedicatedRuntimeOriginHeader))
 	instanceRuntimeType, instanceManaged := services.NormalizeV2RuntimeType(accessToken.InstanceType)
 	dedicatedOrigin := originManaged && instanceManaged && originRuntimeType == instanceRuntimeType &&
-		originRuntimeType == services.RuntimeTypeDeepSeekHarness
+		(originRuntimeType == services.RuntimeTypeOpenCode || originRuntimeType == services.RuntimeTypeDeepSeekHarness)
 	if dedicatedOrigin {
 		cookiePath = "/"
 		cookieSecure = true
@@ -1683,7 +1697,40 @@ func (h *InstanceHandler) proxyAccessToken(c *gin.Context, id int) (string, bool
 		cookieSecure,
 		true,
 	)
-	return queryToken, true
+	return dedicatedOrigin
+}
+
+func dedicatedRuntimeCleanLocation(requestURL *url.URL, instanceID int, accessToken string) string {
+	if requestURL == nil {
+		return "/"
+	}
+	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
+	pathValue := strings.TrimPrefix(requestURL.Path, prefix)
+	if pathValue == "" {
+		pathValue = "/"
+	} else if !strings.HasPrefix(pathValue, "/") {
+		pathValue = "/" + pathValue
+	}
+
+	query := requestURL.Query()
+	values := query["token"]
+	if len(values) > 0 {
+		kept := values[:0]
+		for _, value := range values {
+			if value != accessToken {
+				kept = append(kept, value)
+			}
+		}
+		if len(kept) == 0 {
+			query.Del("token")
+		} else {
+			query["token"] = kept
+		}
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return pathValue + "?" + encoded
+	}
+	return pathValue
 }
 
 func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token string) {
@@ -1692,6 +1739,8 @@ func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token s
 		if err := h.proxyService.ProxyWebSocket(c.Request.Context(), id, token, c.Writer, c.Request); err != nil {
 			if errors.Is(err, services.ErrInstanceGatewayUnavailable) {
 				http.Error(c.Writer, "Instance gateway is not available", http.StatusServiceUnavailable)
+			} else if errors.Is(err, services.ErrOpenCodeDedicatedOriginRequired) {
+				http.Error(c.Writer, err.Error(), http.StatusNotFound)
 			} else {
 				http.Error(c.Writer, err.Error(), http.StatusBadGateway)
 			}
@@ -1712,6 +1761,8 @@ func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token s
 			http.Error(c.Writer, "Token does not match instance", http.StatusForbidden)
 		} else if errors.Is(err, services.ErrInstanceGatewayUnavailable) {
 			http.Error(c.Writer, "Instance gateway is not available", http.StatusServiceUnavailable)
+		} else if errors.Is(err, services.ErrOpenCodeDedicatedOriginRequired) {
+			http.Error(c.Writer, err.Error(), http.StatusNotFound)
 		} else {
 			http.Error(c.Writer, fmt.Sprintf("Failed to proxy request: %v", err), http.StatusBadGateway)
 		}
