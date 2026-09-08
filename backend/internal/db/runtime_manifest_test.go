@@ -213,6 +213,21 @@ func TestNginxRoutesOpenCodeDedicatedOrigins(t *testing.T) {
 	}
 }
 
+func TestNginxWorkersAreBoundedOnLargeClusterNodes(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "worker_processes auto;") {
+		t.Fatal("nginx must not derive its worker count from every CPU on a large Kubernetes node")
+	}
+	if !strings.Contains(text, "worker_processes 8;") {
+		t.Fatal("nginx must use the reviewed bounded worker count")
+	}
+}
+
 func TestNginxDedicatedRuntimeOriginsExposeCertificateConfirmation(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
