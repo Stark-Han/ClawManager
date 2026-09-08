@@ -22,6 +22,7 @@
 /frontend/dist/
 /frontend/dist-ssr/
 /outputs/
+/venv/
 # Logs
 *.log
 npm-debug.log*
@@ -45,6 +46,9 @@ lerna-debug.log*
 .env
 .env.local
 .env.*.local
+/.venv-northbound/
+__pycache__/
+*.py[cod]
 
 # Database
 *.db
@@ -56,6 +60,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+*.bkp
 /test_*
 /deploy/
 /test.tar
@@ -69,6 +74,11 @@ Thumbs.db
 /_pr*.md
 .clawmanager-last-image
 /pr138.patch
+/examples/northbound-ca.crt
+/docs/northbound-api-test-guide.private.md
+/deployments/k8s/sites/nine-node-production/server_login.md
+/deployments/k8s/sites/nine-node-production/private/
+/deployments/k8s/sites/nine-node-production/certificates/
 
 # Team runtime config snapshots
 /team-*.json
@@ -85,6 +95,7 @@ devplan.md
 AGENTS.md
 TASK_BREAKDOWN.md
 dev_progress.md
+/progress.md
 CLAUDE.md
 TEAM_IMAGE_DEPLOY_STEPS.md
 TEAM_PROFILES_LOCAL_TESTING.md

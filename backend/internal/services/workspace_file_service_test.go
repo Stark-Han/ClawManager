@@ -1,8 +1,11 @@
 package services
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +62,9 @@ func TestWorkspaceFileServiceListSortsDirectoriesFirstAndMarksCapabilities(t *te
 	}
 	if entries[1].Path != "alpha.log" || !entries[1].Previewable || !entries[1].Downloadable {
 		t.Fatalf("alpha.log capabilities = %#v, want previewable downloadable file", entries[1])
+	}
+	if !entries[0].IsDir || !entries[0].Downloadable {
+		t.Fatalf("docs capabilities = %#v, want downloadable directory", entries[0])
 	}
 	if entries[2].Previewable || !entries[2].Downloadable {
 		t.Fatalf("binary.dat capabilities = %#v, want download-only file", entries[2])
@@ -163,6 +169,69 @@ func TestWorkspaceFileServiceDownloadAuditsSuccessfulFileOpen(t *testing.T) {
 	}
 	if len(auditRepo.items) != 1 || auditRepo.items[0].Action != "download" || auditRepo.items[0].RelativePath != "report.txt" {
 		t.Fatalf("audit items = %#v, want download audit", auditRepo.items)
+	}
+}
+
+func TestWorkspaceFileServiceDownloadsDirectoryAsZipAndCleansTemporaryFile(t *testing.T) {
+	root := t.TempDir()
+	docs := filepath.Join(root, "资料")
+	if err := os.MkdirAll(filepath.Join(docs, "empty"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "说明.txt"), []byte("hello"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(docs, ".tmp-skill-hidden"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, ".tmp-skill-hidden", "secret.txt"), []byte("hidden"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	auditRepo := &recordingWorkspaceFileAuditRepo{}
+	service := NewWorkspaceFileService(auditRepo)
+	download, filename, size, err := service.OpenDownload(context.Background(), workspaceTestScope(root), "资料")
+	if err != nil {
+		t.Fatalf("OpenDownload directory returned error: %v", err)
+	}
+	temporary, ok := download.(*workspaceTemporaryDownload)
+	if !ok {
+		t.Fatalf("directory download type = %T, want temporary download", download)
+	}
+	temporaryPath := temporary.path
+	data, err := io.ReadAll(download)
+	if err != nil {
+		t.Fatalf("read directory archive: %v", err)
+	}
+	if err := download.Close(); err != nil {
+		t.Fatalf("close directory archive: %v", err)
+	}
+	if _, err := os.Stat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary archive remains after close: %v", err)
+	}
+	if filename != "资料.zip" || size != int64(len(data)) || size <= 0 {
+		t.Fatalf("directory download metadata filename=%q size=%d data=%d", filename, size, len(data))
+	}
+
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("open directory zip: %v", err)
+	}
+	names := make([]string, 0, len(archive.File))
+	for _, file := range archive.File {
+		names = append(names, file.Name)
+	}
+	joined := strings.Join(names, ",")
+	for _, expected := range []string{"资料/", "资料/empty/", "资料/说明.txt"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("zip entries = %v, missing %q", names, expected)
+		}
+	}
+	if strings.Contains(joined, ".tmp-skill-hidden") {
+		t.Fatalf("zip entries include transient directory: %v", names)
+	}
+	if len(auditRepo.items) != 1 || auditRepo.items[0].Action != "download" || auditRepo.items[0].RelativePath != "资料" {
+		t.Fatalf("audit items = %#v, want directory download audit", auditRepo.items)
 	}
 }
 

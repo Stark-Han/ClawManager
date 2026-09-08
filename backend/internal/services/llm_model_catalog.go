@@ -55,6 +55,12 @@ func (s *llmModelService) ListExpandedActiveModels() ([]models.LLMModel, error) 
 	if len(items) == 0 {
 		return items, nil
 	}
+	for index := range items {
+		if strings.TrimSpace(items[index].CatalogProviderName) == "" {
+			items[index].CatalogProviderName = modelCatalogProviderName(items[index])
+		}
+	}
+	items = models.ExpandLLMModelCatalog(items)
 
 	groups, usedDisplayNames := groupModelsByProvider(items)
 	expanded := make([]models.LLMModel, 0, len(items))
@@ -141,7 +147,7 @@ func providerModelNameSet(items []models.LLMModel) map[string]struct{} {
 }
 
 func modelCatalogProviderName(item models.LLMModel) string {
-	name := firstNonEmptyCatalogValue(item.DisplayName, item.ProviderType, "provider")
+	name := firstNonEmptyCatalogValue(item.CatalogProviderName, item.DisplayName, item.ProviderType, "provider")
 	// A slash separates the runtime provider name from its model id.
 	name = strings.ReplaceAll(name, "/", "-")
 	return strings.ReplaceAll(name, `\`, "-")

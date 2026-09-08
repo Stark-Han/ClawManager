@@ -2,6 +2,8 @@ import api from "./api";
 import type {
   Instance,
   InstanceListResponse,
+  InstanceListFilters,
+  InstanceSummary,
   CreateInstanceRequest,
   UpdateInstanceRequest,
   RestartInstanceRequest,
@@ -27,10 +29,16 @@ export const instanceService = {
   getInstances: async (
     page: number = 1,
     limit: number = 20,
+    filters?: InstanceListFilters,
   ): Promise<InstanceListResponse> => {
     const response = await api.get("/instances", {
-      params: { page, limit },
+      params: { page, limit, ...filters },
     });
+    return response.data.data;
+  },
+
+  getSummary: async (): Promise<InstanceSummary> => {
+    const response = await api.get("/instances/summary");
     return response.data.data;
   },
 
@@ -200,6 +208,22 @@ export const instanceService = {
     const response = await api.post(
       `/instances/${id}/external-access/password`,
       data,
+    );
+    return response.data.data;
+  },
+
+  resetExternalShareURL: async (id: number): Promise<EnableShareLinkResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/share-link/reset`,
+    );
+    return response.data.data;
+  },
+
+  resetExternalAccessPassword: async (
+    id: number,
+  ): Promise<PasswordExternalAccessResult> => {
+    const response = await api.post(
+      `/instances/${id}/external-access/password/reset`,
     );
     return response.data.data;
   },

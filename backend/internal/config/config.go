@@ -15,6 +15,8 @@ type Config struct {
 	Server           ServerConfig           `yaml:"server"`
 	Database         DatabaseConfig         `yaml:"database"`
 	JWT              JWTConfig              `yaml:"jwt"`
+	Northbound       NorthboundConfig       `yaml:"northbound"`
+	IEISystem        IEISystemConfig        `yaml:"ieiSystem"`
 	Auth             AuthConfig             `yaml:"auth"`
 	Kubernetes       KubernetesConfig       `yaml:"kubernetes"`
 	Storage          StorageConfig          `yaml:"storage"`
@@ -55,11 +57,15 @@ type ServerConfig struct {
 
 // DatabaseConfig holds database-related configuration
 type DatabaseConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
+	Host            string        `yaml:"host"`
+	Port            int           `yaml:"port"`
+	User            string        `yaml:"user"`
+	Password        string        `yaml:"password"`
+	Database        string        `yaml:"database"`
+	MaxOpenConns    int           `yaml:"maxOpenConns"`
+	MaxIdleConns    int           `yaml:"maxIdleConns"`
+	ConnMaxLifetime time.Duration `yaml:"connMaxLifetime"`
+	ConnMaxIdleTime time.Duration `yaml:"connMaxIdleTime"`
 }
 
 // JWTConfig holds JWT-related configuration
@@ -67,6 +73,50 @@ type JWTConfig struct {
 	Secret        string `yaml:"secret"`
 	AccessExpiry  int    `yaml:"access_expiry"`  // minutes
 	RefreshExpiry int    `yaml:"refresh_expiry"` // hours
+}
+
+// NorthboundConfig controls the separately deployed northbound gateway and
+// the private Core listener used by that gateway. It is disabled by default;
+// enabling either process requires explicit key and TLS configuration.
+type NorthboundConfig struct {
+	Enabled               bool          `yaml:"enabled"`
+	GatewayAddress        string        `yaml:"gatewayAddress"`
+	GatewayTrustedProxies []string      `yaml:"gatewayTrustedProxies"`
+	CoreInternalAddress   string        `yaml:"coreInternalAddress"`
+	CoreBaseURL           string        `yaml:"coreBaseUrl"`
+	GatewayTLSCertFile    string        `yaml:"gatewayTlsCertFile"`
+	GatewayTLSKeyFile     string        `yaml:"gatewayTlsKeyFile"`
+	GatewayClientCertFile string        `yaml:"gatewayClientCertFile"`
+	GatewayClientKeyFile  string        `yaml:"gatewayClientKeyFile"`
+	CoreTLSCertFile       string        `yaml:"coreTlsCertFile"`
+	CoreTLSKeyFile        string        `yaml:"coreTlsKeyFile"`
+	CoreClientCAFile      string        `yaml:"coreClientCaFile"`
+	CoreCAFile            string        `yaml:"coreCaFile"`
+	JWEPrivateKeyFile     string        `yaml:"jwePrivateKeyFile"`
+	JWEKeyID              string        `yaml:"jweKeyId"`
+	JWTSecret             string        `yaml:"jwtSecret"`
+	RefreshTokenPepper    string        `yaml:"refreshTokenPepper"`
+	InternalJWTSecret     string        `yaml:"internalJwtSecret"`
+	ChallengeTTL          time.Duration `yaml:"challengeTtl"`
+	AccessTokenTTL        time.Duration `yaml:"accessTokenTtl"`
+	RefreshTokenTTL       time.Duration `yaml:"refreshTokenTtl"`
+	OperationTick         time.Duration `yaml:"operationTick"`
+	OperationLease        time.Duration `yaml:"operationLease"`
+	OperationMaxAttempts  int           `yaml:"operationMaxAttempts"`
+}
+
+// IEISystemConfig controls the IEI single-sign-on entry used by the
+// northbound Lite-instance portal. The AES key, IV and session signing secret
+// are deployment secrets and intentionally have no source-code defaults.
+type IEISystemConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	AESKey        string        `yaml:"aesKey"`
+	AESIV         string        `yaml:"aesIv"`
+	TokenTTL      time.Duration `yaml:"tokenTtl"`
+	SessionTTL    time.Duration `yaml:"sessionTtl"`
+	SessionSecret string        `yaml:"sessionSecret"`
+	Timezone      string        `yaml:"timezone"`
+	CookieSecure  bool          `yaml:"cookieSecure"`
 }
 
 type AuthConfig struct {
@@ -95,10 +145,10 @@ type LDAPConfig struct {
 	UserFilter        string   `yaml:"userFilter"`
 	UsernameAttribute string   `yaml:"usernameAttribute"`
 	EmailAttribute    string   `yaml:"emailAttribute"`
-	GroupBaseDN        string   `yaml:"groupBaseDN"`
-	GroupFilter        string   `yaml:"groupFilter"`
-	AdminGroupDNs      []string `yaml:"adminGroupDNs"`
-	DefaultRole        string   `yaml:"defaultRole"`
+	GroupBaseDN       string   `yaml:"groupBaseDN"`
+	GroupFilter       string   `yaml:"groupFilter"`
+	AdminGroupDNs     []string `yaml:"adminGroupDNs"`
+	DefaultRole       string   `yaml:"defaultRole"`
 }
 
 // KubernetesConfig holds Kubernetes-related configuration
@@ -207,6 +257,7 @@ type RuntimePoolConfig struct {
 	OpenCodeImage             string        `yaml:"openCodeImage"`
 	MaxGatewaysPerPod         int           `yaml:"maxGatewaysPerPod"`
 	GatewayStartInFlightLimit int           `yaml:"gatewayStartInFlightLimit"`
+	SkillReportPersistence    bool          `yaml:"skillReportPersistence"`
 	GatewayPortStart          int           `yaml:"gatewayPortStart"`
 	GatewayPortEnd            int           `yaml:"gatewayPortEnd"`
 }
@@ -254,16 +305,40 @@ func Load() (*Config, error) {
 			Mode:    "debug",
 		},
 		Database: DatabaseConfig{
-			Host:     "localhost",
-			Port:     3306,
-			User:     "clawreef",
-			Password: "clawreef123",
-			Database: "clawreef",
+			Host:            "localhost",
+			Port:            3306,
+			User:            "clawreef",
+			Password:        "clawreef123",
+			Database:        "clawreef",
+			MaxOpenConns:    50,
+			MaxIdleConns:    25,
+			ConnMaxLifetime: 30 * time.Minute,
+			ConnMaxIdleTime: 5 * time.Minute,
 		},
 		JWT: JWTConfig{
 			Secret:        getEnv("JWT_SECRET", "clawreef-secret-key-change-in-production"),
 			AccessExpiry:  60,  // 60 minutes
 			RefreshExpiry: 168, // 7 days
+		},
+		Northbound: NorthboundConfig{
+			Enabled:              getEnvBool("CLAWMANAGER_NORTHBOUND_ENABLED", false),
+			GatewayAddress:       getEnv("NORTHBOUND_GATEWAY_ADDRESS", ":9443"),
+			CoreInternalAddress:  getEnv("NORTHBOUND_CORE_INTERNAL_ADDRESS", ":9002"),
+			CoreBaseURL:          getEnv("NORTHBOUND_CORE_BASE_URL", "https://clawmanager-core:9002"),
+			JWEKeyID:             getEnv("NORTHBOUND_JWE_KEY_ID", "northbound-login-v1"),
+			ChallengeTTL:         getEnvDuration("NORTHBOUND_CHALLENGE_TTL", time.Minute),
+			AccessTokenTTL:       getEnvDuration("NORTHBOUND_ACCESS_TOKEN_TTL", 30*time.Minute),
+			RefreshTokenTTL:      getEnvDuration("NORTHBOUND_REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			OperationTick:        getEnvDuration("NORTHBOUND_OPERATION_TICK", time.Second),
+			OperationLease:       getEnvDuration("NORTHBOUND_OPERATION_LEASE", 30*time.Second),
+			OperationMaxAttempts: getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", 5),
+		},
+		IEISystem: IEISystemConfig{
+			Enabled:      getEnvBool("IEISYSTEM_SSO_ENABLED", false),
+			TokenTTL:     getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", 24*time.Hour),
+			SessionTTL:   getEnvDuration("IEISYSTEM_SESSION_TTL", 24*time.Hour),
+			Timezone:     getEnv("IEISYSTEM_SSO_TIMEZONE", "Asia/Shanghai"),
+			CookieSecure: getEnvBool("IEISYSTEM_COOKIE_SECURE", true),
 		},
 		Auth: AuthConfig{
 			ConfigEncryptionKey: getEnv("AUTH_CONFIG_ENCRYPTION_KEY", ""),
@@ -285,10 +360,10 @@ func Load() (*Config, error) {
 					UserFilter:        getEnv("LDAP_USER_FILTER", "(&(objectClass=person)(uid=%s))"),
 					UsernameAttribute: getEnv("LDAP_USERNAME_ATTRIBUTE", "uid"),
 					EmailAttribute:    getEnv("LDAP_EMAIL_ATTRIBUTE", "mail"),
-					GroupBaseDN:        getEnv("LDAP_GROUP_BASE_DN", ""),
-					GroupFilter:        getEnv("LDAP_GROUP_FILTER", "(member=%s)"),
-					AdminGroupDNs:      splitEnvList(getEnv("LDAP_ADMIN_GROUP_DNS", "")),
-					DefaultRole:        getEnv("LDAP_DEFAULT_ROLE", "user"),
+					GroupBaseDN:       getEnv("LDAP_GROUP_BASE_DN", ""),
+					GroupFilter:       getEnv("LDAP_GROUP_FILTER", "(member=%s)"),
+					AdminGroupDNs:     splitEnvList(getEnv("LDAP_ADMIN_GROUP_DNS", "")),
+					DefaultRole:       getEnv("LDAP_DEFAULT_ROLE", "user"),
 				},
 			},
 		},
@@ -353,11 +428,12 @@ func Load() (*Config, error) {
 			SchedulerEnabled:          getEnvBool("RUNTIME_SCHEDULER_ENABLED", true),
 			HeartbeatTimeout:          getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", 10*time.Second),
 			SchedulerTick:             getEnvDuration("RUNTIME_SCHEDULER_TICK", 2*time.Second),
-			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"),
+			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1"),
 			HermesImage:               getEnv("HERMES_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
 			OpenCodeImage:             getEnv("OPENCODE_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
 			MaxGatewaysPerPod:         getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),
 			GatewayStartInFlightLimit: getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", 32),
+			SkillReportPersistence:    getEnvBool("SKILL_REPORT_PERSISTENCE_ENABLED", true),
 			GatewayPortStart:          getEnvInt("RUNTIME_GATEWAY_PORT_START", 20000),
 			GatewayPortEnd:            getEnvInt("RUNTIME_GATEWAY_PORT_END", 20299),
 		},
@@ -470,6 +546,10 @@ func applyEnvOverrides(config *Config) {
 	if db := os.Getenv("DB_NAME"); db != "" {
 		config.Database.Database = db
 	}
+	config.Database.MaxOpenConns = getEnvInt("DB_MAX_OPEN_CONNS", config.Database.MaxOpenConns)
+	config.Database.MaxIdleConns = getEnvInt("DB_MAX_IDLE_CONNS", config.Database.MaxIdleConns)
+	config.Database.ConnMaxLifetime = getEnvDuration("DB_CONN_MAX_LIFETIME", config.Database.ConnMaxLifetime)
+	config.Database.ConnMaxIdleTime = getEnvDuration("DB_CONN_MAX_IDLE_TIME", config.Database.ConnMaxIdleTime)
 
 	// JWT config
 	if secret := os.Getenv("JWT_SECRET"); secret != "" {
@@ -540,6 +620,42 @@ func applyEnvOverrides(config *Config) {
 		config.Auth.Enterprise.LDAP.DefaultRole = defaultRole
 	}
 
+	config.Northbound.Enabled = getEnvBool("CLAWMANAGER_NORTHBOUND_ENABLED", config.Northbound.Enabled)
+	config.Northbound.GatewayAddress = getEnv("NORTHBOUND_GATEWAY_ADDRESS", config.Northbound.GatewayAddress)
+	if raw := strings.TrimSpace(os.Getenv("NORTHBOUND_TRUSTED_PROXIES")); raw != "" {
+		config.Northbound.GatewayTrustedProxies = splitNonEmpty(raw)
+	}
+	config.Northbound.CoreInternalAddress = getEnv("NORTHBOUND_CORE_INTERNAL_ADDRESS", config.Northbound.CoreInternalAddress)
+	config.Northbound.CoreBaseURL = getEnv("NORTHBOUND_CORE_BASE_URL", config.Northbound.CoreBaseURL)
+	config.Northbound.GatewayTLSCertFile = getEnv("NORTHBOUND_GATEWAY_TLS_CERT_FILE", config.Northbound.GatewayTLSCertFile)
+	config.Northbound.GatewayTLSKeyFile = getEnv("NORTHBOUND_GATEWAY_TLS_KEY_FILE", config.Northbound.GatewayTLSKeyFile)
+	config.Northbound.GatewayClientCertFile = getEnv("NORTHBOUND_GATEWAY_CLIENT_CERT_FILE", config.Northbound.GatewayClientCertFile)
+	config.Northbound.GatewayClientKeyFile = getEnv("NORTHBOUND_GATEWAY_CLIENT_KEY_FILE", config.Northbound.GatewayClientKeyFile)
+	config.Northbound.CoreTLSCertFile = getEnv("NORTHBOUND_CORE_TLS_CERT_FILE", config.Northbound.CoreTLSCertFile)
+	config.Northbound.CoreTLSKeyFile = getEnv("NORTHBOUND_CORE_TLS_KEY_FILE", config.Northbound.CoreTLSKeyFile)
+	config.Northbound.CoreClientCAFile = getEnv("NORTHBOUND_CORE_CLIENT_CA_FILE", config.Northbound.CoreClientCAFile)
+	config.Northbound.CoreCAFile = getEnv("NORTHBOUND_CORE_CA_FILE", config.Northbound.CoreCAFile)
+	config.Northbound.JWEPrivateKeyFile = getEnv("NORTHBOUND_JWE_PRIVATE_KEY_FILE", config.Northbound.JWEPrivateKeyFile)
+	config.Northbound.JWEKeyID = getEnv("NORTHBOUND_JWE_KEY_ID", config.Northbound.JWEKeyID)
+	config.Northbound.JWTSecret = getEnv("NORTHBOUND_JWT_SECRET", config.Northbound.JWTSecret)
+	config.Northbound.RefreshTokenPepper = getEnv("NORTHBOUND_REFRESH_TOKEN_PEPPER", config.Northbound.RefreshTokenPepper)
+	config.Northbound.InternalJWTSecret = getEnv("NORTHBOUND_INTERNAL_JWT_SECRET", config.Northbound.InternalJWTSecret)
+	config.Northbound.ChallengeTTL = getEnvDuration("NORTHBOUND_CHALLENGE_TTL", config.Northbound.ChallengeTTL)
+	config.Northbound.AccessTokenTTL = getEnvDuration("NORTHBOUND_ACCESS_TOKEN_TTL", config.Northbound.AccessTokenTTL)
+	config.Northbound.RefreshTokenTTL = getEnvDuration("NORTHBOUND_REFRESH_TOKEN_TTL", config.Northbound.RefreshTokenTTL)
+	config.Northbound.OperationTick = getEnvDuration("NORTHBOUND_OPERATION_TICK", config.Northbound.OperationTick)
+	config.Northbound.OperationLease = getEnvDuration("NORTHBOUND_OPERATION_LEASE", config.Northbound.OperationLease)
+	config.Northbound.OperationMaxAttempts = getEnvInt("NORTHBOUND_OPERATION_MAX_ATTEMPTS", config.Northbound.OperationMaxAttempts)
+
+	config.IEISystem.Enabled = getEnvBool("IEISYSTEM_SSO_ENABLED", config.IEISystem.Enabled)
+	config.IEISystem.AESKey = getEnv("IEISYSTEM_SSO_KEY", config.IEISystem.AESKey)
+	config.IEISystem.AESIV = getEnv("IEISYSTEM_SSO_IV", config.IEISystem.AESIV)
+	config.IEISystem.TokenTTL = getEnvDuration("IEISYSTEM_SSO_TOKEN_TTL", config.IEISystem.TokenTTL)
+	config.IEISystem.SessionTTL = getEnvDuration("IEISYSTEM_SESSION_TTL", config.IEISystem.SessionTTL)
+	config.IEISystem.SessionSecret = getEnv("IEISYSTEM_SESSION_SECRET", config.IEISystem.SessionSecret)
+	config.IEISystem.Timezone = getEnv("IEISYSTEM_SSO_TIMEZONE", config.IEISystem.Timezone)
+	config.IEISystem.CookieSecure = getEnvBool("IEISYSTEM_COOKIE_SECURE", config.IEISystem.CookieSecure)
+
 	// Kubernetes config
 	if mode := os.Getenv("K8S_MODE"); mode != "" {
 		config.Kubernetes.Mode = mode
@@ -603,6 +719,7 @@ func applyEnvOverrides(config *Config) {
 	config.Runtime.OpenCodeImage = getEnv("OPENCODE_RUNTIME_IMAGE", config.Runtime.OpenCodeImage)
 	config.Runtime.MaxGatewaysPerPod = getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", config.Runtime.MaxGatewaysPerPod)
 	config.Runtime.GatewayStartInFlightLimit = getEnvInt("RUNTIME_GATEWAY_START_IN_FLIGHT_LIMIT", config.Runtime.GatewayStartInFlightLimit)
+	config.Runtime.SkillReportPersistence = getEnvBool("SKILL_REPORT_PERSISTENCE_ENABLED", config.Runtime.SkillReportPersistence)
 	config.Runtime.GatewayPortStart = getEnvInt("RUNTIME_GATEWAY_PORT_START", config.Runtime.GatewayPortStart)
 	config.Runtime.GatewayPortEnd = getEnvInt("RUNTIME_GATEWAY_PORT_END", config.Runtime.GatewayPortEnd)
 	config.LeaderElection.Enabled = getEnvBool("CLAWMANAGER_LEADER_ELECTION", config.LeaderElection.Enabled)
@@ -783,6 +900,17 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func splitNonEmpty(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 func defaultWorkspaceNFSServer(namespace string) string {

@@ -14,7 +14,10 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       - ../internal/db/migrations:/docker-entrypoint-initdb.d
-    command: --default-authentication-plugin=mysql_native_password
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --binlog-expire-logs-seconds=259200
+      - --max-binlog-size=134217728
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       timeout: 20s

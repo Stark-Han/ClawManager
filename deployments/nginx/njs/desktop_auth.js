@@ -40,26 +40,27 @@ function requestInstanceID(r) {
     return r.variables.inst_id || r.variables.runtime_inst_id || '';
 }
 
-function readCookieToken(r) {
+function readCookieTokens(r) {
     var cookie = r.headersIn['Cookie'];
     if (!cookie) {
-        return '';
+        return [];
     }
 
     var instanceID = requestInstanceID(r);
     if (!instanceID) {
-        return '';
+        return [];
     }
     var name = 'instance_access_' + instanceID;
     var parts = cookie.split(';');
+    var tokens = [];
     for (var i = 0; i < parts.length; i++) {
         var kv = parts[i].trim();
         var eq = kv.indexOf('=');
         if (eq > 0 && kv.substring(0, eq) === name) {
-            return kv.substring(eq + 1);
+            tokens.push(kv.substring(eq + 1));
         }
     }
-    return '';
+    return tokens;
 }
 
 function readQueryToken(r) {
@@ -69,14 +70,7 @@ function readQueryToken(r) {
     return '';
 }
 
-function accessTokenCandidates(r) {
-    // A freshly issued query token must be able to rotate the dedicated-origin
-    // cookie before the old cookie expires. Runtime-owned query tokens are not
-    // valid ClawManager JWTs and therefore fall through to the cookie.
-    return [readQueryToken(r), readCookieToken(r)];
-}
-
-function validatedAccessPayload(r, token, key, allowExpired) {
+function validateTokenCandidate(r, token, key, allowExpired) {
     if (!token) {
         return null;
     }
@@ -112,7 +106,25 @@ function validatedAccessPayload(r, token, key, allowExpired) {
         return null;
     }
 
-    return payload;
+    return { token: token, payload: payload };
+}
+
+function selectValidToken(r, key) {
+    // Prefer a fresh query capability so it can replace an expired cookie on a
+    // dedicated runtime origin. Fall back to the cookie when `token` belongs
+    // to the runtime application rather than ClawManager.
+    var query = validateTokenCandidate(r, readQueryToken(r), key, false);
+    if (query) {
+        return query;
+    }
+    var cookieTokens = readCookieTokens(r);
+    for (var i = 0; i < cookieTokens.length; i++) {
+        var cookie = validateTokenCandidate(r, cookieTokens[i], key, false);
+        if (cookie) {
+            return cookie;
+        }
+    }
+    return null;
 }
 
 function resolveTarget(r) {
@@ -122,20 +134,13 @@ function resolveTarget(r) {
         return DENY;
     }
 
-    var candidates = accessTokenCandidates(r);
-    var payload = null;
-    for (var i = 0; i < candidates.length; i++) {
-        payload = validatedAccessPayload(r, candidates[i], key, false);
-        if (payload) {
-            break;
-        }
-    }
-    if (!payload) {
+    var selected = selectValidToken(r, key);
+    if (!selected) {
         return DENY;
     }
 
-    if (payload.upstream) {
-        return 'https://' + payload.upstream;
+    if (selected.payload.upstream) {
+        return 'https://' + selected.payload.upstream;
     }
 
     return CONTROL_PLANE_FALLBACK;
@@ -157,10 +162,10 @@ function cleanUri(r) {
     if (!queryToken) {
         return uri;
     }
-    var cookieToken = readCookieToken(r);
     var key = secret();
-    var managedQueryToken = key && validatedAccessPayload(r, queryToken, key, true);
-    if (!managedQueryToken && cookieToken !== queryToken) {
+    // Strip any correctly signed ClawManager capability, including an expired
+    // one. A non-ClawManager `token` remains available to the runtime app.
+    if (!key || !validateTokenCandidate(r, queryToken, key, true)) {
         return uri;
     }
 

@@ -455,7 +455,11 @@ func (s *service) listActiveModels() ([]models.LLMModel, error) {
 	if s.expandedModelCatalog != nil {
 		return s.expandedModelCatalog.ListExpandedActiveModels()
 	}
-	return s.modelRepo.ListActive()
+	items, err := s.modelRepo.ListActive()
+	if err != nil {
+		return nil, err
+	}
+	return models.ExpandLLMModelCatalog(items), nil
 }
 
 func (s *service) ChatCompletions(ctx context.Context, userID int, req ChatCompletionRequest) (*ProxyResponse, string, error) {
@@ -2358,34 +2362,23 @@ func (s *service) resolveRequestedModel(requestedModel string) (*models.LLMModel
 		return s.selectAutoModel()
 	}
 	requestedModel = strings.TrimSpace(requestedModel)
-	if s.expandedModelCatalog != nil {
-		items, err := s.listActiveModels()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get model: %w", err)
-		}
-		for _, item := range items {
-			if strings.TrimSpace(item.DisplayName) == requestedModel {
-				selected := item
-				return &selected, nil
-			}
-		}
-		for _, item := range items {
-			if strings.EqualFold(strings.TrimSpace(item.DisplayName), requestedModel) {
-				selected := item
-				return &selected, nil
-			}
-		}
-		return nil, errors.New("model is not active or does not exist")
-	}
-
-	selectedModel, err := s.modelRepo.GetByDisplayName(requestedModel)
+	items, err := s.listActiveModels()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get model: %w", err)
+		return nil, fmt.Errorf("failed to list active models: %w", err)
 	}
-	if selectedModel == nil || !selectedModel.IsActive {
-		return nil, errors.New("model is not active or does not exist")
+	for _, item := range items {
+		if strings.TrimSpace(item.DisplayName) == requestedModel {
+			selected := item
+			return &selected, nil
+		}
 	}
-	return selectedModel, nil
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.DisplayName), requestedModel) {
+			selected := item
+			return &selected, nil
+		}
+	}
+	return nil, errors.New("model is not active or does not exist")
 }
 
 func (s *service) selectAutoModel() (*models.LLMModel, error) {
