@@ -1,5 +1,7 @@
 # ClawManager 北向接口 Pro/Lite 接入与镜像配置说明
 
+> 团队版迁移说明：团队版不交付 WorkBuddy、Codex 或 Claude Code，也不接受这些类型的新建请求。本文保留的 WorkBuddy 内容是个人版历史集成资料，不应作为团队版构建、推送或验收依据。
+
 ## 1. 版本与交付物
 
 本文对应 ClawManager 提交：

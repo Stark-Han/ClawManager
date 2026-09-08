@@ -12,10 +12,6 @@ const instanceTypeSource = readFileSync(
   path.resolve(scriptDir, "../src/types/instance.ts"),
   "utf8",
 );
-const i18nSource = readFileSync(
-  path.resolve(scriptDir, "../src/lib/i18n.ts"),
-  "utf8",
-);
 
 function sectionBetween(startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -81,10 +77,12 @@ assert(
 assert(
   instanceTypeSource.includes('id: "codex"') &&
     instanceTypeSource.includes('id: "claude-code"') &&
+    source.includes('"workbuddy"') &&
     source.includes('"codex"') &&
     source.includes('"claude-code"') &&
-    !source.includes("claudeCodeProCreation"),
-  "Codex and Claude Code must be available in the Pro instance chooser without a frontend feature gate.",
+    source.includes("HIDDEN_TEAM_INSTANCE_TYPE_IDS") &&
+    source.includes("!HIDDEN_TEAM_INSTANCE_TYPE_IDS.has(item.instance_type)"),
+  "Historical runtime types must remain renderable while the team distribution filters them from every create source.",
 );
 const proOnlyTypes = sectionBetween(
   "const isProOnlyInstanceType",
@@ -93,12 +91,7 @@ const proOnlyTypes = sectionBetween(
 assert(
   proOnlyTypes.includes('type === "codex"') &&
     proOnlyTypes.includes('type === "claude-code"'),
-  "Codex and Claude Code must only be shown in Pro mode.",
-);
-assert(
-  (i18nSource.match(/\bcodex:\s*\{/g) ?? []).length >= 5 &&
-    (i18nSource.match(/\bclaudeCode:\s*\{/g) ?? []).length >= 5,
-  "Codex and Claude Code chooser text must exist in every supported locale.",
+  "Historical Codex and Claude Code records must retain their Pro classification.",
 );
 assert(
   source.includes('const isLiteOnlyInstanceType = (type: string) => type === "opencode";') &&

@@ -56,10 +56,10 @@
 | POST | `/auth/refresh` | 无 | 轮换 Refresh Token |
 | POST | `/auth/logout` | 已登录 | 注销当前北向会话 |
 | GET | `/auth/me` | 已登录 | 查询当前身份和 Scope |
-| POST | `/lite-instances` | `lite-instances:create` | 创建受支持的 Lite 实例；`type=workbuddy` 保留为 Linux Pro 兼容入口 |
+| POST | `/lite-instances` | `lite-instances:create` | 创建 OpenClaw、Hermes、OpenCode 或 DeepSeek Harness Lite 实例 |
 | GET | `/lite-instances?owner=...` | `lite-instances:read` | 按 owner 查询当前用户的全部受支持实例 |
 | GET | `/lite-instances/{id}` | `lite-instances:read` | 查询一个受支持实例 |
-| POST | `/pro-instances` | `pro-instances:create` | 创建 OpenClaw、Hermes、OpenCode 或 DeepSeek Harness Pro；也兼容 WorkBuddy |
+| POST | `/pro-instances` | `pro-instances:create` | 创建 OpenClaw、Hermes、OpenCode 或 DeepSeek Harness Pro |
 | GET | `/pro-instances?owner=...` | `pro-instances:read` | 返回 OpenClaw、Hermes、OpenCode、DeepSeek Harness 和 Linux WorkBuddy Pro |
 | GET | `/pro-instances/{id}` | `pro-instances:read` | 查询一个受支持的 Pro 实例 |
 | POST | `/lite-instances/{id}/restart` | `lite-instances:restart` | 异步重启运行中的 Lite；WorkBuddy 兼容入口也适用 |
@@ -88,7 +88,7 @@ Scope 含义：
 
 ### 2.1 创建任一受支持实例的标准调用顺序
 
-创建任一受支持实例时，推荐按以下顺序调用。Lite 使用 `/lite-instances`，OpenClaw、Hermes、OpenCode、DeepSeek Harness 的 Pro 使用 `/pro-instances`；WorkBuddy 继续使用 `/lite-instances` 兼容入口。两个创建接口的请求字段和异步返回结构保持一致。认证、异步创建和 Runtime 就绪是三个不同阶段，不能只调用创建接口后立即使用实例。
+创建任一受支持实例时，推荐按以下顺序调用。Lite 使用 `/lite-instances`，OpenClaw、Hermes、OpenCode、DeepSeek Harness 的 Pro 使用 `/pro-instances`。两个创建接口的请求字段和异步返回结构保持一致。认证、异步创建和 Runtime 就绪是三个不同阶段，不能只调用创建接口后立即使用实例。
 
 ```text
 申请挑战 → 本地生成 JWE → 登录取得 Token → 按 type 提交创建请求
@@ -297,7 +297,7 @@ Content-Type: application/json
 
 ## 4. 创建和查询实例
 
-### 4.1 Lite 创建与 WorkBuddy 兼容入口
+### 4.1 创建 Lite 实例
 
 创建操作是异步的，必须提供长度为 8～128 个 UTF-8 字节的 `Idempotency-Key`。
 
@@ -321,7 +321,7 @@ Idempotency-Key: create-alice-openclaw-001
 | --- | --- | --- |
 | `name` | 是 | 实例显示名称；去除首尾空白后需同时满足 3～50 个 Unicode 字符和 3～50 个 UTF-8 字节，同一用户下不能重名。不会作为 Kubernetes 参数或镜像名使用。 |
 | `owner` | 是 | 创建者或业务归属标识；去除首尾空白后为 1～128 个 UTF-8 字节，不能包含控制字符。保存和列表查询采用区分大小写的精确匹配。 |
-| `type` | 是 | 可选 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 或 `workbuddy`。大小写会被规范为小写，其他类型不允许。前四种创建为 Lite；WorkBuddy 固定创建为 Linux Pro。 |
+| `type` | 是 | 可选 `openclaw`、`hermes`、`opencode` 或 `deepseek-harness`。大小写会被规范为小写，其他类型不允许。 |
 | `description` | 否 | 实例备注，最多 2000 个 UTF-8 字节；只作为元数据，不会注入 Runtime。可省略或传 `null`。 |
 
 #### 4.1.1 Runtime 映射与固定资源
@@ -334,7 +334,6 @@ Idempotency-Key: create-alice-openclaw-001
 | `hermes` | 面向研究、知识检索和长上下文任务的智能体工作空间 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、5 GB 存储、无 GPU | Pro 请使用 `/pro-instances` |
 | `opencode` | 面向代码生成、终端操作和仓库协作的开发者代码工作台 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、5 GB 存储、无 GPU | Pro 请使用 `/pro-instances` |
 | `deepseek-harness` | 插件化智能体执行平台，适合复杂任务拆解、多代理协作和可扩展 Agent 工作流 | Lite | 共享 Gateway Runtime | 2 CPU、4 GB 内存、5 GB 存储、无 GPU | Pro 请使用 `/pro-instances` |
-| `workbuddy` | 面向日常办公、资料处理和内容协作的智能办公搭档 | Linux Pro | 独立 Desktop Runtime | 4 CPU、8 GB 内存、40 GB 存储、无 GPU | 固定 Linux；不允许切换 Windows |
 
 这些资源值是北向接口的安全预设，不代表 ClawManager 管理端支持的全部规格。即使管理端存在其他模式或镜像，北向调用方也不能借助额外字段绕过上述映射。运行镜像由服务端系统镜像设置或部署配置决定，创建响应不会返回镜像地址。
 
@@ -356,7 +355,7 @@ Idempotency-Key: create-alice-openclaw-001
 
 ### 4.2 创建 Pro 实例
 
-OpenClaw、Hermes 和 OpenCode Pro 使用独立的 Pro 创建入口，请求字段与 Lite 完全一致：
+OpenClaw、Hermes、OpenCode 和 DeepSeek Harness Pro 使用独立的 Pro 创建入口，请求字段与 Lite 完全一致：
 
 ```http
 POST /api/northbound/v1/pro-instances
@@ -372,31 +371,11 @@ Idempotency-Key: create-alice-opencode-pro-001
 }
 ```
 
-`type` 只允许 `openclaw`、`hermes`、`opencode` 或 `workbuddy`。接口路径固定选择 Pro/desktop，调用方不传 `mode`、`runtime_type`、镜像或资源字段。OpenClaw、Hermes 和 OpenCode 会使用 ClawManager 系统设置中对应 Runtime 已保存且启用的 DESKTOP 镜像，不依赖 YAML 中写死镜像地址；未配置或未启用对应 Pro 镜像时请求会被拒绝。三种 Runtime 固定使用 4 CPU、8 GB 内存、50 GB 存储且不启用 GPU，Operation 的 `resource_type` 为 `pro_instance`。
+`type` 只允许 `openclaw`、`hermes`、`opencode` 或 `deepseek-harness`。接口路径固定选择 Pro/desktop，调用方不传 `mode`、`runtime_type`、镜像或资源字段。服务端使用 ClawManager 系统设置中对应 Runtime 已保存且启用的 DESKTOP 镜像，不依赖 YAML 中写死镜像地址；未配置或未启用对应 Pro 镜像时请求会被拒绝。四种 Runtime 固定使用 4 CPU、8 GB 内存、50 GB 存储且不启用 GPU，Operation 的 `resource_type` 为 `pro_instance`。
 
-#### 4.2.1 Linux WorkBuddy 兼容行为
+#### 4.2.1 历史 WorkBuddy 兼容边界
 
-WorkBuddy 使用完全相同的创建接口和字段，不接收运行环境、镜像或资源参数：
-
-```http
-POST /api/northbound/v1/lite-instances
-Authorization: Bearer <access-token>
-Content-Type: application/json
-Idempotency-Key: create-alice-workbuddy-001
-
-{
-  "name": "alice-workbuddy",
-  "owner": "alice",
-  "type": "workbuddy",
-  "description": "Created by northbound API"
-}
-```
-
-服务端检测到 `type=workbuddy` 后，固定使用 Linux WorkBuddy、独立桌面运行环境、4 CPU、8 GB 内存、40 GB 存储且不启用 GPU。调用方不能切换到 Windows，也不能通过北向接口修改资源或替换镜像。成功提交仍返回 `202 Accepted`，新请求的 `resource_type` 与原流程一致为 `lite_instance`，并使用同一个 `/operations/{id}` 接口轮询。
-
-WorkBuddy 使用相同的 ShareLink 启用、URL 重置和密码重置接口。生成的短链接会自动代理到 WorkBuddy Linux 桌面；`workspace_access=read` 或 `write` 时，共享文件浏览器访问其 `/config` 工作区。
-
-`/pro-instances` 也继续接受 WorkBuddy，但服务端会把它归一到与 `/lite-instances` 相同的 WorkBuddy 幂等域。调用方使用同一 `Idempotency-Key` 在两个入口重试不会创建两个实例。
+团队版不再接受新的 `type=workbuddy` 创建请求。升级前已存在的 Linux WorkBuddy 记录仍可通过查询、启停、删除和 ShareLink 接口管理；未完成的历史 Operation 仍保留原有载荷解析能力，避免升级 ClawManager 后破坏已经落库的任务。该兼容能力不代表 WorkBuddy 可用于新建。
 
 ### 4.3 查询操作
 
@@ -420,7 +399,7 @@ Operation 字段：
 | --- | --- |
 | `operation_id` | 异步操作 ID，供 `/operations/{id}` 查询。 |
 | `status` | `queued`、`processing`、`succeeded` 或 `failed`。 |
-| `resource_type` | Lite 请求和 WorkBuddy 兼容请求为 `lite_instance`；通过 `/pro-instances` 创建的 OpenClaw、Hermes、OpenCode 为 `pro_instance`。 |
+| `resource_type` | Lite 请求为 `lite_instance`；通过 `/pro-instances` 创建的 OpenClaw、Hermes、OpenCode、DeepSeek Harness 为 `pro_instance`。历史 WorkBuddy Operation 保留原值。 |
 | `instance_id` | 仅成功后出现，后续实例和 ShareLink 接口使用该正整数。 |
 | `error_code` / `error_message` | 仅失败时出现；适合程序判断和运维排查，不包含底层敏感信息。 |
 | `created_at` / `started_at` / `finished_at` / `updated_at` | RFC 3339 时间；尚未发生的阶段字段会省略。 |
@@ -758,8 +737,8 @@ Demo 环境变量说明：
 | `NORTHBOUND_PASSWORD` | 全部 | 必填 | 现有用户密码。只在本地构造 JWE；不得提交到版本库。 |
 | `NORTHBOUND_OWNER` | `create`、`list` | 必填 | 创建者或业务归属标识；列表只返回与它精确匹配的实例。 |
 | `NORTHBOUND_HTTP_TIMEOUT_SECONDS` | 全部 | 默认 `30` | 单次 HTTPS 请求超时，正整数秒；空值、非整数或非正数回退到默认值。 |
-| `NORTHBOUND_INSTANCE_TYPE` | `create` | 默认 `openclaw` | Lite 和 Pro 均可选 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 或 `workbuddy`；WorkBuddy 固定为 Linux Pro。 |
-| `NORTHBOUND_INSTANCE_MODE` | `create`、`list`、`get` | 默认 `lite` | `lite` 使用 `/lite-instances`，`pro` 使用 `/pro-instances`；WorkBuddy 始终使用兼容的 `/lite-instances` 创建入口。该值只控制 Demo 选择路径，不会作为请求字段发送。 |
+| `NORTHBOUND_INSTANCE_TYPE` | `create` | 默认 `openclaw` | Lite 和 Pro 均可选 `openclaw`、`hermes`、`opencode` 或 `deepseek-harness`。 |
+| `NORTHBOUND_INSTANCE_MODE` | `create`、`list`、`get` | 默认 `lite` | `lite` 使用 `/lite-instances`，`pro` 使用 `/pro-instances`。该值只控制 Demo 选择路径，不会作为请求字段发送。 |
 | `NORTHBOUND_INSTANCE_NAME` | `create` | 默认自动生成 | 实例名称；空值时生成 `api-<type>-<毫秒时间戳>`，非空时必须同时满足创建接口的 3～50 Unicode 字符和 3～50 UTF-8 字节限制。 |
 | `NORTHBOUND_DESCRIPTION` | `create` | 默认省略 | 实例备注，最多 2000 UTF-8 字节。 |
 | `NORTHBOUND_IDEMPOTENCY_KEY` | `create` | 默认每次生成 UUID | 8～128 UTF-8 字节。要安全重试同一次业务创建，必须保存并复用相同值。 |
@@ -830,11 +809,11 @@ Demo 每次执行都会获取新挑战并完成一次 JWE 登录，并使用经�
 至少使用一个专用测试 owner 完成以下验收，不要只检查 HTTP `202`：
 
 1. JWE challenge/login 成功，`/auth/me` 返回创建、读取和 ShareLink Scope；登录请求和日志中没有明文密码。
-2. 分别以 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 和 `workbuddy` 验证 `/lite-instances`；再以 `openclaw`、`hermes`、`opencode`、`deepseek-harness` 验证 `/pro-instances`。
+2. 分别以 `openclaw`、`hermes`、`opencode` 和 `deepseek-harness` 验证 `/lite-instances` 与 `/pro-instances`；确认新建 `workbuddy` 返回参数校验错误。
 3. 每次创建都保存并复用稳定的 `Idempotency-Key`；相同请求重放返回同一个 Operation，不产生重复实例。
 4. 轮询 Operation 到 `succeeded` 后，再轮询实例到 `status=running`、`availability=available`。
-5. 验证 Lite Runtime 为 Gateway 且保持 2 CPU、4 GB、5 GB、无 GPU；OpenClaw/Hermes/OpenCode/DeepSeek Harness Pro 为 Desktop，镜像与系统设置中启用的 DESKTOP 卡片完全一致，资源为 4 CPU、8 GB、50 GB、无 GPU；WorkBuddy 为 Linux Pro/Desktop，并符合 4 CPU、8 GB、40 GB、无 GPU 的预设。
-6. `/pro-instances` 能按 owner 返回四种独立 Pro 和 Linux WorkBuddy；兼容统一列表也能看到它们。错误 owner 返回空列表；跨用户查询单实例返回 `INSTANCE_NOT_FOUND`。
+5. 验证 Lite Runtime 为 Gateway 且保持 2 CPU、4 GB、5 GB、无 GPU；OpenClaw/Hermes/OpenCode/DeepSeek Harness Pro 为 Desktop，镜像与系统设置中启用的 DESKTOP 卡片完全一致，资源为 4 CPU、8 GB、50 GB、无 GPU。
+6. `/pro-instances` 能按 owner 返回四种独立 Pro；环境中若存在历史 Linux WorkBuddy，兼容查询仍能看到它。错误 owner 返回空列表；跨用户查询单实例返回 `INSTANCE_NOT_FOUND`。
 7. 所有北向受支持实例都能通过统一 ShareLink 接口启用密码模式；完整 URL 使用门户 Origin 拼接，而不是北向 Gateway Origin。
 8. 分别验证 `workspace_access=none`、`read` 和 `write` 的文件权限边界；WorkBuddy Workspace 根目录按服务端映射到 `/config`。
 9. 验证 URL 重置后旧 URL 立即失效，密码重置后旧密码和旧会话立即失效，未启用 ShareLink 时重置返回对应 `409`。

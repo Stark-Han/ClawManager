@@ -34,6 +34,8 @@ const targetOpenClawUpgradeVersion = "2026.8.1"
 const maxOpenClawUpgradeBatchSize = 8
 const openClawUpgradeGatewayRestartTimeout = 5 * time.Minute
 const (
+	openClawLegacyBaselineDigest           = "sha256:c0905d813cdf22f5ed357d9bd6f61a6798020f1d099022f0aaec4a96c83df125"
+	openClawLegacyBaselineRuntimeVersion   = "2026.7.1-2"
 	RuntimeUpgradeStrategyLegacyRolling    = "legacy_rolling"
 	RuntimeUpgradeStrategyOpenClawDataSafe = "openclaw_8plus_data_safe"
 	RuntimeUpgradePhaseEmptyPoolReset      = "empty_pool_reset"
@@ -3113,8 +3115,8 @@ func resolvedSourceOpenClawVersion(pod models.RuntimePod) string {
 	if digest == "" {
 		digest = imageDigestFromReference(pod.ImageRef)
 	}
-	if strings.EqualFold(digest, OpenClawUpgradeLabBaselineDigest) {
-		return OpenClawUpgradeLabBaselineVersion
+	if strings.EqualFold(digest, openClawLegacyBaselineDigest) {
+		return openClawLegacyBaselineRuntimeVersion
 	}
 	return ""
 }

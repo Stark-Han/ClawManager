@@ -73,7 +73,7 @@ func TestNorthboundOpenAPIContainsShareLinkPaths(t *testing.T) {
 		"required: [name, owner, type]",
 		"required: [id, name, owner, type, instance_mode, runtime_type, status, created_at, updated_at]",
 		"Exact, case-sensitive owner identifier",
-		"enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy]",
+		"enum: [openclaw, hermes, opencode, deepseek-harness]",
 		"resolves the enabled DESKTOP image saved in ClawManager",
 	} {
 		if !strings.Contains(content, required) {

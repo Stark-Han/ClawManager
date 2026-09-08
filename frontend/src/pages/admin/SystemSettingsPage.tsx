@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlaskConical, Plus, Rocket, Save, Trash2 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Plus, Rocket, Save, Trash2 } from 'lucide-react';
 import AdminLayout from '../../components/AdminLayout';
 import { useI18n } from '../../contexts/I18nContext';
 import PasswordSettingsSection from '../../components/PasswordSettingsSection';
@@ -103,11 +102,15 @@ const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVarian
   },
 };
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
-const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...PRO_BASE_RUNTIME_CARDS];
-// Keep the saved Windows image setting intact so it can be restored later,
-// but do not expose it in the image configuration page while Linux WorkBuddy
-// is the only supported option in the instance creation flow.
+// The team distribution does not ship these products. Their saved settings
+// remain intact for existing-instance compatibility, but are not exposed as
+// configurable or creatable runtime cards.
+const HIDDEN_TEAM_RUNTIME_CARD_TYPES = new Set(['workbuddy', 'codex', 'claude-code']);
 const TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS = new Set(['workbuddy:windows']);
+const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(
+  (card) => !HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(card.instance_type),
+);
+const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...VISIBLE_PRO_BASE_RUNTIME_CARDS];
 
 interface EditableImageCard extends SystemImageSetting {
   local_id: string;
@@ -169,6 +172,7 @@ function runtimeVariantForCard(item: SystemImageSetting, definition?: RuntimeCar
 }
 
 function isRuntimeCardVisible(item: SystemImageSetting) {
+  if (HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(item.instance_type)) return false;
   const runtimeVariant = runtimeVariantForCard(item);
   return !runtimeVariant || !TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS.has(`${item.instance_type}:${runtimeVariant}`);
 }
@@ -699,13 +703,6 @@ const SystemSettingsPage: React.FC = () => {
               <h2 className="text-xl font-semibold text-gray-900">{t('systemSettingsPage.liteRolloutTitle')}</h2>
               <p className="text-sm text-gray-500">{t('systemSettingsPage.liteRolloutSubtitle')}</p>
             </div>
-            <Link
-              to="/admin/settings/openclaw-upgrade-lab"
-              className="app-button-secondary inline-flex items-center justify-center gap-2"
-            >
-              <FlaskConical className="h-4 w-4" />
-              OpenClaw 升级实验室
-            </Link>
           </div>
           <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(180px,240px)_1fr] xl:grid-cols-[minmax(180px,240px)_minmax(260px,1fr)_minmax(320px,1.4fr)_120px_140px_auto] xl:items-end">
             <div>

@@ -80,6 +80,9 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 		if requests[idx].Name == "" {
 			return fmt.Errorf("instance name is required")
 		}
+		if !isTeamDistributionCreatableType(requests[idx].Type) {
+			return fmt.Errorf("instance type %q is not available in the team distribution", strings.TrimSpace(requests[idx].Type))
+		}
 		environmentOverrides, err := normalizeEnvironmentOverrides(requests[idx].EnvironmentOverrides)
 		if err != nil {
 			return err
@@ -201,12 +204,21 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 	return nil
 }
 
+func isTeamDistributionCreatableType(instanceType string) bool {
+	switch strings.ToLower(strings.TrimSpace(instanceType)) {
+	case "workbuddy", RuntimeTypeCodex, RuntimeTypeClaudeCode:
+		return false
+	default:
+		return true
+	}
+}
+
 // CreateInstanceRequest holds data for creating an instance
 type CreateInstanceRequest struct {
 	Name                    string              `json:"name" validate:"required,min=3,max=50"`
 	Owner                   *string             `json:"owner,omitempty"`
 	Description             *string             `json:"description,omitempty"`
-	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode workbuddy deepseek-harness codex claude-code"`
+	Type                    string              `json:"type" validate:"required,oneof=openclaw ubuntu debian centos custom webtop hermes opencode deepseek-harness"`
 	RuntimeVariant          string              `json:"runtime_variant,omitempty" validate:"omitempty,oneof=linux windows"`
 	Mode                    string              `json:"mode" validate:"omitempty,oneof=lite pro"`
 	InstanceMode            string              `json:"instance_mode" validate:"omitempty,oneof=lite pro"`
@@ -408,6 +420,13 @@ func (s *instanceService) create(userID int, req CreateInstanceRequest, validate
 				return existing, nil
 			}
 		}
+	}
+	// Only already-persisted northbound operations carry a provisioning
+	// operation ID at this point. Keep those replayable for upgrade
+	// compatibility, while rejecting every new direct or prevalidated request
+	// for products that the team distribution does not ship.
+	if req.ProvisioningOperationID == "" && !isTeamDistributionCreatableType(req.Type) {
+		return nil, fmt.Errorf("instance type %q is not available in the team distribution", req.Type)
 	}
 	req.RuntimeVariant = resolveManagedRuntimeVariantForRequest(req)
 	environmentOverrides, err := normalizeEnvironmentOverrides(req.EnvironmentOverrides)

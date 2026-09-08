@@ -105,7 +105,7 @@ func (p Principal) HasScope(required string) bool {
 type CreateLiteInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
 	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness workbuddy"`
+	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
 	Description *string `json:"description,omitempty"`
 }
 
@@ -115,7 +115,7 @@ type CreateLiteInstanceRequest struct {
 type CreateProInstanceRequest struct {
 	Name        string  `json:"name" binding:"required,min=3,max=50"`
 	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness workbuddy"`
+	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
 	Description *string `json:"description,omitempty"`
 }
 

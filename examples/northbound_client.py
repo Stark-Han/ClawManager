@@ -476,12 +476,11 @@ def run(command: str) -> None:
             "hermes",
             "opencode",
             "deepseek-harness",
-            "workbuddy",
         }
         if instance_type not in allowed_types:
             raise ValueError(
                 "NORTHBOUND_INSTANCE_TYPE must be openclaw, hermes, opencode, "
-                "deepseek-harness, or workbuddy"
+                "or deepseek-harness"
             )
         instance_name = os.getenv("NORTHBOUND_INSTANCE_NAME", "").strip()
         payload: dict[str, Any] = {

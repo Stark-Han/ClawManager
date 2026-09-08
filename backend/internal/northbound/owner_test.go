@@ -132,7 +132,10 @@ func TestNorthboundLiteCreateSupportsEveryManagedLiteRuntime(t *testing.T) {
 		}
 	}
 	if !isSupportedNorthboundType("workbuddy") {
-		t.Fatal("workbuddy must be accepted by the unified northbound contract")
+		t.Fatal("historical workbuddy records must remain supported by the northbound lifecycle contract")
+	}
+	if isCreatableNorthboundType("workbuddy") {
+		t.Fatal("workbuddy must not be accepted for new provisioning in the team distribution")
 	}
 	for _, instanceType := range []string{"codex", "claude-code", "custom"} {
 		if isSupportedNorthboundType(instanceType) {
@@ -198,6 +201,12 @@ func TestProCreateRequestSupportsManagedDesktopRuntimes(t *testing.T) {
 		if isSupportedNorthboundProType(instanceType) {
 			t.Fatalf("runtime %q must not be accepted by this Pro contract", instanceType)
 		}
+	}
+	if !isSupportedNorthboundProType("workbuddy") {
+		t.Fatal("historical WorkBuddy Pro records must remain supported")
+	}
+	if isCreatableNorthboundProType("workbuddy") {
+		t.Fatal("WorkBuddy Pro must not be accepted for new provisioning in the team distribution")
 	}
 }
 

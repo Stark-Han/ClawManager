@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: ClawManager Northbound API
   version: 1.3.0
-  description: Public API for authenticated managed-runtime provisioning and password-protected ShareLink management. The stable `/lite-instances` path accepts four Lite runtimes and Linux WorkBuddy Pro; the server selects the mode from `type`.
+  description: Public API for authenticated managed-runtime provisioning and password-protected ShareLink management. New provisioning accepts OpenClaw, Hermes, OpenCode, and DeepSeek Harness. Existing Linux WorkBuddy records remain readable and manageable for compatibility.
 servers:
   - url: https://northbound.example.com:38443
 paths:
@@ -239,7 +239,7 @@ paths:
   /api/northbound/v1/pro-instances:
     post:
       summary: Submit a managed Pro provisioning operation
-      description: Creates OpenClaw, Hermes, OpenCode, or DeepSeek Harness in dedicated Pro/desktop mode using the enabled DESKTOP image saved in ClawManager system settings. WorkBuddy is also accepted for compatibility and shares its canonical idempotency domain with `POST /lite-instances`.
+      description: Creates OpenClaw, Hermes, OpenCode, or DeepSeek Harness in dedicated Pro/desktop mode using the enabled DESKTOP image saved in ClawManager system settings.
       operationId: createProInstance
       security:
         - bearerAuth: []
@@ -570,8 +570,8 @@ components:
           description: Creator or business owner identifier. The server trims it, stores at most 128 UTF-8 bytes, rejects control characters, and uses case-sensitive exact matching for list queries.
         type:
           type: string
-          enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy]
-          description: Runtime family. OpenClaw, Hermes, OpenCode, and DeepSeek Harness are provisioned as Lite; WorkBuddy is provisioned as a fixed Linux Pro desktop. Callers do not select the mode.
+          enum: [openclaw, hermes, opencode, deepseek-harness]
+          description: Runtime family provisioned as Lite. Callers do not select the mode.
         description:
           type: [string, "null"]
           maxLength: 2000
@@ -593,8 +593,8 @@ components:
           description: Creator or business owner identifier using the same normalization and exact-query contract as CreateLiteInstance.
         type:
           type: string
-          enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy]
-          description: Runtime family. The endpoint fixes Pro/desktop mode and resolves the enabled DESKTOP image saved in ClawManager. WorkBuddy remains Linux-only with 4 CPU, 8 GB memory, 40 GB storage, and no GPU; the other runtimes use 4 CPU, 8 GB memory, 50 GB storage, and no GPU.
+          enum: [openclaw, hermes, opencode, deepseek-harness]
+          description: Runtime family. The endpoint fixes Pro/desktop mode and resolves the enabled DESKTOP image saved in ClawManager. These runtimes use 4 CPU, 8 GB memory, 50 GB storage, and no GPU.
         description:
           type: [string, "null"]
           maxLength: 2000

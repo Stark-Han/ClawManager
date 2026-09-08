@@ -183,6 +183,15 @@ const INSTANCE_TYPE_I18N_KEYS: Record<
   },
 };
 
+// The team distribution does not ship these managed runtime images. Keep
+// their type renderers for existing records, but never offer them for new
+// instances, even when an old image setting remains in the database.
+const HIDDEN_TEAM_INSTANCE_TYPE_IDS = new Set([
+  "workbuddy",
+  "codex",
+  "claude-code",
+]);
+
 const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
   (type) =>
     [
@@ -193,7 +202,7 @@ const FALLBACK_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "deepseek-harness",
       "codex",
       "claude-code",
-    ].includes(type.id),
+    ].includes(type.id) && !HIDDEN_TEAM_INSTANCE_TYPE_IDS.has(type.id),
 );
 const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
   (type) =>
@@ -206,7 +215,7 @@ const CONFIGURED_CREATE_INSTANCE_TYPES = INSTANCE_TYPES.filter(
       "codex",
       "claude-code",
       "custom",
-    ].includes(type.id),
+    ].includes(type.id) && !HIDDEN_TEAM_INSTANCE_TYPE_IDS.has(type.id),
 );
 
 const INSTANCE_MODE_OPTIONS: {
@@ -727,6 +736,7 @@ const CreateInstancePage: React.FC = () => {
         const enabledItems = items.filter(
           (item) =>
             item.is_enabled !== false &&
+            !HIDDEN_TEAM_INSTANCE_TYPE_IDS.has(item.instance_type) &&
             (item.instance_type !== "workbuddy" ||
               resolveManagedRuntimeVariant("workbuddy", item) === "linux"),
         );

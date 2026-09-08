@@ -312,7 +312,6 @@ func main() {
 	var runtimeSchedulerCancel context.CancelFunc
 	var runtimeSchedulerMu sync.Mutex
 	var runtimeScheduler *services.RuntimeScheduler
-	var openClawUpgradeLabHandler *handlers.OpenClawUpgradeLabHandler
 	if controller, ok := teamService.(services.TeamUpgradeMaintenanceController); ok {
 		runtimeUpgradeService.SetTeamMaintenanceController(controller)
 	}
@@ -351,21 +350,6 @@ func main() {
 			)
 			runtimeUpgradeService.SetDeploymentInventoryProvider(runtimeScheduler)
 			runtimeUpgradeService.SetUpgradeGatewayRestarter(runtimeScheduler)
-			if labDeployments, ok := runtimeDeployments.(k8s.RuntimeUpgradeLabDeploymentService); ok {
-				if envBuilder, ok := instanceService.(interface {
-					BuildGatewayEnv(*models.Instance) (map[string]string, error)
-				}); ok {
-					labService := services.NewOpenClawUpgradeLabService(database, instanceRepo, runtimePodRepo, bindingRepo, runtimeAgentClient, labDeployments, runtimeScheduler, runtimeUpgradeService, runtimeScheduler, envBuilder, cfg.Runtime)
-					openClawUpgradeLabHandler = handlers.NewOpenClawUpgradeLabHandler(labService)
-					go func() {
-						recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
-						defer cancelRecovery()
-						if _, recoveryErr := labService.Latest(recoveryCtx); recoveryErr != nil {
-							log.Printf("OpenClaw upgrade lab startup recovery deferred: %v", recoveryErr)
-						}
-					}()
-				}
-			}
 			log.Printf("runtime scheduler initialized")
 		}
 	} else {
@@ -614,15 +598,6 @@ func main() {
 			adminRuntime.POST("/runtime-rollouts", runtimePoolHandler.StartRollout)
 			adminRuntime.POST("/runtime-rollouts/preflight", runtimePoolHandler.PreflightOpenClawRollout)
 			adminRuntime.GET("/runtime-rollouts/:id", runtimePoolHandler.GetRollout)
-			if openClawUpgradeLabHandler != nil {
-				adminRuntime.GET("/openclaw-upgrade-lab", openClawUpgradeLabHandler.Latest)
-				adminRuntime.POST("/openclaw-upgrade-lab", openClawUpgradeLabHandler.CreateBaseline)
-				adminRuntime.GET("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Get)
-				adminRuntime.POST("/openclaw-upgrade-lab/:id/baseline", openClawUpgradeLabHandler.CaptureBaseline)
-				adminRuntime.POST("/openclaw-upgrade-lab/:id/upgrade", openClawUpgradeLabHandler.StartUpgrade)
-				adminRuntime.POST("/openclaw-upgrade-lab/:id/reset", openClawUpgradeLabHandler.Reset)
-				adminRuntime.DELETE("/openclaw-upgrade-lab/:id", openClawUpgradeLabHandler.Cleanup)
-			}
 		}
 
 		teams := api.Group("/teams")

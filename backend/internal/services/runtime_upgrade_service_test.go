@@ -281,8 +281,8 @@ func TestResolvedSourceOpenClawVersionOnlyTrustsPinnedLegacyDigest(t *testing.T)
 	if got := resolvedSourceOpenClawVersion(models.RuntimePod{OpenClawVersion: &reported}); got != reported {
 		t.Fatalf("reported version = %q", got)
 	}
-	baseline := OpenClawUpgradeLabBaselineDigest
-	if got := resolvedSourceOpenClawVersion(models.RuntimePod{ImageDigest: &baseline}); got != OpenClawUpgradeLabBaselineVersion {
+	baseline := openClawLegacyBaselineDigest
+	if got := resolvedSourceOpenClawVersion(models.RuntimePod{ImageDigest: &baseline}); got != openClawLegacyBaselineRuntimeVersion {
 		t.Fatalf("baseline version = %q", got)
 	}
 	if got := resolvedSourceOpenClawVersion(models.RuntimePod{ImageRef: "registry/openclaw:looks-like-7.1"}); got != "" {

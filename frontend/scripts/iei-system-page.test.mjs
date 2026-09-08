@@ -76,10 +76,9 @@ assert(
     listPage.includes("所有者身份已验证") &&
     listPage.includes("实例状态自动同步") &&
     listPage.includes("一切皆插件") &&
-    listPage.includes("你的智能办公搭档") &&
     runtimeCatalog.includes('tagline: "一切皆插件，按需组合智能体能力"') &&
     runtimeCatalog.includes('tagline: "围绕信息、文档与事务持续协作"'),
-  "The owner portal empty state must present all supported runtimes with approved Chinese positioning.",
+  "The owner portal empty state must present team-distribution runtimes while retaining historical presentation metadata.",
 );
 
 assert(

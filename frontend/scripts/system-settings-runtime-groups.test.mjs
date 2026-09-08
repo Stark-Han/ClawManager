@@ -12,11 +12,13 @@ const servicePath = path.resolve(
   "../src/services/systemSettingsService.ts",
 );
 const i18nPath = path.resolve(scriptDir, "../src/lib/i18n.ts");
+const routerPath = path.resolve(scriptDir, "../src/router/index.tsx");
 
 const normalizeNewlines = (source) => source.replace(/\r\n/g, "\n");
 const pageSource = normalizeNewlines(readFileSync(pagePath, "utf8"));
 const serviceSource = normalizeNewlines(readFileSync(servicePath, "utf8"));
 const i18nSource = normalizeNewlines(readFileSync(i18nPath, "utf8"));
+const routerSource = normalizeNewlines(readFileSync(routerPath, "utf8"));
 
 function assert(condition, message) {
   if (!condition) {
@@ -53,12 +55,19 @@ assert(
   "System settings page must keep custom Pro runtime card creation.",
 );
 assert(
-  pageSource.includes('TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS') &&
-    pageSource.includes("new Set(['workbuddy:windows'])") &&
-    pageSource.includes("runtime_variant: 'linux'") &&
-    pageSource.includes('workbuddy-linux:latest') &&
+  pageSource.includes('HIDDEN_TEAM_RUNTIME_CARD_TYPES') &&
+    pageSource.includes("new Set(['workbuddy', 'codex', 'claude-code'])") &&
+    pageSource.includes('!HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(card.instance_type)') &&
+    pageSource.includes('HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(item.instance_type)') &&
     pageSource.includes('isRuntimeCardVisible(item)'),
-  "System settings page must hide only the Windows WorkBuddy image card and keep Linux WorkBuddy configurable.",
+  "System settings must statically hide WorkBuddy, Codex, and Claude Code cards from fixed and persisted image sources.",
+);
+assert(
+  !pageSource.includes('/admin/settings/openclaw-upgrade-lab') &&
+    !pageSource.includes('OpenClaw 升级实验室') &&
+    !routerSource.includes('/admin/settings/openclaw-upgrade-lab') &&
+    !routerSource.includes('OpenClawUpgradeLabPage'),
+  "The team distribution must expose neither an entry nor a route for the OpenClaw upgrade lab.",
 );
 assert(
   pageSource.includes("systemSettingsPage.liteRolloutTitle") &&
@@ -77,11 +86,11 @@ assert(
   "System settings page must not expose the legacy Shell/Desktop selector.",
 );
 assert(
-  pageSource.includes("IMMUTABLE_IMAGE_REFERENCE") &&
-    pageSource.includes("rolloutImmutableTargetRequired") &&
+  pageSource.includes("rolloutRuntimeType === 'openclaw'\n            ? ''") &&
+    pageSource.includes("runtimePoolService.preflightOpenClawRollout") &&
     pageSource.includes("rolloutImmutableTargetHelp") &&
-    pageSource.includes("rolloutRuntimeType === 'openclaw'\n            ? ''"),
-  "OpenClaw rollout must start empty and reject mutable image tags before preflight.",
+    pageSource.includes("preflight.strategy === 'openclaw_8plus_data_safe'"),
+  "OpenClaw rollout must start empty and pass through the dedicated compatibility preflight.",
 );
 
 console.log("System settings runtime grouping source contract is valid.");

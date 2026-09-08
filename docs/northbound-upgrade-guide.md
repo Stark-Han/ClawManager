@@ -1,5 +1,7 @@
 # ClawManager 北向接口版本升级说明
 
+> 团队版迁移说明：团队版不交付 WorkBuddy、Codex 或 Claude Code，也不接受这些类型的新建请求。本文中 WorkBuddy 相关部署步骤仅用于个人版历史记录，不属于团队版上线步骤；团队版只保留既有 WorkBuddy 实例的读取和生命周期兼容。
+
 本文说明如何把已有 ClawManager 升级到本分支的北向接口版本，包含 Lite 实例、Linux
 WorkBuddy 实例、owner 隔离和智慧协作平台单点登录页面。本文适用于仓库中的 Kubernetes 和 K3s 部署；自定义
 部署可按文末的组件清单完成等价升级。

@@ -114,7 +114,7 @@ func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, r
 		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
 	}
 	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundType(req.Type) {
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isCreatableNorthboundType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid instance request", nil)
 	}
 	if !allowedType(s.settings().AllowedLiteTypes, req.Type) {
@@ -173,6 +173,10 @@ func isSupportedNorthboundType(instanceType string) bool {
 	}
 }
 
+func isCreatableNorthboundType(instanceType string) bool {
+	return isSupportedNorthboundType(instanceType) && !strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy")
+}
+
 func isSupportedNorthboundProType(instanceType string) bool {
 	switch strings.ToLower(strings.TrimSpace(instanceType)) {
 	case services.RuntimeTypeOpenClaw,
@@ -194,7 +198,7 @@ func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string
 		return nil, false, apiError(422, "VALIDATION_ERROR", ownerErr.Error(), ownerErr)
 	}
 	req.Owner = owner
-	if len(req.Name) < 3 || len(req.Name) > 50 || !isSupportedNorthboundProType(req.Type) {
+	if len(req.Name) < 3 || len(req.Name) > 50 || !isCreatableNorthboundProType(req.Type) {
 		return nil, false, apiError(422, "VALIDATION_ERROR", "Invalid Pro instance request", nil)
 	}
 	if !allowedType(s.settings().AllowedProTypes, req.Type) {
@@ -218,6 +222,10 @@ func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string
 		OperationTypeProInstance,
 		"Too many unfinished Pro instance operations",
 	)
+}
+
+func isCreatableNorthboundProType(instanceType string) bool {
+	return isSupportedNorthboundProType(instanceType) && !strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy")
 }
 
 func (s *CoreService) SubmitLifecycle(principal Principal, idempotencyKey string, instanceID int, mode, action string) (*models.NorthboundOperation, bool, error) {

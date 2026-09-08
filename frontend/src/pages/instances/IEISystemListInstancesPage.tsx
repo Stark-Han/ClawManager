@@ -29,7 +29,6 @@ const EMPTY_STATE_RUNTIMES = [
   { type: "hermes", description: "自主研究与知识助手" },
   { type: "opencode", description: "开发者代码工作台" },
   { type: "deepseek-harness", description: "一切皆插件" },
-  { type: "workbuddy", description: "你的智能办公搭档" },
 ] as const;
 
 function statusClass(status: string) {

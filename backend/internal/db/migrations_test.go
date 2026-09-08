@@ -86,21 +86,6 @@ func TestOpenClaw81UpgradeMigrationsAreEmbeddedAndDataSafe(t *testing.T) {
 			t.Fatalf("migration 060 must preserve audit and user rows; found %q", destructive)
 		}
 	}
-	lab, err := embeddedMigrations.ReadFile("migrations/061_add_openclaw_upgrade_lab.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	labSQL := string(lab)
-	for _, contract := range []string{"CREATE TABLE IF NOT EXISTS openclaw_upgrade_lab_runs", "baseline_image_digest", "instance_ids_json", "error_code", "checks_json"} {
-		if !strings.Contains(labSQL, contract) {
-			t.Fatalf("migration 061 missing %q", contract)
-		}
-	}
-	for _, destructive := range []string{"ALTER TABLE INSTANCES", "ALTER TABLE RUNTIME_ROLLOUTS", "DELETE FROM", "DROP TABLE", "TRUNCATE"} {
-		if strings.Contains(strings.ToUpper(labSQL), destructive) {
-			t.Fatalf("migration 061 must be additive and isolated; found %q", destructive)
-		}
-	}
 }
 
 func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {

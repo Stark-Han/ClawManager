@@ -1299,6 +1299,32 @@ func TestValidateCreateRequestsChecksAggregateModeCapacity(t *testing.T) {
 	}
 }
 
+func TestValidateCreateRequestsRejectsProductsExcludedFromTeamDistribution(t *testing.T) {
+	service := &instanceService{}
+
+	for _, instanceType := range []string{"workbuddy", RuntimeTypeCodex, RuntimeTypeClaudeCode} {
+		t.Run(instanceType, func(t *testing.T) {
+			err := service.ValidateCreateRequests(45, []CreateInstanceRequest{{
+				Name: "hidden-runtime",
+				Type: instanceType,
+			}})
+			if err == nil || !strings.Contains(err.Error(), "not available in the team distribution") {
+				t.Fatalf("ValidateCreateRequests error = %v, want team distribution rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateCreateRequestsAllowsTeamDistributionRuntimes(t *testing.T) {
+	for _, instanceType := range []string{RuntimeTypeOpenClaw, RuntimeTypeHermes, RuntimeTypeOpenCode, RuntimeTypeDeepSeekHarness} {
+		t.Run(instanceType, func(t *testing.T) {
+			if !isTeamDistributionCreatableType(instanceType) {
+				t.Fatalf("isTeamDistributionCreatableType(%q) = false, want true", instanceType)
+			}
+		})
+	}
+}
+
 func TestInstanceModeResourceLimitRejectsOversizedPro(t *testing.T) {
 	t.Setenv("CLAWMANAGER_PRO_MAX_CPU_CORES", "1.5")
 	service := &instanceService{instanceRepo: newV2LifecycleInstanceRepo()}
