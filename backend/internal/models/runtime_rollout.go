@@ -38,6 +38,11 @@ type RuntimeUpgradeItem struct {
 	TeamMemberID            *int       `db:"team_member_id" json:"team_member_id,omitempty"`
 	InstanceID              int        `db:"instance_id" json:"instance_id"`
 	RuntimePodID            *int64     `db:"runtime_pod_id" json:"runtime_pod_id,omitempty"`
+	SourceGatewayID         *string    `db:"source_gateway_id" json:"-"`
+	SourceGeneration        *int       `db:"source_generation" json:"-"`
+	SourcePodUID            *string    `db:"source_pod_uid" json:"-"`
+	SourceDeploymentName    *string    `db:"source_deployment_name" json:"-"`
+	SourceImageDigest       *string    `db:"source_image_digest" json:"-"`
 	MemberOrder             int        `db:"member_order" json:"member_order"`
 	IsTeamLeader            bool       `db:"is_team_leader" json:"is_team_leader"`
 	SourceRuntimeVersion    *string    `db:"source_runtime_version" json:"source_runtime_version,omitempty"`

@@ -56,8 +56,8 @@ var openClawUpgradeRequiredCapabilities = []string{
 	"openclaw.session-sqlite-preserve-v1",
 	"openclaw.session-continuity-v1",
 	"openclaw.runtime-standby-v1",
-	"openclaw.upgrade-capsule-v2",
-	"openclaw.upgrade-preflight-v3",
+	"openclaw.upgrade-capsule-v3",
+	"openclaw.upgrade-preflight-v4",
 	"redis-team.group-hooks-v1",
 }
 
@@ -145,6 +145,9 @@ type runtimeUpgradeCandidate struct {
 	Availability      string
 	MemberStatus      string
 	SourceVersion     string
+	SourcePodUID      string
+	SourceDeployment  string
+	SourceImageDigest string
 	AgentEndpoint     string
 	Capabilities      []string
 }
@@ -1145,7 +1148,32 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItemMode(ctx context.Context,
 	}
 	if binding == nil {
 		if instanceStatus != "stopped" {
-			return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d is %s without a Runtime binding; runtime reconciliation is required before migration", item.InstanceID, instanceStatus)
+			if requireStable {
+				return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d is %s without a Runtime binding; runtime reconciliation is required before migration", item.InstanceID, instanceStatus)
+			}
+			if !upgradeItemOwnsConfirmedStoppedGateway(item) {
+				return runtimeUpgradeCandidate{}, fmt.Errorf("OPENCLAW_ROLLBACK_SOURCE_IDENTITY_MISSING: instance %d has no confirmed persisted source gateway identity; automatic rollback is safely held", item.InstanceID)
+			}
+			candidate.RuntimePodID = item.RuntimePodID
+			candidate.GatewayID = stringValue(item.SourceGatewayID)
+			candidate.Generation = intValue(item.SourceGeneration, generation)
+			candidate.BindingState = "stopped"
+			if item.RuntimePodID != nil {
+				pod, podErr := s.pods.GetByID(ctx, *item.RuntimePodID)
+				if podErr != nil {
+					return runtimeUpgradeCandidate{}, podErr
+				}
+				if pod != nil && persistedSourcePodMatches(*pod, item) {
+					candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
+					candidate.Capabilities = pod.Capabilities()
+				} else {
+					// A missing or replaced source Pod UID proves the persisted
+					// process cannot still own this gateway.  Keep GatewayID empty
+					// so rollback restores data without contacting an unrelated Pod.
+					candidate.GatewayID = ""
+					candidate.RuntimePodID = nil
+				}
+			}
 		}
 		return candidate, nil
 	}
@@ -1166,6 +1194,38 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItemMode(ctx context.Context,
 	candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
 	candidate.Capabilities = pod.Capabilities()
 	return candidate, nil
+}
+
+func upgradeItemOwnsConfirmedStoppedGateway(item models.RuntimeUpgradeItem) bool {
+	if item.RuntimePodID == nil || item.SourceGatewayID == nil || strings.TrimSpace(*item.SourceGatewayID) == "" || item.SourceGeneration == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(item.State)) {
+	case "quiesced", "migration_started", "migrated", "restart_ready", "gateway_verified", "restored":
+		return true
+	default:
+		return false
+	}
+}
+
+func persistedSourcePodMatches(pod models.RuntimePod, item models.RuntimeUpgradeItem) bool {
+	if item.SourcePodUID != nil && strings.TrimSpace(*item.SourcePodUID) != "" && strings.TrimSpace(stringValue(pod.PodUID)) != strings.TrimSpace(*item.SourcePodUID) {
+		return false
+	}
+	if item.SourceDeploymentName != nil && strings.TrimSpace(*item.SourceDeploymentName) != "" && strings.TrimSpace(pod.DeploymentName) != strings.TrimSpace(*item.SourceDeploymentName) {
+		return false
+	}
+	if item.SourceImageDigest != nil && strings.TrimSpace(*item.SourceImageDigest) != "" && strings.TrimSpace(stringValue(pod.ImageDigest)) != strings.TrimSpace(*item.SourceImageDigest) {
+		return false
+	}
+	return true
+}
+
+func intValue(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func nextRuntimeUpgradeBatch(items []models.RuntimeUpgradeItem, limit int, state string) []models.RuntimeUpgradeItem {
@@ -1455,7 +1515,42 @@ func (s *RuntimeUpgradeService) FailRollback(ctx context.Context, rolloutID int6
 		return
 	}
 	message := rollbackErr.Error()
-	_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'error', rollback_error = ?, updated_at = ? WHERE id = ?`, message, time.Now().UTC(), rolloutID)
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
+	now := time.Now().UTC()
+	// A deterministic rollback failure must not be reconciled forever, and an
+	// instance whose writer binding has already been released must not fall back
+	// into ordinary scheduling against partially migrated state.  Hold only the
+	// unbound instances; a sibling that still has a running binding (for example
+	// one not yet quiesced in the same batch) remains untouched.
+	if err := s.sess.TxContext(ctx, func(tx db.Session) error {
+		if _, err := tx.SQL().ExecContext(ctx, `
+			UPDATE runtime_rollouts
+			SET status = 'error', finished_at = COALESCE(finished_at, ?),
+			    rollback_status = 'error', rollback_error = ?, updated_at = ?
+			WHERE id = ?
+		`, now, message, now, rolloutID); err != nil {
+			return err
+		}
+		_, err := tx.SQL().ExecContext(ctx, `
+			UPDATE instances instance_row
+			JOIN runtime_upgrade_items upgrade_item ON upgrade_item.instance_id = instance_row.id
+			LEFT JOIN instance_runtime_bindings binding
+			  ON binding.instance_id = instance_row.id AND binding.state = 'running'
+			SET instance_row.status = 'error',
+			    instance_row.runtime_error_message = ?,
+			    instance_row.updated_at = ?
+			WHERE upgrade_item.rollout_id = ?
+			  AND binding.id IS NULL
+			  AND LOWER(TRIM(instance_row.status)) NOT IN ('deleting', 'stopped')
+		`, "OpenClaw upgrade rollback is safely held: "+message, now, rolloutID)
+		return err
+	}, nil); err != nil {
+		// Preserve the original failure even if the stronger atomic hold could
+		// not be committed; the next control-plane pass can retry the hold.
+		_, _ = s.sess.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET rollback_status = 'error', rollback_error = ?, updated_at = ? WHERE id = ?`, message, now, rolloutID)
+	}
 }
 
 func (s *RuntimeUpgradeService) RollbackCleanupCandidates(ctx context.Context) ([]models.RuntimeRollout, error) {
@@ -1933,6 +2028,9 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 					blockers = append(blockers, fmt.Sprintf("instance %d source Runtime pod is not ready", instanceID))
 				}
 				candidate.SourceVersion = resolvedSourceOpenClawVersion(pod)
+				candidate.SourcePodUID = stringValue(pod.PodUID)
+				candidate.SourceDeployment = strings.TrimSpace(pod.DeploymentName)
+				candidate.SourceImageDigest = strings.TrimSpace(stringValue(pod.ImageDigest))
 				candidate.AgentEndpoint = stringValue(pod.AgentEndpoint)
 				candidate.Capabilities = pod.Capabilities()
 				if candidate.SourceVersion == "" {
@@ -2683,7 +2781,7 @@ func (s *RuntimeUpgradeService) insertUpgradeItems(ctx context.Context, rolloutI
 	for _, candidate := range candidates {
 		leader := isTeamLeaderRole(candidate.Role)
 		order := candidate.InstanceID
-		item := &models.RuntimeUpgradeItem{RolloutID: rolloutID, TeamID: candidate.TeamID, TeamMemberID: candidate.TeamMemberID, InstanceID: candidate.InstanceID, RuntimePodID: candidate.RuntimePodID, MemberOrder: order, IsTeamLeader: leader, SourceRuntimeVersion: upgradeStringPtrOrNil(candidate.SourceVersion), TargetRuntimeVersion: upgradeStringPtrOrNil(targetVersion), State: "pending", CreatedAt: now, UpdatedAt: now}
+		item := &models.RuntimeUpgradeItem{RolloutID: rolloutID, TeamID: candidate.TeamID, TeamMemberID: candidate.TeamMemberID, InstanceID: candidate.InstanceID, RuntimePodID: candidate.RuntimePodID, SourceGatewayID: upgradeStringPtrOrNil(candidate.GatewayID), SourceGeneration: &candidate.Generation, SourcePodUID: upgradeStringPtrOrNil(candidate.SourcePodUID), SourceDeploymentName: upgradeStringPtrOrNil(candidate.SourceDeployment), SourceImageDigest: upgradeStringPtrOrNil(candidate.SourceImageDigest), MemberOrder: order, IsTeamLeader: leader, SourceRuntimeVersion: upgradeStringPtrOrNil(candidate.SourceVersion), TargetRuntimeVersion: upgradeStringPtrOrNil(targetVersion), State: "pending", CreatedAt: now, UpdatedAt: now}
 		if _, err := s.sess.Collection("runtime_upgrade_items").Insert(item); err != nil {
 			return err
 		}

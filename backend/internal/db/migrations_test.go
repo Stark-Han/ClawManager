@@ -86,6 +86,21 @@ func TestOpenClaw81UpgradeMigrationsAreEmbeddedAndDataSafe(t *testing.T) {
 			t.Fatalf("migration 060 must preserve audit and user rows; found %q", destructive)
 		}
 	}
+	sourceIdentity, err := embeddedMigrations.ReadFile("migrations/061_persist_runtime_upgrade_source_identity.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceIdentitySQL := string(sourceIdentity)
+	for _, required := range []string{"source_gateway_id", "source_generation", "source_pod_uid", "source_deployment_name", "source_image_digest"} {
+		if !strings.Contains(sourceIdentitySQL, required) {
+			t.Fatalf("migration 061 missing %q", required)
+		}
+	}
+	for _, destructive := range []string{"DELETE FROM", "DROP TABLE", "TRUNCATE"} {
+		if strings.Contains(strings.ToUpper(sourceIdentitySQL), destructive) {
+			t.Fatalf("migration 061 must preserve existing rollout and user rows; found %q", destructive)
+		}
+	}
 }
 
 func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {

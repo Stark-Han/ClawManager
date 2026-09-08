@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,6 +78,50 @@ func TestStopCandidateGatewayAcceptsConfirmedConcurrentBindingTransition(t *test
 	}
 	if bindingRepo.bindings[209] != nil || bindingRepo.deleteAndReleaseCalls[209] != 1 {
 		t.Fatalf("concurrent binding was not released: binding=%#v calls=%d", bindingRepo.bindings[209], bindingRepo.deleteAndReleaseCalls[209])
+	}
+}
+
+func TestUnboundRollbackRequiresPersistedConfirmedSourceIdentity(t *testing.T) {
+	podID := int64(9)
+	gatewayID := "gw-209-2"
+	generation := 2
+	item := models.RuntimeUpgradeItem{RuntimePodID: &podID, SourceGatewayID: &gatewayID, SourceGeneration: &generation, State: "migration_started"}
+	if !upgradeItemOwnsConfirmedStoppedGateway(item) {
+		t.Fatal("confirmed post-quiesce item was rejected")
+	}
+	for _, state := range []string{"pending", "prepared", "compatibility_checked", "quiescing"} {
+		item.State = state
+		if upgradeItemOwnsConfirmedStoppedGateway(item) {
+			t.Fatalf("pre-quiesce state %s was allowed to recover without a binding", state)
+		}
+	}
+	item.State = "migrated"
+	item.SourceGatewayID = nil
+	if upgradeItemOwnsConfirmedStoppedGateway(item) {
+		t.Fatal("missing source gateway identity was accepted")
+	}
+}
+
+func TestMissingRollbackSourceIdentityIsDeterministicNotInfrastructureRetryable(t *testing.T) {
+	err := fmt.Errorf("OPENCLAW_ROLLBACK_SOURCE_IDENTITY_MISSING: instance 350 has no confirmed persisted source gateway identity; automatic rollback is safely held")
+	if runtimeUpgradeInfrastructureRetryable(err) {
+		t.Fatal("missing persisted source identity must terminate in a safe hold instead of retrying forever")
+	}
+}
+
+func TestPersistedSourcePodIdentityRejectsReplacement(t *testing.T) {
+	uid := "pod-old"
+	deployment := "openclaw-runtime"
+	digest := "sha256:" + strings.Repeat("a", 64)
+	item := models.RuntimeUpgradeItem{SourcePodUID: &uid, SourceDeploymentName: &deployment, SourceImageDigest: &digest}
+	pod := models.RuntimePod{PodUID: &uid, DeploymentName: deployment, ImageDigest: &digest}
+	if !persistedSourcePodMatches(pod, item) {
+		t.Fatal("matching source Pod identity was rejected")
+	}
+	replacement := "pod-new"
+	pod.PodUID = &replacement
+	if persistedSourcePodMatches(pod, item) {
+		t.Fatal("replacement Pod was mistaken for the stopped source writer")
 	}
 }
 
@@ -269,7 +314,7 @@ func TestOpenClawUpgradeContractExcludesFullWorkspaceSnapshots(t *testing.T) {
 	if strings.Contains(joined, "workspace.snapshot") || strings.Contains(joined, "workspace.atomic-restore") {
 		t.Fatalf("full-workspace capability remained in upgrade contract: %s", joined)
 	}
-	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.session-sqlite-preserve-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v2", "openclaw.upgrade-preflight-v3"} {
+	for _, required := range []string{"openclaw.session-sqlite-migrate-v1", "openclaw.session-sqlite-restore-v1", "openclaw.session-sqlite-preserve-v1", "openclaw.runtime-standby-v1", "openclaw.upgrade-capsule-v3", "openclaw.upgrade-preflight-v4"} {
 		if !containsString(openClawUpgradeRequiredCapabilities, required) {
 			t.Fatalf("missing capability %s", required)
 		}
