@@ -392,7 +392,9 @@ func TestInspectOpenClawRegistryImageSelectsUpgradeStrategyFromImageMetadata(t *
 	}{
 		{name: "older labelled OpenClaw keeps generic rolling update", version: "2026.6.5", want: RuntimeUpgradeStrategyLegacyRolling},
 		{name: "legacy 7.1 keeps generic rolling update", version: "2026.7.1-2", want: RuntimeUpgradeStrategyLegacyRolling},
-		{name: "unknown image rejects missing version metadata", wantErr: true},
+		{name: "unlabelled legacy image keeps generic rolling update", want: RuntimeUpgradeStrategyLegacyRolling},
+		{name: "malformed legacy version keeps generic rolling update", version: "legacy", want: RuntimeUpgradeStrategyLegacyRolling},
+		{name: "partial data safe contract without version is rejected", strategy: openClawDataSafeImageStrategy, wantErr: true},
 		{name: "empty pool accepts missing version metadata", imageOnlyReset: true, want: RuntimeUpgradeStrategyLegacyRolling},
 		{name: "8.1 uses data safe update", version: "2026.8.1", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},
 		{name: "later compatible version uses data safe update", version: "2026.9.0", strategy: openClawDataSafeImageStrategy, protocol: openClawDataSafeProtocol, want: RuntimeUpgradeStrategyOpenClawDataSafe},

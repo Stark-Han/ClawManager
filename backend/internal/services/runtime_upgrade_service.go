@@ -247,7 +247,7 @@ func (s *RuntimeUpgradeService) Preflight(ctx context.Context, req RuntimeUpgrad
 		if result.EmptyPoolReset {
 			result.Warnings = []string{"The ordinary OpenClaw Lite pool is empty and has no user state to migrate; only the Runtime image will be rolled to the pinned target digest"}
 		} else {
-			result.Warnings = []string{"The target is an OpenClaw version before 2026.8.1 and will use the unchanged legacy Lite rolling update path"}
+			result.Warnings = []string{"The target does not declare the OpenClaw 2026.8.1 data-safe upgrade contract and will use the unchanged legacy Lite rolling update path"}
 		}
 		return result, nil
 	}
@@ -3004,15 +3004,16 @@ func inspectOpenClawRegistryImage(ctx context.Context, target string, sourceImag
 	if version == "" {
 		version = strings.TrimSpace(env["CLAWMANAGER_OPENCLAW_VERSION"])
 	}
-	_, versionOK := parseOpenClawNumericVersion(version)
-	if !versionOK && !imageOnlyReset {
-		return nil, fmt.Errorf("target OpenClaw image does not publish a valid runtime version")
-	}
 	strategy := RuntimeUpgradeStrategyLegacyRolling
 	protocol := ""
-	if !imageOnlyReset && openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
-		imageStrategy := strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.strategy"])
-		protocol = strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.protocol"])
+	imageStrategy := strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.strategy"])
+	imageProtocol := strings.TrimSpace(config.Config.Labels["io.clawmanager.upgrade.protocol"])
+	_, versionOK := parseOpenClawNumericVersion(version)
+	if !imageOnlyReset && !versionOK && (imageStrategy != "" || imageProtocol != "") {
+		return nil, fmt.Errorf("target OpenClaw image publishes an incomplete data-safe upgrade contract without a valid runtime version")
+	}
+	if !imageOnlyReset && versionOK && openClawVersionAtLeast(version, targetOpenClawUpgradeVersion) {
+		protocol = imageProtocol
 		if imageStrategy != openClawDataSafeImageStrategy || protocol != openClawDataSafeProtocol {
 			return nil, fmt.Errorf("OpenClaw %s image lacks the supported data-safe upgrade contract", version)
 		}
