@@ -59,6 +59,9 @@
 
 Recent highlights from the latest product and documentation updates.
 
+- [2026-09-08] Hardened data-safe OpenClaw Lite rollouts with version-aware preflight, migration verification, bounded recovery, and source-identity rollback. Legacy images without the 8.1 capability marker continue to use the established rolling-update path.
+- [2026-09-02] Expanded the Northbound API and owner-scoped portal with OpenClaw, Hermes, OpenCode, and DeepSeek Harness Lite/Pro provisioning, asynchronous lifecycle operations, and protected Share Link management. See the [Northbound API Guide](./docs/northbound-api-guide.md).
+- [2026-09-01] Added LDAP enterprise authentication, expanded managed provider model catalogs, and dedicated browser origins for managed OpenCode and DeepSeek Harness instances.
 - [2026-08-19] Added managed OpenCode workspaces, refreshed the instance desktop experience, and expanded Skill Hub delivery to OpenClaw, Hermes, and OpenCode runtimes. See the [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_en.md).
 - [2026-08-18] Expanded Team collaboration with eight read-only built-in templates, natural-language custom Team templates, optional Hermes Lite Workers, live Execution Kanban, shared artifacts, and member-session visibility.
 - [2026-08-17] Added model-managed Thinking, AI Gateway Session Usage, editable scheduled tasks, and improved Lite instance lifecycle and batch operations.
@@ -159,6 +162,12 @@ The cluster profile is validated with Longhorn (`longhorn` for RWO data and `lon
 ### Runtime and Instance Management
 
 Create OpenClaw, Hermes, OpenCode, or DeepSeek Harness workspaces in Lite or Pro mode, choose an enabled system image, apply a resource preset or custom CPU/memory/storage values, and manage lifecycle, desktop access, files, shell access, environment variables, archives, Share Links, and Lite batch operations from one place.
+
+### Northbound API and Enterprise Access
+
+Integrate ClawManager with external systems through a separately deployed Northbound gateway. One-time JWE authentication, scoped tokens, owner isolation, idempotent asynchronous operations, rate limits, audit records, and gateway-to-Core mTLS keep the public integration boundary separate from the management console. Administrators can also configure LDAP/LDAPS or StartTLS authentication, preview and import directory users, and map groups to platform roles.
+
+The Northbound API manages supported OpenClaw, Hermes, OpenCode, and DeepSeek Harness Lite/Pro instances, including create, query, restart, confirmed reset, and password-protected Share Links. See the [Northbound API Guide](./docs/northbound-api-guide.md) and [deployment add-on](./deployments/k8s/northbound/README.md).
 
 ### AI Gateway
 

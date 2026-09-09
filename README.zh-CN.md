@@ -59,6 +59,9 @@
 
 这里展示最近的重要产品与文档更新。
 
+- [2026-09-08] 完善 OpenClaw Lite 数据安全滚动升级：增加版本感知预检、迁移校验、有界恢复和基于源身份的自动回退；未携带 8.1 能力标识的旧镜像继续使用原有滚动更新流程。
+- [2026-09-02] 扩展北向接口与 Owner 隔离门户，支持 OpenClaw、Hermes、OpenCode、DeepSeek Harness 的 Lite / Pro 创建、异步生命周期操作和受保护的 Share Link 管理。详见[北向接口使用说明](./docs/northbound-api-guide.md)。
+- [2026-09-01] 新增 LDAP 企业认证，扩展托管 Provider 模型目录，并为受管 OpenCode 与 DeepSeek Harness 实例提供独立浏览器域名。
 - [2026-08-19] 新增受管 OpenCode 工作空间，更新实例桌面体验，并将 Skill Hub 能力交付扩展到 OpenClaw、Hermes 与 OpenCode Runtime。详见 [OpenCode 工作空间指南](./docs/opencode-lite-pro-agent-development.md)。
 - [2026-08-18] 完善 Team 协作：8 个只读内置模板、自然语言生成的自定义 Team、可选 Hermes Lite Worker、实时 Execution Kanban、共享产物与成员会话查看。
 - [2026-08-17] 新增模型级托管 Thinking、AI Gateway 会话用量、定时任务编辑，以及更完善的 Lite 实例生命周期和批量操作。
@@ -160,6 +163,12 @@ ClawManager 现在将 Kubernetes 发行版与存储 profile 拆开。先选择 `
 ### Runtime 与实例管理
 
 创建 OpenClaw、Hermes、OpenCode 或 DeepSeek Harness 的 Lite / Pro 工作空间，选择已启用的系统镜像和资源规格，并在同一界面管理生命周期、桌面、文件、Shell、环境变量、归档、Share Link 与 Lite 批量操作。
+
+### 北向接口与企业接入
+
+通过独立部署的北向 Gateway 将 ClawManager 接入外部系统。一次性 JWE 登录、权限 Scope、Owner 隔离、幂等异步操作、限流、审计，以及 Gateway 到 Core 的 mTLS，共同保证对外集成边界与管理控制台相互隔离。管理员还可配置 LDAP/LDAPS 或 StartTLS 企业认证，预览并导入目录用户，并将 LDAP Group 映射为平台角色。
+
+北向接口可管理 OpenClaw、Hermes、OpenCode 与 DeepSeek Harness 的 Lite / Pro 实例，覆盖创建、查询、重启、显式确认的数据重置和密码模式 Share Link。详见[北向接口使用说明](./docs/northbound-api-guide.md)与[部署附加包](./deployments/k8s/northbound/README.md)。
 
 <a id="ai-gateway"></a>
 ### AI Gateway
