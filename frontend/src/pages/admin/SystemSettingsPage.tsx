@@ -36,7 +36,7 @@ const LITE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     instance_type: 'openclaw',
     runtime_type: 'gateway',
     display_name: 'OpenClaw Lite',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest',
   },
   {
     instance_type: 'hermes',
@@ -63,7 +63,7 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     instance_type: 'openclaw',
     runtime_type: 'desktop',
     display_name: 'OpenClaw Pro',
-    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:2026.8.1',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest',
   },
   {
     instance_type: 'hermes',

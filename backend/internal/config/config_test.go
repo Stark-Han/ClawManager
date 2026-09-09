@@ -30,7 +30,7 @@ func TestLoadRuntimeDefaults(t *testing.T) {
 	if got, want := cfg.Runtime.HermesImage, "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"; got != want {
 		t.Fatalf("expected Hermes default image %q, got %q", want, got)
 	}
-	if got, want := cfg.Runtime.OpenClawImage, "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1"; got != want {
+	if got, want := cfg.Runtime.OpenClawImage, "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"; got != want {
 		t.Fatalf("expected OpenClaw default image %q, got %q", want, got)
 	}
 	if got, want := cfg.Runtime.OpenCodeImage, "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"; got != want {

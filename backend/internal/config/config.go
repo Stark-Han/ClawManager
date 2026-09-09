@@ -428,7 +428,7 @@ func Load() (*Config, error) {
 			SchedulerEnabled:          getEnvBool("RUNTIME_SCHEDULER_ENABLED", true),
 			HeartbeatTimeout:          getEnvDuration("RUNTIME_HEARTBEAT_TIMEOUT", 10*time.Second),
 			SchedulerTick:             getEnvDuration("RUNTIME_SCHEDULER_TICK", 2*time.Second),
-			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1"),
+			OpenClawImage:             getEnv("OPENCLAW_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest"),
 			HermesImage:               getEnv("HERMES_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite:latest"),
 			OpenCodeImage:             getEnv("OPENCODE_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/opencode-lite:latest"),
 			MaxGatewaysPerPod:         getEnvInt("RUNTIME_MAX_GATEWAYS_PER_POD", 100),

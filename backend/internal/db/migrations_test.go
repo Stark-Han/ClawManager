@@ -101,6 +101,27 @@ func TestOpenClaw81UpgradeMigrationsAreEmbeddedAndDataSafe(t *testing.T) {
 			t.Fatalf("migration 061 must preserve existing rollout and user rows; found %q", destructive)
 		}
 	}
+	followLatest, err := embeddedMigrations.ReadFile("migrations/062_follow_openclaw_latest_images.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	followLatestSQL := string(followLatest)
+	for _, required := range []string{
+		"ghcr.io/yuan-lab-llm/agentsruntime/openclaw:2026.8.1",
+		"ghcr.io/yuan-lab-llm/agentsruntime/openclaw:latest",
+		"ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:2026.8.1",
+		"ghcr.io/yuan-lab-llm/agentsruntime/openclaw-lite:latest",
+		"image IN",
+	} {
+		if !strings.Contains(followLatestSQL, required) {
+			t.Fatalf("migration 062 missing %q", required)
+		}
+	}
+	for _, destructive := range []string{"DELETE FROM", "DROP TABLE", "TRUNCATE"} {
+		if strings.Contains(strings.ToUpper(followLatestSQL), destructive) {
+			t.Fatalf("migration 062 must preserve custom image settings and user rows; found %q", destructive)
+		}
+	}
 }
 
 func TestMigration034UpdatesLiteDefaultImages(t *testing.T) {
