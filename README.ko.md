@@ -312,6 +312,10 @@ Runtime과 Protocol 기술 자료는 Contributor를 위해 `docs/`에 유지하�
 - [Resource Management Guide](./docs/resource-management_ko.md)
 - [Skill Hub Guide](./docs/skill-hub-guide_ko.md)
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_ko.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
+- [Northbound API Guide (중국어)](./docs/northbound-api-guide.md)
+- [Northbound API Upgrade Guide (중국어)](./docs/northbound-upgrade-guide.md)
+- [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
 
 ## 라이선스
 

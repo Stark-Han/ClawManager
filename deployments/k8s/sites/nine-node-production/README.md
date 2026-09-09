@@ -142,15 +142,14 @@ database-client change and a new ClawManager image first.
 ## Production image registry
 
 All active workload images in this site use `10.130.15.40:5000`. The application,
-four Lite Runtime pools, WorkBuddy Linux Pro, MySQL, Redis, MinIO, Skill Scanner,
-all Longhorn components and `kubectl:v1.31.14` were checked against the remote
+managed Runtime images, MySQL, Redis, MinIO, Skill Scanner, all Longhorn
+components and `kubectl:v1.31.14` were checked against the remote
 Registry manifests on 2026-08-24. All 24 target digests were present and all
 image configs reported `linux/amd64`.
 
-The database bootstrap also stores the site-local images for OpenClaw Lite,
-Hermes Lite, OpenCode Lite, DeepSeek Harness Lite and WorkBuddy Linux Pro. This
-prevents a fresh installation from reverting those managed Runtime paths to an
-external default image.
+The database bootstrap also stores the site-local images for the supported Lite
+and Pro runtimes. This prevents a fresh installation from reverting those
+managed Runtime paths to an external default image.
 
 ## Required checks
 

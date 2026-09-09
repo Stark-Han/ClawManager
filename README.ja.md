@@ -312,6 +312,10 @@ Runtime と Protocol の技術資料は Contributor 向けに `docs/` に残し�
 - [Resource Management Guide](./docs/resource-management_ja.md)
 - [Skill Hub Guide](./docs/skill-hub-guide_ja.md)
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_ja.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
+- [Northbound API Guide（中国語）](./docs/northbound-api-guide.md)
+- [Northbound API Upgrade Guide（中国語）](./docs/northbound-upgrade-guide.md)
+- [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
 
 ## ライセンス
 

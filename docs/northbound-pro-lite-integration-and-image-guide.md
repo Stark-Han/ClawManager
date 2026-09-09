@@ -1,35 +1,12 @@
 # ClawManager 北向接口 Pro/Lite 接入与镜像配置说明
 
-> 团队版迁移说明：团队版不交付 WorkBuddy、Codex 或 Claude Code，也不接受这些类型的新建请求。本文保留的 WorkBuddy 内容是个人版历史集成资料，不应作为团队版构建、推送或验收依据。
-
 ## 1. 版本与交付物
 
-本文对应 ClawManager 提交：
-
-```text
-commit: 2d3456c
-branch: codex/northbound-all-pro-runtime
-feature: support configured pro runtimes
-```
-
-ClawManager 应用镜像：
-
-```text
-10.130.14.23:5000/clawmanager-hxc-app:northbound-all-pro-20260827-2d3456c
-```
-
-离线 TAR：
-
-```text
-clawmanager-hxc-app_northbound-all-pro_20260827-2d3456c.tar
-SHA-256: 0225980fccda0e25eebd140a42150b7556bd09db9fdb96369f7423d9326e5582
-```
-
-该 TAR 只包含 ClawManager 应用镜像，不包含 OpenClaw、Hermes、OpenCode、DeepSeek Harness、WorkBuddy 等 Runtime 镜像。本次不提供 Runtime 合并 TAR；部署方应从本文给出的源 Registry 自行拉取、转存或按现场方式导入。
+本文不绑定某个临时分支、测试标签或内网 Registry。部署时应从目标发布提交构建并记录不可变的 ClawManager 镜像摘要。ClawManager 应用镜像不包含 OpenClaw、Hermes、OpenCode、DeepSeek Harness 等 Runtime 镜像；部署方应分别准备并验证每个启用 Runtime 的镜像。
 
 ## 2. 本次北向接口增加的能力
 
-本次改动在原有 Lite 创建流程之外，增加了独立的 Pro 创建、查询和镜像解析能力，同时保留 WorkBuddy 的兼容调用方式。
+北向接口在 Lite 创建流程之外，提供独立的 Pro 创建、查询和镜像解析能力。
 
 ### 2.1 支持的 Runtime 矩阵
 
@@ -38,8 +15,7 @@ SHA-256: 0225980fccda0e25eebd140a42150b7556bd09db9fdb96369f7423d9326e5582
 | OpenClaw | 支持 | 支持 | Lite 使用共享 Gateway Pool；Pro 使用独立桌面实例 |
 | Hermes | 支持 | 支持 | Lite 使用共享 Gateway Pool；Pro 使用独立桌面实例 |
 | OpenCode | 支持 | 支持 | Lite 使用共享 Gateway Pool；Pro 使用独立桌面实例 |
-| DeepSeek Harness | 支持 | 暂不支持 | 当前北向仅开放 Lite |
-| WorkBuddy | 不提供 Lite | 支持 | 固定创建 Linux Pro；为兼容既有调用方，仍可通过 Lite 创建路径提交 |
+| DeepSeek Harness | 支持 | 支持 | Lite 使用共享 Gateway Pool；Pro 使用独立桌面实例 |
 
 ### 2.2 新增 Pro 接口
 
@@ -55,12 +31,12 @@ Pro 接口支持的 `type`：
 openclaw
 hermes
 opencode
-workbuddy
+deepseek-harness
 ```
 
-其中 OpenClaw、Hermes、OpenCode 通过 Pro 接口创建真正的独立桌面实例。WorkBuddy 也接受 Pro 路径，但服务端会将其归一到兼容操作域，避免同一幂等键在 Lite/Pro 路径间重复创建。
+四种 Runtime 都通过 Pro 接口创建独立桌面实例。
 
-### 2.3 保留的 Lite/兼容接口
+### 2.3 Lite 接口
 
 ```text
 POST /api/northbound/v1/lite-instances
@@ -75,15 +51,12 @@ openclaw
 hermes
 opencode
 deepseek-harness
-workbuddy
 ```
 
 服务端根据 `type` 决定实际模式：
 
 - OpenClaw、Hermes、OpenCode、DeepSeek Harness：创建 Lite 实例。
-- WorkBuddy：固定创建 Linux Pro 实例。
 - 调用方不能在请求体中传 `mode`、镜像、CPU、内存或磁盘参数。
-- WorkBuddy 继续走原来的统一创建路径，调用方不需要为了 WorkBuddy 改用第二套流程。
 
 ### 2.4 ShareLink 对 Lite 和 Pro 保持统一
 
@@ -116,8 +89,7 @@ Pro 资源由服务端固定：
 
 | Pro 类型 | CPU | 内存 | 磁盘 | GPU |
 |---|---:|---:|---:|---:|
-| OpenClaw / Hermes / OpenCode | 4 核 | 8 GB | 50 GB | 无 |
-| WorkBuddy Linux | 4 核 | 8 GB | 40 GB | 无 |
+| OpenClaw / Hermes / OpenCode / DeepSeek Harness | 4 核 | 8 GB | 50 GB | 无 |
 
 ## 4. 北向认证流程
 
@@ -272,41 +244,12 @@ Pro 接口当前支持：
 openclaw
 hermes
 opencode
-workbuddy
+deepseek-harness
 ```
 
-DeepSeek Harness Pro 已通过北向 `/pro-instances` 开放。服务端固定读取 ClawManager 中已保存且启用的 `deepseek-harness` DESKTOP 镜像，调用方不能提交任意镜像地址。
+服务端固定读取 ClawManager 中已保存且启用的对应 DESKTOP 镜像，调用方不能提交任意镜像地址。
 
-## 8. WorkBuddy 兼容调用
-
-推荐调用方继续使用原有统一创建路径，只改变 `type`：
-
-```http
-POST /api/northbound/v1/lite-instances
-
-{
-  "name": "demo-workbuddy",
-  "owner": "user@example.com",
-  "type": "workbuddy",
-  "description": "智能办公搭档"
-}
-```
-
-服务端会自动处理为：
-
-```text
-模式：Pro
-后端：desktop
-系统：Linux
-CPU：4 核
-内存：8 GB
-磁盘：40 GB
-GPU：无
-```
-
-示例客户端检测到 `type=workbuddy` 时也会自动使用兼容路径，不需要调用方再维护分支。
-
-## 9. 异步 Operation
+## 8. 异步 Operation
 
 创建接口返回 Operation，不保证 Runtime 已经立即可访问。调用方必须轮询：
 
@@ -345,7 +288,7 @@ failed
 
 Operation 成功只表示创建流程完成。前端仍应根据实例 `availability` 判断 Runtime 是否已真正可访问。
 
-## 10. 查询实例
+## 9. 查询实例
 
 Lite/兼容视图：
 
@@ -371,7 +314,7 @@ $env:NORTHBOUND_INSTANCE_MODE = "pro"
 python examples/northbound_client.py list
 ```
 
-## 11. Lite Runtime 镜像配置
+## 10. Lite Runtime 镜像配置
 
 Lite 实例不会为每个实例单独创建 Runtime Pod，而是进入对应共享 Gateway Pool。因此 Lite 镜像需要落实到集群 Deployment。
 
@@ -407,7 +350,7 @@ kubectl -n <system-namespace> rollout status deployment/opencode-runtime
 kubectl -n <system-namespace> rollout status deployment/deepseek-harness-runtime
 ```
 
-## 12. Pro Runtime 镜像配置
+## 11. Pro Runtime 镜像配置
 
 Pro 镜像不再由北向 YAML 写死，也不允许调用方在请求体传入。北向服务在创建时读取 ClawManager 数据库中已启用的 `desktop` 镜像卡片。
 
@@ -426,7 +369,7 @@ OpenClaw、Hermes、OpenCode 当前 Lite/Pro 使用相同构建内容。部署�
 | OpenClaw Pro | `openclaw` | `desktop` | 空 | `<目标Registry>/agentsruntime/openclaw:master-20260824-737ad4c` |
 | Hermes Pro | `hermes` | `desktop` | 空 | `<目标Registry>/agentsruntime/hermes:profile-skill-dedupe-20260826-0bf0a76` |
 | OpenCode Pro | `opencode` | `desktop` | 空 | `<目标Registry>/agentsruntime/opencode:master-20260825-987f05d` |
-| WorkBuddy Pro | `workbuddy` | `desktop` | `linux` | `10.130.15.40:5000/agentsruntime/workbuddy-linux:2026.8.1` 或转存 tag |
+| DeepSeek Harness Pro | `deepseek-harness` | `desktop` | 空 | `<目标Registry>/agentsruntime/deepseek-harness:<immutable-tag>` |
 
 转存示例：
 
@@ -459,18 +402,6 @@ DELETE /api/v1/system-settings/images/{id-or-instanceType}
 }
 ```
 
-保存 WorkBuddy 时必须明确 Linux 变体：
-
-```json
-{
-  "instance_type": "workbuddy",
-  "runtime_type": "desktop",
-  "runtime_variant": "linux",
-  "display_name": "WorkBuddy Pro",
-  "image": "10.130.15.40:5000/agentsruntime/workbuddy-linux:2026.8.1"
-}
-```
-
 北向创建时按 `instance_type + runtime_type=desktop` 精确选择镜像，防止同一个 Runtime 同时存在 Lite/Pro 卡片时错误命中 Lite 镜像。
 
 如果没有启用对应 Desktop 镜像，Pro 创建返回：
@@ -479,7 +410,7 @@ DELETE /api/v1/system-settings/images/{id-or-instanceType}
 PRO_IMAGE_NOT_CONFIGURED
 ```
 
-## 13. 镜像关系说明
+## 12. 镜像关系说明
 
 OpenClaw、Hermes、OpenCode 的 Lite/Pro 镜像可以来自相同构建内容，但建议使用不同 Registry 仓库名：
 
@@ -496,19 +427,14 @@ agentsruntime/opencode:<tag>
 
 即使镜像 digest 相同，分开命名仍能明确表达部署模式，并避免运维人员把 Gateway Pool 镜像误配置到 Desktop 卡片。
 
-DeepSeek Harness 当前北向只使用：
+DeepSeek Harness 同样分别配置 Lite Pool 和 Pro Desktop 镜像：
 
 ```text
 agentsruntime/deepseek-harness-lite:<tag>
+agentsruntime/deepseek-harness:<tag>
 ```
 
-WorkBuddy 当前只使用：
-
-```text
-agentsruntime/workbuddy-linux:<tag>
-```
-
-## 14. 在 k3s 中导入 ClawManager TAR
+## 13. 在 k3s 中导入 ClawManager TAR
 
 校验：
 
@@ -527,7 +453,7 @@ sudo k3s crictl images | grep clawmanager-hxc-app
 
 多节点集群中，需要保证可能运行 `clawmanager-app` 和 `clawmanager-northbound-gateway` 的节点都能获取该镜像。部署方可以逐节点导入，也可以导入后转存到所有节点可访问的 Registry。
 
-## 15. k3s 部署注意事项
+## 14. k3s 部署注意事项
 
 部署方应将 ClawManager 应用镜像引用写入自己的 k3s 安装配置，并保证 `clawmanager-app` 与 `clawmanager-northbound-gateway` 使用同一版本。
 
@@ -553,7 +479,7 @@ kubectl -n <system-namespace> rollout status deployment/clawmanager-app
 kubectl -n <system-namespace> rollout status deployment/clawmanager-northbound-gateway
 ```
 
-## 16. 验收清单
+## 15. 验收清单
 
 ### 北向基础能力
 
@@ -574,9 +500,8 @@ kubectl -n <system-namespace> rollout status deployment/clawmanager-northbound-g
 
 ### Pro
 
-- OpenClaw、Hermes、OpenCode 通过 `/pro-instances` 创建。
+- OpenClaw、Hermes、OpenCode、DeepSeek Harness 通过 `/pro-instances` 创建。
 - 创建时命中管理后台保存的 Desktop 镜像，而不是 Lite 镜像。
-- WorkBuddy 通过兼容路径创建后实际为 Linux Pro。
 - Pro 实例 Pod 使用预期镜像和资源规格。
 - 实例重启后工作区仍保留。
 
@@ -588,16 +513,9 @@ kubectl -n <system-namespace> rollout status deployment/clawmanager-northbound-g
 - IEI Owner 门户能列出同一 owner 的 Lite 与 Pro 实例。
 - “进入实例”只在实例真正可用后开放。
 
-## 17. 当前实测结果
+## 16. 验收记录要求
 
-在对应部署上已使用北向接口完成全矩阵验收：
-
-```text
-35 项接口检查通过
-0 项失败
-```
-
-创建并达到 `available` 的实例组合：
+每次发布都应保存对应提交、镜像摘要、环境和时间，并记录以下矩阵与接口检查的实际结果；不得沿用其他版本的静态通过数字：
 
 ```text
 OpenClaw Lite
@@ -607,10 +525,10 @@ DeepSeek Harness Lite
 OpenClaw Pro
 Hermes Pro
 OpenCode Pro
-WorkBuddy Pro
+DeepSeek Harness Pro
 ```
 
-实测同时覆盖：
+接口检查至少覆盖：
 
 ```text
 challenge/login

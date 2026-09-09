@@ -312,11 +312,10 @@ Runtime and protocol implementation references remain under `docs/` for contribu
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_en.md)
 - [Hermes Runtime Guide](./docs/hermes-runtime-agent-development.md)
 - [Generic Runtime Agent Integration Guide](./docs/runtime-agent-integration-guide.md)
-- [Skill Content MD5 Spec](./docs/skill-content-md5-spec.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
 - [Northbound API Guide (Chinese)](./docs/northbound-api-guide.md)
 - [Northbound API Upgrade Guide (Chinese)](./docs/northbound-upgrade-guide.md)
 - [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
-- [Developer Guide](./docs/developer-guide.md)
 
 ## License
 

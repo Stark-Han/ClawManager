@@ -312,6 +312,10 @@ Technische Runtime- und Protokollreferenzen bleiben fuer Mitwirkende unter `docs
 - [Resource Management Guide](./docs/resource-management_de.md)
 - [Skill Hub Guide](./docs/skill-hub-guide_de.md)
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_de.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
+- [Northbound API Guide (Chinesisch)](./docs/northbound-api-guide.md)
+- [Northbound API Upgrade Guide (Chinesisch)](./docs/northbound-upgrade-guide.md)
+- [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
 
 ## Lizenz
 

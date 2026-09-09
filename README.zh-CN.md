@@ -315,6 +315,10 @@ ClawManager 是一个 Kubernetes 原生平台，包含 React 前端、Go 后端�
 - [资源管理指南](./docs/resource-management_cn.md)
 - [Skill Hub 使用指南](./docs/skill-hub-guide.md)
 - [OpenCode 工作空间指南](./docs/opencode-lite-pro-agent-development.md)
+- [北向接口 Kubernetes 部署附加包](./deployments/k8s/northbound/README.md)
+- [北向接口使用说明](./docs/northbound-api-guide.md)
+- [北向接口版本升级说明](./docs/northbound-upgrade-guide.md)
+- [北向接口 OpenAPI 3.1 规范](./docs/northbound-openapi.yaml)
 
 ## 许可证
 

@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: ClawManager Northbound API
   version: 1.3.0
-  description: Public API for authenticated managed-runtime provisioning and password-protected ShareLink management. New provisioning accepts OpenClaw, Hermes, OpenCode, and DeepSeek Harness. Existing Linux WorkBuddy records remain readable and manageable for compatibility.
+  description: Public API for authenticated OpenClaw, Hermes, OpenCode, and DeepSeek Harness provisioning and password-protected ShareLink management.
 servers:
   - url: https://northbound.example.com:38443
 paths:
@@ -275,7 +275,7 @@ paths:
           $ref: "#/components/responses/RateLimited"
     get:
       summary: List the current user's supported Pro instances
-      description: Returns OpenClaw, Hermes, OpenCode, DeepSeek Harness, and Linux WorkBuddy Pro instances for the exact owner.
+      description: Returns OpenClaw, Hermes, OpenCode, and DeepSeek Harness Pro instances for the exact owner.
       operationId: listProInstances
       security:
         - bearerAuth: []
@@ -366,7 +366,7 @@ paths:
   /api/northbound/v1/lite-instances/{id}/external-access/password:
     post:
       summary: Enable password-protected ShareLink access for a supported instance
-      description: Requires `lite-instances:share-link:manage`. Supports the managed Lite runtimes plus OpenClaw, Hermes, OpenCode, and Linux WorkBuddy Pro. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
+      description: Requires `lite-instances:share-link:manage`. Supports OpenClaw, Hermes, OpenCode, and DeepSeek Harness Lite and Pro instances. Any previous external-access URL and credentials are replaced. The generated password is returned in this response and must not be logged.
       operationId: enableLiteInstanceShareLinkPassword
       security:
         - bearerAuth: []
@@ -643,7 +643,7 @@ components:
         name: { type: string, description: Instance display name. }
         owner: { type: string, description: Creator or business owner identifier stored on this instance. }
         description: { type: [string, "null"], description: Optional instance metadata. }
-        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy], description: Managed runtime family; workbuddy identifies the fixed Linux Pro runtime. }
+        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness], description: Managed runtime family. }
         instance_mode: { type: string, enum: [lite, pro], description: Effective instance mode selected by the server. }
         runtime_type: { type: string, enum: [gateway, desktop, shell], description: Effective runtime backend. }
         runtime_variant: { type: string, enum: [linux, windows], description: Optional managed runtime variant. }
@@ -660,7 +660,7 @@ components:
         name: { type: string }
         owner: { type: string }
         description: { type: [string, "null"] }
-        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness, workbuddy] }
+        type: { type: string, enum: [openclaw, hermes, opencode, deepseek-harness] }
         instance_mode: { type: string, const: pro }
         runtime_type: { type: string, const: desktop }
         runtime_variant: { type: string, enum: [linux, windows] }
