@@ -33,21 +33,22 @@ import (
 )
 
 const (
-	teamSharedMountPath      = "/team"
-	teamConfigFileName       = "team.json"
-	teamIntroductionFileName = "team-introduction.md"
-	teamAgentsFileName       = "AGENTS.md"
-	teamSoulFileName         = "SOUL.md"
-	teamManagedOverlayStart  = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
-	teamManagedOverlayEnd    = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
-	teamConfigMountDirPath   = "/etc/clawmanager/team"
-	teamConfigMountPath      = teamConfigMountDirPath + "/" + teamConfigFileName
-	teamHermesSoulMountPath  = "/config/.hermes/SOUL.md"
-	teamSharedUID            = 1000
-	teamSharedGID            = 1000
-	teamSharedUmask          = "0002"
-	teamRedisURLSecretKey    = "CLAWMANAGER_TEAM_REDIS_URL"
-	teamTokenSecretKey       = "CLAWMANAGER_TEAM_TOKEN"
+	teamSharedMountPath                = "/team"
+	teamConfigFileName                 = "team.json"
+	teamIntroductionFileName           = "team-introduction.md"
+	teamAgentsFileName                 = "AGENTS.md"
+	teamSoulFileName                   = "SOUL.md"
+	teamManagedOverlayStart            = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
+	teamManagedOverlayEnd              = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
+	teamConfigMountDirPath             = "/etc/clawmanager/team"
+	teamConfigMountPath                = teamConfigMountDirPath + "/" + teamConfigFileName
+	teamHermesSoulMountPath            = "/config/.hermes/SOUL.md"
+	teamSharedUID                      = 1000
+	teamSharedGID                      = 1000
+	teamSharedUmask                    = "0002"
+	teamRedisURLSecretKey              = "CLAWMANAGER_TEAM_REDIS_URL"
+	teamTokenSecretKey                 = "CLAWMANAGER_TEAM_TOKEN"
+	teamRuntimeUnavailableReasonPrefix = "Runtime unavailable: "
 )
 
 const (
@@ -274,6 +275,7 @@ type teamService struct {
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	mu                    sync.Mutex
+	deletionMu            sync.Mutex
 	running               bool
 	wg                    sync.WaitGroup
 	consumers             map[int]struct{}
@@ -416,6 +418,7 @@ func (s *teamService) StopBackground() {
 func (s *teamService) consumerScanLoop(ctx context.Context) {
 	defer s.wg.Done()
 
+	s.resumePendingTeamDeletions()
 	s.ensureConsumersForActiveTeams(ctx)
 
 	ticker := time.NewTicker(teamConsumerScanInterval)
@@ -426,7 +429,67 @@ func (s *teamService) consumerScanLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.resumePendingTeamDeletions()
 			s.ensureConsumersForActiveTeams(ctx)
+		}
+	}
+}
+
+func (s *teamService) resumePendingTeamDeletions() {
+	repo, ok := s.repo.(repository.PendingTeamDeletionRepository)
+	if !ok {
+		return
+	}
+	teams, err := repo.ListTeamsByStatus(models.TeamStatusDeleting)
+	if err != nil {
+		fmt.Printf("Warning: failed to list pending Team deletions: %v\n", err)
+		return
+	}
+	teamIDs := make(map[int]struct{}, len(teams))
+	for idx := range teams {
+		team := teams[idx]
+		teamIDs[team.ID] = struct{}{}
+		if err := s.DeleteTeam(team.UserID, team.ID); err != nil {
+			fmt.Printf("Warning: failed to resume Team %d deletion: %v\n", team.ID, err)
+		}
+	}
+	members, err := repo.ListMembersByStatus(models.TeamMemberStatusDeleting)
+	if err != nil {
+		fmt.Printf("Warning: failed to list pending Team member deletions: %v\n", err)
+		return
+	}
+	for idx := range members {
+		member := members[idx]
+		if _, deletingTeam := teamIDs[member.TeamID]; deletingTeam {
+			continue
+		}
+		team, err := s.repo.GetTeamByID(member.TeamID)
+		if err != nil || team == nil {
+			fmt.Printf("Warning: failed to load Team %d for pending member %s deletion: %v\n", member.TeamID, member.MemberKey, err)
+			continue
+		}
+		if team.Status == models.TeamStatusDeleted {
+			if member.InstanceID != nil && *member.InstanceID > 0 {
+				if err := s.instanceService.Delete(*member.InstanceID); err != nil {
+					fmt.Printf("Warning: failed to resume deleted Team %d member %s instance deletion: %v\n", team.ID, member.MemberKey, err)
+					continue
+				}
+				member.InstanceID = nil
+			}
+			member.Status = models.TeamMemberStatusDeleted
+			member.CurrentTaskID = nil
+			member.UpdatedAt = time.Now().UTC()
+			if err := s.repo.UpdateMember(&member); err != nil {
+				fmt.Printf("Warning: failed to finish deleted Team %d member %s deletion: %v\n", team.ID, member.MemberKey, err)
+			}
+			continue
+		}
+		if isTeamLeaderRole(member.Role) {
+			fmt.Printf("Warning: refusing to resume standalone leader %s deletion for active Team %d\n", member.MemberKey, team.ID)
+			continue
+		}
+		if err := s.DeleteMember(team.UserID, team.ID, strconv.Itoa(member.ID)); err != nil {
+			fmt.Printf("Warning: failed to resume Team %d member %s deletion: %v\n", team.ID, member.MemberKey, err)
 		}
 	}
 }
@@ -1325,6 +1388,9 @@ func (s *teamService) createTeamMemberInstance(userID int, team *models.Team, me
 
 func (s *teamService) openClawConfigPlanForTeamMember(userID int, memberPlan plannedTeamMember) (*OpenClawConfigPlan, error) {
 	plan := memberPlan.Request.OpenClawConfigPlan
+	if !strings.EqualFold(strings.TrimSpace(memberPlan.RuntimeType), RuntimeTypeOpenClaw) {
+		return nil, nil
+	}
 	if plan == nil || memberPlan.IsLeader || s.openClawConfigPlanner == nil {
 		return plan, nil
 	}
@@ -1350,6 +1416,10 @@ func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Tea
 		instanceMode = InstanceModeLite
 	}
 	runtimeBackendType, _ := RuntimeTypeForInstanceMode(instanceMode)
+	defaultDiskGB := 20
+	if instanceMode == InstanceModeLite {
+		defaultDiskGB = DefaultLiteDiskGB
+	}
 	memberEnv := s.teamMemberEnv(team, memberPlan)
 	if instanceMode == InstanceModeLite {
 		memberEnv["CLAWMANAGER_TEAM_SHARED_DIR"] = s.teamRuntimeSharedPath(team)
@@ -1372,7 +1442,7 @@ func (s *teamService) buildTeamMemberInstanceRequestWithSecrets(team *models.Tea
 		RuntimeType:          runtimeBackendType,
 		CPUCores:             defaultFloat(req.CPUCores, 2),
 		MemoryGB:             defaultInt(req.MemoryGB, 4),
-		DiskGB:               defaultInt(req.DiskGB, 20),
+		DiskGB:               defaultInt(req.DiskGB, defaultDiskGB),
 		GPUEnabled:           req.GPUEnabled,
 		GPUCount:             req.GPUCount,
 		OSType:               memberPlan.RuntimeType,
@@ -1840,6 +1910,9 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireTeamDispatchAvailable(context.Background(), team); err != nil {
+		return nil, err
+	}
 	memberKey := strings.TrimSpace(req.TargetMemberID)
 	if memberKey == "" {
 		members, err := s.repo.ListMembersByTeamID(teamID)
@@ -1964,6 +2037,10 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode task envelope: %w", err)
 	}
+	// Close the dispatch-to-XADD race with runtime-upgrade maintenance.
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return nil, err
+	}
 	streamID, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, member.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
 		"team_id":    strconv.Itoa(team.ID),
@@ -1982,6 +2059,69 @@ func (s *teamService) DispatchTask(userID, teamID int, req DispatchTeamTaskReque
 		return nil, err
 	}
 	return teamTaskPayload(*task)
+}
+
+func (s *teamService) requireTeamDispatchAvailable(ctx context.Context, team *models.Team) error {
+	if team == nil {
+		return fmt.Errorf("team is required")
+	}
+	bus, err := s.redisBusForTeam(ctx, team)
+	if err != nil {
+		return err
+	}
+	return s.requireTeamRedisDeliveryAvailable(ctx, team, bus)
+}
+
+func (s *teamService) requireTeamRedisDeliveryAvailable(ctx context.Context, team *models.Team, bus *redisBus) error {
+	if team == nil || bus == nil {
+		return fmt.Errorf("team and Redis bus are required")
+	}
+	raw, exists, err := bus.Get(ctx, teamMaintenanceKey(team.ID))
+	if err != nil {
+		return fmt.Errorf("check Team maintenance state: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	var state struct {
+		Enabled   bool `json:"enabled"`
+		RolloutID any  `json:"rolloutId"`
+	}
+	if json.Unmarshal([]byte(raw), &state) == nil && state.Enabled {
+		return fmt.Errorf("Team is temporarily drained for OpenClaw runtime upgrade; no task data was changed")
+	}
+	if value := strings.ToLower(strings.TrimSpace(raw)); value == "1" || value == "true" || value == "on" {
+		return fmt.Errorf("Team is temporarily drained for OpenClaw runtime upgrade; no task data was changed")
+	}
+	return nil
+}
+
+func (s *teamService) SetRuntimeUpgradeMaintenance(ctx context.Context, teamIDs []int, rolloutID int64, enabled bool) error {
+	for _, teamID := range teamIDs {
+		team, err := s.repo.GetTeamByID(teamID)
+		if err != nil {
+			return err
+		}
+		if team == nil {
+			return fmt.Errorf("Team %d not found", teamID)
+		}
+		bus, err := s.redisBusForTeam(ctx, team)
+		if err != nil {
+			return err
+		}
+		key := teamMaintenanceKey(teamID)
+		if enabled {
+			value, _ := json.Marshal(map[string]any{"enabled": true, "rolloutId": rolloutID, "reason": "openclaw_runtime_upgrade", "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)})
+			// Upgrade maintenance is fail-closed. It is removed only after
+			// postflight or a verified rollback, never by an elapsed TTL.
+			if err := bus.Set(ctx, key, string(value), 0); err != nil {
+				return err
+			}
+		} else if err := bus.Del(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *teamService) enrichBootstrapTaskPayload(userID int, team *models.Team, payload map[string]interface{}) error {
@@ -3218,12 +3358,29 @@ func buildTeamRuntimePrompt(rawPrompt string, memberContext map[string]string) s
 }
 
 func (s *teamService) DeleteTeam(userID, teamID int) error {
+	s.deletionMu.Lock()
+	defer s.deletionMu.Unlock()
 	team, err := s.requireOwnedTeam(userID, teamID)
 	if err != nil {
 		return err
 	}
 	if team.Status == models.TeamStatusDeleted {
 		return nil
+	}
+	members, err := s.repo.ListMembersByTeamID(teamID)
+	if err != nil {
+		return err
+	}
+	if validator, ok := s.instanceService.(interface{ ValidateDelete(int) error }); ok {
+		for idx := range members {
+			member := members[idx]
+			if member.Status == models.TeamMemberStatusDeleted || member.InstanceID == nil || *member.InstanceID <= 0 {
+				continue
+			}
+			if err := validator.ValidateDelete(*member.InstanceID); err != nil {
+				return fmt.Errorf("cannot delete Team %d while member %s instance %d is protected: %w", teamID, member.MemberKey, *member.InstanceID, err)
+			}
+		}
 	}
 
 	now := time.Now().UTC()
@@ -3233,10 +3390,6 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 		return err
 	}
 
-	members, err := s.repo.ListMembersByTeamID(teamID)
-	if err != nil {
-		return err
-	}
 	for idx := range members {
 		member := members[idx]
 		if member.Status == models.TeamMemberStatusDeleted {
@@ -3244,16 +3397,21 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 		}
 		member.Status = models.TeamMemberStatusDeleting
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			return fmt.Errorf("failed to mark Team %d member %s deleting: %w", teamID, member.MemberKey, err)
+		}
 		if member.InstanceID != nil && *member.InstanceID > 0 {
 			if err := s.instanceService.Delete(*member.InstanceID); err != nil {
-				fmt.Printf("Warning: failed to delete Team %d member %s instance %d: %v\n", teamID, member.MemberKey, *member.InstanceID, err)
+				return fmt.Errorf("failed to delete Team %d member %s instance %d: %w", teamID, member.MemberKey, *member.InstanceID, err)
 			}
+			member.InstanceID = nil
 		}
 		member.Status = models.TeamMemberStatusDeleted
 		member.CurrentTaskID = nil
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			return fmt.Errorf("failed to mark Team %d member %s deleted: %w", teamID, member.MemberKey, err)
+		}
 	}
 
 	ctx := context.Background()
@@ -3276,6 +3434,8 @@ func (s *teamService) DeleteTeam(userID, teamID int) error {
 }
 
 func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
+	s.deletionMu.Lock()
+	defer s.deletionMu.Unlock()
 	team, err := s.requireOwnedTeam(userID, teamID)
 	if err != nil {
 		return err
@@ -3296,6 +3456,13 @@ func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
 	if isTeamLeaderRole(member.Role) {
 		return fmt.Errorf("team leader cannot be deleted before assigning a new leader")
 	}
+	if member.InstanceID != nil && *member.InstanceID > 0 {
+		if validator, ok := s.instanceService.(interface{ ValidateDelete(int) error }); ok {
+			if err := validator.ValidateDelete(*member.InstanceID); err != nil {
+				return fmt.Errorf("cannot delete Team %d member %s instance %d: %w", teamID, member.MemberKey, *member.InstanceID, err)
+			}
+		}
+	}
 
 	now := time.Now().UTC()
 	member.Status = models.TeamMemberStatusDeleting
@@ -3307,6 +3474,7 @@ func (s *teamService) DeleteMember(userID, teamID int, memberID string) error {
 		if err := s.instanceService.Delete(*member.InstanceID); err != nil {
 			return err
 		}
+		member.InstanceID = nil
 	}
 	member.Status = models.TeamMemberStatusDeleted
 	member.CurrentTaskID = nil
@@ -3548,6 +3716,9 @@ func (s *teamService) deliverTeamEventOutbox(team *models.Team, bus *redisBus, o
 	if team == nil || bus == nil || outbox == nil || strings.TrimSpace(outbox.Destination) == "" {
 		return fmt.Errorf("team, redis bus and outbox destination are required")
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return err
+	}
 	payload := map[string]interface{}{}
 	if err := json.Unmarshal([]byte(outbox.PayloadJSON), &payload); err != nil {
 		return fmt.Errorf("decode Team outbox payload %d: %w", outbox.ID, err)
@@ -3614,9 +3785,6 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 	var errs []error
 	for idx := range teams {
 		team := teams[idx]
-		if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
-			continue
-		}
 		items, listErr := s.repo.ListWorkItemsByTeamID(team.ID, 500)
 		if listErr != nil {
 			errs = append(errs, listErr)
@@ -3627,9 +3795,36 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 			errs = append(errs, memberErr)
 			continue
 		}
+		unavailableMembers := map[int]models.Instance{}
+		for memberIdx := range members {
+			member := &members[memberIdx]
+			unavailable, instance, changed, reconcileErr := s.reconcileTeamMemberRuntimeAvailability(member, items, now)
+			if reconcileErr != nil {
+				errs = append(errs, reconcileErr)
+				continue
+			}
+			if unavailable && instance != nil {
+				unavailableMembers[member.ID] = *instance
+			}
+			if changed {
+				member.UpdatedAt = now
+				if updateErr := s.repo.UpdateMember(member); updateErr != nil {
+					errs = append(errs, updateErr)
+				}
+			}
+		}
+		if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
+			continue
+		}
+		if releaseErr := s.reconcileTerminalTeamMemberBindings(&team, members, now); releaseErr != nil {
+			errs = append(errs, releaseErr)
+		}
 		for memberIdx := range members {
 			member := members[memberIdx]
 			if isLeaderTeamMember(&member) || !isActiveTeamMember(&member) {
+				continue
+			}
+			if _, unavailable := unavailableMembers[member.ID]; unavailable {
 				continue
 			}
 			if reconcileTeamMemberOperationalState(&member, items) {
@@ -3641,6 +3836,58 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 		}
 
 		var bus *redisBus
+		for itemIdx := range items {
+			item := items[itemIdx]
+			if item.OwnerMemberID == nil || !isActiveTeamWorkItemStatus(item.Status) {
+				continue
+			}
+			instance, unavailable := unavailableMembers[*item.OwnerMemberID]
+			if !unavailable {
+				continue
+			}
+			instanceStatus := strings.ToLower(strings.TrimSpace(instance.Status))
+			if instanceStatus == "creating" || instanceStatus == "starting" || instanceStatus == "pending" {
+				continue
+			}
+			owner, ownerErr := s.repo.GetMemberByID(*item.OwnerMemberID)
+			if ownerErr != nil {
+				errs = append(errs, ownerErr)
+				continue
+			}
+			task, taskErr := s.repo.GetTaskByID(item.RootTaskID)
+			if taskErr != nil {
+				errs = append(errs, taskErr)
+				continue
+			}
+			if owner == nil || task == nil || isLeaderTeamMember(owner) || isTerminalTeamTaskStatus(task.Status) {
+				continue
+			}
+			if bus == nil {
+				bus, err = s.redisBusForTeam(context.Background(), &team)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			}
+			reason := strings.TrimSpace(stringValue(instance.RuntimeErrorMessage))
+			if reason == "" {
+				reason = "linked Runtime instance is " + strings.TrimSpace(instance.Status)
+			}
+			failureIdentity := fmt.Sprintf("%d:%d:%s:%s", instance.ID, instance.RuntimeGeneration, strings.ToLower(strings.TrimSpace(instance.Status)), reason)
+			failureHash := sha256.Sum256([]byte(failureIdentity))
+			streamRef := fmt.Sprintf("runtime-instance:%d:%x", instance.ID, failureHash[:8])
+			summary := fmt.Sprintf("Member %s Runtime instance %d is unavailable: %s. Preserve the current assignment and artifacts; retry or reassign only after checking Runtime recovery.", owner.MemberKey, instance.ID, reason)
+			sourcePayload := map[string]interface{}{
+				"eventKind": "runtime_reconciliation_needed", "failureDomain": "runtime_gateway",
+				"recoverable": true, "retryable": true, "summary": summary,
+				"workId": item.WorkID, "assignmentId": workItemBusinessID(item),
+				"runtimeInstanceId": instance.ID, "runtimeGeneration": instance.RuntimeGeneration,
+			}
+			sourceEvent := &models.TeamEvent{TeamID: team.ID, TaskID: &task.ID, MemberID: &owner.ID, EventType: "runtime_instance_unavailable", RedisStreamID: &streamRef, CreatedAt: now, OccurredAt: &now}
+			if recoveryErr := s.createLeaderMediatedRecoveryRequest(&team, bus, task, owner, sourcePayload, sourceEvent); recoveryErr != nil {
+				errs = append(errs, recoveryErr)
+			}
+		}
 		for itemIdx := range items {
 			item := items[itemIdx]
 			if item.Status != models.TeamTaskStatusSucceeded || item.OwnerMemberID == nil || !workItemHasAcceptedResultReceipt(item) {
@@ -3694,6 +3941,119 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 				errs = append(errs, createErr)
 			}
 		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *teamService) reconcileTeamMemberRuntimeAvailability(member *models.TeamMember, items []models.TeamWorkItem, now time.Time) (bool, *models.Instance, bool, error) {
+	if s == nil || s.instanceService == nil || member == nil || member.InstanceID == nil || *member.InstanceID <= 0 || member.Status == models.TeamMemberStatusDeleted || member.Status == models.TeamMemberStatusDeleting {
+		return false, nil, false, nil
+	}
+	instance, err := s.instanceService.GetByID(*member.InstanceID)
+	if err != nil {
+		// A control-plane read failure is not evidence that a Runtime died.
+		return false, nil, false, err
+	}
+	changed := false
+	setString := func(target *string, value string) {
+		if *target != value {
+			*target = value
+			changed = true
+		}
+	}
+	setOptional := func(target **string, value string) {
+		if strings.TrimSpace(derefTeamString(*target)) == value {
+			return
+		}
+		copyValue := value
+		*target = &copyValue
+		changed = true
+	}
+	if instance == nil {
+		instance = &models.Instance{ID: *member.InstanceID, Status: "missing"}
+	}
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if status == "running" {
+		wasRuntimeUnavailable := member.Status == models.TeamMemberStatusOffline ||
+			member.Status == models.TeamMemberStatusCreating ||
+			member.Availability == models.TeamMemberAvailabilityOffline ||
+			strings.HasPrefix(strings.TrimSpace(derefTeamString(member.BlockedReason)), teamRuntimeUnavailableReasonPrefix)
+		if !wasRuntimeUnavailable {
+			return false, instance, false, nil
+		}
+		if !reconcileTeamMemberOperationalState(member, items) {
+			setString(&member.Status, models.TeamMemberStatusIdle)
+			setString(&member.Availability, models.TeamMemberAvailabilityIdle)
+		}
+		setOptional(&member.RuntimeStatus, "running")
+		if member.BlockedReason != nil {
+			member.BlockedReason = nil
+			changed = true
+		}
+		return false, instance, changed, nil
+	}
+	if status == "creating" || status == "starting" || status == "pending" {
+		setString(&member.Status, models.TeamMemberStatusCreating)
+		setString(&member.Availability, models.TeamMemberAvailabilityOffline)
+		setOptional(&member.RuntimeStatus, status)
+		reason := teamRuntimeUnavailableReasonPrefix + "linked instance is starting"
+		setOptional(&member.BlockedReason, reason)
+		return true, instance, changed, nil
+	}
+	setString(&member.Status, models.TeamMemberStatusOffline)
+	setString(&member.Availability, models.TeamMemberAvailabilityOffline)
+	setOptional(&member.RuntimeStatus, status)
+	reason := "linked instance is " + status
+	if instance != nil && instance.RuntimeErrorMessage != nil && strings.TrimSpace(*instance.RuntimeErrorMessage) != "" {
+		reason = strings.TrimSpace(*instance.RuntimeErrorMessage)
+	}
+	setOptional(&member.BlockedReason, teamRuntimeUnavailableReasonPrefix+reason)
+	return true, instance, changed, nil
+}
+
+// reconcileTerminalTeamMemberBindings repairs only stale operational pointers.
+// The root task's persisted terminal state is authoritative, and the
+// repository compare-and-clear predicate ensures a late sweep cannot erase a
+// newer assignment that reused the same member.
+func (s *teamService) reconcileTerminalTeamMemberBindings(team *models.Team, members []models.TeamMember, now time.Time) error {
+	if s == nil || s.repo == nil || team == nil {
+		return nil
+	}
+	var errs []error
+	for idx := range members {
+		member := &members[idx]
+		if member.TeamID != team.ID || member.CurrentTaskID == nil || *member.CurrentTaskID <= 0 {
+			continue
+		}
+		taskID := *member.CurrentTaskID
+		task, err := s.repo.GetTaskByID(taskID)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if task == nil || task.TeamID != team.ID || !isTerminalTeamTaskStatus(task.Status) {
+			continue
+		}
+		runtimeStatus := models.TeamTaskStatusSucceeded
+		availability := models.TeamMemberAvailabilityIdle
+		progress := 100
+		if task.Status != models.TeamTaskStatusSucceeded {
+			runtimeStatus = models.TeamTaskStatusFailed
+			availability = models.TeamMemberAvailabilityBlocked
+			progress = 0
+		}
+		if _, err := s.repo.ReleaseMemberFromTask(member.ID, taskID, runtimeStatus, availability, progress, now); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		member.Status = models.TeamMemberStatusIdle
+		member.CurrentTaskID = nil
+		member.Progress = progress
+		member.Availability = availability
+		member.RuntimeStatus = &runtimeStatus
+		member.RuntimeTaskID = nil
+		member.RuntimeIntent = nil
+		member.BlockedReason = nil
 	}
 	return errors.Join(errs...)
 }
@@ -4588,6 +4948,9 @@ func (s *teamService) createLeaderSynthesisReminder(team *models.Team, bus *redi
 	if err != nil {
 		return err
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return err
+	}
 	s.publishTeamRootWorkflowState(bus, task)
 	_, err = bus.XAdd(context.Background(), teamInboxKey(team.ID, leader.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
@@ -5032,6 +5395,9 @@ func (s *teamService) dispatchAssignmentStatusCheck(team *models.Team, bus *redi
 	}
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
+		return err
+	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
 		return err
 	}
 	_, err = bus.XAdd(context.Background(), teamInboxKey(team.ID, owner.MemberKey), map[string]string{
@@ -9553,6 +9919,10 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 			member.CurrentTaskID = nil
 			member.Progress = 100
 			member.Availability = models.TeamMemberAvailabilityIdle
+			runtimeStatus := models.TeamTaskStatusSucceeded
+			member.RuntimeStatus = &runtimeStatus
+			member.RuntimeTaskID = nil
+			member.RuntimeIntent = nil
 			member.BlockedReason = nil
 		}
 		// Runtime availability is an instantaneous transport observation. The
@@ -9687,6 +10057,14 @@ func reconcileTeamMemberOperationalState(member *models.TeamMember, items []mode
 		setOptionalString(&member.RuntimeStatus, models.TeamTaskStatusSucceeded)
 		if member.CurrentTaskID != nil {
 			member.CurrentTaskID = nil
+			changed = true
+		}
+		if member.RuntimeTaskID != nil {
+			member.RuntimeTaskID = nil
+			changed = true
+		}
+		if member.RuntimeIntent != nil {
+			member.RuntimeIntent = nil
 			changed = true
 		}
 		if member.Progress != 100 {
@@ -9904,6 +10282,9 @@ func (s *teamService) dispatchMemberTargetResolutionReviewToInbox(team *models.T
 		fmt.Printf("Warning: failed to encode member target-resolution reminder for Team %d task %d: %v\n", team.ID, task.ID, err)
 		return
 	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
+		return
+	}
 	if _, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, member.MemberKey), map[string]string{
 		"payload":    envelopeJSON,
 		"team_id":    strconv.Itoa(team.ID),
@@ -9973,6 +10354,9 @@ func (s *teamService) dispatchLeaderMediatedRecoveryRequestToInbox(team *models.
 	envelopeJSON, err := marshalJSON(envelope)
 	if err != nil {
 		fmt.Printf("Warning: failed to encode Leader recovery notification for Team %d task %d: %v\n", team.ID, task.ID, err)
+		return
+	}
+	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
 		return
 	}
 	if _, err := bus.XAdd(context.Background(), teamInboxKey(team.ID, leaderKey), map[string]string{
@@ -12984,15 +13368,25 @@ func (s *teamService) rollbackTeamCreation(userID int, team *models.Team, cause 
 	}
 	for idx := range members {
 		member := members[idx]
+		member.Status = models.TeamMemberStatusDeleting
+		member.UpdatedAt = time.Now().UTC()
+		if err := s.repo.UpdateMember(&member); err != nil {
+			fmt.Printf("Warning: failed to mark Team %d member %s deleting during create rollback: %v\n", team.ID, member.MemberKey, err)
+			continue
+		}
 		if member.InstanceID != nil && *member.InstanceID > 0 {
 			if err := s.instanceService.Delete(*member.InstanceID); err != nil {
 				fmt.Printf("Warning: failed to delete Team %d member %s instance %d during create rollback: %v\n", team.ID, member.MemberKey, *member.InstanceID, err)
+				continue
 			}
+			member.InstanceID = nil
 		}
 		member.Status = models.TeamMemberStatusDeleted
 		member.CurrentTaskID = nil
 		member.UpdatedAt = time.Now().UTC()
-		_ = s.repo.UpdateMember(&member)
+		if err := s.repo.UpdateMember(&member); err != nil {
+			fmt.Printf("Warning: failed to mark Team %d member %s deleted during create rollback: %v\n", team.ID, member.MemberKey, err)
+		}
 	}
 	ctx := context.Background()
 	if strings.TrimSpace(derefTeamString(team.TeamTokenSecretName)) != "" {
@@ -14663,6 +15057,10 @@ func normalizeTeamRedisKeyPart(value string) string {
 
 func teamPresenceKey(teamID int) string {
 	return fmt.Sprintf("claw:team:%d:presence", teamID)
+}
+
+func teamMaintenanceKey(teamID int) string {
+	return fmt.Sprintf("claw:team:%d:maintenance", teamID)
 }
 
 func teamDLQKey(teamID int) string {

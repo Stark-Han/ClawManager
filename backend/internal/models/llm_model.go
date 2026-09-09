@@ -4,16 +4,18 @@ import "time"
 
 // LLMModel stores an admin-managed AI model configuration.
 type LLMModel struct {
-	ID                int     `db:"id,primarykey,autoincrement" json:"id"`
-	DisplayName       string  `db:"display_name" json:"display_name"`
-	Description       *string `db:"description" json:"description,omitempty"`
-	ProviderType      string  `db:"provider_type" json:"provider_type"`
-	ProtocolType      string  `db:"protocol_type" json:"protocol_type,omitempty"`
-	BaseURL           string  `db:"base_url" json:"base_url"`
-	ProviderModelName string  `db:"provider_model_name" json:"provider_model_name"`
-	ReasoningEnabled  bool    `db:"reasoning_enabled" json:"reasoning_enabled"`
-	SupportsReasoning bool    `db:"-" json:"supports_reasoning"`
-	ReasoningControl  string  `db:"-" json:"reasoning_control,omitempty"`
+	ID                 int                `db:"id,primarykey,autoincrement" json:"id"`
+	DisplayName        string             `db:"display_name" json:"display_name"`
+	Description        *string            `db:"description" json:"description,omitempty"`
+	ProviderType       string             `db:"provider_type" json:"provider_type"`
+	ProtocolType       string             `db:"protocol_type" json:"protocol_type,omitempty"`
+	BaseURL            string             `db:"base_url" json:"base_url"`
+	ProviderModelName  string             `db:"provider_model_name" json:"provider_model_name"`
+	ProviderModelsJSON *string            `db:"provider_models_json" json:"-"`
+	ProviderModels     []LLMProviderModel `db:"-" json:"provider_models"`
+	ReasoningEnabled   bool               `db:"reasoning_enabled" json:"reasoning_enabled"`
+	SupportsReasoning  bool               `db:"-" json:"supports_reasoning"`
+	ReasoningControl   string             `db:"-" json:"reasoning_control,omitempty"`
 	// CatalogProviderName is the configured provider alias used when a runtime
 	// renders qualified model references such as "provider/model". It is
 	// populated only for the expanded in-memory catalog and is never persisted.

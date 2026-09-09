@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, KeyRound, Pencil, Plus, Rocket, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import AdminLayout from '../../components/AdminLayout';
 import { useI18n } from '../../contexts/I18nContext';
@@ -15,17 +15,20 @@ import {
   type LDAPConfigPublic,
 } from '../../services/enterpriseAuthService';
 import { runtimePoolService } from '../../services/runtimePoolService';
+import type { RuntimeUpgradeDetails, RuntimeUpgradePreflightResult } from '../../types/runtimePool';
 import type { RuntimePod, RuntimeType } from '../../types/runtimePool';
 import { localizeEnterpriseAuthIssue, localizeEnterpriseAuthIssues } from '../../utils/enterpriseAuthErrors';
 
 type ImageRuntimeType = 'desktop' | 'gateway';
 type RuntimeGroup = 'lite' | 'pro';
+type RuntimeVariant = 'linux' | 'windows';
 
 interface RuntimeCardDefinition {
   instance_type: string;
   runtime_type: ImageRuntimeType;
   display_name: string;
   image: string;
+  runtime_variant?: RuntimeVariant;
 }
 
 const LITE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
@@ -75,22 +78,46 @@ const PRO_BASE_RUNTIME_CARDS: RuntimeCardDefinition[] = [
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness:latest',
   },
   {
+    instance_type: 'codex',
+    runtime_type: 'desktop',
+    runtime_variant: 'windows',
+    display_name: 'Codex Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest',
+  },
+  {
+    instance_type: 'claude-code',
+    runtime_type: 'desktop',
+    display_name: 'Claude Code Pro',
+    image: 'ghcr.io/yuan-lab-llm/agentsruntime/claude-code:latest',
+  },
+  {
     instance_type: 'workbuddy',
     runtime_type: 'desktop',
+    runtime_variant: 'linux',
     display_name: 'Workbuddy Pro',
     image: 'ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest',
   },
 ];
 
-// The Workbuddy implementation remains available to existing instances, but
-// its image must not be configurable through the UI while it is hidden from
-// new-instance creation.
-const TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES = new Set(['workbuddy']);
-const isRuntimeCardVisible = (card: Pick<RuntimeCardDefinition, 'instance_type'>) =>
-  !TEMPORARILY_HIDDEN_RUNTIME_CARD_TYPES.has(card.instance_type);
-const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(isRuntimeCardVisible);
-
+const RUNTIME_VARIANT_IMAGES: Record<'workbuddy' | 'codex', Record<RuntimeVariant, string>> = {
+  workbuddy: {
+    linux: 'ghcr.io/yuan-lab-llm/agentsruntime/workbuddy-linux:latest',
+    windows: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-workbuddy:latest',
+  },
+  codex: {
+    linux: 'ghcr.io/yuan-lab-llm/agentsruntime/codex:latest',
+    windows: 'ghcr.io/yuan-lab-llm/agentsruntime/windows-vm-codex:latest',
+  },
+};
 const PRO_CUSTOM_DEFAULT_IMAGE = 'registry.example.com/your-custom-image:latest';
+// The team distribution does not ship these products. Their saved settings
+// remain intact for existing-instance compatibility, but are not exposed as
+// configurable or creatable runtime cards.
+const HIDDEN_TEAM_RUNTIME_CARD_TYPES = new Set(['workbuddy', 'codex', 'claude-code']);
+const TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS = new Set(['workbuddy:windows']);
+const VISIBLE_PRO_BASE_RUNTIME_CARDS = PRO_BASE_RUNTIME_CARDS.filter(
+  (card) => !HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(card.instance_type),
+);
 const FIXED_RUNTIME_CARDS = [...LITE_RUNTIME_CARDS, ...VISIBLE_PRO_BASE_RUNTIME_CARDS];
 const DEFAULT_LDAP_FORM: LDAPConfigPublic = {
   host: '',
@@ -161,6 +188,42 @@ function groupForRuntimeType(runtimeType: ImageRuntimeType): RuntimeGroup {
   return runtimeType === 'gateway' ? 'lite' : 'pro';
 }
 
+function supportsRuntimeVariant(instanceType: string): instanceType is 'workbuddy' | 'codex' {
+  return instanceType === 'workbuddy' || instanceType === 'codex';
+}
+
+function canSelectRuntimeVariant(instanceType: string): instanceType is 'codex' {
+  return instanceType === 'codex';
+}
+
+function inferRuntimeVariant(instanceType: string, image?: string): RuntimeVariant {
+  const normalizedImage = image?.trim().toLowerCase() ?? '';
+  if (instanceType === 'workbuddy' && normalizedImage.includes('workbuddy-linux')) {
+    return 'linux';
+  }
+  if (instanceType === 'codex' && normalizedImage.includes('agentsruntime/codex')) {
+    return 'linux';
+  }
+  return 'windows';
+}
+
+function runtimeVariantForCard(item: SystemImageSetting, definition?: RuntimeCardDefinition): RuntimeVariant | undefined {
+  if (!supportsRuntimeVariant(item.instance_type)) return undefined;
+  return item.runtime_variant ?? definition?.runtime_variant ?? inferRuntimeVariant(item.instance_type, item.image);
+}
+
+function isRuntimeCardVisible(item: SystemImageSetting) {
+  if (HIDDEN_TEAM_RUNTIME_CARD_TYPES.has(item.instance_type)) return false;
+  const runtimeVariant = runtimeVariantForCard(item);
+  return !runtimeVariant || !TEMPORARILY_HIDDEN_RUNTIME_CARD_VARIANTS.has(`${item.instance_type}:${runtimeVariant}`);
+}
+
+function defaultImageForVariant(instanceType: string, variant?: RuntimeVariant) {
+  return supportsRuntimeVariant(instanceType) && variant
+    ? RUNTIME_VARIANT_IMAGES[instanceType][variant]
+    : undefined;
+}
+
 function runtimePodSeenAt(pod: RuntimePod) {
   const parsed = Date.parse(pod.last_seen_at || pod.updated_at || '');
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -170,12 +233,22 @@ function resolveCurrentRuntimeImage(pods: RuntimePod[]) {
   const candidates = pods
     .filter((pod) => pod.image_ref?.trim())
     .filter((pod) => !pod.draining && pod.state !== 'deleted')
+	.filter((pod) => pod.pool_purpose !== 'openclaw-upgrade-lab' && pod.pool_role !== 'upgrade-lab')
+	.filter((pod) => pod.pool_role !== 'upgrade-target' || pod.scheduling_enabled === true || pod.used_slots > 0)
+	.filter((pod) => pod.scheduling_enabled !== false || pod.used_slots > 0)
     .sort((a, b) => runtimePodSeenAt(b) - runtimePodSeenAt(a) || b.id - a.id);
   if (candidates.length === 0) {
     return '';
   }
 
-  const images = Array.from(new Set(candidates.map((pod) => pod.image_ref.trim())));
+	const imagesByDigest = new Map<string, string>();
+	for (const pod of candidates) {
+		const key = pod.image_digest?.trim() || pod.image_ref.trim();
+		if (!imagesByDigest.has(key)) {
+			imagesByDigest.set(key, pod.image_ref.trim());
+		}
+	}
+	const images = Array.from(imagesByDigest.values());
   return images.join(', ');
 }
 
@@ -219,12 +292,15 @@ function toEditableCard(
 ): EditableImageCard {
   const runtimeType = normalizeImageRuntimeType(item.runtime_type);
   const definition = fallback ?? defaultForCard({ ...item, runtime_type: runtimeType });
+  const runtimeVariant = runtimeVariantForCard(item, definition);
+  const variantDefaultImage = defaultImageForVariant(item.instance_type, runtimeVariant);
   return {
     ...item,
     runtime_type: runtimeType,
+    runtime_variant: runtimeVariant,
     display_name: item.display_name || definition?.display_name || 'Custom Pro',
     image: item.image || definition?.image || PRO_CUSTOM_DEFAULT_IMAGE,
-    default_image: definition?.image,
+    default_image: variantDefaultImage ?? definition?.image,
     group: groupForRuntimeType(runtimeType),
     isBase: Boolean(definition),
     isNew: !item.id,
@@ -235,11 +311,7 @@ function toEditableCard(
 
 function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
   const enabledCards = items
-    .filter(
-      (item) =>
-        item.is_enabled !== false &&
-        isRuntimeCardVisible(item),
-    )
+    .filter((item) => item.is_enabled !== false && isRuntimeCardVisible(item))
     .map((item, index) => toEditableCard(item, index));
   const byFixedKey = new Map(enabledCards.map((card) => [fixedCardKey(card), card]));
 
@@ -249,7 +321,7 @@ function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
       return {
         ...existing,
         display_name: definition.display_name,
-        default_image: definition.image,
+        default_image: defaultImageForVariant(existing.instance_type, existing.runtime_variant) ?? definition.image,
         group: groupForRuntimeType(definition.runtime_type),
         isBase: true,
       };
@@ -259,6 +331,7 @@ function buildRuntimeCards(items: SystemImageSetting[]): EditableImageCard[] {
       {
         instance_type: definition.instance_type,
         runtime_type: definition.runtime_type,
+        runtime_variant: definition.runtime_variant,
         display_name: definition.display_name,
         image: definition.image,
         is_enabled: true,
@@ -286,27 +359,30 @@ const SystemSettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
   const [rolloutRuntimeType, setRolloutRuntimeType] = useState<RuntimeType>('openclaw');
-  const [rolloutImage, setRolloutImage] = useState(LITE_RUNTIME_CARDS[0].image);
+  const [rolloutImage, setRolloutImage] = useState('');
   const [rolloutCurrentImage, setRolloutCurrentImage] = useState('');
   const [rolloutCurrentLoading, setRolloutCurrentLoading] = useState(false);
-  const [rolloutBatchSize, setRolloutBatchSize] = useState(1);
+	const [rolloutBatchSize, setRolloutBatchSize] = useState(2);
   const [rolloutMaxUnavailable, setRolloutMaxUnavailable] = useState(1);
   const [rolloutSaving, setRolloutSaving] = useState(false);
   const [rolloutError, setRolloutError] = useState<string | null>(null);
-  const [enterpriseConfig, setEnterpriseConfig] = useState<EnterpriseAuthConfig | null>(null);
-  const [enterpriseLoading, setEnterpriseLoading] = useState(true);
-  const [enterpriseSaving, setEnterpriseSaving] = useState(false);
-  const [enterpriseTesting, setEnterpriseTesting] = useState(false);
-  const [enterpriseError, setEnterpriseError] = useState<string | null>(null);
-  const [enterpriseTestStatus, setEnterpriseTestStatus] = useState<EnterpriseAuthStatus | null>(null);
-  const [ldapEnabled, setLdapEnabled] = useState(false);
-  const [allowLocalFallback, setAllowLocalFallback] = useState(true);
-  const [syncRole, setSyncRole] = useState(false);
-  const [ldapForm, setLdapForm] = useState<LDAPConfigPublic>(DEFAULT_LDAP_FORM);
-  const [bindPassword, setBindPassword] = useState('');
-  const [bindPasswordEditing, setBindPasswordEditing] = useState(false);
-  const [clearBindPassword, setClearBindPassword] = useState(false);
-  const [adminGroupDNsText, setAdminGroupDNsText] = useState('');
+  const [rolloutPreflight, setRolloutPreflight] = useState<RuntimeUpgradePreflightResult | null>(null);
+	const [rolloutDetails, setRolloutDetails] = useState<RuntimeUpgradeDetails | null>(null);
+	const [activeRolloutId, setActiveRolloutId] = useState<number | null>(null);
+	const [enterpriseConfig, setEnterpriseConfig] = useState<EnterpriseAuthConfig | null>(null);
+	const [enterpriseLoading, setEnterpriseLoading] = useState(true);
+	const [enterpriseSaving, setEnterpriseSaving] = useState(false);
+	const [enterpriseTesting, setEnterpriseTesting] = useState(false);
+	const [enterpriseError, setEnterpriseError] = useState<string | null>(null);
+	const [enterpriseTestStatus, setEnterpriseTestStatus] = useState<EnterpriseAuthStatus | null>(null);
+	const [ldapEnabled, setLdapEnabled] = useState(false);
+	const [allowLocalFallback, setAllowLocalFallback] = useState(true);
+	const [syncRole, setSyncRole] = useState(false);
+	const [ldapForm, setLdapForm] = useState<LDAPConfigPublic>(DEFAULT_LDAP_FORM);
+	const [bindPassword, setBindPassword] = useState('');
+	const [bindPasswordEditing, setBindPasswordEditing] = useState(false);
+	const [clearBindPassword, setClearBindPassword] = useState(false);
+	const [adminGroupDNsText, setAdminGroupDNsText] = useState('');
 
   const liteCards = useMemo(
     () => LITE_RUNTIME_CARDS.map((definition) =>
@@ -316,7 +392,7 @@ const SystemSettingsPage: React.FC = () => {
   );
 
   const proBaseCards = useMemo(
-    () => VISIBLE_PRO_BASE_RUNTIME_CARDS.map((definition) =>
+    () => PRO_BASE_RUNTIME_CARDS.map((definition) =>
       cards.find((card) => fixedCardKey(card) === fixedCardKey(definition)),
     ).filter((card): card is EditableImageCard => Boolean(card)),
     [cards],
@@ -343,7 +419,11 @@ const SystemSettingsPage: React.FC = () => {
         const nextRolloutCard = nextCards.find(
           (card) => card.instance_type === rolloutRuntimeType && card.runtime_type === 'gateway',
         );
-        setRolloutImage(nextRolloutCard?.image.trim() || LITE_RUNTIME_CARDS[0].image);
+        setRolloutImage(
+          rolloutRuntimeType === 'openclaw'
+            ? ''
+            : nextRolloutCard?.image.trim() || '',
+        );
       } catch (error: unknown) {
         setPageError(getErrorMessage(error, t('systemSettingsPage.loadFailed')));
       } finally {
@@ -411,7 +491,7 @@ const SystemSettingsPage: React.FC = () => {
     };
   }, [rolloutRuntimeType]);
 
-  const refreshRolloutCurrentImage = async (runtimeType: RuntimeType) => {
+  const refreshRolloutCurrentImage = useCallback(async (runtimeType: RuntimeType) => {
     try {
       setRolloutCurrentLoading(true);
       const pods = await runtimePoolService.listPods(runtimeType);
@@ -421,7 +501,45 @@ const SystemSettingsPage: React.FC = () => {
     } finally {
       setRolloutCurrentLoading(false);
     }
-  };
+  }, []);
+
+	useEffect(() => {
+		if (!activeRolloutId) {
+			return undefined;
+		}
+		let cancelled = false;
+		let timer: number | undefined;
+		const poll = async () => {
+			try {
+				const details = await runtimePoolService.getRollout(activeRolloutId);
+				if (cancelled) return;
+				setRolloutDetails(details);
+				const terminal = ['finished', 'error', 'cancelled'].includes(details.rollout.status);
+				if (terminal) {
+					setActiveRolloutId(null);
+					setRolloutSaving(false);
+					void refreshRolloutCurrentImage(details.rollout.runtime_type);
+					if (details.rollout.status === 'error') {
+						setRolloutError(details.rollout.rollback_status === 'restored'
+							? `升级失败，已恢复旧版本：${details.rollout.error_message || details.rollout.rollback_error || '请查看阶段详情'}`
+							: details.rollout.error_message || details.rollout.rollback_error || '升级失败');
+					}
+					return;
+				}
+				timer = window.setTimeout(() => void poll(), 2000);
+			} catch (error: unknown) {
+				if (!cancelled) {
+					setRolloutError(getErrorMessage(error, t('systemSettingsPage.rolloutFailed')));
+					timer = window.setTimeout(() => void poll(), 5000);
+				}
+			}
+		};
+		void poll();
+		return () => {
+			cancelled = true;
+			if (timer !== undefined) window.clearTimeout(timer);
+		};
+	}, [activeRolloutId, refreshRolloutCurrentImage, t]);
 
   const updateCard = (localId: string, patch: Partial<EditableImageCard>) => {
     setCards((current) => current.map((card) =>
@@ -555,6 +673,7 @@ const SystemSettingsPage: React.FC = () => {
         id: card.id,
         instance_type: card.instance_type,
         runtime_type: card.runtime_type,
+        runtime_variant: card.runtime_variant,
         display_name: card.display_name.trim() || (card.isBase ? card.display_name : 'Custom Pro'),
         image: card.image.trim(),
       });
@@ -587,6 +706,16 @@ const SystemSettingsPage: React.FC = () => {
     }
   };
 
+  const updateRuntimeVariant = (card: EditableImageCard, runtimeVariant: RuntimeVariant) => {
+    const previousDefault = card.default_image;
+    const nextDefault = defaultImageForVariant(card.instance_type, runtimeVariant);
+    updateCard(card.local_id, {
+      runtime_variant: runtimeVariant,
+      default_image: nextDefault,
+      image: !card.image.trim() || card.image.trim() === previousDefault ? nextDefault ?? card.image : card.image,
+    });
+  };
+
   const deleteCard = async (card: EditableImageCard) => {
     if (card.isBase) {
       return;
@@ -611,8 +740,13 @@ const SystemSettingsPage: React.FC = () => {
   const handleRolloutRuntimeTypeChange = (runtimeType: RuntimeType) => {
     const nextCard = liteCards.find((card) => card.instance_type === runtimeType);
     setRolloutRuntimeType(runtimeType);
-    setRolloutImage(nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
+    setRolloutImage(runtimeType === 'openclaw'
+      ? ''
+      : nextCard?.image.trim() || LITE_RUNTIME_CARDS.find((item) => item.instance_type === runtimeType)?.image || '');
     setRolloutError(null);
+    setRolloutPreflight(null);
+		setRolloutDetails(null);
+    setRolloutMaxUnavailable(1);
   };
 
   const startRollout = async () => {
@@ -620,25 +754,52 @@ const SystemSettingsPage: React.FC = () => {
       setRolloutError(t('systemSettingsPage.rolloutTargetRequired'));
       return;
     }
-
     try {
       setRolloutSaving(true);
       setRolloutError(null);
-      await runtimePoolService.startRollout({
+		let targetImage = rolloutImage.trim();
+		let preflight = rolloutPreflight;
+		if (rolloutRuntimeType === 'openclaw' && preflight && !preflight.passed) {
+			setRolloutError(preflight.blockers.join('；'));
+			return;
+		}
+      if (rolloutRuntimeType === 'openclaw' && !preflight) {
+			preflight = await runtimePoolService.preflightOpenClawRollout({
+			  target_image_ref: targetImage,
+			  batch_size: Math.max(1, rolloutBatchSize),
+			  max_unavailable: 0,
+			  auto_rollback: true,
+			});
+			targetImage = preflight.target_image_ref || targetImage;
+			setRolloutImage(targetImage);
+			if (!preflight.passed) {
+			  setRolloutPreflight(preflight);
+			  setRolloutError(preflight.blockers.join('；'));
+			  return;
+			}
+			if (preflight.strategy === 'openclaw_8plus_data_safe') {
+			  setRolloutPreflight(preflight);
+			  setRolloutMaxUnavailable(0);
+			  return;
+			}
+		}
+		const rollout = await runtimePoolService.startRollout({
         runtime_type: rolloutRuntimeType,
-        target_image_ref: rolloutImage.trim(),
+		target_image_ref: targetImage,
         batch_size: Math.max(1, rolloutBatchSize),
-        max_unavailable: Math.max(1, rolloutMaxUnavailable),
+		max_unavailable: preflight?.strategy === 'openclaw_8plus_data_safe' ? 0 : Math.max(1, rolloutMaxUnavailable),
+		preflight_id: preflight?.strategy === 'openclaw_8plus_data_safe' ? preflight.rollout?.preflight_id : undefined,
+        auto_rollback: true,
       });
+		setRolloutDetails({ rollout, items: [], audits: [] });
+		setActiveRolloutId(rollout.id);
+      setRolloutPreflight(null);
       setRolloutImage(rolloutCard?.image.trim() || rolloutImage.trim());
       void refreshRolloutCurrentImage(rolloutRuntimeType);
-      window.setTimeout(() => {
-        void refreshRolloutCurrentImage(rolloutRuntimeType);
-      }, 5000);
     } catch (error: unknown) {
       setRolloutError(getErrorMessage(error, t('systemSettingsPage.rolloutFailed')));
     } finally {
-      setRolloutSaving(false);
+		if (!activeRolloutId) setRolloutSaving(false);
     }
   };
 
@@ -669,6 +830,20 @@ const SystemSettingsPage: React.FC = () => {
             onChange={(event) => updateCard(card.local_id, { display_name: event.target.value })}
             className="app-input mt-1 block w-full"
           />
+        </div>
+      )}
+
+      {card.runtime_type === 'desktop' && canSelectRuntimeVariant(card.instance_type) && (
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.runtimeVariant')}</label>
+          <select
+            value={card.runtime_variant ?? 'windows'}
+            onChange={(event) => updateRuntimeVariant(card, event.target.value as RuntimeVariant)}
+            className="app-input mt-1 block w-full"
+          >
+            <option value="linux">{t('systemSettingsPage.linuxVariant')}</option>
+            <option value="windows">{t('systemSettingsPage.windowsVariant')}</option>
+          </select>
         </div>
       )}
 
@@ -920,9 +1095,11 @@ const SystemSettingsPage: React.FC = () => {
         </section>
 
         <section className="app-panel p-6">
-          <div className="flex flex-col gap-1">
-            <h2 className="text-xl font-semibold text-gray-900">{t('systemSettingsPage.liteRolloutTitle')}</h2>
-            <p className="text-sm text-gray-500">{t('systemSettingsPage.liteRolloutSubtitle')}</p>
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl font-semibold text-gray-900">{t('systemSettingsPage.liteRolloutTitle')}</h2>
+              <p className="text-sm text-gray-500">{t('systemSettingsPage.liteRolloutSubtitle')}</p>
+            </div>
           </div>
           <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(180px,240px)_1fr] xl:grid-cols-[minmax(180px,240px)_minmax(260px,1fr)_minmax(320px,1.4fr)_120px_140px_auto] xl:items-end">
             <div>
@@ -950,10 +1127,17 @@ const SystemSettingsPage: React.FC = () => {
               <input
                 type="text"
                 value={rolloutImage}
-                onChange={(event) => setRolloutImage(event.target.value)}
+                onChange={(event) => { setRolloutImage(event.target.value); setRolloutPreflight(null); setRolloutError(null); }}
                 className="app-input mt-1 block w-full"
-                placeholder={rolloutCard?.default_image}
+                placeholder={rolloutRuntimeType === 'openclaw'
+				  ? 'registry/repository:tag 或 registry/repository@sha256:...'
+                  : rolloutCard?.default_image}
               />
+              {rolloutRuntimeType === 'openclaw' && (
+                <p className="mt-1 text-xs text-slate-500">
+                  {t('systemSettingsPage.rolloutImmutableTargetHelp')}
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.rolloutBatch')}</label>
@@ -961,7 +1145,7 @@ const SystemSettingsPage: React.FC = () => {
                 type="number"
                 min={1}
                 value={rolloutBatchSize}
-                onChange={(event) => setRolloutBatchSize(Number(event.target.value) || 1)}
+                onChange={(event) => { setRolloutBatchSize(Number(event.target.value) || 1); setRolloutPreflight(null); }}
                 className="app-input mt-1 block w-full"
               />
             </div>
@@ -969,25 +1153,64 @@ const SystemSettingsPage: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700">{t('systemSettingsPage.rolloutUnavailable')}</label>
               <input
                 type="number"
-                min={1}
+				min={rolloutPreflight?.strategy === 'openclaw_8plus_data_safe' ? 0 : 1}
                 value={rolloutMaxUnavailable}
-                onChange={(event) => setRolloutMaxUnavailable(Number(event.target.value) || 1)}
+                onChange={(event) => { setRolloutMaxUnavailable(Number(event.target.value) || 0); setRolloutPreflight(null); }}
+				disabled={rolloutPreflight?.strategy === 'openclaw_8plus_data_safe'}
                 className="app-input mt-1 block w-full"
               />
             </div>
             <button
               type="button"
               onClick={() => void startRollout()}
-              disabled={rolloutSaving}
+				disabled={rolloutSaving || activeRolloutId !== null}
               className="app-button-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Rocket className="h-4 w-4" />
-              {rolloutSaving ? t('systemSettingsPage.rolloutStarting') : t('systemSettingsPage.startRollout')}
+			  {activeRolloutId !== null
+				? `升级执行中（#${activeRolloutId}）`
+				: rolloutSaving
+                ? t('systemSettingsPage.rolloutStarting')
+				: rolloutRuntimeType === 'openclaw' && rolloutPreflight?.strategy === 'openclaw_8plus_data_safe' && rolloutPreflight.passed
+                  ? '确认执行（自动回退）'
+                  : rolloutRuntimeType === 'openclaw'
+                    ? '执行升级预检'
+                    : t('systemSettingsPage.startRollout')}
             </button>
           </div>
           {rolloutError && (
             <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {rolloutError}
+            </div>
+          )}
+		  {rolloutDetails && (
+			<div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+			  <div className="font-medium">
+				升级 #{rolloutDetails.rollout.id}：{rolloutDetails.rollout.status} / {rolloutDetails.rollout.phase}
+			  </div>
+			  <div className="mt-1">
+				目标：<span className="font-mono break-all">{rolloutDetails.rollout.target_image_ref}</span>
+			  </div>
+			  <div className="mt-1">
+				实例 {rolloutDetails.items.length} 个；已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；已恢复 {rolloutDetails.items.filter((item) => ['restored', 'restart_ready'].includes(item.state)).length} 个。
+			  </div>
+			  {rolloutDetails.rollout.rollback_status && <div className="mt-1">自动回退：{rolloutDetails.rollout.rollback_status}</div>}
+			  {(rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error) && (
+				<div className="mt-2 text-red-700">{rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error}</div>
+			  )}
+			</div>
+		  )}
+          {rolloutPreflight && (
+            <div className={`mt-4 rounded-md border px-4 py-3 text-sm ${rolloutPreflight.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+              <div className="font-medium">
+                {rolloutPreflight.passed ? '预检通过，可确认执行' : '预检未通过，未修改 Runtime 或用户数据'}
+              </div>
+              <div className="mt-1">
+                实例 {rolloutPreflight.instance_count} 个，Team {rolloutPreflight.team_count} 个，OpenClaw Team 成员 {rolloutPreflight.openclaw_team_member_count} 个，Hermes 成员 {rolloutPreflight.hermes_team_member_count} 个（Hermes 不升级）。
+              </div>
+              {rolloutPreflight.warnings.length > 0 && <div className="mt-2">提示：{rolloutPreflight.warnings.join('；')}</div>}
+              {rolloutPreflight.blockers.length > 0 && <div className="mt-2">阻断：{rolloutPreflight.blockers.join('；')}</div>}
+			  {rolloutPreflight.rollout?.plan_fingerprint && <div className="mt-2 font-mono text-xs break-all">审计指纹：{rolloutPreflight.rollout.plan_fingerprint}</div>}
             </div>
           )}
         </section>

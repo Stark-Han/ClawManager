@@ -59,6 +59,9 @@
 
 Wichtige aktuelle Produkt- und Dokumentations-Updates.
 
+- [2026-09-08] Datensichere OpenClaw-Lite-Rollouts mit versionsbewusster Vorpruefung, Migrationspruefung, begrenzter Wiederherstellung und Rollback ueber die gespeicherte Quellidentitaet gehaertet. Aeltere Images ohne 8.1-Faehigkeitsmerkmal verwenden weiterhin den etablierten Rolling-Update-Pfad.
+- [2026-09-02] Northbound API und Owner-isoliertes Portal um Lite/Pro-Provisionierung fuer OpenClaw, Hermes, OpenCode und DeepSeek Harness, asynchrone Lifecycle-Operationen und geschuetzte Share-Link-Verwaltung erweitert. Siehe [Northbound API Guide](./docs/northbound-api-guide.md).
+- [2026-09-01] LDAP-Unternehmensauthentifizierung, erweiterte verwaltete Provider-Modellkataloge und dedizierte Browser-Origins fuer verwaltete OpenCode- und DeepSeek-Harness-Instanzen hinzugefuegt.
 - [2026-08-19] Verwaltete OpenCode-Workspaces, eine aktualisierte Instanzansicht und Skill-Hub-Bereitstellung fuer OpenClaw, Hermes und OpenCode hinzugefuegt. Siehe [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_de.md).
 - [2026-08-18] Team-Kollaboration um acht schreibgeschuetzte Vorlagen, benutzerdefinierte Teams aus natuerlicher Sprache, optionale Hermes Lite Worker, Live-Kanban, gemeinsame Artefakte und Member-Sessions erweitert.
 - [2026-08-17] Modellgesteuertes Thinking, AI-Gateway Session Usage, bearbeitbare geplante Aufgaben und erweiterte Lite-Lifecycle- und Batch-Funktionen hinzugefuegt.
@@ -158,6 +161,12 @@ Waehle zuerst `k3s` oder `k8s` und danach das Storage-Profil fuer einen Einzelkn
 ### Runtime- und Instanzverwaltung
 
 OpenClaw-, Hermes-, OpenCode- oder DeepSeek-Harness-Workspaces in Lite oder Pro erstellen und Images, Ressourcen, Lifecycle, Desktop, Dateien, Shell, Umgebungsvariablen, Archive, Share Links und Lite-Batch-Aktionen zentral verwalten.
+
+### Northbound API und Unternehmenszugang
+
+Externe Systeme werden ueber ein separat bereitgestelltes Northbound Gateway angebunden. Einmalige JWE-Anmeldung, Scopes, Owner-Isolation, idempotente asynchrone Operationen, Rate Limits, Audit-Eintraege und mTLS zwischen Gateway und Core trennen die oeffentliche Integrationsgrenze von der Management-Konsole. Administratoren koennen ausserdem LDAP/LDAPS oder StartTLS konfigurieren, Verzeichnisbenutzer pruefen und importieren sowie Gruppen auf Plattformrollen abbilden.
+
+Die Northbound API verwaltet unterstuetzte OpenClaw-, Hermes-, OpenCode- und DeepSeek-Harness-Instanzen in Lite und Pro, einschliesslich Erstellung, Abfrage, Neustart, bestaetigtem Reset und passwortgeschuetzten Share Links. Siehe [Northbound API Guide](./docs/northbound-api-guide.md) und [Deployment Add-on](./deployments/k8s/northbound/README.md).
 
 <a id="ai-gateway"></a>
 ### AI Gateway
@@ -312,6 +321,10 @@ Technische Runtime- und Protokollreferenzen bleiben fuer Mitwirkende unter `docs
 - [Resource Management Guide](./docs/resource-management_de.md)
 - [Skill Hub Guide](./docs/skill-hub-guide_de.md)
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_de.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
+- [Northbound API Guide (Chinesisch)](./docs/northbound-api-guide.md)
+- [Northbound API Upgrade Guide (Chinesisch)](./docs/northbound-upgrade-guide.md)
+- [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
 
 ## Lizenz
 

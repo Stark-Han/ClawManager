@@ -911,6 +911,8 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "--innodb-use-native-aio=0"
+            - "--binlog-expire-logs-seconds=259200"
+            - "--max-binlog-size=134217728"
           ports:
             - containerPort: 3306
           env:
@@ -1267,6 +1269,8 @@ spec:
             - name: proxy
               containerPort: 9001
           env:
+            - name: TZ
+              value: "Asia/Shanghai"
             - name: SERVER_ADDRESS
               value: ":9001"
             - name: SERVER_MODE
@@ -1390,9 +1394,8 @@ spec:
               value: "redis://clawmanager-redis.clawmanager-system.svc.cluster.local:6379/0"
             - name: CLAWMANAGER_DESKTOP_DIRECT_PROXY
               value: "true"
-            # Required for the OpenCode Lite per-instance browser origin. Set
-            # this to a nip.io or private wildcard-DNS URL template; the
-            # {instance_id} placeholder is mandatory. See docs/deployment.md.
+            # Required for the OpenCode Lite root-origin UI. The {instance_id}
+            # placeholder is required; see docs/deployment.md.
             - name: CLAWMANAGER_OPENCODE_PUBLIC_URL_TEMPLATE
               value: ""
             # Required for the DeepSeek Harness Lite root-origin UI. The

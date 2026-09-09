@@ -59,6 +59,9 @@
 
 最近の重要な製品アップデートとドキュメント更新です。
 
+- [2026-09-08] バージョン対応の事前検証、移行検証、上限付きリカバリ、保存済み移行元 ID によるロールバックを追加し、OpenClaw Lite のデータ安全なロールアウトを強化しました。8.1 能力マーカーを持たない旧イメージは従来のローリング更新経路を継続します。
+- [2026-09-02] Northbound API と Owner 分離 Portal を拡張し、OpenClaw、Hermes、OpenCode、DeepSeek Harness の Lite / Pro 作成、非同期ライフサイクル操作、保護された Share Link 管理に対応しました。[Northbound API Guide](./docs/northbound-api-guide.md) を参照してください。
+- [2026-09-01] LDAP エンタープライズ認証、管理対象 Provider のモデルカタログ拡張、OpenCode と DeepSeek Harness の管理対象インスタンス専用 Browser Origin を追加しました。
 - [2026-08-19] 管理対象 OpenCode ワークスペース、新しいインスタンス画面、OpenClaw・Hermes・OpenCode 向け Skill Hub 配布を追加しました。[OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_ja.md) を参照してください。
 - [2026-08-18] 8 個の読み取り専用テンプレート、自然言語によるカスタム Team、Hermes Lite Worker、ライブ Kanban、共有成果物、メンバーセッションで Team コラボレーションを強化しました。
 - [2026-08-17] モデル管理 Thinking、AI Gateway Session Usage、スケジュールタスク編集、Lite のライフサイクルと一括操作を追加しました。
@@ -158,6 +161,12 @@ Runtime プレビュー:
 ### Runtime とインスタンス管理
 
 OpenClaw、Hermes、OpenCode、DeepSeek Harness を Lite / Pro で作成し、イメージ、リソース、ライフサイクル、デスクトップ、ファイル、Shell、環境変数、アーカイブ、Share Link、一括操作を管理できます。
+
+### Northbound API とエンタープライズアクセス
+
+外部システムは、独立してデプロイする Northbound Gateway を介して ClawManager と連携します。ワンタイム JWE 認証、Scope、Owner 分離、冪等な非同期操作、Rate Limit、Audit、Gateway-to-Core mTLS により、公開連携境界を管理コンソールから分離します。管理者は LDAP/LDAPS または StartTLS を設定し、Directory User の Preview/Import と Group-to-Role Mapping も実行できます。
+
+Northbound API は OpenClaw、Hermes、OpenCode、DeepSeek Harness の Lite / Pro に対する作成、照会、再起動、明示確認付き Reset、Password 保護 Share Link を管理します。[Northbound API Guide](./docs/northbound-api-guide.md) と [Deployment Add-on](./deployments/k8s/northbound/README.md) を参照してください。
 
 <a id="ai-gateway"></a>
 ### AI Gateway
@@ -312,6 +321,10 @@ Runtime と Protocol の技術資料は Contributor 向けに `docs/` に残し�
 - [Resource Management Guide](./docs/resource-management_ja.md)
 - [Skill Hub Guide](./docs/skill-hub-guide_ja.md)
 - [OpenCode Workspace Guide](./docs/opencode-lite-pro-agent-development_ja.md)
+- [Northbound API Deployment Add-on](./deployments/k8s/northbound/README.md)
+- [Northbound API Guide（中国語）](./docs/northbound-api-guide.md)
+- [Northbound API Upgrade Guide（中国語）](./docs/northbound-upgrade-guide.md)
+- [Northbound OpenAPI 3.1 Specification](./docs/northbound-openapi.yaml)
 
 ## ライセンス
 

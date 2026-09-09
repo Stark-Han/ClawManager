@@ -84,7 +84,7 @@ func (s *fakeWorkspaceFileService) OpenPreview(ctx context.Context, scope servic
 	s.lastScope = scope
 	return s.file, "text/plain; charset=utf-8", s.size, nil
 }
-func (s *fakeWorkspaceFileService) OpenDownload(ctx context.Context, scope services.WorkspaceFileScope, relativePath string) (*os.File, string, int64, error) {
+func (s *fakeWorkspaceFileService) OpenDownload(ctx context.Context, scope services.WorkspaceFileScope, relativePath string) (io.ReadCloser, string, int64, error) {
 	s.lastScope = scope
 	return s.file, s.filename, s.size, nil
 }
@@ -118,6 +118,12 @@ func (s *fakeSharedExternalAccessService) EnableShareLink(ctx context.Context, i
 	return nil, fmt.Errorf("not implemented")
 }
 func (s *fakeSharedExternalAccessService) CreatePassword(ctx context.Context, instanceID, createdBy int, expiration services.ExternalAccessExpirationRequest) (*services.PasswordExternalAccessResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (s *fakeSharedExternalAccessService) ResetURL(ctx context.Context, instanceID, createdBy int) (*services.EnableShareLinkResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (s *fakeSharedExternalAccessService) ResetPassword(ctx context.Context, instanceID, createdBy int) (*services.PasswordExternalAccessResult, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 func (s *fakeSharedExternalAccessService) Disable(ctx context.Context, instanceID int) error {
@@ -404,6 +410,43 @@ func TestSharedWorkspaceFileHandlerDoesNotExposeLegacyNoneScope(t *testing.T) {
 	}
 	if fileService.listCalls != 0 {
 		t.Fatalf("legacy none scope reached file service %d times", fileService.listCalls)
+	}
+}
+
+func TestDesktopWorkspaceEligibilityFollowsManagedRuntimeVariant(t *testing.T) {
+	tests := []struct {
+		name     string
+		instance *models.Instance
+		want     bool
+	}{
+		{
+			name:     "linux workbuddy",
+			instance: &models.Instance{Type: "workbuddy", RuntimeVariant: "linux", InstanceMode: services.InstanceModePro},
+			want:     true,
+		},
+		{
+			name:     "windows workbuddy",
+			instance: &models.Instance{Type: "workbuddy", RuntimeVariant: "windows", InstanceMode: services.InstanceModePro},
+			want:     false,
+		},
+		{
+			name:     "linux codex",
+			instance: &models.Instance{Type: services.RuntimeTypeCodex, RuntimeVariant: "linux", InstanceMode: services.InstanceModePro},
+			want:     true,
+		},
+		{
+			name:     "windows codex",
+			instance: &models.Instance{Type: services.RuntimeTypeCodex, RuntimeVariant: "windows", InstanceMode: services.InstanceModePro},
+			want:     false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDesktopWorkspaceInstance(test.instance); got != test.want {
+				t.Fatalf("isDesktopWorkspaceInstance() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

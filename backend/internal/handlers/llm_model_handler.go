@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"clawreef/internal/models"
 	"clawreef/internal/services"
 	"clawreef/internal/utils"
 
@@ -17,21 +18,22 @@ type LLMModelHandler struct {
 
 // UpsertLLMModelRequest defines editable fields for model catalog entries.
 type UpsertLLMModelRequest struct {
-	ID                int     `json:"id,omitempty"`
-	DisplayName       string  `json:"display_name" binding:"required"`
-	Description       *string `json:"description,omitempty"`
-	ProviderType      string  `json:"provider_type" binding:"required"`
-	ProtocolType      string  `json:"protocol_type,omitempty"`
-	BaseURL           string  `json:"base_url" binding:"required"`
-	ProviderModelName string  `json:"provider_model_name" binding:"required"`
-	ReasoningEnabled  *bool   `json:"reasoning_enabled,omitempty"`
-	APIKey            *string `json:"api_key,omitempty"`
-	APIKeySecretRef   *string `json:"api_key_secret_ref,omitempty"`
-	IsSecure          bool    `json:"is_secure"`
-	IsActive          bool    `json:"is_active"`
-	InputPrice        float64 `json:"input_price"`
-	OutputPrice       float64 `json:"output_price"`
-	Currency          string  `json:"currency,omitempty"`
+	ID                int                       `json:"id,omitempty"`
+	DisplayName       string                    `json:"display_name" binding:"required"`
+	Description       *string                   `json:"description,omitempty"`
+	ProviderType      string                    `json:"provider_type" binding:"required"`
+	ProtocolType      string                    `json:"protocol_type,omitempty"`
+	BaseURL           string                    `json:"base_url" binding:"required"`
+	ProviderModelName string                    `json:"provider_model_name" binding:"required"`
+	ProviderModels    []models.LLMProviderModel `json:"provider_models,omitempty"`
+	ReasoningEnabled  *bool                     `json:"reasoning_enabled,omitempty"`
+	APIKey            *string                   `json:"api_key,omitempty"`
+	APIKeySecretRef   *string                   `json:"api_key_secret_ref,omitempty"`
+	IsSecure          bool                      `json:"is_secure"`
+	IsActive          bool                      `json:"is_active"`
+	InputPrice        float64                   `json:"input_price"`
+	OutputPrice       float64                   `json:"output_price"`
+	Currency          string                    `json:"currency,omitempty"`
 }
 
 // DiscoverLLMModelsRequest defines fields needed to fetch provider models.
@@ -77,6 +79,7 @@ func (h *LLMModelHandler) UpsertModel(c *gin.Context) {
 		ProtocolType:      req.ProtocolType,
 		BaseURL:           req.BaseURL,
 		ProviderModelName: req.ProviderModelName,
+		ProviderModels:    req.ProviderModels,
 		ReasoningEnabled:  req.ReasoningEnabled,
 		APIKey:            req.APIKey,
 		APIKeySecretRef:   req.APIKeySecretRef,

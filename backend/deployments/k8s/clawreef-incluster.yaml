@@ -547,6 +547,9 @@ spec:
       containers:
         - name: mysql
           image: mysql:8.4
+          args:
+            - "--binlog-expire-logs-seconds=259200"
+            - "--max-binlog-size=134217728"
           ports:
             - containerPort: 3306
           env:

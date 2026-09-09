@@ -157,12 +157,12 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	}
 
 	// Extract the actual path from the request (remove the proxy prefix)
-	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(effectiveRequestPath, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
-	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType) && !dedicatedRuntimeOrigin
+	shouldRewriteHTML := s.shouldRewriteHTMLForProxy(instanceID, accessToken.InstanceType, targetPort) && !dedicatedRuntimeOrigin
 
 	// Build target URL
-	targetURL, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
+	targetURL, runtimeGateway, err := s.resolveHTTPProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, effectiveRequestPath)
 	if err != nil {
 		return err
 	}
@@ -188,18 +188,11 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		}
 	}
 
-	// OpenCode uses a long-lived SSE stream at /global/event to initialize and
-	// keep its session UI in sync. Giving that request the normal five-minute
-	// HTTP proxy deadline delays all events until the connection is closed and
-	// leaves the Lite portal as an empty shell.
-	proxyCtx := ctx
-	cancel := func() {}
-	if !isOpenCodeEventStreamRequest(opencodeLite, bootstrapPath) {
-		proxyCtx, cancel = context.WithTimeout(ctx, 5*time.Minute)
-	}
-	defer cancel()
-
-	proxyReq, err := http.NewRequestWithContext(proxyCtx, r.Method, targetURL.String(), r.Body)
+	// Agent UIs use SSE, streaming responses, and long-running HTTP calls such
+	// as DeepSeek Harness /api/respond. Keep every proxied request attached to
+	// the browser's request context instead of imposing an unrelated hard
+	// deadline. Client disconnects still cancel the upstream request.
+	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL.String(), r.Body)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy request: %w", err)
 	}
@@ -220,8 +213,16 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 		}
 	}
 
-	// Set X-Forwarded headers
+	// Set X-Forwarded headers. OpenClaw 2026.8.1 rejects proxy-shaped
+	// requests whose forwarded client cannot be attributed to a concrete IP.
+	// Shared Runtime gateways reach this backend through the nginx sidecar in
+	// the same Pod, so r.RemoteAddr is loopback rather than the browser peer.
+	// Rebuild only the OpenClaw Runtime header at that trusted local boundary;
+	// all other instance types retain their existing proxy contract.
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	if runtimeGateway && isOpenClawRuntimeType(accessToken.InstanceType) {
+		setOpenClawRuntimeForwardedClient(proxyReq.Header, r)
+	}
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 	proxyReq.Header.Set("X-Forwarded-Proto", requestScheme(r))
 	if dedicatedRuntimeOrigin {
@@ -258,9 +259,9 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	if location := resp.Header.Get("Location"); location != "" && !dedicatedRuntimeOrigin {
 		resp.Header.Set("Location", s.rewriteRedirectLocation(instanceID, location))
 	}
-	// OpenCode is authenticated on the internal hop. Never expose its Basic
-	// challenge to the browser, where it would open a native login dialog.
-	if opencodeLite {
+	// OpenCode is authenticated transparently on the upstream request. Do not
+	// let a failed upstream challenge open a native browser Basic-auth dialog.
+	if isOpenCodeRuntimeType(accessToken.InstanceType) {
 		resp.Header.Del("WWW-Authenticate")
 	}
 
@@ -331,10 +332,6 @@ func (s *InstanceProxyService) ProxyRequest(ctx context.Context, instanceID int,
 	return nil
 }
 
-func isOpenCodeEventStreamRequest(opencodeLite bool, targetPath string) bool {
-	return opencodeLite && strings.TrimSpace(targetPath) == "/global/event"
-}
-
 func copyEventStream(w http.ResponseWriter, body io.Reader) error {
 	buffer := make([]byte, 32*1024)
 	flusher, _ := w.(http.Flusher)
@@ -391,10 +388,10 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	}
 
 	// Extract the actual path from the request
-	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType)
+	targetPath := s.extractTargetPath(r.URL.Path, instanceID, accessToken.InstanceType, accessToken.TargetPort)
 	targetPort := s.resolveTargetPort(accessToken.InstanceType, accessToken.TargetPort, targetPath)
 
-	targetURL, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
+	targetURL, runtimeGateway, err := s.resolveWebSocketProxyTarget(ctx, accessToken, instanceID, targetPort, targetPath, r.URL.Path)
 	if err != nil {
 		return err
 	}
@@ -426,6 +423,9 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	upstreamHeader.Del("Sec-Websocket-Version")
 	upstreamHeader.Del("Sec-Websocket-Extensions")
 	upstreamHeader.Set("X-Forwarded-For", r.RemoteAddr)
+	if runtimeGateway && isOpenClawRuntimeType(accessToken.InstanceType) {
+		setOpenClawRuntimeForwardedClient(upstreamHeader, r)
+	}
 	upstreamHeader.Set("X-Forwarded-Host", r.Host)
 	upstreamHeader.Set("X-Forwarded-Proto", requestScheme(r))
 	if dedicatedRuntimeOrigin {
@@ -605,6 +605,46 @@ func instanceProxyPrefix(instanceID int) string {
 func isOpenCodeRuntimeType(instanceType string) bool {
 	runtimeType, managed := NormalizeV2RuntimeType(instanceType)
 	return managed && runtimeType == RuntimeTypeOpenCode
+}
+
+func isOpenClawRuntimeType(instanceType string) bool {
+	runtimeType, managed := NormalizeV2RuntimeType(instanceType)
+	return managed && runtimeType == RuntimeTypeOpenClaw
+}
+
+// setOpenClawRuntimeForwardedClient reconstructs the client attribution passed
+// to an OpenClaw shared Runtime gateway. Only the in-Pod nginx hop is allowed
+// to supply X-Real-IP. Direct callers cannot spoof either forwarded header.
+func setOpenClawRuntimeForwardedClient(header http.Header, request *http.Request) {
+	if header == nil || request == nil {
+		return
+	}
+	peer := parseProxyPeerIP(request.RemoteAddr)
+	client := peer
+	if peer != nil && peer.IsLoopback() {
+		if realIP := net.ParseIP(strings.TrimSpace(request.Header.Get("X-Real-IP"))); realIP != nil {
+			client = realIP
+		}
+	}
+	if client == nil {
+		header.Del("X-Forwarded-For")
+		header.Del("X-Real-IP")
+		return
+	}
+	normalized := client.String()
+	header.Set("X-Forwarded-For", normalized)
+	header.Set("X-Real-IP", normalized)
+}
+
+func parseProxyPeerIP(remoteAddr string) net.IP {
+	value := strings.TrimSpace(remoteAddr)
+	if value == "" {
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	return net.ParseIP(strings.Trim(value, "[]"))
 }
 
 func (s *InstanceProxyService) isOpenCodeLiteProxyInstance(instanceID int, instanceType string) bool {
@@ -855,34 +895,34 @@ func (s *InstanceProxyService) managedRuntimeGatewayBearerToken(ctx context.Cont
 	return ""
 }
 
-func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+func (s *InstanceProxyService) resolveHTTPProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, bool, error) {
 	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, false); ok || err != nil {
-		return targetURL, err
+		return targetURL, ok, err
 	}
 	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get or create service: %w", err)
+		return nil, false, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, false),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, false),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
-	}, nil
+	}, false, nil
 }
 
-func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, error) {
+func (s *InstanceProxyService) resolveWebSocketProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPort int32, targetPath, requestPath string) (*url.URL, bool, error) {
 	if targetURL, ok, err := s.resolveV2ProxyTarget(ctx, accessToken, instanceID, targetPath, requestPath, true); ok || err != nil {
-		return targetURL, err
+		return targetURL, ok, err
 	}
 	serviceInfo, err := s.getOrCreateService(ctx, accessToken.UserID, instanceID, targetPort)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get or create service: %w", err)
+		return nil, false, fmt.Errorf("failed to get or create service: %w", err)
 	}
 	return &url.URL{
-		Scheme: s.resolveTargetScheme(accessToken.InstanceType, true),
+		Scheme: s.resolveTargetScheme(accessToken.InstanceType, targetPort, true),
 		Host:   s.resolveProxyHost(ctx, accessToken.UserID, instanceID, serviceInfo),
 		Path:   targetPath,
-	}, nil
+	}, false, nil
 }
 
 func (s *InstanceProxyService) resolveV2ProxyTarget(ctx context.Context, accessToken *AccessToken, instanceID int, targetPath, requestPath string, websocket bool) (*url.URL, bool, error) {
@@ -996,9 +1036,9 @@ func (s *InstanceProxyService) getOrCreateService(ctx context.Context, userID, i
 // extractTargetPath extracts the target path from the proxy URL
 // Input: /api/v1/instances/24/proxy/vnc.html
 // Output: /vnc.html
-func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string) string {
+func (s *InstanceProxyService) extractTargetPath(requestPath string, instanceID int, instanceType string, targetPort int32) string {
 	prefix := fmt.Sprintf("/api/v1/instances/%d/proxy", instanceID)
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, targetPort) {
 		if strings.HasPrefix(requestPath, prefix) {
 			path := requestPath
 			if path == "" {
@@ -1088,9 +1128,8 @@ func (s *InstanceProxyService) GetProxyURLForInstance(instance *models.Instance,
 		return ""
 	}
 	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeOpenCode {
-		// OpenCode's web UI owns the root of its origin. Do not fall back to the
-		// legacy /instances/{id}/proxy subpath when the deployment forgot its
-		// dedicated-origin template; fail access generation instead.
+		// OpenCode owns the root of its dedicated origin. Falling back to the
+		// legacy subpath produces broken asset and WebSocket URLs.
 		return managedRuntimePublicURL(runtimeType, instance.ID, token)
 	}
 	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeDeepSeekHarness {
@@ -1144,7 +1183,7 @@ func (s *InstanceProxyService) GetTargetPortForInstance(instance *models.Instanc
 		return 3001
 	}
 
-	return buildRuntimeConfig(instance.Type, instance.OSType, instance.OSVersion, instance.ImageRegistry, instance.ImageTag).Port
+	return buildRuntimeConfigForInstance(instance).Port
 }
 
 // ResolveUpstreamHostPort ensures the instance Service exists and returns its
@@ -1160,7 +1199,7 @@ func (s *InstanceProxyService) ResolveUpstreamHostPort(ctx context.Context, user
 }
 
 func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPort int32, targetPath string) int32 {
-	if usesWebtopImage(instanceType) {
+	if usesWebtopRuntime(instanceType, defaultPort) {
 		if defaultPort == 0 {
 			return 3001
 		}
@@ -1183,6 +1222,9 @@ func (s *InstanceProxyService) resolveTargetPort(instanceType string, defaultPor
 }
 
 func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
+	if targetPort == 8006 {
+		return []int32{3389}
+	}
 	if targetPort == 3000 || targetPort == 8082 {
 		return []int32{3000, 8082}
 	}
@@ -1190,8 +1232,8 @@ func (s *InstanceProxyService) getAdditionalPorts(targetPort int32) []int32 {
 	return nil
 }
 
-func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocket bool) string {
-	if usesHTTPSUpstream(instanceType) {
+func (s *InstanceProxyService) resolveTargetScheme(instanceType string, targetPort int32, websocket bool) string {
+	if usesHTTPSUpstream(instanceType, targetPort) {
 		if websocket {
 			return "wss"
 		}
@@ -1205,9 +1247,12 @@ func (s *InstanceProxyService) resolveTargetScheme(instanceType string, websocke
 	return "http"
 }
 
-func usesHTTPSUpstream(instanceType string) bool {
+func usesHTTPSUpstream(instanceType string, targetPort int32) bool {
+	if usesWebtopRuntime(instanceType, targetPort) {
+		return true
+	}
 	switch instanceType {
-	case "ubuntu", "webtop", "hermes", "openclaw", "workbuddy", RuntimeTypeDeepSeekHarness:
+	case "ubuntu", "webtop", "hermes", "openclaw", RuntimeTypeDeepSeekHarness:
 		return true
 	default:
 		return false
@@ -1218,21 +1263,43 @@ func (s *InstanceProxyService) resolveProxyHost(ctx context.Context, userID, ins
 	return fmt.Sprintf("%s:%d", serviceInfo.ClusterIP, serviceInfo.TargetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTML(instanceType string) bool {
-	return !usesWebtopImage(instanceType)
+func (s *InstanceProxyService) shouldRewriteHTML(instanceType string, targetPort int32) bool {
+	return !usesWebtopRuntime(instanceType, targetPort)
 }
 
-func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string) bool {
+func (s *InstanceProxyService) shouldRewriteHTMLForProxy(instanceID int, instanceType string, targetPort int32) bool {
+	if s != nil && s.instanceRepo != nil && strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeHermes) {
+		instance, err := s.instanceRepo.GetByID(instanceID)
+		if err == nil && instance != nil {
+			if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok && runtimeType == RuntimeTypeHermes {
+				return true
+			}
+		}
+	}
 	if s.isOpenCodeLiteProxyInstance(instanceID, instanceType) {
 		return true
 	}
-	return s.shouldRewriteHTML(instanceType)
+	return s.shouldRewriteHTML(instanceType, targetPort)
 }
 
 // IsWebtopInstanceType reports whether the instance type is served by a
 // Webtop/KasmVNC desktop image (and therefore eligible for direct gateway
 // proxying via SUBFOLDER-prefixed paths).
 func (s *InstanceProxyService) IsWebtopInstanceType(instanceType string) bool {
+	return usesWebtopImage(instanceType)
+}
+
+// IsWebtopInstance includes legacy Linux Workbuddy instances without treating
+// Windows Workbuddy/noVNC as Webtop.
+func (s *InstanceProxyService) IsWebtopInstance(instance *models.Instance) bool {
+	return isWebtopRuntimeInstance(instance)
+}
+
+func usesWebtopRuntime(instanceType string, targetPort int32) bool {
+	if strings.EqualFold(strings.TrimSpace(instanceType), "workbuddy") ||
+		strings.EqualFold(strings.TrimSpace(instanceType), RuntimeTypeCodex) {
+		return targetPort == 3001
+	}
 	return usesWebtopImage(instanceType)
 }
 

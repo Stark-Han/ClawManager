@@ -22,11 +22,12 @@ var openCodeBuiltInProviders = []string{
 }
 
 type gatewayModelInjection struct {
-	defaultModel         string
-	modelsJSON           string
-	providerModelsJSON   string
-	reasoningJSON        string
-	reasoningControlJSON string
+	defaultModel            string
+	codingAgentDefaultModel string
+	modelsJSON              string
+	providerModelsJSON      string
+	reasoningJSON           string
+	reasoningControlJSON    string
 }
 
 type providerModelRef struct {
@@ -111,13 +112,18 @@ func (s *instanceService) resolveGatewayModelInjection() (*gatewayModelInjection
 	if err != nil {
 		return nil, err
 	}
+	codingAgentDefaultModel := ""
+	if len(modelIDs) > 1 {
+		codingAgentDefaultModel = modelIDs[1]
+	}
 
 	return &gatewayModelInjection{
-		defaultModel:         "auto",
-		modelsJSON:           modelsJSON,
-		providerModelsJSON:   providerModelsJSON,
-		reasoningJSON:        reasoningJSON,
-		reasoningControlJSON: reasoningControlJSON,
+		defaultModel:            "auto",
+		codingAgentDefaultModel: codingAgentDefaultModel,
+		modelsJSON:              modelsJSON,
+		providerModelsJSON:      providerModelsJSON,
+		reasoningJSON:           reasoningJSON,
+		reasoningControlJSON:    reasoningControlJSON,
 	}, nil
 }
 
@@ -134,6 +140,14 @@ func (s *instanceService) listGatewayModels() ([]models.LLMModel, error) {
 		items, err = s.expandedModelCatalog.ListExpandedActiveModels()
 	} else {
 		items, err = s.llmModelRepo.ListActive()
+		if err == nil {
+			for index := range items {
+				if strings.TrimSpace(items[index].CatalogProviderName) == "" {
+					items[index].CatalogProviderName = modelCatalogProviderName(items[index])
+				}
+			}
+			items = models.ExpandLLMModelCatalog(items)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list active models: %w", err)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,6 +210,23 @@ func TestRuntimePoolHandlerListPodsIncludesUnreportedDeploymentPods(t *testing.T
 	}
 	if pod.Capacity != 33 {
 		t.Fatalf("fallback pod capacity = %d, want configured capacity 33", pod.Capacity)
+	}
+}
+
+func TestMergeRuntimePoolDeploymentPodsEnrichesAgentRowsWithPoolMetadata(t *testing.T) {
+	disabled := false
+	digest := "sha256:" + strings.Repeat("8", 64)
+	items := runtimePoolPodListItems([]models.RuntimePod{
+		{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:stale", State: "ready"},
+		{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u55", PodName: "deleted-pod", RuntimeType: "openclaw", ImageRef: "registry/openclaw:deleted", State: "unhealthy"},
+	}, true)
+	discovered := []models.RuntimePod{{Namespace: "runtime-system", DeploymentName: "openclaw-runtime-u48", PodName: "target-pod", ImageRef: "registry/openclaw@" + digest, ImageDigest: &digest, PoolRole: "upgrade-target", UpgradeID: "48", SourceDeployment: "openclaw-runtime", SchedulingEnabled: &disabled}}
+	got := mergeRuntimePoolDeploymentPods(items, discovered)
+	if len(got) != 1 || got[0].PoolRole != "upgrade-target" || got[0].UpgradeID != "48" || got[0].SchedulingEnabled == nil || *got[0].SchedulingEnabled {
+		t.Fatalf("pool metadata was not merged: %#v", got)
+	}
+	if got[0].ImageRef != "registry/openclaw@"+digest || got[0].ImageDigest == nil || *got[0].ImageDigest != digest {
+		t.Fatalf("Kubernetes image did not replace stale Agent image: %#v", got[0])
 	}
 }
 
@@ -510,7 +528,7 @@ func (s *runtimePoolHandlerDeploymentService) Ensure(ctx context.Context, spec k
 func (s *runtimePoolHandlerDeploymentService) Scale(ctx context.Context, namespace, name string, replicas int32) error {
 	return nil
 }
-func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, namespace, name, image string, maxUnavailable, maxSurge int) error {
+func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error {
 	s.rollouts = append(s.rollouts, runtimePoolHandlerDeploymentRollout{
 		namespace:      namespace,
 		name:           name,
@@ -518,6 +536,18 @@ func (s *runtimePoolHandlerDeploymentService) RolloutImage(ctx context.Context, 
 		maxUnavailable: maxUnavailable,
 		maxSurge:       maxSurge,
 	})
+	return nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) EnsureUpgradePool(ctx context.Context, namespace, sourceName, targetName, image, upgradeID string) error {
+	return nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error {
+	return nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) DeleteUpgradePool(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error {
 	return nil
 }
 func (s *runtimePoolHandlerDeploymentService) ListPods(ctx context.Context, namespace, runtimeType string) ([]k8s.RuntimeDeploymentPod, error) {
@@ -530,6 +560,20 @@ func (s *runtimePoolHandlerDeploymentService) ListPods(ctx context.Context, name
 			continue
 		}
 		pods = append(pods, pod)
+	}
+	return pods, nil
+}
+
+func (s *runtimePoolHandlerDeploymentService) ListDeploymentPods(ctx context.Context, refs []k8s.RuntimeDeploymentRef) ([]k8s.RuntimeDeploymentPod, error) {
+	allowed := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		allowed[ref.Namespace+"/"+ref.Name] = struct{}{}
+	}
+	var pods []k8s.RuntimeDeploymentPod
+	for _, pod := range s.pods {
+		if _, ok := allowed[pod.Namespace+"/"+pod.DeploymentName]; ok {
+			pods = append(pods, pod)
+		}
 	}
 	return pods, nil
 }

@@ -1,4 +1,4 @@
-﻿import React, {
+import React, {
   useCallback,
   useEffect,
   useMemo,
@@ -62,6 +62,12 @@ const RESTART_NOTICE_AUTO_DISMISS_MS = 6000;
 const LITE_COLLAPSED_BOTTOM_FALLBACK_PX = 120;
 const LITE_COLLAPSED_BOTTOM_MAX_PX = 220;
 const LITE_ROOT_GAP_TOTAL_PX = 16; // two gap-2 rows between header / workspace / bottom
+type ExternalAccessAction =
+  | "share-link"
+  | "password"
+  | "reset-url"
+  | "reset-password"
+  | "disable";
 const DESKTOP_STREAM_PROFILES: Array<{
   id: DesktopStreamProfile;
   labelKey: string;
@@ -141,11 +147,16 @@ function formatBytes(value?: number) {
 }
 
 function supportsWorkspace(instance: Instance) {
+  if (instance.type === "workbuddy" || instance.type === "codex") {
+    return (
+      instance.runtime_variant === "linux" ||
+      (!instance.runtime_variant && instance.mount_path?.trim() === "/config")
+    );
+  }
   return (
     instance.type === "openclaw" ||
     instance.type === "hermes" ||
     instance.type === "opencode" ||
-    instance.type === "workbuddy" ||
     instance.type === "deepseek-harness" ||
     Boolean(instance.workspace_path)
   );
@@ -369,6 +380,7 @@ const InstanceDetailPage: React.FC = () => {
   const [externalActionLoading, setExternalActionLoading] = useState<
     string | null
   >(null);
+  const [externalResetTarget, setExternalResetTarget] = useState<"url" | "password" | null>(null);
   const [externalError, setExternalError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<string | null>(null);
   const [externalExpiresMode, setExternalExpiresMode] =
@@ -454,6 +466,17 @@ const InstanceDetailPage: React.FC = () => {
   useEffect(() => {
     return () => cancelRestartNoticeTimer();
   }, [cancelRestartNoticeTimer]);
+
+  const openCodeInitialDirectory = (() => {
+    if (instance?.type !== "opencode" || instance.instance_mode !== "lite") {
+      return undefined;
+    }
+    const workspacePath = instance?.workspace_path?.trim().replaceAll("\\", "/");
+    if (!workspacePath?.startsWith("/")) {
+      return undefined;
+    }
+    return `${workspacePath.replace(/\/+$/gu, "")}/starter`;
+  })();
 
   const fetchMeta = useCallback(
     async (targetInstanceId: number, options?: { background?: boolean }) => {
@@ -965,7 +988,7 @@ const InstanceDetailPage: React.FC = () => {
   };
 
   const handleExternalAction = async (
-    action: "share-link" | "password" | "disable",
+    action: ExternalAccessAction,
   ) => {
     if (!instance) {
       return;
@@ -1000,6 +1023,20 @@ const InstanceDetailPage: React.FC = () => {
         setExternalPassword(result.password);
         setExternalPasswordVisible(false);
         setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalAccessPanelOpen(true);
+      } else if (action === "reset-url") {
+        const result = await instanceService.resetExternalShareURL(instance.id);
+        setExternalAccess(result.access);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalResetTarget(null);
+        setExternalAccessPanelOpen(true);
+      } else if (action === "reset-password") {
+        const result = await instanceService.resetExternalAccessPassword(instance.id);
+        setExternalAccess(result.access);
+        setExternalPassword(result.password);
+        setExternalPasswordVisible(false);
+        setExternalShareURL(absoluteExternalURL(result.share_url));
+        setExternalResetTarget(null);
         setExternalAccessPanelOpen(true);
       } else {
         await instanceService.disableExternalAccess(instance.id);
@@ -1416,6 +1453,28 @@ const InstanceDetailPage: React.FC = () => {
               {externalAccess?.enabled && (
                 <button
                   type="button"
+                  className="app-button-secondary"
+                  disabled={externalActionLoading !== null}
+                  onClick={() => setExternalResetTarget("url")}
+                >
+                  <RotateCw className="h-4 w-4" />
+                  Reset URL
+                </button>
+              )}
+              {externalAccess?.enabled && externalAccess.auth_mode === "password" && (
+                <button
+                  type="button"
+                  className="app-button-secondary"
+                  disabled={externalActionLoading !== null}
+                  onClick={() => setExternalResetTarget("password")}
+                >
+                  <KeyRound className="h-4 w-4" />
+                  Reset Password
+                </button>
+              )}
+              {externalAccess?.enabled && (
+                <button
+                  type="button"
                   className="app-button-secondary border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800"
                   disabled={externalActionLoading !== null}
                   onClick={() => void handleExternalAction("disable")}
@@ -1555,9 +1614,9 @@ const InstanceDetailPage: React.FC = () => {
               instanceId={instance.id}
               instanceName={instance.name}
               instanceType={instance.type}
-              instanceMode={instance.instance_mode}
               availability={availability}
               reloadToken={serviceFrameReloadToken}
+              openCodeInitialDirectory={openCodeInitialDirectory}
               workspaceVisible={supportsWorkspace(instance) ? workspaceVisible : undefined}
               onWorkspaceVisibilityChange={supportsWorkspace(instance) ? setWorkspaceVisible : undefined}
             />
@@ -1565,7 +1624,15 @@ const InstanceDetailPage: React.FC = () => {
           {workspaceVisible &&
             (supportsWorkspace(instance) ? (
               <div className="h-full min-h-0 min-w-0">
-                <WorkspaceFileManager instanceId={instance.id} />
+                <WorkspaceFileManager
+                  instanceId={instance.id}
+                  initialPath={
+                    instance.type === "opencode" &&
+                    instance.instance_mode === "lite"
+                      ? "starter"
+                      : undefined
+                  }
+                />
               </div>
             ) : (
               <div className="cm-surface flex h-full min-h-[420px] items-center justify-center text-sm text-slate-500">
@@ -1660,7 +1727,6 @@ const InstanceDetailPage: React.FC = () => {
             instanceId={instance.id}
             instanceName={instance.name}
             instanceType={instance.type}
-            instanceMode={instance.instance_mode}
             availability={availability}
             reloadToken={serviceFrameReloadToken}
             workspaceVisible={supportsWorkspace(instance) ? workspaceVisible : undefined}
@@ -1764,7 +1830,7 @@ const InstanceDetailPage: React.FC = () => {
             {desktopStreamMessage || t("instances.restartRequiredAfterChange")}
           </p>
         </section>
-      )}
+        )}
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,22rem)]">
         <InstanceSkillHubPanel
@@ -1887,6 +1953,32 @@ const InstanceDetailPage: React.FC = () => {
         !isDedicatedInstance && (skillPanelExpanded || sessionPanelExpanded)
       }
     >
+      <ConfirmDialog
+        open={externalResetTarget !== null}
+        title={externalResetTarget === "password" ? "Reset share password" : "Reset share URL"}
+        message={
+          externalResetTarget === "password"
+            ? "The old password and existing authenticated share sessions will stop working immediately. The share URL, expiration, and workspace permissions will stay unchanged."
+            : "The old share URL will stop working immediately. Password, expiration, and workspace permissions will stay unchanged."
+        }
+        confirmLabel={externalResetTarget === "password" ? "Reset Password" : "Reset URL"}
+        cancelLabel={t("common.cancel")}
+        destructive
+        loading={
+          externalActionLoading ===
+          (externalResetTarget === "password" ? "reset-password" : "reset-url")
+        }
+        onCancel={() => {
+          if (externalActionLoading === null) {
+            setExternalResetTarget(null);
+          }
+        }}
+        onConfirm={() =>
+          void handleExternalAction(
+            externalResetTarget === "password" ? "reset-password" : "reset-url",
+          )
+        }
+      />
       <ConfirmDialog
         open={showDeleteDialog}
         title={t("common.delete")}

@@ -8,6 +8,7 @@ export interface LLMModel {
   protocol_type?: string;
   base_url: string;
   provider_model_name: string;
+  provider_models?: DiscoveredProviderModel[];
   reasoning_enabled: boolean;
   supports_reasoning?: boolean;
   reasoning_control?: string;

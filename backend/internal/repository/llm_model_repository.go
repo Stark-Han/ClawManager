@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS llm_models (
   protocol_type VARCHAR(100) NULL,
   base_url VARCHAR(500) NOT NULL,
   provider_model_name VARCHAR(255) NOT NULL,
+  provider_models_json TEXT NULL,
   reasoning_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   api_key TEXT NULL,
   api_key_secret_ref VARCHAR(255) NULL,
@@ -98,6 +99,16 @@ ALTER TABLE llm_models
 			panic(fmt.Errorf("failed to ensure llm_models reasoning_enabled column: %w", err))
 		}
 	}
+
+	const alterProviderModelsQuery = `
+ALTER TABLE llm_models
+  ADD COLUMN provider_models_json TEXT NULL AFTER provider_model_name;
+`
+	if _, err := r.sess.SQL().Exec(alterProviderModelsQuery); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			panic(fmt.Errorf("failed to ensure llm_models provider_models_json column: %w", err))
+		}
+	}
 }
 
 func (r *llmModelRepository) List() ([]models.LLMModel, error) {
@@ -105,6 +116,7 @@ func (r *llmModelRepository) List() ([]models.LLMModel, error) {
 	if err := r.sess.Collection("llm_models").Find().OrderBy("-is_secure", "display_name").All(&items); err != nil {
 		return nil, fmt.Errorf("failed to list llm models: %w", err)
 	}
+	populateProviderModels(items)
 	return items, nil
 }
 
@@ -113,6 +125,7 @@ func (r *llmModelRepository) ListActive() ([]models.LLMModel, error) {
 	if err := r.sess.Collection("llm_models").Find(db.Cond{"is_active": true}).OrderBy("-is_secure", "display_name").All(&items); err != nil {
 		return nil, fmt.Errorf("failed to list active llm models: %w", err)
 	}
+	populateProviderModels(items)
 	return items, nil
 }
 
@@ -125,6 +138,7 @@ func (r *llmModelRepository) GetByID(id int) (*models.LLMModel, error) {
 		}
 		return nil, fmt.Errorf("failed to get llm model by id: %w", err)
 	}
+	models.PopulateLLMProviderModels(&item)
 	return &item, nil
 }
 
@@ -137,6 +151,7 @@ func (r *llmModelRepository) GetByDisplayName(displayName string) (*models.LLMMo
 		}
 		return nil, fmt.Errorf("failed to get llm model by display name: %w", err)
 	}
+	models.PopulateLLMProviderModels(&item)
 	return &item, nil
 }
 
@@ -165,4 +180,10 @@ func (r *llmModelRepository) Delete(id int) error {
 		return fmt.Errorf("failed to delete llm model: %w", err)
 	}
 	return nil
+}
+
+func populateProviderModels(items []models.LLMModel) {
+	for index := range items {
+		models.PopulateLLMProviderModels(&items[index])
+	}
 }

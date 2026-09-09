@@ -6,11 +6,11 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const detailSource = readFileSync(
   path.resolve(scriptDir, "../src/pages/instances/InstanceDetailPage.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const frameSource = readFileSync(
   path.resolve(scriptDir, "../src/components/InstanceServiceFrame.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 function assert(condition, message) {
   if (!condition) {

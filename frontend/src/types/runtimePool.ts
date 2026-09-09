@@ -13,6 +13,12 @@ export interface RuntimePod {
   node_name?: string;
   deployment_name: string;
   image_ref: string;
+  openclaw_version?: string;
+  agent_protocol_version?: string;
+  team_plugin_version?: string;
+  session_store?: string;
+  image_digest?: string;
+  capabilities: string[];
   state: "pending" | "ready" | "draining" | "unhealthy" | "deleted" | string;
   used_slots: number;
   capacity: number;
@@ -25,6 +31,11 @@ export interface RuntimePod {
   last_seen_at?: string;
   updated_at?: string;
   agent_reported?: boolean;
+  pool_role?: "upgrade-target" | "upgrade-lab" | string;
+  pool_purpose?: string;
+  upgrade_id?: string;
+  source_deployment?: string;
+  scheduling_enabled?: boolean;
 }
 
 export interface RuntimeGateway {
@@ -47,4 +58,52 @@ export interface StartRuntimeRolloutRequest {
   target_image_ref: string;
   batch_size: number;
   max_unavailable: number;
+  preflight_id?: string;
+  auto_rollback?: boolean;
+}
+
+export interface RuntimeRollout {
+  id: number;
+  runtime_type: RuntimeType;
+  target_image_ref: string;
+  target_image_digest?: string;
+  status: string;
+  phase: string;
+  preflight_id?: string;
+  plan_fingerprint?: string;
+  auto_rollback: boolean;
+  rollback_status?: string;
+  rollback_error?: string;
+  error_message?: string;
+}
+
+export interface RuntimeUpgradePreflightResult {
+  rollout?: RuntimeRollout;
+  strategy: "legacy_rolling" | "openclaw_8plus_data_safe" | string;
+  target_image_ref: string;
+  target_runtime_version?: string;
+  target_upgrade_protocol?: string;
+  passed: boolean;
+  blockers: string[];
+  warnings: string[];
+  instance_count: number;
+  team_count: number;
+  openclaw_team_member_count: number;
+  hermes_team_member_count: number;
+  required_capabilities: string[];
+  empty_pool_reset?: boolean;
+}
+
+export interface RuntimeUpgradeItem {
+  id: number;
+  instance_id: number;
+  team_id?: number;
+  state: string;
+  error_message?: string;
+}
+
+export interface RuntimeUpgradeDetails {
+  rollout: RuntimeRollout;
+  items: RuntimeUpgradeItem[];
+  audits: Array<{ id: number; action: string; phase: string; outcome: string; created_at: string }>;
 }
