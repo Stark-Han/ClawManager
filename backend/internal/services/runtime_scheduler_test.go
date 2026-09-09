@@ -1793,6 +1793,73 @@ func TestRuntimeSchedulerReconcileRetriesUnboundGatewayStartFailureAfterRuntimeU
 	}
 }
 
+func TestRuntimeSchedulerRecoversConfirmedLegacyGatewayExitWithBinding(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "http://agent.runtime"
+	workspacePath := "/workspaces/openclaw/user-46/instance-971"
+	errorMessage := "exit status 1"
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.desiredRunning = []models.Instance{{
+		ID: 971, UserID: 46, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway,
+		InstanceMode: InstanceModeLite, Status: "error", RuntimeErrorMessage: &errorMessage,
+		MemoryGB: 1, DiskGB: 1, WorkspacePath: &workspacePath, RuntimeGeneration: 27,
+	}}
+	podRepo := &fakeRuntimePodRepo{
+		pods:        map[int64]*models.RuntimePod{52: {ID: 52, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100, UsedSlots: 1}},
+		schedulable: []models.RuntimePod{{ID: 52, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100, UsedSlots: 0}},
+	}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[971] = &models.InstanceRuntimeBinding{
+		InstanceID: 971, RuntimePodID: 52, RuntimeType: RuntimeTypeOpenClaw,
+		GatewayID: "gw-971-27", GatewayPort: 20000, WorkspacePath: workspacePath,
+		State: RuntimeGatewayBindingError, Generation: 27,
+	}
+	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-971-27", Status: "running"}}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, NewRuntimeEventService(nil), nil, &fakeRuntimeDeploymentService{}, time.Second)
+
+	if err := scheduler.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if len(agent.deleteRequests) != 1 || agent.deleteRequests[0].gatewayID != "gw-971-27" {
+		t.Fatalf("writer fencing delete requests = %#v", agent.deleteRequests)
+	}
+	if bindingRepo.failedReleaseCalls[971] != 1 || len(agent.createRequests) != 1 {
+		t.Fatalf("failed binding release=%d create requests=%d", bindingRepo.failedReleaseCalls[971], len(agent.createRequests))
+	}
+	state := instanceRepo.runtimeStates[971]
+	if state.status != "running" || state.generation != 27 || state.message != nil {
+		t.Fatalf("runtime state = %+v, want recovered running generation 27", state)
+	}
+}
+
+func TestRuntimeSchedulerDoesNotRecoverFailedBindingWithoutAgentFence(t *testing.T) {
+	ctx := context.Background()
+	endpoint := "http://agent.runtime"
+	workspacePath := "/workspaces/openclaw/user-46/instance-972"
+	errorMessage := "exit status 1"
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instanceRepo.desiredRunning = []models.Instance{{
+		ID: 972, UserID: 46, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway,
+		InstanceMode: InstanceModeLite, Status: "error", RuntimeErrorMessage: &errorMessage,
+		MemoryGB: 1, DiskGB: 1, WorkspacePath: &workspacePath, RuntimeGeneration: 28,
+	}}
+	podRepo := &fakeRuntimePodRepo{
+		pods:        map[int64]*models.RuntimePod{53: {ID: 53, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100, UsedSlots: 1}},
+		schedulable: []models.RuntimePod{{ID: 53, RuntimeType: RuntimeTypeOpenClaw, AgentEndpoint: &endpoint, State: "ready", Capacity: 100}},
+	}
+	bindingRepo := newFakeRuntimeBindingRepo()
+	bindingRepo.bindings[972] = &models.InstanceRuntimeBinding{InstanceID: 972, RuntimePodID: 53, GatewayID: "gw-972-28", State: RuntimeGatewayBindingError, Generation: 28}
+	agent := &fakeRuntimeAgentClient{deleteErr: context.DeadlineExceeded}
+	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, NewRuntimeEventService(nil), nil, &fakeRuntimeDeploymentService{}, time.Second)
+
+	if err := scheduler.reconcile(ctx); err == nil {
+		t.Fatal("reconcile error = nil, want writer-fencing failure")
+	}
+	if bindingRepo.failedReleaseCalls[972] != 0 || len(agent.createRequests) != 0 || bindingRepo.bindings[972] == nil {
+		t.Fatalf("unsafe recovery mutated state: releases=%d creates=%d binding=%#v", bindingRepo.failedReleaseCalls[972], len(agent.createRequests), bindingRepo.bindings[972])
+	}
+}
+
 func TestRuntimeSchedulerReconcileSkipsNonRecoverableErrorInstance(t *testing.T) {
 	ctx := context.Background()
 	endpoint := "http://agent.runtime"
@@ -3249,6 +3316,7 @@ type fakeRuntimeBindingRepo struct {
 	createErr             error
 	enforceUniqueGateway  bool
 	deleteByPodPortCalls  map[string]int
+	failedReleaseCalls    map[int]int
 }
 
 func newFakeRuntimeBindingRepo() *fakeRuntimeBindingRepo {
@@ -3257,6 +3325,7 @@ func newFakeRuntimeBindingRepo() *fakeRuntimeBindingRepo {
 		deleteCalls:           map[int]int{},
 		deleteAndReleaseCalls: map[int]int{},
 		deleteByPodPortCalls:  map[string]int{},
+		failedReleaseCalls:    map[int]int{},
 	}
 }
 
@@ -3361,6 +3430,15 @@ func (r *fakeRuntimeBindingRepo) DeleteRunningByInstanceIDGenerationAndReleaseSl
 		return false, nil
 	}
 	r.deleteAndReleaseCalls[instanceID]++
+	delete(r.bindings, instanceID)
+	return true, nil
+}
+func (r *fakeRuntimeBindingRepo) DeleteFailedByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int) (bool, error) {
+	binding := r.bindings[instanceID]
+	if binding == nil || binding.RuntimePodID != runtimePodID || binding.Generation != generation || (binding.State != "error" && binding.State != "failed" && binding.State != "stopped") {
+		return false, nil
+	}
+	r.failedReleaseCalls[instanceID]++
 	delete(r.bindings, instanceID)
 	return true, nil
 }

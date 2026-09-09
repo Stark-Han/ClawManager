@@ -33,21 +33,22 @@ import (
 )
 
 const (
-	teamSharedMountPath      = "/team"
-	teamConfigFileName       = "team.json"
-	teamIntroductionFileName = "team-introduction.md"
-	teamAgentsFileName       = "AGENTS.md"
-	teamSoulFileName         = "SOUL.md"
-	teamManagedOverlayStart  = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
-	teamManagedOverlayEnd    = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
-	teamConfigMountDirPath   = "/etc/clawmanager/team"
-	teamConfigMountPath      = teamConfigMountDirPath + "/" + teamConfigFileName
-	teamHermesSoulMountPath  = "/config/.hermes/SOUL.md"
-	teamSharedUID            = 1000
-	teamSharedGID            = 1000
-	teamSharedUmask          = "0002"
-	teamRedisURLSecretKey    = "CLAWMANAGER_TEAM_REDIS_URL"
-	teamTokenSecretKey       = "CLAWMANAGER_TEAM_TOKEN"
+	teamSharedMountPath                = "/team"
+	teamConfigFileName                 = "team.json"
+	teamIntroductionFileName           = "team-introduction.md"
+	teamAgentsFileName                 = "AGENTS.md"
+	teamSoulFileName                   = "SOUL.md"
+	teamManagedOverlayStart            = "<!-- CLAWMANAGER TEAM OVERLAY: START -->"
+	teamManagedOverlayEnd              = "<!-- CLAWMANAGER TEAM OVERLAY: END -->"
+	teamConfigMountDirPath             = "/etc/clawmanager/team"
+	teamConfigMountPath                = teamConfigMountDirPath + "/" + teamConfigFileName
+	teamHermesSoulMountPath            = "/config/.hermes/SOUL.md"
+	teamSharedUID                      = 1000
+	teamSharedGID                      = 1000
+	teamSharedUmask                    = "0002"
+	teamRedisURLSecretKey              = "CLAWMANAGER_TEAM_REDIS_URL"
+	teamTokenSecretKey                 = "CLAWMANAGER_TEAM_TOKEN"
+	teamRuntimeUnavailableReasonPrefix = "Runtime unavailable: "
 )
 
 const (
@@ -3784,9 +3785,6 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 	var errs []error
 	for idx := range teams {
 		team := teams[idx]
-		if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
-			continue
-		}
 		items, listErr := s.repo.ListWorkItemsByTeamID(team.ID, 500)
 		if listErr != nil {
 			errs = append(errs, listErr)
@@ -3797,12 +3795,36 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 			errs = append(errs, memberErr)
 			continue
 		}
+		unavailableMembers := map[int]models.Instance{}
+		for memberIdx := range members {
+			member := &members[memberIdx]
+			unavailable, instance, changed, reconcileErr := s.reconcileTeamMemberRuntimeAvailability(member, items, now)
+			if reconcileErr != nil {
+				errs = append(errs, reconcileErr)
+				continue
+			}
+			if unavailable && instance != nil {
+				unavailableMembers[member.ID] = *instance
+			}
+			if changed {
+				member.UpdatedAt = now
+				if updateErr := s.repo.UpdateMember(member); updateErr != nil {
+					errs = append(errs, updateErr)
+				}
+			}
+		}
+		if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
+			continue
+		}
 		if releaseErr := s.reconcileTerminalTeamMemberBindings(&team, members, now); releaseErr != nil {
 			errs = append(errs, releaseErr)
 		}
 		for memberIdx := range members {
 			member := members[memberIdx]
 			if isLeaderTeamMember(&member) || !isActiveTeamMember(&member) {
+				continue
+			}
+			if _, unavailable := unavailableMembers[member.ID]; unavailable {
 				continue
 			}
 			if reconcileTeamMemberOperationalState(&member, items) {
@@ -3814,6 +3836,58 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 		}
 
 		var bus *redisBus
+		for itemIdx := range items {
+			item := items[itemIdx]
+			if item.OwnerMemberID == nil || !isActiveTeamWorkItemStatus(item.Status) {
+				continue
+			}
+			instance, unavailable := unavailableMembers[*item.OwnerMemberID]
+			if !unavailable {
+				continue
+			}
+			instanceStatus := strings.ToLower(strings.TrimSpace(instance.Status))
+			if instanceStatus == "creating" || instanceStatus == "starting" || instanceStatus == "pending" {
+				continue
+			}
+			owner, ownerErr := s.repo.GetMemberByID(*item.OwnerMemberID)
+			if ownerErr != nil {
+				errs = append(errs, ownerErr)
+				continue
+			}
+			task, taskErr := s.repo.GetTaskByID(item.RootTaskID)
+			if taskErr != nil {
+				errs = append(errs, taskErr)
+				continue
+			}
+			if owner == nil || task == nil || isLeaderTeamMember(owner) || isTerminalTeamTaskStatus(task.Status) {
+				continue
+			}
+			if bus == nil {
+				bus, err = s.redisBusForTeam(context.Background(), &team)
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
+			}
+			reason := strings.TrimSpace(stringValue(instance.RuntimeErrorMessage))
+			if reason == "" {
+				reason = "linked Runtime instance is " + strings.TrimSpace(instance.Status)
+			}
+			failureIdentity := fmt.Sprintf("%d:%d:%s:%s", instance.ID, instance.RuntimeGeneration, strings.ToLower(strings.TrimSpace(instance.Status)), reason)
+			failureHash := sha256.Sum256([]byte(failureIdentity))
+			streamRef := fmt.Sprintf("runtime-instance:%d:%x", instance.ID, failureHash[:8])
+			summary := fmt.Sprintf("Member %s Runtime instance %d is unavailable: %s. Preserve the current assignment and artifacts; retry or reassign only after checking Runtime recovery.", owner.MemberKey, instance.ID, reason)
+			sourcePayload := map[string]interface{}{
+				"eventKind": "runtime_reconciliation_needed", "failureDomain": "runtime_gateway",
+				"recoverable": true, "retryable": true, "summary": summary,
+				"workId": item.WorkID, "assignmentId": workItemBusinessID(item),
+				"runtimeInstanceId": instance.ID, "runtimeGeneration": instance.RuntimeGeneration,
+			}
+			sourceEvent := &models.TeamEvent{TeamID: team.ID, TaskID: &task.ID, MemberID: &owner.ID, EventType: "runtime_instance_unavailable", RedisStreamID: &streamRef, CreatedAt: now, OccurredAt: &now}
+			if recoveryErr := s.createLeaderMediatedRecoveryRequest(&team, bus, task, owner, sourcePayload, sourceEvent); recoveryErr != nil {
+				errs = append(errs, recoveryErr)
+			}
+		}
 		for itemIdx := range items {
 			item := items[itemIdx]
 			if item.Status != models.TeamTaskStatusSucceeded || item.OwnerMemberID == nil || !workItemHasAcceptedResultReceipt(item) {
@@ -3869,6 +3943,72 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s *teamService) reconcileTeamMemberRuntimeAvailability(member *models.TeamMember, items []models.TeamWorkItem, now time.Time) (bool, *models.Instance, bool, error) {
+	if s == nil || s.instanceService == nil || member == nil || member.InstanceID == nil || *member.InstanceID <= 0 || member.Status == models.TeamMemberStatusDeleted || member.Status == models.TeamMemberStatusDeleting {
+		return false, nil, false, nil
+	}
+	instance, err := s.instanceService.GetByID(*member.InstanceID)
+	if err != nil {
+		// A control-plane read failure is not evidence that a Runtime died.
+		return false, nil, false, err
+	}
+	changed := false
+	setString := func(target *string, value string) {
+		if *target != value {
+			*target = value
+			changed = true
+		}
+	}
+	setOptional := func(target **string, value string) {
+		if strings.TrimSpace(derefTeamString(*target)) == value {
+			return
+		}
+		copyValue := value
+		*target = &copyValue
+		changed = true
+	}
+	if instance == nil {
+		instance = &models.Instance{ID: *member.InstanceID, Status: "missing"}
+	}
+	status := strings.ToLower(strings.TrimSpace(instance.Status))
+	if status == "running" {
+		wasRuntimeUnavailable := member.Status == models.TeamMemberStatusOffline ||
+			member.Status == models.TeamMemberStatusCreating ||
+			member.Availability == models.TeamMemberAvailabilityOffline ||
+			strings.HasPrefix(strings.TrimSpace(derefTeamString(member.BlockedReason)), teamRuntimeUnavailableReasonPrefix)
+		if !wasRuntimeUnavailable {
+			return false, instance, false, nil
+		}
+		if !reconcileTeamMemberOperationalState(member, items) {
+			setString(&member.Status, models.TeamMemberStatusIdle)
+			setString(&member.Availability, models.TeamMemberAvailabilityIdle)
+		}
+		setOptional(&member.RuntimeStatus, "running")
+		if member.BlockedReason != nil {
+			member.BlockedReason = nil
+			changed = true
+		}
+		return false, instance, changed, nil
+	}
+	if status == "creating" || status == "starting" || status == "pending" {
+		setString(&member.Status, models.TeamMemberStatusCreating)
+		setString(&member.Availability, models.TeamMemberAvailabilityOffline)
+		setOptional(&member.RuntimeStatus, status)
+		reason := teamRuntimeUnavailableReasonPrefix + "linked instance is starting"
+		setOptional(&member.BlockedReason, reason)
+		return true, instance, changed, nil
+	}
+	setString(&member.Status, models.TeamMemberStatusOffline)
+	setString(&member.Availability, models.TeamMemberAvailabilityOffline)
+	setOptional(&member.RuntimeStatus, status)
+	reason := "linked instance is " + status
+	if instance != nil && instance.RuntimeErrorMessage != nil && strings.TrimSpace(*instance.RuntimeErrorMessage) != "" {
+		reason = strings.TrimSpace(*instance.RuntimeErrorMessage)
+	}
+	setOptional(&member.BlockedReason, teamRuntimeUnavailableReasonPrefix+reason)
+	return true, instance, changed, nil
 }
 
 // reconcileTerminalTeamMemberBindings repairs only stale operational pointers.

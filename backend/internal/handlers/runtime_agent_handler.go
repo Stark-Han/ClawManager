@@ -90,15 +90,19 @@ type runtimeAgentGatewaysRequest struct {
 }
 
 type runtimeAgentGatewayReport struct {
-	InstanceID    int        `json:"instance_id" binding:"required"`
-	GatewayID     string     `json:"gateway_id"`
-	GatewayPort   int        `json:"gateway_port"`
-	GatewayPID    *int       `json:"gateway_pid,omitempty"`
-	WorkspacePath string     `json:"workspace_path,omitempty"`
-	State         string     `json:"state" binding:"required"`
-	Generation    int        `json:"generation" binding:"required"`
-	ErrorMessage  *string    `json:"error_message,omitempty"`
-	HealthAt      *time.Time `json:"health_at,omitempty"`
+	InstanceID     int        `json:"instance_id" binding:"required"`
+	GatewayID      string     `json:"gateway_id"`
+	GatewayPort    int        `json:"gateway_port"`
+	GatewayPID     *int       `json:"gateway_pid,omitempty"`
+	WorkspacePath  string     `json:"workspace_path,omitempty"`
+	State          string     `json:"state" binding:"required"`
+	Generation     int        `json:"generation" binding:"required"`
+	ErrorMessage   *string    `json:"error_message,omitempty"`
+	FailureClass   string     `json:"failure_class,omitempty"`
+	ExitCode       *int       `json:"exit_code,omitempty"`
+	Retryable      *bool      `json:"retryable,omitempty"`
+	RestartAttempt int        `json:"restart_attempt,omitempty"`
+	HealthAt       *time.Time `json:"health_at,omitempty"`
 }
 
 func NewRuntimeAgentHandler(cfg config.RuntimePoolConfig, podRepo repository.RuntimePodRepository, bindingRepo repository.InstanceRuntimeBindingRepository, instanceRepo repository.InstanceRepository, events runtimeEventPublisher, skillService services.SkillService) *RuntimeAgentHandler {

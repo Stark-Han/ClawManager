@@ -41,6 +41,14 @@ type PendingGatewayBindingReleaser interface {
 	DeletePendingByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int, updatedBefore time.Time) (bool, error)
 }
 
+// FailedGatewayBindingReleaser conditionally releases an old Agent-reported
+// process failure after that Agent has confirmed the writer is gone. The
+// generation/state predicate prevents a delayed recovery pass from deleting a
+// newer binding.
+type FailedGatewayBindingReleaser interface {
+	DeleteFailedByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int) (bool, error)
+}
+
 type instanceRuntimeBindingRepository struct {
 	sess db.Session
 }
@@ -394,6 +402,40 @@ func (r *instanceRuntimeBindingRepository) DeleteRunningByInstanceIDGenerationAn
 			WHERE id = ?
 		`, time.Now().UTC(), runtimePodID); err != nil {
 			return fmt.Errorf("failed to release runtime pod slot: %w", err)
+		}
+		deleted = true
+		return nil
+	}, nil)
+	return deleted, err
+}
+
+func (r *instanceRuntimeBindingRepository) DeleteFailedByInstanceIDGenerationAndReleaseSlot(ctx context.Context, instanceID int, runtimePodID int64, generation int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	deleted := false
+	err := r.sess.TxContext(ctx, func(tx db.Session) error {
+		res, err := tx.SQL().ExecContext(ctx, `
+			DELETE FROM instance_runtime_bindings
+			WHERE instance_id = ? AND runtime_pod_id = ? AND generation = ?
+			  AND state IN ('error', 'failed', 'stopped')
+		`, instanceID, runtimePodID, generation)
+		if err != nil {
+			return fmt.Errorf("failed to delete confirmed failed instance runtime binding: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to inspect confirmed failed binding delete: %w", err)
+		}
+		if affected == 0 {
+			return nil
+		}
+		if _, err := tx.SQL().ExecContext(ctx, `
+			UPDATE runtime_pods
+			SET used_slots = CASE WHEN used_slots > 0 THEN used_slots - 1 ELSE 0 END, updated_at = ?
+			WHERE id = ?
+		`, time.Now().UTC(), runtimePodID); err != nil {
+			return fmt.Errorf("failed to release confirmed failed runtime slot: %w", err)
 		}
 		deleted = true
 		return nil

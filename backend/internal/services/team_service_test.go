@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8693,6 +8694,76 @@ type teamDeletionInstanceServiceStub struct {
 	validateCalls   []int
 	deleteErr       error
 	deleteCalls     []int
+}
+
+type teamRuntimeAvailabilityInstanceServiceStub struct {
+	InstanceService
+	instances map[int]*models.Instance
+	err       error
+}
+
+func (s *teamRuntimeAvailabilityInstanceServiceStub) GetByID(id int) (*models.Instance, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.instances[id], nil
+}
+
+func TestTeamRuntimeAvailabilityProjectsFailedInstanceOffline(t *testing.T) {
+	instanceID := 930
+	runtimeError := "exit status 1"
+	member := &models.TeamMember{ID: 90, InstanceID: &instanceID, Status: models.TeamMemberStatusBusy, Availability: models.TeamMemberAvailabilityBusy}
+	service := &teamService{instanceService: &teamRuntimeAvailabilityInstanceServiceStub{instances: map[int]*models.Instance{
+		instanceID: {ID: instanceID, Status: "error", RuntimeErrorMessage: &runtimeError},
+	}}}
+
+	unavailable, _, changed, err := service.reconcileTeamMemberRuntimeAvailability(member, nil, time.Now().UTC())
+	if err != nil || !unavailable || !changed {
+		t.Fatalf("availability result unavailable=%t changed=%t err=%v", unavailable, changed, err)
+	}
+	if member.Status != models.TeamMemberStatusOffline || member.Availability != models.TeamMemberAvailabilityOffline || derefTeamString(member.RuntimeStatus) != "error" {
+		t.Fatalf("failed Runtime projection = %+v", member)
+	}
+	if !strings.Contains(derefTeamString(member.BlockedReason), runtimeError) {
+		t.Fatalf("blocked reason = %q, want Runtime failure", derefTeamString(member.BlockedReason))
+	}
+}
+
+func TestTeamRuntimeAvailabilityRestoresActiveAssignmentAfterRuntimeRecovery(t *testing.T) {
+	instanceID := 931
+	rootTaskID := 401
+	runtimeStatus := "error"
+	reason := teamRuntimeUnavailableReasonPrefix + "exit status 1"
+	member := &models.TeamMember{
+		ID: 91, InstanceID: &instanceID, Status: models.TeamMemberStatusOffline,
+		Availability: models.TeamMemberAvailabilityOffline, RuntimeStatus: &runtimeStatus, BlockedReason: &reason,
+	}
+	service := &teamService{instanceService: &teamRuntimeAvailabilityInstanceServiceStub{instances: map[int]*models.Instance{
+		instanceID: {ID: instanceID, Status: "running"},
+	}}}
+	items := []models.TeamWorkItem{{ID: 501, RootTaskID: rootTaskID, OwnerMemberID: &member.ID, WorkID: "A1", Status: models.TeamTaskStatusRunning}}
+
+	unavailable, _, changed, err := service.reconcileTeamMemberRuntimeAvailability(member, items, time.Now().UTC())
+	if err != nil || unavailable || !changed {
+		t.Fatalf("availability result unavailable=%t changed=%t err=%v", unavailable, changed, err)
+	}
+	if member.Status != models.TeamMemberStatusBusy || member.Availability != models.TeamMemberAvailabilityBusy || member.CurrentTaskID == nil || *member.CurrentTaskID != rootTaskID || derefTeamString(member.RuntimeStatus) != "running" || member.BlockedReason != nil {
+		t.Fatalf("recovered Runtime projection = %+v", member)
+	}
+}
+
+func TestTeamRuntimeAvailabilityDoesNotInferFailureFromControlPlaneReadError(t *testing.T) {
+	instanceID := 932
+	member := &models.TeamMember{ID: 92, InstanceID: &instanceID, Status: models.TeamMemberStatusBusy, Availability: models.TeamMemberAvailabilityBusy}
+	service := &teamService{instanceService: &teamRuntimeAvailabilityInstanceServiceStub{err: context.DeadlineExceeded}}
+
+	unavailable, _, changed, err := service.reconcileTeamMemberRuntimeAvailability(member, nil, time.Now().UTC())
+	if err == nil || unavailable || changed {
+		t.Fatalf("availability result unavailable=%t changed=%t err=%v", unavailable, changed, err)
+	}
+	if member.Status != models.TeamMemberStatusBusy || member.Availability != models.TeamMemberAvailabilityBusy {
+		t.Fatalf("transient control-plane error mutated member: %+v", member)
+	}
 }
 
 func (s *teamDeletionInstanceServiceStub) ValidateDelete(instanceID int) error {

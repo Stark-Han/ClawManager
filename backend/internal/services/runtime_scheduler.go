@@ -1216,6 +1216,13 @@ func (s *RuntimeScheduler) reconcile(ctx context.Context) error {
 				}
 				if stale {
 					binding = nil
+				} else if recovered, recoverErr := s.recoverLegacyFailedGatewayBinding(ctx, instance, binding); recoverErr != nil {
+					errs = append(errs, fmt.Errorf("recover failed Gateway binding for desired instance %d: %w", instance.ID, recoverErr))
+					continue
+				} else if recovered {
+					binding = nil
+					instance.Status = "creating"
+					instance.RuntimeErrorMessage = nil
 				} else if err := s.syncInstanceStateFromBinding(ctx, instance, binding); err != nil {
 					errs = append(errs, fmt.Errorf("sync desired instance %d from binding: %w", instance.ID, err))
 					continue
@@ -1233,6 +1240,45 @@ func (s *RuntimeScheduler) reconcile(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s *RuntimeScheduler) recoverLegacyFailedGatewayBinding(ctx context.Context, instance models.Instance, binding *models.InstanceRuntimeBinding) (bool, error) {
+	if s == nil || binding == nil || s.agentClient == nil || s.podRepo == nil || s.instanceRepo == nil {
+		return false, nil
+	}
+	state := strings.ToLower(strings.TrimSpace(binding.State))
+	if state != RuntimeGatewayBindingError && state != "failed" && state != RuntimeGatewayBindingStopped {
+		return false, nil
+	}
+	if !isRuntimeErrorInstance(instance) || !isLegacyUnexpectedGatewayExitMessage(strings.TrimSpace(stringValue(instance.RuntimeErrorMessage))) {
+		return false, nil
+	}
+	releaser, ok := s.bindingRepo.(repository.FailedGatewayBindingReleaser)
+	if !ok {
+		return false, nil
+	}
+	pod, err := s.podRepo.GetByID(ctx, binding.RuntimePodID)
+	if err != nil {
+		return false, err
+	}
+	if pod == nil || pod.State != "ready" || pod.Draining || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" {
+		return false, nil
+	}
+	// DeleteGateway is the writer-fencing acknowledgement. Never release the
+	// binding or schedule another process when the Agent cannot confirm that the
+	// old PID is gone.
+	if err := s.agentClient.DeleteGateway(ctx, strings.TrimSpace(*pod.AgentEndpoint), binding.GatewayID); err != nil && !errors.Is(err, ErrRuntimeAgentNotFound) {
+		return false, fmt.Errorf("confirm failed Gateway %s stopped: %w", binding.GatewayID, err)
+	}
+	deleted, err := releaser.DeleteFailedByInstanceIDGenerationAndReleaseSlot(ctx, instance.ID, binding.RuntimePodID, binding.Generation)
+	if err != nil || !deleted {
+		return false, err
+	}
+	message := "recovering a confirmed legacy Gateway process exit"
+	if err := s.instanceRepo.UpdateRuntimeState(ctx, instance.ID, "creating", binding.Generation, &message); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *RuntimeScheduler) reconcileCreatingInstances(ctx context.Context, instances []models.Instance) []error {
@@ -2295,7 +2341,15 @@ func isRecoverableRuntimeSchedulingError(instance models.Instance) bool {
 	return message == fmt.Sprintf("no schedulable %s runtime pod", runtimeType) ||
 		strings.Contains(message, fmt.Sprintf("no schedulable %s runtime pod:", runtimeType)) ||
 		message == fmt.Sprintf("instance %d is held by an active data-safe runtime rollout", instance.ID) ||
-		message == "gateway start failed: exit status 1"
+		message == "gateway start failed: exit status 1" ||
+		isLegacyUnexpectedGatewayExitMessage(message)
+}
+
+func isLegacyUnexpectedGatewayExitMessage(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return normalized == "exit status 1" ||
+		strings.HasPrefix(normalized, "gateway process exited unexpectedly") ||
+		strings.HasPrefix(normalized, "gateway exited unexpectedly")
 }
 
 func isRuntimeAssignmentPending(err error) bool {
