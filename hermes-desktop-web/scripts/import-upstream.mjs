@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,9 +24,46 @@ export async function importUpstream(source) {
       throw new Error('Unsafe or invalid locked source entry')
     }
   }
-  const checkout = source ? path.resolve(source) : null
+  const imported = path.join(root, '.upstream', 'source')
+  let checkout = source ? path.resolve(source) : null
+  let temporaryRoot = null
+  if (!checkout) {
+    let cacheComplete = true
+    for (const [filename, expected] of entries) {
+      try {
+        if (gitBlob(await readFile(path.join(imported, filename))) !== expected) cacheComplete = false
+      } catch {
+        cacheComplete = false
+      }
+      if (!cacheComplete) break
+    }
+    if (cacheComplete) return imported
+    if (lock.repository !== 'https://github.com/NousResearch/hermes-agent.git' || !/^v[0-9]{4}\.[0-9]+\.[0-9]+$/.test(lock.ref)) {
+      throw new Error('Unreviewed Hermes source repository or ref')
+    }
+    temporaryRoot = await mkdtemp(path.join(tmpdir(), 'clawmanager-hermes-source-'))
+    checkout = path.join(temporaryRoot, 'source')
+    let cloneError
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        execFileSync('git', [
+          '-c', 'core.hooksPath=/dev/null', 'clone', '--no-checkout', '--depth', '1',
+          '--single-branch', '--branch', lock.ref, lock.repository, checkout
+        ], { maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })
+        cloneError = null
+        break
+      } catch (error) {
+        cloneError = error
+        await rm(checkout, { recursive: true, force: true })
+      }
+    }
+    if (cloneError) {
+      await rm(temporaryRoot, { recursive: true, force: true })
+      throw new Error(`Hermes source clone failed: ${cloneError.message}`)
+    }
+  }
   const sourceBytes = new Map()
-  if (checkout) {
+  try {
     const actual = git(checkout, ['rev-parse', `${lock.commit}^{commit}`]).toString().trim()
     if (actual !== lock.commit) throw new Error('Hermes source commit mismatch')
     if (git(checkout, ['rev-parse', `${lock.commit}^{tree}`]).toString().trim() !== lock.sourceTree) {
@@ -57,38 +95,27 @@ export async function importUpstream(source) {
       offset += size + 1
     }
     if (offset !== batch.length) throw new Error('Unexpected trailing Git object data')
-  }
-  const imported = path.join(root, '.upstream', 'source')
-  let next = 0
-  async function worker() {
-    while (next < entries.length) {
-      const [filename, expected] = entries[next++]
-      const target = path.join(imported, filename)
-      let cached
-      try { cached = await readFile(target) } catch { /* Missing cache is downloaded below. */ }
-      if (cached && gitBlob(cached) === expected) continue
-      let bytes = sourceBytes.get(filename)
-      if (!bytes) {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            const response = await fetch(`https://raw.githubusercontent.com/NousResearch/hermes-agent/${lock.commit}/${filename}`, {
-              signal: AbortSignal.timeout(30_000), redirect: 'error'
-            })
-            if (!response.ok) throw new Error(`Source download failed (${response.status}): ${filename}`)
-            bytes = Buffer.from(await response.arrayBuffer())
-            break
-          } catch (error) { if (attempt === 2) throw error }
-        }
+    let next = 0
+    async function worker() {
+      while (next < entries.length) {
+        const [filename, expected] = entries[next++]
+        const target = path.join(imported, filename)
+        let cached
+        try { cached = await readFile(target) } catch { /* Missing cache is imported below. */ }
+        if (cached && gitBlob(cached) === expected) continue
+        const bytes = sourceBytes.get(filename)
+        if (!bytes) throw new Error(`Missing Hermes source: ${filename}`)
+        const actualBlob = gitBlob(bytes)
+        if (actualBlob !== expected) throw new Error(`Hermes source integrity mismatch: ${filename}`)
+        await mkdir(path.dirname(target), { recursive: true })
+        await writeFile(target, bytes)
       }
-      if (!bytes) throw new Error(`Missing Hermes source: ${filename}`)
-      const actualBlob = gitBlob(bytes)
-      if (actualBlob !== expected) throw new Error(`Hermes source integrity mismatch: ${filename}`)
-      await mkdir(path.dirname(target), { recursive: true })
-      await writeFile(target, bytes)
     }
+    await Promise.all(Array.from({ length: 8 }, () => worker()))
+    return imported
+  } finally {
+    if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true })
   }
-  await Promise.all(Array.from({ length: 8 }, () => worker()))
-  return imported
 }
 
 function gitBlob(bytes) {
