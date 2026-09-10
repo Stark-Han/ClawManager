@@ -211,6 +211,14 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 	rolloutPhase := "requested"
 	var sourceImagesJSON *string
 	var targetImageDigest *string
+	if runtimeType == services.RuntimeTypeHermes {
+		resolved, digest, err := services.ResolveHermesRolloutImage(c.Request.Context(), targetImage)
+		if err != nil {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		targetImage, targetImageDigest = resolved, &digest
+	}
 	if runtimeType == services.RuntimeTypeOpenClaw {
 		if h.upgrade == nil {
 			utils.Error(c, http.StatusServiceUnavailable, "runtime upgrade service is unavailable")

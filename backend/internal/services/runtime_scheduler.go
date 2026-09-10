@@ -851,6 +851,9 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	pods = annotateRuntimePods(pods, inventory)
 	pods = s.currentRuntimePods(pods, time.Now().UTC())
 	if len(pods) == 0 {
+		if !dataSafeOpenClaw {
+			return s.waitForLegacyRollout(ctx, rollout, "no current Runtime Agent has registered")
+		}
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
 			timeoutErr := fmt.Errorf("OpenClaw target runtime did not register within 15 minutes")
 			message := timeoutErr.Error()
@@ -869,12 +872,15 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	if !dataSafeOpenClaw {
 		pods = filterOrdinaryRuntimePods(pods)
+		if len(pods) == 0 {
+			return s.waitForLegacyRollout(ctx, rollout, "no ordinary Runtime Agent has registered")
+		}
 		for _, pod := range pods {
 			if pod.RuntimeType != rollout.RuntimeType {
 				continue
 			}
 			if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
-				return nil
+				return s.waitForLegacyRollout(ctx, rollout, fmt.Sprintf("Runtime pod %s is not ready at the target image (state=%s, draining=%t)", pod.PodName, pod.State, pod.Draining))
 			}
 		}
 	}
@@ -949,6 +955,18 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	finishedAt := time.Now().UTC()
 	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
+}
+
+// A failed/unregistered Agent must not leave a generic rollout running forever.
+// Do not claim rollback or touch bindings: generic updates have no saved source
+// inventory from which a safe rollback could be reconstructed.
+func (s *RuntimeScheduler) waitForLegacyRollout(ctx context.Context, rollout models.RuntimeRollout, reason string) error {
+	if rollout.StartedAt == nil || time.Since(rollout.StartedAt.UTC()) < 15*time.Minute {
+		return nil
+	}
+	finished := time.Now().UTC()
+	message := "Runtime rollout timed out after 15 minutes: " + reason + "; inspect Runtime container startup logs; no automatic rollback was performed"
+	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, &finished, &message)
 }
 
 func runtimeUpgradeReconcileInterrupted(ctx context.Context, err error) bool {

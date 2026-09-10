@@ -231,6 +231,11 @@ func TestMergeRuntimePoolDeploymentPodsEnrichesAgentRowsWithPoolMetadata(t *test
 }
 
 func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Content-Digest", "sha256:"+strings.Repeat("a", 64))
+		_, _ = w.Write([]byte(`{"schemaVersion":2}`))
+	}))
+	defer registry.Close()
 	gin.SetMode(gin.TestMode)
 	rolloutRepo := &runtimePoolHandlerRolloutRepo{}
 	events := &runtimePoolHandlerEvents{}
@@ -241,7 +246,7 @@ func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testi
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/runtime-rollouts", bytes.NewBufferString(`{
 		"runtime_type": "hermes",
-		"target_image_ref": "ghcr.io/example/hermes:v2",
+		"target_image_ref": "`+strings.TrimPrefix(registry.URL, "http://")+`/hermes:v2",
 		"batch_size": 2,
 		"max_unavailable": 1
 	}`))
@@ -253,6 +258,9 @@ func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testi
 	}
 	if rolloutRepo.created == nil {
 		t.Fatalf("rollout was not created")
+	}
+	if !strings.HasSuffix(rolloutRepo.created.TargetImageRef, "@sha256:"+strings.Repeat("a", 64)) {
+		t.Fatalf("tag was not pinned: %s", rolloutRepo.created.TargetImageRef)
 	}
 	if rolloutRepo.created.StartedBy == nil || *rolloutRepo.created.StartedBy != 7 {
 		t.Fatalf("started_by = %#v, want 7", rolloutRepo.created.StartedBy)
@@ -295,7 +303,7 @@ func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/runtime-rollouts", bytes.NewBufferString(`{
 		"runtime_type": "hermes",
-		"target_image_ref": "registry/hermes:v2",
+		"target_image_ref": "registry/hermes@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"batch_size": 1,
 		"max_unavailable": 1
 	}`))
@@ -309,7 +317,7 @@ func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
 		t.Fatalf("deployment rollouts = %d, want 1", got)
 	}
 	rollout := deployments.rollouts[0]
-	if rollout.namespace != "clawmanager-system" || rollout.name != "hermes-runtime" || rollout.image != "registry/hermes:v2" {
+	if rollout.namespace != "clawmanager-system" || rollout.name != "hermes-runtime" || rollout.image != "registry/hermes@sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("deployment rollout = %+v, want hermes-runtime registry/hermes:v2", rollout)
 	}
 	if podRepo.markedPodID != 21 || podRepo.markedState != "draining" || !podRepo.markedDraining {
@@ -348,9 +356,15 @@ func (r *runtimePoolHandlerUserRepo) GetByUsername(username string) (*models.Use
 	return nil, nil
 }
 
-func (r *runtimePoolHandlerUserRepo) GetByAuthProviderUsername(authProvider, username string) (*models.User, error) { return r.GetByUsername(username) }
-func (r *runtimePoolHandlerUserRepo) CountByAuthProviderUsername(authProvider, username string) (int, error) { return 0, nil }
-func (r *runtimePoolHandlerUserRepo) GetByLoginAlias(authProvider, loginAlias string) (*models.User, error) { return nil, nil }
+func (r *runtimePoolHandlerUserRepo) GetByAuthProviderUsername(authProvider, username string) (*models.User, error) {
+	return r.GetByUsername(username)
+}
+func (r *runtimePoolHandlerUserRepo) CountByAuthProviderUsername(authProvider, username string) (int, error) {
+	return 0, nil
+}
+func (r *runtimePoolHandlerUserRepo) GetByLoginAlias(authProvider, loginAlias string) (*models.User, error) {
+	return nil, nil
+}
 func (r *runtimePoolHandlerUserRepo) GetByEmail(email string) (*models.User, error) {
 	return nil, nil
 }
