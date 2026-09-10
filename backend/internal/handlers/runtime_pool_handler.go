@@ -12,18 +12,20 @@ import (
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services"
+	"clawreef/internal/services/k8s"
 	"clawreef/internal/utils"
 
 	"github.com/gin-gonic/gin"
 )
 
 type RuntimePoolHandler struct {
-	podRepo     repository.RuntimePodRepository
-	bindingRepo repository.InstanceRuntimeBindingRepository
-	rolloutRepo repository.RuntimeRolloutRepository
-	scheduler   *services.RuntimeScheduler
-	events      runtimeEventPublisher
-	upgrade     *services.RuntimeUpgradeService
+	podRepo            repository.RuntimePodRepository
+	bindingRepo        repository.InstanceRuntimeBindingRepository
+	rolloutRepo        repository.RuntimeRolloutRepository
+	scheduler          *services.RuntimeScheduler
+	events             runtimeEventPublisher
+	upgrade            *services.RuntimeUpgradeService
+	hermesWebInspector func(context.Context, string) (bool, error)
 }
 
 const (
@@ -218,6 +220,18 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 			return
 		}
 		targetImage, targetImageDigest = resolved, &digest
+		inspect := h.hermesWebInspector
+		if inspect == nil {
+			inspect = services.HermesImageNeedsWebTrust
+		}
+		web, err := inspect(c.Request.Context(), targetImage)
+		if err != nil {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		if web {
+			rolloutPhase = k8s.HermesWebRolloutPhase
+		}
 	}
 	if runtimeType == services.RuntimeTypeOpenClaw {
 		if h.upgrade == nil {

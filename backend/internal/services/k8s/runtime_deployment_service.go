@@ -47,6 +47,8 @@ type RuntimeDeploymentSpec struct {
 	AgentReportToken      string
 	BackendURL            string
 	TrustedProxyCIDRs     string
+	ControlUIOrigin       string
+	HermesDesktopWeb      bool
 }
 
 type RuntimeDeploymentPod struct {
@@ -536,6 +538,17 @@ func (s *runtimeDeploymentService) Ensure(ctx context.Context, spec RuntimeDeplo
 	}
 
 	desired := BuildRuntimeDeployment(spec)
+	if spec.RuntimeType == "hermes" && spec.HermesDesktopWeb {
+		container := &desired.Spec.Template.Spec.Containers[0]
+		upsertEnvVar(container, "CLAWMANAGER_CONTROL_UI_ORIGIN", spec.ControlUIOrigin)
+		env, err := s.hermesWebEnvironment(ctx, spec.Namespace, *container)
+		if err != nil {
+			return err
+		}
+		for key, value := range env {
+			upsertEnvVar(container, key, value)
+		}
+	}
 	deployments := s.client.AppsV1().Deployments(spec.Namespace)
 	existing, err := deployments.Get(ctx, spec.Name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
@@ -597,6 +610,10 @@ func (s *runtimeDeploymentService) Scale(ctx context.Context, namespace, name st
 }
 
 func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int) error {
+	return s.rolloutImage(ctx, namespace, name, image, upgradeID, maxUnavailable, maxSurge, false)
+}
+
+func (s *runtimeDeploymentService) rolloutImage(ctx context.Context, namespace, name, image, upgradeID string, maxUnavailable, maxSurge int, hermesWeb bool) error {
 	if s == nil || s.client == nil {
 		return fmt.Errorf("k8s client not initialized")
 	}
@@ -625,6 +642,26 @@ func (s *runtimeDeploymentService) RolloutImage(ctx context.Context, namespace, 
 		}
 
 		container := &updated.Spec.Template.Spec.Containers[containerIndex]
+		if hermesWeb {
+			if existing.Labels["clawmanager.io/runtime-type"] != "hermes" {
+				return fmt.Errorf("Hermes Web rollout cannot target another runtime")
+			}
+			env, err := s.hermesWebEnvironment(ctx, namespace, *container)
+			if err != nil {
+				return err
+			}
+			for key, value := range env {
+				upsertEnvVar(container, key, value)
+			}
+		} else if existing.Labels["clawmanager.io/runtime-type"] == "hermes" {
+			// Only remove the Web mode we injected, not administrator overrides.
+			for _, e := range container.Env {
+				if e.Name == "CLAWMANAGER_HERMES_PROXY_SOURCE" {
+					removeEnvVar(container, "CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED")
+					break
+				}
+			}
+		}
 		container.Image = image
 		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_REF", image)
 		upsertEnvVar(container, "CLAWMANAGER_RUNTIME_IMAGE_DIGEST", runtimeImageDigest(image))

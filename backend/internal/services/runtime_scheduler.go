@@ -318,7 +318,7 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		allPods = filterOrdinaryRuntimePods(allPods)
 	}
 	currentPods := s.currentRuntimePods(allPods, time.Now().UTC())
-	if runtimePodsAlreadyAtImage(currentPods, rollout.RuntimeType, rollout.TargetImageRef) && !(rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil) {
+	if runtimePodsAlreadyAtImage(currentPods, rollout.RuntimeType, rollout.TargetImageRef) && rollout.Phase != k8s.HermesWebRolloutPhase && !(rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil) {
 		finishedAt := time.Now().UTC()
 		return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", &startedAt, &finishedAt, nil)
 	}
@@ -565,7 +565,13 @@ func (s *RuntimeScheduler) rolloutRuntimeDeployments(ctx context.Context, rollou
 			upgradeID = strconv.FormatInt(rollout.ID, 10)
 		}
 		var err error
-		if upgradeID != "" {
+		if rollout.RuntimeType == RuntimeTypeHermes && rollout.Phase == k8s.HermesWebRolloutPhase {
+			web, ok := s.deployments.(k8s.HermesWebDeploymentService)
+			if !ok {
+				return fmt.Errorf("Hermes Web deployment configuration is unavailable")
+			}
+			err = web.RolloutHermesWebImage(ctx, ref.namespace, ref.name, targetImage, maxUnavailable, maxSurge)
+		} else if upgradeID != "" {
 			err = s.deployments.EnsureUpgradePool(ctx, ref.namespace, ref.name, runtimeUpgradeTargetDeploymentName(ref.name, rollout.ID), targetImage, upgradeID)
 		} else {
 			err = s.deployments.RolloutImage(ctx, ref.namespace, ref.name, targetImage, "", maxUnavailable, maxSurge)
@@ -878,6 +884,19 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 		for _, pod := range pods {
 			if pod.RuntimeType != rollout.RuntimeType {
 				continue
+			}
+			if rollout.RuntimeType == RuntimeTypeHermes && rollout.Phase == k8s.HermesWebRolloutPhase {
+				web, ok := s.deployments.(k8s.HermesWebDeploymentService)
+				if !ok {
+					return fmt.Errorf("Hermes Web deployment configuration is unavailable")
+				}
+				ready, err := web.HermesWebRolloutReady(ctx, pod.Namespace, pod.DeploymentName)
+				if err != nil {
+					return err
+				}
+				if !ready {
+					return s.waitForLegacyRollout(ctx, rollout, "Hermes Web deployment configuration has not rolled out")
+				}
 			}
 			if pod.State != "ready" || pod.Draining || strings.TrimSpace(pod.ImageRef) != targetImage {
 				return s.waitForLegacyRollout(ctx, rollout, fmt.Sprintf("Runtime pod %s is not ready at the target image (state=%s, draining=%t)", pod.PodName, pod.State, pod.Draining))
@@ -2004,6 +2023,22 @@ func (s *RuntimeScheduler) prepareGatewayStartExcludingPorts(
 	environment, err := s.gatewayEnvironment(&instance)
 	if err != nil {
 		return nil, fmt.Errorf("build runtime gateway environment: %w", err)
+	}
+	if runtimeType == RuntimeTypeHermes {
+		if web, ok := s.deployments.(interface {
+			HermesGatewayEnvironment(context.Context, string, string) (map[string]string, error)
+		}); ok {
+			trusted, err := web.HermesGatewayEnvironment(ctx, pod.Namespace, pod.DeploymentName)
+			if err != nil {
+				return nil, fmt.Errorf("prepare Hermes Web trust: %w", err)
+			}
+			if environment == nil {
+				environment = map[string]string{}
+			}
+			for key, value := range trusted {
+				environment[key] = value
+			}
+		}
 	}
 	uid, gid := runtimeGatewayLinuxIDs(instance.ID, environment)
 	if runtimeType == RuntimeTypeOpenClaw {

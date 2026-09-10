@@ -240,6 +240,7 @@ func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testi
 	rolloutRepo := &runtimePoolHandlerRolloutRepo{}
 	events := &runtimePoolHandlerEvents{}
 	handler := NewRuntimePoolHandler(&runtimePoolHandlerPodRepo{}, &runtimePoolHandlerBindingRepo{}, rolloutRepo, nil, events)
+	handler.hermesWebInspector = func(context.Context, string) (bool, error) { return false, nil }
 
 	router := runtimePoolHandlerRouter(7, "admin", handler)
 
@@ -297,6 +298,7 @@ func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
 		time.Second,
 	)
 	handler := NewRuntimePoolHandler(podRepo, &runtimePoolHandlerBindingRepo{}, rolloutRepo, scheduler, &runtimePoolHandlerEvents{})
+	handler.hermesWebInspector = func(context.Context, string) (bool, error) { return false, nil }
 
 	router := runtimePoolHandlerRouter(7, "admin", handler)
 

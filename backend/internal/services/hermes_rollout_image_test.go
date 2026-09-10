@@ -40,6 +40,27 @@ func TestHermesRolloutImageRegistryFailure(t *testing.T) {
 	}
 }
 
+func TestHermesWebTrustDetectionUsesImageConfig(t *testing.T) {
+	for _, web := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(r.URL.Path, "/manifests/") {
+				_, _ = w.Write([]byte(`{"schemaVersion":2,"config":{"digest":"sha256:` + strings.Repeat("b", 64) + `"}}`))
+				return
+			}
+			if web {
+				_, _ = w.Write([]byte(`{"config":{"Env":["CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED=true"]}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"config":{"Env":[]}}`))
+			}
+		}))
+		got, err := HermesImageNeedsWebTrust(context.Background(), strings.TrimPrefix(server.URL, "http://")+"/hermes@sha256:"+strings.Repeat("a", 64))
+		server.Close()
+		if err != nil || got != web {
+			t.Fatalf("web=%t got=%t err=%v", web, got, err)
+		}
+	}
+}
+
 func TestLegacyRolloutMissingAgentHasDeadline(t *testing.T) {
 	for _, runtimeType := range []string{RuntimeTypeHermes, RuntimeTypeOpenClaw, "opencode", "deepseek"} {
 		t.Run(runtimeType, func(t *testing.T) {
