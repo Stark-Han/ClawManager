@@ -246,8 +246,8 @@ func main() {
 		services.WithInstanceProxyRuntimeRepositories(instanceRepo, runtimePodRepo, bindingRepo),
 	)
 	hermesDesktopService := services.NewHermesDesktopService(services.HermesDesktopConfig{
-		ControlUIOrigin: strings.TrimSpace(os.Getenv("CLAWMANAGER_CONTROL_UI_ORIGIN")),
-		Enabled:         strings.EqualFold(strings.TrimSpace(os.Getenv("CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED")), "true"),
+		ControlUIOrigin: services.HermesControlUIOrigin(cfg.Runtime.Namespace, os.Getenv("CLAWMANAGER_CONTROL_UI_ORIGIN")),
+		Enabled:         services.HermesWebEnabled(os.Getenv("CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED")),
 		Secret:          cfg.JWT.Secret, Instances: instanceRepo, Users: userRepo, Bindings: bindingRepo, Pods: runtimePodRepo,
 		Teams: repository.NewHermesDesktopTeamGuard(database), Agent: runtimeAgentClient, Redis: platformRedis,
 	})

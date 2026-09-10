@@ -11,7 +11,7 @@ export interface InstanceServiceFrameProps {
   instanceId: number;
   instanceName: string;
   instanceType?: string;
-  instanceMode?: string;
+  instanceMode: string;
   availability: InstanceAvailability;
   reloadToken?: number;
   openCodeInitialDirectory?: string;
