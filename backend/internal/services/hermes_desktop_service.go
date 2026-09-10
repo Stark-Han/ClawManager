@@ -135,16 +135,10 @@ func (s *HermesDesktopService) resolveRuntime(ctx context.Context, userID, insta
 	if instance.Type != "hermes" || instance.InstanceMode != InstanceModeLite || instance.RuntimeType != RuntimeBackendGateway {
 		return nil, "unsupported_instance", nil
 	}
-	if s.config.Teams == nil {
-		return nil, "runtime_unavailable", nil
-	}
-	team, err := s.config.Teams.IsTeamInstance(instanceID)
-	if err != nil {
-		return nil, "runtime_unavailable", nil
-	}
-	if team {
-		return nil, "team_not_supported", nil
-	}
+	// Team membership is not a Web authorization boundary. The instance owner
+	// (or admin) may inspect its sessions and use separate Web conversations.
+	// Keep the same binding, generation, capability and ticket checks below;
+	// membership alone must neither grant access nor deny a capable Runtime.
 	if instance.Status != "running" {
 		return nil, "instance_not_running", nil
 	}

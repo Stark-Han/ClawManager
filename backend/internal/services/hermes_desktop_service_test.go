@@ -132,8 +132,14 @@ func TestHermesDesktopCapabilityAndOwnershipGates(t *testing.T) {
 		{name: "Redis offline", uid: 45, reason: "ticket_store_unavailable", modify: func(s *HermesDesktopService) { s.config.Redis.(*desktopRedis).err = errors.New("offline") }},
 		{name: "missing signing secret", uid: 45, reason: "runtime_auth_unavailable", modify: func(s *HermesDesktopService) { s.config.Secret = "" }},
 		{name: "inactive user", uid: 45, wantErr: ErrHermesDesktopUnauthorized, modify: func(s *HermesDesktopService) { s.config.Users.(*desktopUserRepo).users[45].IsActive = false }},
-		{name: "Team", uid: 45, reason: "team_not_supported", modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{team: true} }},
-		{name: "Team lookup failure", uid: 45, reason: "runtime_unavailable", modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{err: errors.New("db")} }},
+		{name: "Team owner", uid: 45, modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{team: true} }},
+		{name: "Team admin", uid: 1, modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{team: true} }},
+		{name: "Team other owner", uid: 46, wantErr: ErrHermesDesktopForbidden, modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{team: true} }},
+		{name: "Team lookup is not required for instance access", uid: 45, modify: func(s *HermesDesktopService) { s.config.Teams = &desktopTeamGuard{err: errors.New("db")} }},
+		{name: "Team old runtime stays unsupported", uid: 45, reason: "runtime_capability_unsupported", modify: func(s *HermesDesktopService) {
+			s.config.Teams = &desktopTeamGuard{team: true}
+			s.config.Agent.(*desktopAgent).health.Capabilities.HermesDesktopWeb = nil
+		}},
 		{name: "old runtime", uid: 45, reason: "runtime_capability_unsupported", modify: func(s *HermesDesktopService) {
 			s.config.Agent.(*desktopAgent).health.Capabilities.HermesDesktopWeb = nil
 		}},
@@ -162,6 +168,7 @@ func TestHermesDesktopCapabilityAndOwnershipGates(t *testing.T) {
 
 func TestHermesDesktopCookieScopeAndTicketReplay(t *testing.T) {
 	s := desktopFixture(t, "http://127.0.0.1:9000")
+	s.config.Teams = &desktopTeamGuard{team: true}
 	c := HermesDesktopClaims{UserID: 45, InstanceID: 123, Generation: 3, PodID: 9, Port: 9000, SessionID: "browser-session", Epoch: "initial"}
 	raw, err := s.sign(&c, "session", HermesDesktopSessionTTL)
 	if err != nil {
@@ -195,6 +202,39 @@ func TestHermesDesktopCookieScopeAndTicketReplay(t *testing.T) {
 	c.Generation++
 	if _, err = s.authorizeClaims(context.Background(), &c); !errors.Is(err, ErrHermesDesktopUnauthorized) {
 		t.Fatalf("stale cookie accepted: %v", err)
+	}
+}
+
+func TestHermesTeamWebActivationAndHistory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/password-login":
+			http.SetCookie(w, &http.Cookie{Name: "hermes_session_at", Value: "managed-session", Path: "/", HttpOnly: true})
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/api/sessions":
+			if _, err := r.Cookie("hermes_session_at"); err != nil {
+				t.Error("history request missing upstream authentication")
+			}
+			_, _ = w.Write([]byte(`{"sessions":[{"id":"team-history","source":"redis_team"}],"total":1}`))
+		default:
+			t.Errorf("unexpected upstream path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	s := desktopFixture(t, server.URL)
+	s.config.Teams = &desktopTeamGuard{team: true}
+	_, raw, err := s.Activate(context.Background(), 45, 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := s.Authenticate(context.Background(), raw, 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := s.ProxyAPI(context.Background(), claims, "GET", "/sessions", nil)
+	if err != nil || !strings.Contains(string(body), "redis_team") {
+		t.Fatalf("Team history missing: body=%s err=%v", body, err)
 	}
 }
 
