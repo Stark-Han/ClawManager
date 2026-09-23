@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   ArrowLeft,
   Ban,
@@ -350,6 +350,9 @@ const InstanceDetailPage: React.FC = () => {
   const { t, locale } = useI18n();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const requestedReturn = location.state?.returnTo;
+  const listReturnTo = typeof requestedReturn === "string" && /^\/instances(?:\?[^#]*)?$/.test(requestedReturn) ? requestedReturn : "/instances";
   const instanceId = id ? Number(id) : null;
 
   const [instance, setInstance] = useState<Instance | null>(null);
@@ -831,7 +834,7 @@ const InstanceDetailPage: React.FC = () => {
         case "delete":
           await instanceService.deleteInstance(instance.id);
           setShowDeleteDialog(false);
-          navigate("/instances");
+          navigate(listReturnTo);
           return;
       }
       await fetchMeta(instance.id, { background: true });
@@ -1153,7 +1156,7 @@ const InstanceDetailPage: React.FC = () => {
     <div className="flex shrink-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
         <Link
-          to="/instances"
+          to={listReturnTo}
           className="mb-3 inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-slate-950"
         >
           <ArrowLeft className="h-4 w-4" />

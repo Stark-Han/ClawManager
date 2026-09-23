@@ -132,6 +132,7 @@ func workspaceArchiveMaxBytes() int64 {
 
 // InstanceHandler handles instance management requests
 type InstanceHandler struct {
+	batchMutationReservation      func([]int) (func(), error)
 	instanceService               services.InstanceService
 	instanceAgentService          services.InstanceAgentService
 	runtimeStatusService          services.InstanceRuntimeStatusService
@@ -146,6 +147,11 @@ type InstanceHandler struct {
 	externalAccessService         services.InstanceExternalAccessService
 	ieiSSOService                 *services.IEISSOService
 	aiObservabilityService        services.AIObservabilityService
+}
+
+// NewInstanceHandler creates a new instance handler
+func (h *InstanceHandler) SetBatchMutationReservation(reserve func([]int) (func(), error)) {
+	h.batchMutationReservation = reserve
 }
 
 // NewInstanceHandler creates a new instance handler
@@ -737,6 +743,14 @@ func (h *InstanceHandler) BatchDeleteLiteInstances(c *gin.Context) {
 
 	seen := map[int]struct{}{}
 	instances := make([]*models.Instance, 0, len(req.InstanceIDs))
+	if h.batchMutationReservation != nil {
+		release, err := h.batchMutationReservation(req.InstanceIDs)
+		if err != nil {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		defer release()
+	}
 	for _, id := range req.InstanceIDs {
 		if _, exists := seen[id]; exists {
 			continue

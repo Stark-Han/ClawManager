@@ -327,6 +327,26 @@ func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
 	}
 }
 
+func TestRuntimePoolHandlerListRolloutsRestoresTeamUpgradeHistory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &runtimePoolHandlerRolloutRepo{recent: []models.RuntimeRollout{
+		{ID: 23, RuntimeType: "hermes", Status: "finished", Phase: "verified"},
+	}, active: []models.RuntimeRollout{
+		{ID: 12, RuntimeType: "hermes", Status: "running", Phase: "draining"},
+	}}
+	handler := NewRuntimePoolHandler(&runtimePoolHandlerPodRepo{}, &runtimePoolHandlerBindingRepo{}, repo, nil, &runtimePoolHandlerEvents{})
+	router := runtimePoolHandlerRouter(1, "admin", handler)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime-rollouts?runtime_type=hermes", nil)
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"id":23`) || !strings.Contains(recorder.Body.String(), `"id":12`) {
+		t.Fatalf("history response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if repo.lastRuntimeType != "hermes" {
+		t.Fatalf("runtime type filter = %q", repo.lastRuntimeType)
+	}
+}
+
 func runtimePoolHandlerRouter(userID int, role string, handler *RuntimePoolHandler) *gin.Engine {
 	userRepo := &runtimePoolHandlerUserRepo{users: map[int]*models.User{
 		userID: {ID: userID, Username: "tester", Role: role},
@@ -342,6 +362,7 @@ func runtimePoolHandlerRouter(userID int, role string, handler *RuntimePoolHandl
 	{
 		admin.GET("/runtime-pods", handler.ListPods)
 		admin.POST("/runtime-rollouts", handler.StartRollout)
+		admin.GET("/runtime-rollouts", handler.ListRollouts)
 	}
 	return router
 }
@@ -487,8 +508,16 @@ func (r *runtimePoolHandlerBindingRepo) DeleteRunningByInstanceIDGenerationAndRe
 }
 
 type runtimePoolHandlerRolloutRepo struct {
-	created *models.RuntimeRollout
-	byID    map[int64]*models.RuntimeRollout
+	created         *models.RuntimeRollout
+	byID            map[int64]*models.RuntimeRollout
+	recent          []models.RuntimeRollout
+	active          []models.RuntimeRollout
+	lastRuntimeType string
+}
+
+func (r *runtimePoolHandlerRolloutRepo) ListRecent(_ context.Context, runtimeType string) ([]models.RuntimeRollout, error) {
+	r.lastRuntimeType = runtimeType
+	return r.recent, nil
 }
 
 func (r *runtimePoolHandlerRolloutRepo) Create(ctx context.Context, rollout *models.RuntimeRollout) error {
@@ -508,7 +537,7 @@ func (r *runtimePoolHandlerRolloutRepo) GetByID(ctx context.Context, id int64) (
 	return r.byID[id], nil
 }
 func (r *runtimePoolHandlerRolloutRepo) ListActive(ctx context.Context, runtimeType string) ([]models.RuntimeRollout, error) {
-	return nil, nil
+	return r.active, nil
 }
 func (r *runtimePoolHandlerRolloutRepo) UpdateStatus(ctx context.Context, id int64, status string, startedAt *time.Time, finishedAt *time.Time, message *string) error {
 	return nil

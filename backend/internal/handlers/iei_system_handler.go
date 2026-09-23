@@ -25,6 +25,7 @@ const (
 )
 
 type IEISystemHandler struct {
+	dashboard       ownerDashboardReader
 	cfg             config.IEISystemConfig
 	sso             *services.IEISSOService
 	instances       services.InstanceService
@@ -48,18 +49,21 @@ type ieiSessionExchangeRequest struct {
 }
 
 type ieiInstanceView struct {
-	ID             int        `json:"id"`
-	Owner          string     `json:"owner"`
-	Name           string     `json:"name"`
-	Description    *string    `json:"description,omitempty"`
-	Type           string     `json:"type"`
-	RuntimeType    string     `json:"runtime_type"`
-	RuntimeVariant string     `json:"runtime_variant,omitempty"`
-	InstanceMode   string     `json:"instance_mode"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
+	WorkspaceAvailable bool       `json:"workspace_available"`
+	WorkspaceRoot      string     `json:"workspace_root"`
+	ID                 int        `json:"id"`
+	Owner              string     `json:"owner"`
+	Name               string     `json:"name"`
+	Alias              *string    `json:"alias,omitempty"`
+	Description        *string    `json:"description,omitempty"`
+	Type               string     `json:"type"`
+	RuntimeType        string     `json:"runtime_type"`
+	RuntimeVariant     string     `json:"runtime_variant,omitempty"`
+	InstanceMode       string     `json:"instance_mode"`
+	Status             string     `json:"status"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
 }
 
 type ieiLifecycleOperationView struct {
@@ -227,7 +231,7 @@ func (h *IEISystemHandler) RestartInstance(c *gin.Context) {
 	}
 
 	status := strings.ToLower(strings.TrimSpace(instance.Status))
-	if status != "running" {
+	if status != "running" && status != "error" {
 		utils.Error(c, http.StatusConflict, "Instance is not running")
 		return
 	}
@@ -413,7 +417,7 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 			h.lifecycleError(c, err, "Unable to verify instance lifecycle status")
 			return
 		}
-		if operation != nil && (operation.Status == "queued" || operation.Status == "processing") {
+		if operation != nil && (operation.Status == "queued" || operation.Status == "processing" || operation.Status == "batch_pending") {
 			utils.Error(c, http.StatusConflict, "Instance lifecycle operation is in progress")
 			return
 		}
@@ -527,6 +531,23 @@ func (h *IEISystemHandler) handleWorkspace(c *gin.Context, next func(*WorkspaceF
 		utils.Error(c, http.StatusServiceUnavailable, "IEI workspace access is unavailable")
 		return
 	}
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		if instance.Status == "creating" || instance.Status == "deleting" {
+			utils.Error(c, http.StatusConflict, "实例正在创建或删除，暂不可修改工作区。")
+			return
+		}
+		if h.lifecycle != nil {
+			op, err := h.lifecycle.GetLatestLifecycleOperation(instance.UserID, instance.ID)
+			if err != nil {
+				utils.HandleError(c, err)
+				return
+			}
+			if op != nil && (op.Status == "queued" || op.Status == "processing" || op.Status == "batch_pending") {
+				utils.Error(c, http.StatusConflict, "实例正在执行维护操作，完成后才能修改工作区。")
+				return
+			}
+		}
+	}
 
 	// Pass only the instance that was authorized by the dedicated IEI owner
 	// check. WorkspaceFileHandler uses this server-side context instead of the
@@ -610,9 +631,17 @@ func newIEIInstanceView(instance *models.Instance) ieiInstanceView {
 		owner = *instance.Owner
 	}
 	return ieiInstanceView{
+		WorkspaceAvailable: isDesktopWorkspaceInstance(instance) || (instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != ""),
+		WorkspaceRoot: func() string {
+			if isDesktopWorkspaceInstance(instance) {
+				return "/config"
+			}
+			return "Workspace"
+		}(),
 		ID:             instance.ID,
 		Owner:          owner,
 		Name:           instance.Name,
+		Alias:          instance.Alias,
 		Description:    instance.Description,
 		Type:           instance.Type,
 		RuntimeType:    instance.RuntimeType,

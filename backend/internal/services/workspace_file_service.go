@@ -643,7 +643,7 @@ func buildWorkspaceEntry(relativePath string, info os.FileInfo) WorkspaceEntry {
 }
 
 func isWorkspaceTransientEntry(name string) bool {
-	return name == ".tmp" || strings.HasPrefix(name, ".tmp-skill-")
+	return name == ".tmp" || strings.HasPrefix(name, ".tmp-skill-") || name == ".clawmanager-editor-lock" || strings.HasPrefix(name, ".clawmanager-edit-")
 }
 
 func workspaceEntryPreviewable(name string, size int64, isDir bool) bool {
@@ -658,6 +658,9 @@ func workspaceEntryPreviewable(name string, size int64, isDir bool) bool {
 }
 
 func workspacePreviewKind(name string, size int64) (string, string, bool, int64) {
+	if workspaceTextName(name) {
+		return "text", "text/plain; charset=utf-8", true, textPreviewMaxBytes
+	}
 	ext := strings.ToLower(filepath.Ext(name))
 	switch ext {
 	case ".txt", ".md", ".json", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".go", ".sh":

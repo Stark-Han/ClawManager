@@ -315,6 +315,36 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 	utils.Success(c, http.StatusCreated, "Runtime rollout created successfully", gin.H{"rollout": rollout})
 }
 
+func (h *RuntimePoolHandler) ListRollouts(c *gin.Context) {
+	repo, ok := h.rolloutRepo.(interface {
+		ListRecent(context.Context, string) ([]models.RuntimeRollout, error)
+	})
+	if !ok {
+		utils.Error(c, http.StatusServiceUnavailable, "Runtime rollout history unavailable")
+		return
+	}
+	items, err := repo.ListRecent(c.Request.Context(), strings.TrimSpace(c.Query("runtime_type")))
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	active, err := h.rolloutRepo.ListActive(c.Request.Context(), strings.TrimSpace(c.Query("runtime_type")))
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	seen := make(map[int64]struct{}, len(items))
+	for _, item := range items {
+		seen[item.ID] = struct{}{}
+	}
+	for _, item := range active {
+		if _, exists := seen[item.ID]; !exists {
+			items = append(items, item)
+		}
+	}
+	utils.Success(c, http.StatusOK, "Runtime rollout history", gin.H{"items": items})
+}
+
 func (h *RuntimePoolHandler) publish(ctx context.Context, eventType string, payload any) {
 	if h.events == nil {
 		return

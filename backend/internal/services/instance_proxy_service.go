@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"clawreef/internal/models"
+	"clawreef/internal/ownerrecords"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
 
@@ -28,6 +29,7 @@ import (
 
 // InstanceProxyService handles proxying requests to instance pods
 type InstanceProxyService struct {
+	ownerUsage           *ownerrecords.Store
 	serviceService       *k8s.ServiceService
 	accessService        *InstanceAccessService
 	instanceRepo         repository.InstanceRepository
@@ -492,7 +494,7 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 	clientConn.SetReadLimit(instanceProxyWebSocketMaxMessageBytes)
 
 	errCh := make(chan error, 2)
-	pipe := func(dst, src *websocket.Conn) {
+	pipe := func(dst, src *websocket.Conn, upstream bool) {
 		for {
 			messageType, reader, readErr := src.NextReader()
 			if readErr != nil {
@@ -504,10 +506,20 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 				errCh <- writeErr
 				return
 			}
-			if _, copyErr := io.Copy(writer, reader); copyErr != nil {
+			var observed boundedUsageFrame
+			var source io.Reader = reader
+			if s.ownerUsage != nil && accessToken.InstanceType == "openclaw" && messageType == websocket.TextMessage {
+				source = io.TeeReader(reader, &observed)
+			}
+			if _, copyErr := io.Copy(writer, source); copyErr != nil {
 				_ = writer.Close()
 				errCh <- copyErr
 				return
+			}
+			// Persist a bounded submission observation before the final frame is
+			// flushed, so a fast upstream final cannot race its submission record.
+			if len(observed.data) > 0 {
+				s.observeOwnerFrame(instanceID, upstream, &observed)
 			}
 			if closeErr := writer.Close(); closeErr != nil {
 				errCh <- closeErr
@@ -516,8 +528,8 @@ func (s *InstanceProxyService) ProxyWebSocket(ctx context.Context, instanceID in
 		}
 	}
 
-	go pipe(upstreamConn, clientConn)
-	go pipe(clientConn, upstreamConn)
+	go pipe(upstreamConn, clientConn, false)
+	go pipe(clientConn, upstreamConn, true)
 
 	select {
 	case <-ctx.Done():

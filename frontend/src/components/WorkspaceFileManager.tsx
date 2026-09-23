@@ -1,3 +1,6 @@
+import { CompactTimestamp } from "./CompactTimestamp";
+import { WorkspaceTextEditor, editableWorkspaceName, type WorkspaceText } from "./WorkspaceTextEditor";
+import "../styles/workspace-time.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,7 +11,8 @@ import {
   Folder,
   FolderPlus,
   FolderUp,
-  Pencil,
+  FilePenLine,
+  TextCursorInput,
   RefreshCw,
   Trash2,
   Upload,
@@ -33,6 +37,8 @@ interface WorkspaceFileManagerProps {
 }
 
 export interface WorkspaceFileOperations {
+  readText?(instanceId: number, path: string): Promise<WorkspaceText>;
+  saveText?(instanceId: number, path: string, text: string, version: string): Promise<WorkspaceText>;
   list(instanceId: number, path?: string): Promise<WorkspaceEntry[]>;
   preview(instanceId: number, path: string): Promise<WorkspacePreview>;
   previewBlob(instanceId: number, path: string): Promise<Blob>;
@@ -253,6 +259,8 @@ export function WorkspaceFileManager({
   const uploadMenuRef = useRef<HTMLDivElement | null>(null);
   const [currentPath, setCurrentPath] = useState(() => normalizeWorkspacePath(initialPath));
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [editPath, setEditPath] = useState<string | null>(null);
+  const canEditEntry = (entry: WorkspaceEntry) => Boolean(service.readText && service.saveText && !entry.is_dir && entry.size <= 1024*1024 && editableWorkspaceName(entry.name));
   const previewObjectUrlRef = useRef<string | null>(null);
   const [previewObjectUrl, setPreviewObjectUrl] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -649,7 +657,7 @@ export function WorkspaceFileManager({
       )}
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className={`${previewPath ? "hidden" : "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"}`}>
+        <div className={`workspace-files-container ${previewPath ? "hidden" : "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"}`}>
           {entriesQuery.isLoading ? (
             <div className="flex h-48 items-center justify-center text-sm text-slate-500">
               {translateLabel("workspaceFileManager.loading")}
@@ -659,14 +667,14 @@ export function WorkspaceFileManager({
               {translateLabel("workspaceFileManager.noFiles")}
             </div>
           ) : (
-            <table className="w-full table-fixed divide-y divide-slate-200 text-sm">
+            <table className="workspace-files-table w-full table-fixed divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-50 text-left text-xs font-medium uppercase tracking-normal text-slate-500">
                 <tr>
                   <th className="px-3 py-2">{translateLabel("workspaceFileManager.name")}</th>
                   <th className="w-14 px-2 py-2">
                     {translateLabel("workspaceFileManager.size")}
                   </th>
-                  <th className="w-28 px-2 py-2">
+                  <th className="workspace-time-column w-28 px-2 py-2">
                     {translateLabel("workspaceFileManager.modified")}
                   </th>
                   <th className="w-40 px-2 py-2 text-right">
@@ -690,15 +698,12 @@ export function WorkspaceFileManager({
                         </span>
                         <WorkspaceEntryName name={entry.name} />
                       </button>
+                      <CompactTimestamp className="workspace-time-inline" value={entry.modified_at} locale={effectiveLocale}/>
                     </td>
                     <td className="truncate px-2 py-2 text-slate-500">
                       {entry.is_dir ? "-" : formatBytes(entry.size)}
                     </td>
-                    <td className="truncate px-2 py-2 text-slate-500">
-                      {entry.modified_at
-                        ? new Date(entry.modified_at).toLocaleString(effectiveLocale)
-                        : "-"}
-                    </td>
+                    <td className="workspace-time-column whitespace-nowrap px-2 py-2 text-xs text-slate-500"><CompactTimestamp value={entry.modified_at} locale={effectiveLocale}/></td>
                     <td className="px-2 py-2">
                       <div className="flex justify-end gap-1">
                         {!entry.is_dir && entry.previewable && (
@@ -727,11 +732,12 @@ export function WorkspaceFileManager({
                             <button
                               type="button"
                               className="cm-icon-button h-8 w-8"
-                              title={translateLabel("workspaceFileManager.rename")}
-                              onClick={() => handleRename(entry)}
+                              title={canEditEntry(entry) ? "编辑" : translateLabel("workspaceFileManager.rename")}
+                              aria-label={`${canEditEntry(entry) ? "编辑" : "重命名"} ${entry.name}`}
+                              onClick={() => canEditEntry(entry) ? setEditPath(entry.path) : handleRename(entry)}
                               disabled={busyAction === `rename:${entry.path}`}
                             >
-                              <Pencil className="h-4 w-4" />
+                              {canEditEntry(entry) ? <FilePenLine className="h-4 w-4" /> : <TextCursorInput className="h-4 w-4" />}
                             </button>
                             <button
                               type="button"
@@ -753,6 +759,7 @@ export function WorkspaceFileManager({
           )}
         </div>
 
+        {editPath && <WorkspaceTextEditor instanceId={instanceId} initialPath={editPath} service={service} canWrite={canWrite} onClose={()=>setEditPath(null)} onSaved={async()=>{setPreviewPath(null);await invalidateCurrentPath();await queryClient.invalidateQueries({queryKey:["workspace-preview",cacheKey]});await notifyMutation()}}/>}
         <PreviewPane
           path={previewPath}
           preview={preview}

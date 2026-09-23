@@ -504,6 +504,28 @@ const SystemSettingsPage: React.FC = () => {
   }, []);
 
 	useEffect(() => {
+		let cancelled = false;
+		const restoreRollout = async () => {
+			try {
+				const recent = await runtimePoolService.listRollouts();
+				// Preflight records are previews, not running upgrades; restoring one
+				// as active would disable confirmation indefinitely after a reload.
+				const active = recent.find((item) => ['pending', 'running'].includes(item.status));
+				const latest = active ?? recent[0];
+				if (!latest || cancelled) return;
+				const details = await runtimePoolService.getRollout(latest.id);
+				if (cancelled) return;
+				setRolloutDetails((current) => current ?? details);
+				if (active) setActiveRolloutId((current) => current ?? active.id);
+			} catch {
+				// Rollout history is supplementary; settings remain usable when unavailable.
+			}
+		};
+		void restoreRollout();
+		return () => { cancelled = true; };
+	}, []);
+
+	useEffect(() => {
 		if (!activeRolloutId) {
 			return undefined;
 		}
@@ -1197,6 +1219,17 @@ const SystemSettingsPage: React.FC = () => {
 			  {rolloutDetails.rollout.rollback_status && <div className="mt-1">自动回退：{rolloutDetails.rollout.rollback_status}</div>}
 			  {(rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error) && (
 				<div className="mt-2 text-red-700">{rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error}</div>
+			  )}
+			  {rolloutDetails.items.length > 0 && (
+				<div className="mt-3 max-h-48 overflow-y-auto rounded-md border border-blue-100 bg-white/80">
+				  {rolloutDetails.items.map((item) => (
+					<div key={item.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-blue-100 px-3 py-2 text-xs last:border-b-0">
+					  <span>实例 #{item.instance_id}{item.team_id ? ` · Team #${item.team_id}` : ''}</span>
+					  <span className="font-medium">{item.state}</span>
+					  {item.error_message && <span className="w-full text-red-700">{item.error_message}</span>}
+					</div>
+				  ))}
+				</div>
 			  )}
 			</div>
 		  )}

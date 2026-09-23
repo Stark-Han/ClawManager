@@ -7,9 +7,11 @@ import (
 // Instance represents a virtual desktop instance
 type Instance struct {
 	ID                       int        `db:"id,primarykey,autoincrement" json:"id"`
+	LastOnlineAt             *time.Time `db:"-" json:"last_online_at,omitempty"`
 	UserID                   int        `db:"user_id" json:"user_id"`
 	Owner                    *string    `db:"owner" json:"owner,omitempty"`
 	Name                     string     `db:"name" json:"name"`
+	Alias                    *string    `db:"alias" json:"alias,omitempty"`
 	Description              *string    `db:"description" json:"description,omitempty"`
 	Type                     string     `db:"type" json:"type"`
 	RuntimeType              string     `db:"runtime_type" json:"runtime_type"`

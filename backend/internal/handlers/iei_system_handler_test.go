@@ -149,6 +149,9 @@ func TestIEISystemRestartRequiresSessionOwnerAndRunningInstance(t *testing.T) {
 	}
 
 	owned := httptest.NewRequest(http.MethodPost, "/api/v1/ieisystem/instances/1/restart", nil)
+	// A failed runtime must remain restartable; ownership and transitional
+	// state protections above must not be relaxed with it.
+	instanceService.instances[1].Status = "error"
 	owned.AddCookie(sessionCookie)
 	ownedRecorder := httptest.NewRecorder()
 	router.ServeHTTP(ownedRecorder, owned)
