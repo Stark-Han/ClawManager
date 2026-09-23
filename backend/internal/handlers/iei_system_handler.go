@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -32,6 +33,11 @@ type IEISystemHandler struct {
 	instanceHandler *InstanceHandler
 	workspace       *WorkspaceFileHandler
 	lifecycle       ieiLifecycleService
+	hermesDesktop   ieiHermesDesktopActivator
+}
+
+type ieiHermesDesktopActivator interface {
+	Activate(context.Context, int, int) (*services.HermesDesktopDescriptor, string, error)
 }
 
 type ieiLifecycleService interface {
@@ -99,6 +105,14 @@ func (h *IEISystemHandler) SetWorkspaceFileHandler(workspace *WorkspaceFileHandl
 
 func (h *IEISystemHandler) SetLifecycleService(lifecycle ieiLifecycleService) {
 	h.lifecycle = lifecycle
+}
+
+func (h *IEISystemHandler) SetHermesDesktopActivator(activator ieiHermesDesktopActivator) {
+	h.hermesDesktop = activator
+}
+
+func (h *IEISystemHandler) SetHermesDesktopService(service *services.HermesDesktopService) {
+	h.hermesDesktop = service
 }
 
 func (h *IEISystemHandler) ExchangeSession(c *gin.Context) {
@@ -426,6 +440,34 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 		utils.Error(c, http.StatusBadRequest, "Desktop access is not available for shell runtime instances")
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(instance.Type), services.RuntimeTypeHermes) &&
+		strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendGateway) &&
+		strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModeLite) {
+		if h.hermesDesktop == nil {
+			utils.Error(c, http.StatusServiceUnavailable, "Hermes Desktop Web access is unavailable")
+			return
+		}
+		descriptor, token, err := h.hermesDesktop.Activate(c.Request.Context(), instance.UserID, instance.ID)
+		if err != nil {
+			utils.Error(c, http.StatusServiceUnavailable, "Unable to activate Hermes Desktop Web")
+			return
+		}
+		if descriptor == nil || !descriptor.Available || strings.TrimSpace(descriptor.RendererURL) == "" || strings.TrimSpace(token) == "" || descriptor.ExpiresAt == nil {
+			utils.Error(c, http.StatusServiceUnavailable, "Unable to activate Hermes Desktop Web")
+			return
+		}
+		setHermesSessionCookie(c, services.HermesDesktopCookieName(instance.ID), services.HermesDesktopBase(instance.ID)+"/", token, *descriptor.ExpiresAt)
+		workspaceAvailable := instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != ""
+		utils.Success(c, http.StatusOK, "IEI instance access granted", gin.H{
+			"access_url":               descriptor.RendererURL,
+			"expires_at":               descriptor.ExpiresAt,
+			"desktop_proxy_mode":       "hermes_desktop_web",
+			"desktop_upstream_present": false,
+			"workspace_available":      workspaceAvailable,
+			"workspace_root":           "Workspace",
+		})
+		return
+	}
 	if h.instanceHandler == nil || h.instanceHandler.accessService == nil || h.instanceHandler.proxyService == nil {
 		utils.Error(c, http.StatusServiceUnavailable, "Instance access is unavailable")
 		return
@@ -469,6 +511,16 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 	}
 	proxyURL := h.instanceHandler.proxyService.GetProxyURLForInstance(instance, accessToken.Token)
 	browserURL := browserAccessEntryURL(accessURL, proxyURL)
+	// OpenClaw Lite bootstraps its control UI through the shared proxy and can
+	// issue early navigation/subresource requests before the path-scoped
+	// instance cookie is available in every browser/proxy combination. Carry
+	// the short-lived ClawManager capability on the first URL for this runtime
+	// only. The proxy strips it before forwarding to OpenClaw and promotes it
+	// to the existing HttpOnly cookie, while all other instance types retain
+	// their established token-free same-origin entry behavior.
+	if isOpenClawLiteInstance(instance) {
+		browserURL = proxyURL
+	}
 	workspaceAvailable := isDesktopWorkspaceInstance(instance) ||
 		(instance.WorkspacePath != nil && strings.TrimSpace(*instance.WorkspacePath) != "")
 	workspaceRoot := "Workspace"
@@ -730,6 +782,15 @@ func (h *IEISystemHandler) setInstanceAccessCookie(c *gin.Context, instanceID in
 		Secure:   h.cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func isOpenClawLiteInstance(instance *models.Instance) bool {
+	if instance == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(instance.Type), services.RuntimeTypeOpenClaw) &&
+		strings.EqualFold(strings.TrimSpace(instance.RuntimeType), services.RuntimeBackendGateway) &&
+		strings.EqualFold(strings.TrimSpace(instance.InstanceMode), services.InstanceModeLite)
 }
 
 func (h *IEISystemHandler) noStore(c *gin.Context) {

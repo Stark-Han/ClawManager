@@ -50,6 +50,7 @@ export interface WorkspaceFileOperations {
 }
 
 const invalidNamePattern = /[\\/]/;
+const workspacePageSize = 250;
 
 function joinPath(base: string, name: string) {
   return [base, name].filter(Boolean).join("/");
@@ -81,19 +82,29 @@ function normalizeWorkspacePath(path: string | undefined) {
     .join("/");
 }
 
-function rootBreadcrumbLabel(initialPath: string | undefined, workspaceLabel: string) {
+function virtualRootBreadcrumbs(initialPath: string | undefined) {
   const raw = initialPath?.trim() ?? "";
   if (!raw.startsWith("/")) {
-    return workspaceLabel;
+    return [];
   }
-  return raw.replace(/\/+$/, "") || "/";
+  return raw.split("/").filter(Boolean);
 }
 
-function breadcrumbItems(path: string, rootLabel: string) {
+function breadcrumbItems(
+  path: string,
+  initialPath: string | undefined,
+  workspaceLabel: string,
+) {
   const parts = path.split("/").filter(Boolean);
   return [
-    { label: rootLabel, path: "" },
+    { key: "workspace", label: workspaceLabel, path: "" },
+    ...virtualRootBreadcrumbs(initialPath).map((part, index) => ({
+      key: `virtual-root-${index}-${part}`,
+      label: part,
+      path: "",
+    })),
     ...parts.map((part, index) => ({
+      key: `path-${index}-${part}`,
       label: part,
       path: parts.slice(0, index + 1).join("/"),
     })),
@@ -267,14 +278,12 @@ export function WorkspaceFileManager({
   const [error, setError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
-  const rootLabel = rootBreadcrumbLabel(
-    initialPath,
-    translateLabel("workspaceFileManager.workspace"),
-  );
-
+  const [pageIndex, setPageIndex] = useState(0);
   useEffect(() => {
     setCurrentPath(normalizeWorkspacePath(initialPath));
     setPreviewPath(null);
+	setEditPath(null);
+	setPageIndex(0);
   }, [cacheKey, initialPath]);
 
   useEffect(() => {
@@ -303,12 +312,18 @@ export function WorkspaceFileManager({
   const entriesQuery = useQuery({
     queryKey: ["workspace", cacheKey, currentPath],
     queryFn: () => service.list(instanceId, currentPath),
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const previewQuery = useQuery({
     queryKey: ["workspace-preview", cacheKey, previewPath],
     queryFn: () => service.preview(instanceId, previewPath ?? ""),
     enabled: Boolean(previewPath),
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
@@ -530,18 +545,31 @@ export function WorkspaceFileManager({
 
   const preview = previewQuery.data;
   const entries = entriesQuery.data ?? [];
+  const pageCount = Math.max(1, Math.ceil(entries.length / workspacePageSize));
+  const visiblePageIndex = Math.min(pageIndex, pageCount - 1);
+  const visibleEntries = entries.slice(
+    visiblePageIndex * workspacePageSize,
+    (visiblePageIndex + 1) * workspacePageSize,
+  );
 
   return (
     <section className="cm-surface flex h-full min-h-0 min-w-0 flex-col overflow-hidden max-xl:min-h-[360px]">
       <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm">
-            {breadcrumbItems(currentPath, rootLabel).map((item, index, items) => (
-              <span key={item.path || "root"} className="flex min-w-0 items-center gap-1">
+            {breadcrumbItems(
+              currentPath,
+              initialPath,
+              translateLabel("workspaceFileManager.workspace"),
+            ).map((item, index, items) => (
+              <span key={item.key} className="flex min-w-0 items-center gap-1">
                 <button
                   type="button"
                   className="max-w-[140px] truncate rounded px-1.5 py-1 font-medium text-slate-700 hover:bg-slate-100"
-                  onClick={() => setCurrentPath(item.path)}
+                  onClick={() => {
+                    setCurrentPath(item.path);
+                    setPageIndex(0);
+                  }}
                 >
                   {item.label}
                 </button>
@@ -650,9 +678,10 @@ export function WorkspaceFileManager({
         </div>
       )}
 
-      {error && (
+      {(error || entriesQuery.isError) && (
         <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
+          {error || getErrorMessage(entriesQuery.error, translateLabel("workspaceFileManager.failedList"))}
+          {entriesQuery.isError && <button type="button" disabled={entriesQuery.isFetching} onClick={() => void entriesQuery.refetch()} className="ml-3 rounded border px-2 py-1 disabled:opacity-50">{translateLabel("common.retry")}</button>}
         </div>
       )}
 
@@ -662,11 +691,18 @@ export function WorkspaceFileManager({
             <div className="flex h-48 items-center justify-center text-sm text-slate-500">
               {translateLabel("workspaceFileManager.loading")}
             </div>
+          ) : entriesQuery.isError && !entriesQuery.data ? (
+            <div className="flex h-48 items-center justify-center text-sm text-slate-500">
+              <button type="button" disabled={entriesQuery.isFetching} onClick={() => void entriesQuery.refetch()} className="rounded border px-3 py-2 disabled:opacity-50">
+                {translateLabel("common.retry")}
+              </button>
+            </div>
           ) : entries.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-sm text-slate-500">
               {translateLabel("workspaceFileManager.noFiles")}
             </div>
           ) : (
+            <>
             <table className="workspace-files-table w-full table-fixed divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-50 text-left text-xs font-medium uppercase tracking-normal text-slate-500">
                 <tr>
@@ -683,15 +719,20 @@ export function WorkspaceFileManager({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
-                {entries.map((entry) => (
+                {visibleEntries.map((entry) => (
                   <tr key={entry.path} className="hover:bg-slate-50">
                     <td className="min-w-0 px-3 py-2">
                       <button
                         type="button"
                         className="flex w-full min-w-0 items-center gap-2 text-left"
-                        onClick={() =>
-                          entry.is_dir ? setCurrentPath(entry.path) : setPreviewPath(entry.path)
-                        }
+                        onClick={() => {
+                          if (entry.is_dir) {
+                            setCurrentPath(entry.path);
+                            setPageIndex(0);
+                          } else {
+                            setPreviewPath(entry.path);
+                          }
+                        }}
                       >
                         <span className="shrink-0">
                           <EntryIcon entry={entry} />
@@ -756,6 +797,30 @@ export function WorkspaceFileManager({
                 ))}
               </tbody>
             </table>
+            {pageCount > 1 && (
+              <div className="sticky bottom-0 flex items-center justify-between border-t border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                <button
+                  type="button"
+                  className="rounded border border-slate-200 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={visiblePageIndex === 0}
+                  onClick={() => setPageIndex((value) => Math.max(0, value - 1))}
+                >
+                  {translateLabel("workspaceFileManager.previousPage")}
+                </button>
+                <span>
+                  {translateLabel("workspaceFileManager.pageStatus", {current: visiblePageIndex + 1, total: pageCount})}
+                </span>
+                <button
+                  type="button"
+                  className="rounded border border-slate-200 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={visiblePageIndex >= pageCount - 1}
+                  onClick={() => setPageIndex((value) => Math.min(pageCount - 1, value + 1))}
+                >
+                  {translateLabel("workspaceFileManager.nextPage")}
+                </button>
+              </div>
+            )}
+            </>
           )}
         </div>
 

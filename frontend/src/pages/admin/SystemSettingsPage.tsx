@@ -1214,7 +1214,7 @@ const SystemSettingsPage: React.FC = () => {
 				目标：<span className="font-mono break-all">{rolloutDetails.rollout.target_image_ref}</span>
 			  </div>
 			  <div className="mt-1">
-				实例 {rolloutDetails.items.length} 个；已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；已恢复 {rolloutDetails.items.filter((item) => ['restored', 'restart_ready'].includes(item.state)).length} 个。
+				{rolloutDetails.pool_progress ? <>运行池 {rolloutDetails.pool_progress.completed} / {rolloutDetails.pool_progress.targets.length} 已更新；当前：{rolloutDetails.pool_progress.targets[rolloutDetails.pool_progress.completed]?.Name ?? '等待最终验证'}</> : <>实例 {rolloutDetails.items.length} 个；已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；已恢复 {rolloutDetails.items.filter((item) => ['restored', 'restart_ready'].includes(item.state)).length} 个。</>}
 			  </div>
 			  {rolloutDetails.rollout.rollback_status && <div className="mt-1">自动回退：{rolloutDetails.rollout.rollback_status}</div>}
 			  {(rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error) && (

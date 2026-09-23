@@ -100,7 +100,7 @@ func TestRuntimePoolHandlerListPodsReturnsMetricsForAdmin(t *testing.T) {
 func TestRuntimePoolHandlerListPodsOmitsStaleRuntimePods(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recentSeen := time.Now().UTC()
-	staleSeen := recentSeen.Add(-5 * time.Minute)
+	staleSeen := recentSeen.Add(-runtimePodListStaleWindowMultiplier*runtimePodListFallbackHeartbeatTimeout - time.Minute)
 	handler := NewRuntimePoolHandler(&runtimePoolHandlerPodRepo{pods: []models.RuntimePod{
 		{ID: 1, RuntimeType: "openclaw", PodName: "openclaw-runtime-live", State: "ready", LastSeenAt: &recentSeen},
 		{ID: 2, RuntimeType: "openclaw", PodName: "openclaw-runtime-deleted", State: "unhealthy", LastSeenAt: &staleSeen},
@@ -271,7 +271,7 @@ func TestRuntimePoolHandlerStartRolloutStoresRequesterAndPublishesEvent(t *testi
 	}
 }
 
-func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
+func TestRuntimePoolHandlerStartRolloutQueuesForElectedScheduler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rolloutRepo := &runtimePoolHandlerRolloutRepo{}
 	podRepo := &runtimePoolHandlerPodRepo{pods: []models.RuntimePod{{
@@ -315,15 +315,14 @@ func TestRuntimePoolHandlerStartRolloutRunsSchedulerImmediately(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s, want 201", rec.Code, rec.Body.String())
 	}
-	if got := len(deployments.rollouts); got != 1 {
-		t.Fatalf("deployment rollouts = %d, want 1", got)
+	if got := len(deployments.rollouts); got != 0 {
+		t.Fatalf("HTTP handler mutated %d deployments before elected execution", got)
 	}
-	rollout := deployments.rollouts[0]
-	if rollout.namespace != "clawmanager-system" || rollout.name != "hermes-runtime" || rollout.image != "registry/hermes@sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("deployment rollout = %+v, want hermes-runtime registry/hermes:v2", rollout)
+	if rolloutRepo.created == nil || rolloutRepo.created.Status != "pending" {
+		t.Fatal("request must persist a pending operation")
 	}
-	if podRepo.markedPodID != 21 || podRepo.markedState != "draining" || !podRepo.markedDraining {
-		t.Fatalf("pod mark = id:%d state:%q draining:%t, want drain pod 21", podRepo.markedPodID, podRepo.markedState, podRepo.markedDraining)
+	if podRepo.markedPodID != 0 {
+		t.Fatal("HTTP handler drained a runtime")
 	}
 }
 

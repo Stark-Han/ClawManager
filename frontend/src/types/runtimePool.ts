@@ -103,6 +103,12 @@ export interface RuntimeUpgradeItem {
 }
 
 export interface RuntimeUpgradeDetails {
+  pool_progress?: {
+    version: number;
+    completed: number;
+    applying: boolean;
+    targets: Array<{ Namespace: string; Name: string; Image: string }>;
+  } | null;
   rollout: RuntimeRollout;
   items: RuntimeUpgradeItem[];
   audits: Array<{ id: number; action: string; phase: string; outcome: string; created_at: string }>;

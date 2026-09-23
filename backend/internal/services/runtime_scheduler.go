@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"clawreef/internal/heartbeat"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
@@ -156,7 +157,7 @@ func NewRuntimeScheduler(
 		runtimeNamespace:          "clawmanager-system",
 		gatewayPortStart:          RuntimeGatewayPortStart,
 		gatewayPortEnd:            RuntimeGatewayPortEnd,
-		heartbeatTimeout:          10 * time.Second,
+		heartbeatTimeout:          heartbeat.Timeout,
 		maxGatewaysPerPod:         RuntimePodCapacity,
 		gatewayStartInFlightLimit: defaultRuntimeGatewayStartInFlightLimit,
 		gatewayCreateLocks:        map[int64]*sync.Mutex{},
@@ -263,6 +264,12 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 	}
 	if rollout == nil {
 		return fmt.Errorf("runtime rollout %d not found", rolloutID)
+	}
+	if rollout.Status != "pending" {
+		return nil
+	}
+	if handled, err := s.startPoolRollout(ctx, rollout); handled {
+		return err
 	}
 	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
 		if s.upgrade == nil {
@@ -816,6 +823,15 @@ func runtimeDeploymentFallbackState(k8sState string) string {
 func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout models.RuntimeRollout) error {
 	if s == nil || s.podRepo == nil || s.rolloutRepo == nil {
 		return nil
+	}
+	if rollout.RuntimeType != RuntimeTypeOpenClaw {
+		p, err := LoadRuntimePoolProgress(ctx, s.rolloutRepo, rollout.ID)
+		if err != nil {
+			return err
+		}
+		if p != nil && p.Completed < len(p.Targets) {
+			return s.advancePoolRollout(ctx, rollout, p)
+		}
 	}
 	targetImage := strings.TrimSpace(rollout.TargetImageRef)
 	if targetImage == "" {

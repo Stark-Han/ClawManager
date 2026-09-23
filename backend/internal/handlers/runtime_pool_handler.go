@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"clawreef/internal/heartbeat"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services"
@@ -29,7 +30,7 @@ type RuntimePoolHandler struct {
 }
 
 const (
-	runtimePodListFallbackHeartbeatTimeout = 10 * time.Second
+	runtimePodListFallbackHeartbeatTimeout = heartbeat.Timeout
 	runtimePodListStaleWindowMultiplier    = 3
 )
 
@@ -103,7 +104,14 @@ func (h *RuntimePoolHandler) GetRollout(c *gin.Context) {
 		utils.Error(c, http.StatusNotFound, "runtime rollout not found")
 		return
 	}
-	utils.Success(c, http.StatusOK, "Runtime rollout retrieved successfully", details)
+	progress, err := services.LoadRuntimePoolProgress(c.Request.Context(), h.rolloutRepo, id)
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	utils.Success(c, http.StatusOK, "Runtime rollout retrieved successfully", gin.H{
+		"rollout": details.Rollout, "items": details.Items, "audits": details.Audits, "pool_progress": progress,
+	})
 }
 
 func NewRuntimePoolHandler(
@@ -297,12 +305,8 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		utils.HandleError(c, err)
 		return
 	}
-	if h.scheduler != nil {
-		if err := h.scheduler.StartRollout(c.Request.Context(), rollout.ID); err != nil {
-			utils.HandleError(c, err)
-			return
-		}
-	}
+	// The elected scheduler owns execution. A request on a follower must not
+	// mutate runtime pools concurrently with the leader.
 	h.publish(c.Request.Context(), "runtime_rollout", map[string]any{
 		"rollout_id":       rollout.ID,
 		"runtime_type":     rollout.RuntimeType,

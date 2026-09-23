@@ -133,6 +133,11 @@ func (s *CoreService) ValidatePrincipal(principal Principal) error {
 }
 
 func (s *CoreService) SubmitCreate(principal Principal, idempotencyKey string, req CreateLiteInstanceRequest) (*models.NorthboundOperation, bool, error) {
+	if err := validateNorthboundCreateMode(req.InstanceMode, services.InstanceModeLite); err != nil {
+		return nil, false, err
+	}
+	// Keep the established canonical payload and idempotency hash unchanged.
+	req.InstanceMode = ""
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	alias, aliasErr := normalizeInstanceAlias(req.Alias)
@@ -222,6 +227,10 @@ func isSupportedNorthboundProType(instanceType string) bool {
 }
 
 func (s *CoreService) SubmitProCreate(principal Principal, idempotencyKey string, req CreateProInstanceRequest) (*models.NorthboundOperation, bool, error) {
+	if err := validateNorthboundCreateMode(req.InstanceMode, services.InstanceModePro); err != nil {
+		return nil, false, err
+	}
+	req.InstanceMode = ""
 	req.Name = strings.TrimSpace(req.Name)
 	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	alias, aliasErr := normalizeInstanceAlias(req.Alias)

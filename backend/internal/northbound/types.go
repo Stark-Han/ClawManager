@@ -114,22 +114,24 @@ func (p Principal) HasScope(required string) bool {
 }
 
 type CreateLiteInstanceRequest struct {
-	Name        string  `json:"name" binding:"required,min=3,max=50"`
-	Alias       *string `json:"alias,omitempty"`
-	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
-	Description *string `json:"description,omitempty"`
+	InstanceMode string  `json:"instance_mode,omitempty"`
+	Name         string  `json:"name" binding:"required,min=3,max=50"`
+	Alias        *string `json:"alias,omitempty"`
+	Owner        string  `json:"owner" binding:"required,min=1,max=128"`
+	Type         string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
+	Description  *string `json:"description,omitempty"`
 }
 
 // CreateProInstanceRequest intentionally mirrors the existing Lite request.
 // The endpoint fixes Pro/desktop mode and the server owns image and resource
 // selection, so callers cannot mix Lite and Pro provisioning parameters.
 type CreateProInstanceRequest struct {
-	Name        string  `json:"name" binding:"required,min=3,max=50"`
-	Alias       *string `json:"alias,omitempty"`
-	Owner       string  `json:"owner" binding:"required,min=1,max=128"`
-	Type        string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
-	Description *string `json:"description,omitempty"`
+	InstanceMode string  `json:"instance_mode,omitempty"`
+	Name         string  `json:"name" binding:"required,min=3,max=50"`
+	Alias        *string `json:"alias,omitempty"`
+	Owner        string  `json:"owner" binding:"required,min=1,max=128"`
+	Type         string  `json:"type" binding:"required,oneof=openclaw hermes opencode deepseek-harness"`
+	Description  *string `json:"description,omitempty"`
 }
 
 type InstanceLifecycleRequest struct {
