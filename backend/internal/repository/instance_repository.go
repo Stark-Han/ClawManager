@@ -755,15 +755,34 @@ func buildV2SchedulerInstanceQuery(statuses []string, limit int) (string, []any)
 }
 
 func (r *instanceRepository) UpdateRuntimeState(ctx context.Context, id int, status string, generation int, message *string) error {
+	return r.updateRuntimeStateWithCode(ctx, id, status, generation, message, nil)
+}
+
+// Optional capability keeps old repository adapters compatible. The code and
+// message are committed atomically with the existing generation fence.
+func (r *instanceRepository) UpdateRuntimeFailure(ctx context.Context, id, generation int, message, code string) error {
+	return r.updateRuntimeStateWithCode(ctx, id, "error", generation, &message, &code)
+}
+
+func (r *instanceRepository) FenceRuntimeRestart(ctx context.Context, id, expectedGeneration int) (bool, error) {
+	result, err := r.sess.SQL().ExecContext(ctx, `UPDATE instances SET status = 'stopped', runtime_generation = runtime_generation + 1, runtime_error_message = NULL, runtime_error_code = NULL, updated_at = ? WHERE id = ? AND runtime_generation = ? AND status IN ('running','stopped','error') AND EXISTS (SELECT 1 FROM llm_models WHERE is_active = 1)`, time.Now().UTC(), id, expectedGeneration)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
+}
+
+func (r *instanceRepository) updateRuntimeStateWithCode(ctx context.Context, id int, status string, generation int, message, code *string) error {
 	res, err := r.sess.SQL().ExecContext(ctx, `
 		UPDATE instances
-		SET status = ?, runtime_generation = ?, runtime_error_message = ?, updated_at = ?
+		SET status = ?, runtime_generation = ?, runtime_error_message = ?, runtime_error_code = ?, updated_at = ?
 		WHERE id = ? AND runtime_generation <= ?
 		  AND (
 			status <> ? OR runtime_generation <> ? OR
-			NOT (runtime_error_message <=> ?)
+			NOT (runtime_error_message <=> ?) OR NOT (runtime_error_code <=> ?)
 		  )
-	`, status, generation, message, time.Now().UTC(), id, generation, status, generation, message)
+	`, status, generation, message, code, time.Now().UTC(), id, generation, status, generation, message, code)
 	if err != nil {
 		return fmt.Errorf("failed to update instance runtime state: %w", err)
 	}

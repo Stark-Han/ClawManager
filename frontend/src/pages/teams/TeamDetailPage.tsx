@@ -1,5 +1,11 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, MonitorUp } from "lucide-react";
+import { Download, MonitorUp, MessagesSquare } from "lucide-react";
+import TeamChatWorkspace from "../../components/teams/TeamChatWorkspace";
+import { createPortal } from "react-dom";
+import CollapsibleTable, { markdownColumnWidths } from "../../components/teams/CollapsibleTable";
+import TeamHistoryMenu from "../../components/teams/TeamHistoryMenu";
+import TeamWorkflowMini, { buildMiniWorkflow } from "../../components/teams/TeamWorkflowMini";
+import { useChatReadingPosition } from "../../components/teams/useChatReadingPosition";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import UserLayout from "../../components/UserLayout";
 import { useAuth } from "../../contexts/AuthContext";
@@ -433,33 +439,11 @@ type CollaborationGroup = {
   items: CollaborationItem[];
 };
 
-type TeamSidePanelView = "kanban" | "files";
 type KanbanDetailSize = "short" | "medium" | "long";
 type WorkspacePreviewState = {
   path: string;
   name: string;
   content: string;
-};
-
-const teamWorkspaceHeight = (
-  view: TeamSidePanelView,
-  detailSize: KanbanDetailSize,
-  communicationMode?: string,
-) => {
-  if (view === "files") {
-    return 760;
-  }
-  if (isPeerCommunicationMode(communicationMode)) {
-    return 900;
-  }
-  switch (detailSize) {
-    case "long":
-      return 1110;
-    case "medium":
-      return 945;
-    default:
-      return 740;
-  }
 };
 
 const groupStartTime = (group: CollaborationGroup) => {
@@ -1006,8 +990,6 @@ const TeamDetailPage: React.FC = () => {
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
-  const [sidePanelView, setSidePanelView] = useState<TeamSidePanelView>("kanban");
-  const [kanbanDetailSize, setKanbanDetailSize] = useState<KanbanDetailSize>("short");
   const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreviewState | null>(null);
 
   useEffect(() => {
@@ -1093,12 +1075,6 @@ const TeamDetailPage: React.FC = () => {
       selectActiveProcessGroup(collaborationGroups),
     [collaborationGroups, selectedGroupKey],
   );
-  const mainWorkspaceHeight = teamWorkspaceHeight(
-    sidePanelView,
-    kanbanDetailSize,
-    details?.team.communication_mode,
-  );
-
   const handleDeleteTeam = async () => {
     if (!teamId || !window.confirm(`删除 Team「${details?.team.name || teamId}」？`)) {
       return;
@@ -1232,7 +1208,7 @@ const TeamDetailPage: React.FC = () => {
     );
   }
 
-  if (error || !details) {
+  if (!details) {
     return (
       <UserLayout title="Team">
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-700">
@@ -1243,7 +1219,8 @@ const TeamDetailPage: React.FC = () => {
   }
 
   return (
-    <UserLayout
+    <><UserLayout
+      fillHeight
       title={details.team.name}
       titleAccessory={
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2 rounded-2xl border border-[#f1e7e1] bg-white/80 px-3 py-2 shadow-[0_14px_34px_-30px_rgba(72,44,24,0.45)] backdrop-blur">
@@ -1285,197 +1262,65 @@ const TeamDetailPage: React.FC = () => {
         </div>
       }
     >
-      <div className="space-y-4">
-        <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-[minmax(0,1.18fr)_minmax(560px,0.86fr)]">
-          <div className="min-w-0 self-start">
-            <div
-              className="transition-[height] duration-300"
-              style={{ height: mainWorkspaceHeight }}
-            >
-              <CollaborationPanel
-                team={details.team}
-                groups={collaborationGroups}
-                members={details.members}
-                memberById={memberById}
-                leaderMemberId={details.leader_member_id}
-                currentUserLabel={currentUserLabel}
-                currentUserKey={currentUserKey}
-                taskPrompt={taskPrompt}
-                dispatching={dispatching}
-                dispatchError={dispatchError}
-                historyLoading={historyLoading}
-                historyError={historyError}
-                hasMoreHistory={hasMoreTasks || hasMoreEvents}
-                activeGroupKey={activeProcessGroup?.key}
-                onTaskPromptChange={setTaskPrompt}
-                onDispatch={handleDispatch}
-                onLoadMoreHistory={handleLoadMoreHistory}
-                onSelectGroup={setSelectedGroupKey}
-                sidePanelView={sidePanelView}
-                onSidePanelViewChange={setSidePanelView}
-                onWorkspaceFileOpen={handleOpenWorkspacePath}
-              />
+      {error && <div role="alert" className="shrink-0 px-3 py-2 text-sm text-red-700">刷新失败：{error}（保留已加载的内容）</div>}
+      <TeamChatWorkspace
+        key={details.team.id}
+        members={details.members}
+        membersContent={<>
+          <div className="text-xs leading-6 text-slate-500">Team #{details.team.id}<br />{details.team.communication_mode}<br />共享目录：{details.team.shared_mount_path}</div>
+          {details.members.map(member => <article key={member.id} className="team-member-detail">
+            <strong className="text-sm text-slate-900">{member.display_name}</strong>
+            <div className="text-slate-500">{member.member_key} · {member.role}</div>
+            <div>{member.runtime_type || "openclaw"} · {member.instance_mode || "lite"}</div>
+            <div className="my-2 flex flex-wrap gap-2">
+              <span className={`rounded border px-1.5 ${statusStyle(member.status)}`}>调度：{member.status}</span>
+              <span className={`rounded border px-1.5 ${availabilityStyle(member.availability)}`}>Runtime：{member.availability || "unknown"}</span>
             </div>
-          </div>
-
-          <aside
-            className="self-start transition-[height] duration-300"
-            style={{ height: mainWorkspaceHeight }}
-          >
-            {sidePanelView === "files" ? (
-              <TeamWorkspaceBrowser
-                teamId={details.team.id}
-                rootPath={details.team.shared_mount_path}
-                heightClass="h-full"
-              />
-            ) : (
-              <InteractionProcessPanel
-                group={activeProcessGroup}
-                workItems={details.work_items || []}
-                memberById={memberById}
-                leaderMemberId={details.leader_member_id}
-                communicationMode={details.team.communication_mode}
-                compact
-                expanded
-                heightClass="h-full"
-                showToggle={false}
-                onDetailSizeChange={setKanbanDetailSize}
-                onWorkspaceFileOpen={handleOpenWorkspacePath}
-              />
-            )}
-          </aside>
-        </div>
-
-        <div className="grid grid-cols-1 gap-6">
-          <section className="app-panel overflow-hidden">
-            <div className="border-b border-[#f1e7e1] px-5 py-4">
-              <h2 className="text-lg font-semibold text-gray-900">成员与团队配置</h2>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-[#f1e7e1] text-sm">
-                <thead className="bg-[#fff8f5] text-left text-xs font-semibold uppercase tracking-[0.14em] text-[#b46c50]">
-                  <tr>
-                    <th className="px-5 py-3">成员</th>
-                    <th className="px-5 py-3">角色</th>
-                    <th className="px-5 py-3">Runtime</th>
-                    <th className="px-5 py-3">Mode</th>
-                    <th className="px-5 py-3">职责</th>
-                    <th className="px-5 py-3">状态</th>
-                    <th
-                      className="px-5 py-3"
-                      title="Runtime 最近上报的可用态，和 ClawManager 调度状态分开显示"
-                    >
-                      Runtime 可用态
-                    </th>
-                    <th className="px-5 py-3">最后在线</th>
-                    <th className="px-5 py-3">实例</th>
-                    <th className="min-w-[140px] px-5 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#f1e7e1] bg-white">
-                  {details.members.map((member) => (
-                    <tr key={member.id}>
-                      <td className="px-5 py-4">
-                        <div className="font-medium text-gray-900">
-                          {member.display_name}
-                        </div>
-                        <div className="mt-1 font-mono text-xs text-gray-500">
-                          {member.member_key}
-                        </div>
-                      </td>
-                      <td className="px-5 py-4 text-gray-600">{member.role}</td>
-                      <td className="px-5 py-4 text-gray-600">
-                        {member.runtime_type || "openclaw"}
-                      </td>
-                      <td className="px-5 py-4 text-gray-600">
-                        {member.instance_mode || "lite"}
-                      </td>
-                      <td className="min-w-[280px] max-w-md px-5 py-4">
-                        <DescriptionPreview
-                          text={getTeamMemberDisplayDescription(member.description)}
-                        />
-                      </td>
-                      <td className="px-5 py-4">
-                        <span
-                          className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(member.status)}`}
-                        >
-                          {member.status}
-                        </span>
-                      </td>
-                      <td className="max-w-xs px-5 py-4">
-                        <span
-                          className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${availabilityStyle(member.availability)}`}
-                        >
-                          {member.availability || "unknown"}
-                        </span>
-                        {(member.blocked_reason || member.last_summary) && (
-                          <div className="mt-2 line-clamp-3 text-xs text-gray-500">
-                            {member.blocked_reason || member.last_summary}
-                          </div>
-                        )}
-                        {(member.runtime_task_id || member.runtime_intent) && (
-                          <div className="mt-1 break-all font-mono text-[11px] text-gray-400">
-                            {member.runtime_intent || "-"} ·{" "}
-                            {member.runtime_task_id || "-"}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-5 py-4 text-gray-600">
-                        {formatDateTime(member.last_seen_at)}
-                      </td>
-                      <td className="px-5 py-4">
-                        {member.instance_id ? (
-                          <Link
-                            to={`/instances/${member.instance_id}`}
-                            className="text-[#dc2626] hover:underline"
-                          >
-                            #{member.instance_id}
-                          </Link>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td className="min-w-[140px] px-5 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          {member.instance_id ? (
-                            <Link
-                              to={`/instances/${member.instance_id}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="group/desktop inline-flex min-w-[108px] items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-slate-300 bg-[linear-gradient(180deg,#ffffff,#e9eef3)] px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-[0_8px_18px_-14px_rgba(15,23,42,0.65)] transition-all duration-200 hover:-translate-y-0.5 hover:border-sky-300 hover:bg-[linear-gradient(180deg,#ffffff,#e1eef7)] hover:text-sky-700 hover:shadow-[0_12px_24px_-15px_rgba(14,116,144,0.55)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/45"
-                            >
-                              <MonitorUp
-                                aria-hidden="true"
-                                className="h-3.5 w-3.5 transition-transform duration-200 group-hover/desktop:-translate-y-0.5"
-                                strokeWidth={1.8}
-                              />
-                              访问桌面
-                            </Link>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled
-                              className="inline-flex min-w-[108px] items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-slate-200 bg-[linear-gradient(180deg,#f8fafc,#edf1f5)] px-3.5 py-2 text-xs font-semibold text-slate-400"
-                            >
-                              <MonitorUp
-                                aria-hidden="true"
-                                className="h-3.5 w-3.5"
-                                strokeWidth={1.8}
-                              />
-                              访问桌面
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-
-      </div>
+            {member.blocked_reason && <p className="text-red-700">{member.blocked_reason}</p>}
+            {member.last_summary && <p>{member.last_summary}</p>}
+            <details><summary>职责与运行详情</summary>
+              <DescriptionPreview text={getTeamMemberDisplayDescription(member.description)} />
+              <div>意图：{member.runtime_intent || "-"}</div>
+              <div>任务：{member.runtime_task_id || "-"}</div>
+              <div>最后在线：{formatDateTime(member.last_seen_at)}</div>
+            </details>
+            {member.instance_id ? <Link to={`/instances/${member.instance_id}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sky-700 hover:underline"><MonitorUp size={14} />访问桌面 #{member.instance_id}</Link> : <span className="text-slate-400">实例尚未创建</span>}
+          </article>)}
+        </>}
+        chat={<CollaborationPanel
+          team={details.team}
+          groups={collaborationGroups}
+          members={details.members}
+          memberById={memberById}
+          leaderMemberId={details.leader_member_id}
+          currentUserLabel={currentUserLabel}
+          currentUserKey={currentUserKey}
+          taskPrompt={taskPrompt}
+          dispatching={dispatching}
+          dispatchError={dispatchError}
+          historyLoading={historyLoading}
+          historyError={historyError}
+          hasMoreHistory={hasMoreTasks || hasMoreEvents}
+          activeGroupKey={activeProcessGroup?.key}
+          onTaskPromptChange={setTaskPrompt}
+          onDispatch={handleDispatch}
+          onLoadMoreHistory={handleLoadMoreHistory}
+          onSelectGroup={setSelectedGroupKey}
+          onWorkspaceFileOpen={handleOpenWorkspacePath}
+        />}
+        renderKanban={(mini, open) => <InteractionProcessPanel
+          group={activeProcessGroup}
+          workItems={details.work_items || []}
+          memberById={memberById}
+          leaderMemberId={details.leader_member_id}
+          communicationMode={details.team.communication_mode}
+          compact expanded heightClass="h-full" showToggle={false}
+          mini={mini} onOpen={open}
+          onWorkspaceFileOpen={handleOpenWorkspacePath}
+        />}
+        files={<TeamWorkspaceBrowser teamId={details.team.id} rootPath={details.team.shared_mount_path} heightClass="h-full" />}
+      />
+    </UserLayout>
       {workspacePreview && (
         <WorkspacePreviewModal
           preview={workspacePreview}
@@ -1483,7 +1328,7 @@ const TeamDetailPage: React.FC = () => {
           onDownload={() => void handleDownloadWorkspacePreview()}
         />
       )}
-    </UserLayout>
+    </>
   );
 };
 
@@ -1722,13 +1567,6 @@ function TeamWorkspaceBrowser({
         onChange={(event) => void handleUpload(event.target.files, "folder")}
       />
 
-      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_82px_130px_176px] border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-bold uppercase tracking-[0.04em] text-slate-500">
-        <div>Name</div>
-        <div>Size</div>
-        <div>Modified</div>
-        <div className="text-right">Actions</div>
-      </div>
-
       <div className="min-h-0 flex-1 overflow-auto">
         {error && (
           <div className="mx-4 mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
@@ -1743,7 +1581,7 @@ function TeamWorkspaceBrowser({
           entries.map((entry) => (
             <div
               key={entry.path}
-              className="grid grid-cols-[minmax(0,1fr)_82px_130px_176px] items-center border-b border-slate-100 px-4 py-3 text-sm transition hover:bg-slate-50/70"
+              className="team-file-row hover:bg-slate-50/70"
             >
               <button
                 type="button"
@@ -1754,13 +1592,12 @@ function TeamWorkspaceBrowser({
                     void handlePreview(entry);
                   }
                 }}
-                className="flex min-w-0 items-center gap-2 text-left font-semibold text-slate-800"
+                className="team-file-name flex min-w-0 items-center gap-2 text-left font-semibold text-slate-800"
               >
                 <Icon name={entry.type === "directory" ? "folder" : "file"} />
-                <span className="truncate">{entry.name}</span>
+                <span className="break-all">{entry.name}</span>
               </button>
-              <div className="text-slate-500">{entry.type === "directory" ? "-" : formatWorkspaceSize(entry.size)}</div>
-              <div className="truncate text-slate-500">{formatWorkspaceModified(entry.modified_at)}</div>
+              <div className="team-file-meta">{entry.type === "directory" ? "文件夹" : formatWorkspaceSize(entry.size)}<br />{formatWorkspaceModified(entry.modified_at)}</div>
               <div className="flex justify-end gap-1.5">
                 {entry.type === "file" && entry.previewable && (
                   <WorkspaceIconButton
@@ -1825,6 +1662,27 @@ function WorkspacePreviewModal({
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const isMarkdown = isMarkdownWorkspacePath(preview.path || preview.name);
+  const modalRef = useRef<HTMLDialogElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = modalRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialog?.showModal();
+    modalRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closeRef.current(); }
+      if (event.key !== "Tab") return;
+      const controls = [...(modalRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href]') || [])].filter(node => node.getClientRects().length > 0);
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", handler, true);
+    return () => { document.removeEventListener("keydown", handler, true); dialog?.close(); document.body.style.overflow = previousOverflow; previous?.focus(); };
+  }, []);
 
   const handleCopy = async () => {
     try {
@@ -1837,13 +1695,13 @@ function WorkspacePreviewModal({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
+  return createPortal(
+    <dialog ref={modalRef} data-workspace-preview aria-modal="true" aria-label={`预览 ${preview.name}`} onCancel={event => { event.preventDefault(); onClose(); }} className="fixed inset-0 m-0 flex h-dvh max-h-none w-screen max-w-none items-center justify-center border-0 bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
       <div className="flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
-          <div className="min-w-0">
+        <div className="team-preview-header flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3">
+          <div className="min-w-0 flex-1 basis-40">
             <div className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Preview</div>
-            <div className="mt-1 truncate text-base font-semibold text-slate-900">{preview.name}</div>
+            <div className="mt-1 break-words text-base font-semibold text-slate-900">{preview.name}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
@@ -1869,7 +1727,7 @@ function WorkspacePreviewModal({
             </button>
           </div>
         </div>
-        <div className="min-h-0 overflow-auto bg-slate-50 p-5 sm:p-6">
+        <div className="team-preview-body min-h-0 overflow-auto overscroll-contain bg-slate-50 p-5 sm:p-6">
           {isMarkdown ? (
             <React.Suspense
               fallback={
@@ -1887,7 +1745,7 @@ function WorkspacePreviewModal({
           )}
         </div>
       </div>
-    </div>
+    </dialog>, document.body
   );
 }
 
@@ -2298,8 +2156,6 @@ function CollaborationPanel({
   onDispatch,
   onLoadMoreHistory,
   onSelectGroup,
-  sidePanelView,
-  onSidePanelViewChange,
   onWorkspaceFileOpen,
 }: {
   team: TeamDetails["team"];
@@ -2320,8 +2176,6 @@ function CollaborationPanel({
   onDispatch: (event: React.FormEvent) => void;
   onLoadMoreHistory: () => void;
   onSelectGroup: (groupKey: string) => void;
-  sidePanelView: TeamSidePanelView;
-  onSidePanelViewChange: (view: TeamSidePanelView) => void;
   onWorkspaceFileOpen?: (path: string) => void;
 }) {
   const messages = buildTeamChatMessages(
@@ -2332,8 +2186,9 @@ function CollaborationPanel({
     currentUserKey,
   );
   const onlineCount = members.filter(
-    (member) => !["offline", "deleted", "deleting"].includes(member.status),
+    (member) => ["idle", "busy"].includes(member.availability || ""),
   ).length;
+  const { feedRef, capture, unread, jumpToLatest } = useChatReadingPosition(messages.at(-1)?.id);
   const messageAnchorRefs = useRef(new Map<string, HTMLDivElement | null>());
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
@@ -2349,8 +2204,9 @@ function CollaborationPanel({
         resizeTeamChatComposer(composerRef.current);
       }
     };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    const observer = new ResizeObserver(handleResize);
+    if (composerRef.current) observer.observe(composerRef.current);
+    return () => observer.disconnect();
   }, []);
   const firstMessageByGroup = useMemo(() => {
     const result = new Map<string, string>();
@@ -2372,60 +2228,45 @@ function CollaborationPanel({
     onSelectGroup(groupKey);
     window.setTimeout(() => {
       const target = messageAnchorRefs.current.get(groupKey);
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const feed = feedRef.current;
+      if (target && feed) { feed.scrollTop += target.getBoundingClientRect().top - feed.getBoundingClientRect().top; capture(); }
     }, 50);
   };
 
   return (
-    <section className="app-panel relative flex h-full min-h-0 flex-col overflow-hidden rounded-[22px]">
-      <div className="shrink-0 border-b border-[#e8e8e8] bg-white px-4 py-3">
+    <section className="team-chat-transcript">
+      <div className="team-chat-topbar">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <h2 className="text-base font-semibold leading-6 text-gray-950">团队群聊</h2>
-            <div className="mt-0.5 truncate text-xs text-gray-500">
-              Team #{team.id} · {team.status}
-            </div>
-            <div className="mt-1 flex items-center gap-2 text-xs text-gray-500">
-              <span className="h-2 w-2 rounded-full bg-emerald-400" />
-              <span>{onlineCount}人在线</span>
+            <h2 className="team-chat-heading"><span><MessagesSquare size={18} /></span>团队对话</h2>
+            <div className="team-chat-subtitle">
+              <span>Team #{team.id}</span><span className="team-chat-online"><i />{onlineCount} 人在线</span><span>{team.status}</span>
             </div>
           </div>
-          <div className="flex shrink-0 rounded-full border border-[#eadfd8] bg-[#fff8f5] p-1">
-            {([
-              ["kanban", "看板"],
-              ["files", "文件"],
-            ] as const).map(([view, label]) => (
-              <button
-                key={view}
-                type="button"
-                onClick={() => onSidePanelViewChange(view)}
-                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                  sidePanelView === view
-                    ? "bg-white text-gray-950 shadow-sm"
-                    : "text-gray-500 hover:text-gray-800"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          {queryAnchors.length >= 2 && <TeamHistoryMenu
+            items={queryAnchors.map(group => ({ key: group.key, title: groupQueryText(group), time: formatDateTime(group.task?.created_at) }))}
+            activeKey={activeGroupKey}
+            onSelect={handleSelectAnchor}
+          />}
         </div>
       </div>
 
       <div
-        className="min-h-0 flex-1 overflow-auto bg-[#f5f5f5]"
+        ref={feedRef}
+        className="team-chat-feed"
         onScroll={(event) => {
+          capture();
           if (event.currentTarget.scrollTop <= 24 && hasMoreHistory && !historyLoading) {
             void onLoadMoreHistory();
           }
         }}
       >
         {messages.length === 0 ? (
-          <div className="space-y-5 px-4 py-5">
+          <div className="team-chat-messages">
             <div className="p-6 text-center text-xs text-gray-500">暂无群聊消息。</div>
           </div>
         ) : (
-          <div className="space-y-5 px-4 py-5">
+          <div className="team-chat-messages">
             {(hasMoreHistory || historyLoading || historyError) && (
               <div className="space-y-2 text-center">
                 {hasMoreHistory && (
@@ -2457,6 +2298,7 @@ function CollaborationPanel({
               return (
                 <div
                   key={message.id}
+                  data-chat-message={message.id}
                   ref={(node) => {
                     if (!message.threadKey || !isFirstGroupMessage) {
                       return;
@@ -2484,13 +2326,7 @@ function CollaborationPanel({
         )}
       </div>
 
-      {queryAnchors.length >= 2 && (
-        <QuestionAnchorRail
-          groups={queryAnchors}
-          activeGroupKey={activeGroupKey}
-          onSelect={handleSelectAnchor}
-        />
-      )}
+      {unread && <button type="button" className="mx-auto my-1 rounded-full border border-sky-200 px-3 py-1 text-xs text-sky-700" onClick={jumpToLatest}>有新消息 · 回到底部 ↓</button>}
 
       <div className="shrink-0 border-t border-[#dddddd] bg-white px-3 py-2.5">
         {dispatchError && (
@@ -2511,7 +2347,7 @@ function CollaborationPanel({
             }}
             onInput={(event) => resizeTeamChatComposer(event.currentTarget)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
                 event.preventDefault();
                 event.currentTarget.form?.requestSubmit();
               }
@@ -2541,6 +2377,15 @@ function CollaborationPanel({
   );
 }
 
+function latestMiniHandoff(group?: CollaborationGroup) {
+  return group?.items.filter(item =>
+    ["outbound", "task_assigned", "assignment", "peer_request", "peer_handoff", "peer_review_request", "peer_reply", "reply", "result"].includes(item.eventType)
+    && item.from && item.to && item.from !== item.to
+    && payloadBool(item.payload, ["sent"]) !== false
+    && payloadBool(item.payload, ["messageDelivered"]) !== false,
+  ).sort((a, b) => b.event.id - a.event.id)[0];
+}
+
 function InteractionProcessPanel({
   group,
   workItems = [],
@@ -2554,7 +2399,11 @@ function InteractionProcessPanel({
   onDetailSizeChange,
   onWorkspaceFileOpen,
   communicationMode,
+  mini = false,
+  onOpen,
 }: {
+  mini?: boolean;
+  onOpen?: () => void;
   group?: CollaborationGroup;
   workItems?: TeamWorkItem[];
   memberById: Map<number, TeamMember>;
@@ -2592,10 +2441,11 @@ function InteractionProcessPanel({
       ? leaderLedgerSummary?.progress || 0
       : processProgress(group, steps, visualStatus, peerRoot)
     : 0;
-  const isTerminal = ["succeeded", "failed", "stale"].includes(visualStatus);
+  const rootTerminalStatus = ["succeeded", "failed", "stale"].includes(group?.task?.status || "") ? group!.task!.status : undefined;
+  const isTerminal = ["succeeded", "failed", "stale"].includes(visualStatus) || !!rootTerminalStatus;
   const latestRuntimeStatus = group ? latestGroupRuntimeStatus(group) : "";
   const statusText = isTerminal
-    ? processStatusText(visualStatus)
+    ? processStatusText(rootTerminalStatus || visualStatus)
     : latestRuntimeStatus === "waiting_completion"
       ? "等待显式完成确认"
       : workflowStatusText(group?.task?.workflow_state) || processStatusText(visualStatus);
@@ -2625,6 +2475,8 @@ function InteractionProcessPanel({
     allCards.find((card) => card.column === "todo")?.id ||
     "";
   const [selectedCardId, setSelectedCardId] = useState(defaultCardId);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const selectCard = (id: string) => { setSelectedCardId(id); setDetailOpen(true); };
   const [internalExpanded, setInternalExpanded] = useState(false);
   const expanded = controlledExpanded ?? internalExpanded;
   const setExpanded = onExpandedChange ?? setInternalExpanded;
@@ -2637,8 +2489,9 @@ function InteractionProcessPanel({
     : leaderKanbanWorkspaceSize(selectedDetailSize, decompositionItems.length, columns);
 
   useEffect(() => {
-    setSelectedCardId(defaultCardId);
-  }, [defaultCardId, group?.key]);
+    setSelectedCardId("");
+    setDetailOpen(false);
+  }, [group?.key]);
 
   useEffect(() => {
     if (!onDetailSizeChange) {
@@ -2657,8 +2510,27 @@ function InteractionProcessPanel({
         : "from-slate-500 via-sky-500 to-cyan-400";
   const routeMembers = group?.route || [];
 
+  const handoff = latestMiniHandoff(group);
+  const [freshHandoff, setFreshHandoff] = useState(false);
+  const lastHandoffId = useRef({ group: group?.key, id: handoff?.event.id });
+  useEffect(() => {
+    const changed = lastHandoffId.current.group === group?.key && lastHandoffId.current.id !== handoff?.event.id;
+    lastHandoffId.current = { group: group?.key, id: handoff?.event.id };
+    setFreshHandoff(changed && !!handoff && !isTerminal && Date.now() - handoff.timeMs < 30000);
+    const timer = window.setTimeout(() => setFreshHandoff(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [handoff?.event.id, group?.key, isTerminal]);
+  const workflowNodes = buildMiniWorkflow(allCards, rootWorkItems, [...memberById.values()], isTerminal);
+  if (mini) return <TeamWorkflowMini
+    nodes={workflowNodes} taskId={group?.task?.id} status={statusText} title={queryText} terminal={isTerminal}
+    onOpen={onOpen}
+    onSelect={id => { setSelectedCardId(id); setDetailOpen(false); onOpen?.(); }}
+    handoff={handoff ? { id: handoff.event.id, from: memberByKey.get(handoff.from)?.display_name || handoff.from, to: memberByKey.get(handoff.to)?.display_name || handoff.to, verb: eventVerb(handoff.eventType) } : undefined}
+    freshHandoff={freshHandoff}
+  />;
+
   return (
-    <section className={`app-panel cm-tech-panel flex flex-col overflow-hidden rounded-[22px] transition-[height] duration-300 ${heightClass || (compact ? (expanded ? "h-[760px]" : "h-[480px]") : "h-[420px]")}`}>
+    <section className={`app-panel cm-tech-panel team-docked-kanban flex flex-col overflow-hidden rounded-[22px] transition-[height] duration-300 ${heightClass || (compact ? (expanded ? "h-[760px]" : "h-[480px]") : "h-[420px]")}`}>
       <div className={`cm-tech-header text-slate-800 ${compact ? "px-4 py-3" : "px-4 py-3.5"}`}>
         <div className="relative z-[1] flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -2707,7 +2579,7 @@ function InteractionProcessPanel({
               )}
             </div>
           </div>
-          <div className="min-w-[150px] max-w-[176px] shrink-0 text-right">
+          <div className="team-kanban-status min-w-[150px] max-w-[176px] shrink-0 text-right">
             {leaderLedgerSummary ? (
               <>
                 <div title={leaderLedgerSummary.phase} className="truncate whitespace-nowrap text-sm font-semibold leading-5">
@@ -2748,7 +2620,12 @@ function InteractionProcessPanel({
       </div>
 
       <div className={`cm-tech-workspace min-h-0 flex-1 ${expanded ? "flex flex-col gap-2 overflow-hidden px-3 py-2.5" : "space-y-3 overflow-auto px-4 py-3"}`}>
-        {compact && !expanded ? (
+        {detailOpen && selectedCard ? (
+          <div className="cm-tech-surface rounded-xl p-3">
+            <button type="button" onClick={() => setDetailOpen(false)} className="mb-3 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700">← 返回看板</button>
+            <KanbanCardDetail card={selectedCard} size={selectedDetailSize} onWorkspaceFileOpen={onWorkspaceFileOpen} />
+          </div>
+        ) : compact && !expanded ? (
           <div className="space-y-3">
             <div className="cm-tech-surface rounded-2xl p-3">
               <div className="flex items-start justify-between gap-3">
@@ -2803,7 +2680,7 @@ function InteractionProcessPanel({
           visualStatus={visualStatus}
           progress={progress}
           selectedCardId={selectedCard?.id}
-          onSelect={setSelectedCardId}
+          onSelect={selectCard}
         />
 
         <div className={`cm-tech-surface flex min-h-[112px] min-w-0 flex-col overflow-hidden rounded-2xl p-2.5 ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
@@ -2845,233 +2722,34 @@ function InteractionProcessPanel({
           </>
         ) : (
           <>
-        <div className="cm-tech-surface shrink-0 rounded-2xl p-2">
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(144px,172px)]">
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                总任务 Query
-              </div>
-              <div className="mt-1 line-clamp-1 text-xs leading-5 text-slate-700">
-                {queryText || "Idle，等待新的团队任务。"}
-              </div>
-              <div className="cm-tech-subtle mt-2 rounded-xl p-1.5">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-semibold text-slate-700">任务拆解</span>
-                  <span className="text-[10px] text-slate-400">{decompositionItems.length} 项</span>
-                </div>
-                {decompositionItems.length === 0 ? (
-                  <div className="text-[11px] leading-5 text-slate-400">
-                    等待 Leader 拆解并派发子任务。
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {decompositionItems.map((item) => (
-                      <div
-                        key={item.id}
-                        className="rounded-lg border border-white/80 bg-white/75 px-2 py-1 shadow-[0_1px_4px_rgba(15,23,42,0.05)] transition duration-200 hover:border-sky-200/80 hover:bg-white"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="min-w-0 truncate text-[11px] font-medium text-slate-700">
-                            {item.title}
-                          </div>
-                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${item.badgeClass}`}>
-                            {item.status}
-                          </span>
-                        </div>
-                        {item.summary && (
-                          <div className="mt-1 line-clamp-1 text-[10px] leading-4 text-slate-500">{item.summary}</div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="cm-tech-subtle min-w-0 rounded-xl px-3 py-2">
-              <div title={statusText} className={`max-w-full truncate whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
-                {statusText}
-              </div>
-              {leaderLedgerSummary ? (
-                <>
-                  <div title={leaderLedgerSummary.phase} className="mt-2 truncate whitespace-nowrap text-[13px] font-semibold leading-5 text-slate-900">
-                    {leaderLedgerSummary.phase}
-                  </div>
-                  <div title={`交付 ${leaderLedgerSummary.delivered}/${leaderLedgerSummary.total} · ${leaderLedgerSummary.blockers > 0 ? `${leaderLedgerSummary.blockers} 个阻塞` : "无阻塞"}`} className="mt-1 truncate whitespace-nowrap text-[10px] leading-4 text-slate-400">
-                    交付 {leaderLedgerSummary.delivered}/{leaderLedgerSummary.total} · {leaderLedgerSummary.blockers > 0 ? `${leaderLedgerSummary.blockers} 个阻塞` : "无阻塞"}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="mt-2 text-xl font-semibold leading-none text-slate-900">{progress}%</div>
-                  <div className="mt-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">overall</div>
-                </>
-              )}
-              <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[10px]">
-                <KanbanCount label="T" value={kanbanCounts.todo} tone="todo" />
-                <KanbanCount label="D" value={kanbanCounts.doing} tone="doing" />
-                <KanbanCount label="✓" value={kanbanCounts.done} tone="done" />
-              </div>
-            </div>
-          </div>
+        <div className="team-board-overview">
+          <span>{leaderLedgerSummary?.phase || statusText}</span>
+          {leaderLedgerSummary && <span>成员交付 <b>{leaderLedgerSummary.delivered}/{leaderLedgerSummary.total}</b> · {leaderLedgerSummary.blockers ? <span className="text-red-600">{leaderLedgerSummary.blockers} 项阻断</span> : "无阻断"}</span>}
         </div>
-
-        <div className="shrink-0 overflow-hidden">
-          <div className="grid grid-cols-3 gap-2">
-            <KanbanColumn
-              title="Todo"
-              subtitle="已拆解 / 待领取"
-              cards={columns.todo}
-              tone="todo"
-              selectedCardId={selectedCard?.id}
-              onSelect={setSelectedCardId}
-            />
-            <KanbanColumn
-              title="Doing"
-              subtitle="执行中 / 有进展"
-              cards={columns.doing}
-              tone="doing"
-              selectedCardId={selectedCard?.id}
-              onSelect={setSelectedCardId}
-            />
-            <KanbanColumn
-              title="Done"
-              subtitle="已完成 / 已反馈"
-              cards={columns.done}
-              tone="done"
-              selectedCardId={selectedCard?.id}
-              onSelect={setSelectedCardId}
-            />
-          </div>
+        <div className="team-board-columns grid grid-cols-3 gap-2">
+          <KanbanColumn title="Todo" subtitle="待领取" cards={columns.todo} tone="todo" selectedCardId={selectedCard?.id} onSelect={selectCard} />
+          <KanbanColumn title="Doing" subtitle="执行中" cards={columns.doing} tone="doing" selectedCardId={selectedCard?.id} onSelect={selectCard} />
+          <KanbanColumn title="Done" subtitle="成功 / 异常终态" cards={columns.done} tone="done" selectedCardId={selectedCard?.id} onSelect={selectCard} />
         </div>
-
-        <div className={`cm-tech-surface flex min-h-[112px] min-w-0 shrink-0 flex-col overflow-hidden rounded-2xl p-2.5 ${kanbanDetailPanelMaxHeight(selectedDetailSize)}`}>
-          <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
-            <div>
-              <div className="text-xs font-semibold text-slate-800">
-                {selectedCard ? "卡片详情" : "汇总结果"}
-              </div>
-              <div className="mt-0.5 text-[11px] text-slate-400">
-                点击 Kanban 卡片可切换查看细节
-              </div>
-            </div>
-            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(visualStatus)}`}>
-              {statusText}
-            </span>
-          </div>
-          <div className="min-h-0">
-            {selectedCard ? (
-              <KanbanCardDetail
-                card={selectedCard}
-                size={selectedDetailSize}
-                onWorkspaceFileOpen={onWorkspaceFileOpen}
-              />
-            ) : finalResult ? (
-              <div className={`overflow-auto pb-4 pr-1 text-xs leading-5 text-slate-700 ${kanbanDetailBodyMaxHeight(selectedDetailSize)}`}>
-                <MarkdownContent
-                  text={finalResult}
-                  compact
-                  onWorkspaceFileOpen={onWorkspaceFileOpen}
-                />
-              </div>
-            ) : (
-              <div className="text-xs leading-5 text-slate-500">
-                当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
-              </div>
-            )}
-          </div>
-        </div>
+        <div className="px-1 text-xs leading-5 text-slate-500">点击执行卡片查看详情、产物和可访问链接。</div>
+        <details className="team-board-plan">
+          <summary>任务拆解 · {decompositionItems.length} 项</summary>
+          {decompositionItems.length === 0 ? <p className="mt-2 text-slate-500">等待 Leader 拆解并派发任务。</p> : decompositionItems.map(item => <button
+            key={item.id} type="button" onClick={() => { const card = allCards.find(card => card.id === item.id); if (card) selectCard(card.id); }}
+            disabled={!allCards.some(card => card.id === item.id)}>
+            <span className="flex items-start justify-between gap-2"><strong className="min-w-0">{item.title}</strong><span className={`shrink-0 rounded-full px-2 text-[11px] ${item.badgeClass}`}>{item.status}</span></span>
+            {item.route && <span className="mt-1 block text-[11px] text-slate-500">{item.route}</span>}
+            {item.summary && <span className="mt-1 block text-[11px] text-slate-500">{item.summary}</span>}
+          </button>)}
+        </details>
+        {finalResult && <details className="team-board-plan">
+          <summary>总任务结果</summary>
+          <div className="mt-3"><MarkdownContent text={finalResult} compact onWorkspaceFileOpen={onWorkspaceFileOpen} /></div>
+        </details>}
           </>
         )}
       </div>
     </section>
-  );
-}
-
-function QuestionAnchorRail({
-  groups,
-  activeGroupKey,
-  onSelect,
-}: {
-  groups: CollaborationGroup[];
-  activeGroupKey?: string;
-  onSelect: (groupKey: string) => void;
-}) {
-  const visibleGroups = groups.slice(-12);
-  const hiddenCount = Math.max(groups.length - visibleGroups.length, 0);
-
-  return (
-    <div className="absolute right-3 top-1/2 z-20 hidden -translate-y-1/2 xl:block">
-      <div className="group/anchors relative flex items-center">
-        <div className="flex flex-col items-end gap-2.5 px-1 py-2">
-          {hiddenCount > 0 && (
-            <div className="mb-0.5 h-px w-7 bg-slate-300/70" title={`还有 ${hiddenCount} 条更早的问题`} />
-          )}
-          {visibleGroups.map((group) => {
-            const active = group.key === activeGroupKey;
-            return (
-              <button
-                key={group.key}
-                type="button"
-                title={groupQueryText(group)}
-                onClick={() => onSelect(group.key)}
-                className={`h-px rounded-full transition-all ${
-                  active
-                    ? "w-9 bg-slate-950"
-                    : "w-7 bg-slate-300 hover:w-9 hover:bg-slate-700"
-                }`}
-              />
-            );
-          })}
-        </div>
-
-        <div className="pointer-events-none absolute right-10 top-1/2 w-80 -translate-y-1/2 opacity-0 transition duration-150 group-hover/anchors:pointer-events-auto group-hover/anchors:opacity-100">
-          <div className="rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.75)] backdrop-blur">
-            <div className="mb-2 flex items-center justify-between gap-2 px-1">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                历史问题
-              </div>
-              <div className="text-[11px] text-slate-400">{groups.length} 条</div>
-            </div>
-            <div className="max-h-80 space-y-1 overflow-auto pr-1">
-              {groups.map((group, index) => {
-                const active = group.key === activeGroupKey;
-                return (
-                  <button
-                    key={group.key}
-                    type="button"
-                    onClick={() => onSelect(group.key)}
-                    className={`w-full rounded-xl border px-3 py-2 text-left transition ${
-                      active
-                        ? "border-slate-900 bg-slate-950 text-white shadow-sm"
-                        : "border-transparent bg-slate-50 text-slate-700 hover:border-slate-200 hover:bg-white"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className={`text-[10px] ${active ? "text-slate-300" : "text-slate-400"}`}>
-                        Q{index + 1}
-                      </span>
-                      <span
-                        className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
-                          active ? "border-white/20 text-slate-200" : statusStyle(group.status)
-                        }`}
-                      >
-                        {group.status}
-                      </span>
-                    </div>
-                    <div className="mt-1 line-clamp-2 text-xs leading-5">
-                      {groupQueryText(group)}
-                    </div>
-                    <div className={`mt-1 text-[10px] ${active ? "text-slate-300" : "text-slate-400"}`}>
-                      {formatDateTime(new Date(groupStartTime(group)).toISOString())}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -5667,41 +5345,18 @@ function TeamChatMessageRow({
   const artifactRefs = message.artifactRefs || [];
   const hiddenArtifactCount = Math.max(artifactRefs.length - 5, 0);
   const visibleArtifactRefs = artifactsExpanded ? artifactRefs : artifactRefs.slice(0, 5);
-  const bubbleClass =
-    message.tone === "assignment"
-      ? "relative overflow-hidden border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 text-gray-950 shadow-[0_14px_28px_-22px_rgba(180,83,9,0.8)]"
-      : message.tone === "feedback"
-      ? "relative overflow-hidden border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-green-50 text-gray-950 shadow-[0_14px_28px_-22px_rgba(5,150,105,0.55)]"
-      : message.tone === "error"
-      ? "border border-red-100 bg-red-50 text-red-800"
-      : message.tone === "warning"
-      ? "border border-amber-200 bg-amber-50 text-amber-900"
-      : "bg-white text-gray-950";
-  const isAssignment = message.tone === "assignment";
-  const isFeedback = message.tone === "feedback";
-  const markerClass = isFeedback
-    ? "border-emerald-100 text-emerald-700"
-    : "border-amber-100 text-amber-700";
-  const markerDotClass = isFeedback ? "bg-emerald-400" : "bg-amber-400";
-  const markerDotSolidClass = isFeedback ? "bg-emerald-500" : "bg-amber-500";
+  const toneClass = message.tone === "error" ? "text-red-800" : message.tone === "warning" ? "text-amber-800" : "text-gray-950";
+  const marker = message.tone === "assignment" ? "任务下发" : message.tone === "feedback" ? "任务结果反馈" : message.tone === "error" ? "错误" : message.tone === "warning" ? "提示" : "";
   return (
     <div className="flex items-start gap-3">
       <MemberAvatar name={message.senderKey} />
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-2">
+        <div className="mb-1 flex flex-wrap items-center gap-2">
           <span className="truncate text-xs font-medium text-gray-500">{message.sender}</span>
           <span className="shrink-0 text-xs text-gray-400">{formatChatTime(message.time)}</span>
         </div>
-        <div className={`inline-block max-w-[92%] rounded-lg px-3.5 py-2.5 text-sm leading-6 shadow-sm ${bubbleClass}`}>
-          {(isAssignment || isFeedback) && (
-            <div className={`mb-2 flex items-center gap-2 border-b pb-2 text-[11px] font-semibold uppercase tracking-[0.12em] ${markerClass}`}>
-              <span className="relative flex h-2 w-2">
-                <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${markerDotClass}`} />
-                <span className={`relative inline-flex h-2 w-2 rounded-full ${markerDotSolidClass}`} />
-              </span>
-              <span>{isFeedback ? "任务结果反馈" : "任务下发"}</span>
-            </div>
-          )}
+        <div className={`team-plain-message ${toneClass}`}>
+          {marker && <span className={`mb-1 inline-block text-xs font-medium ${message.tone === "feedback" ? "text-emerald-700" : message.tone === "assignment" ? "text-amber-700" : toneClass}`}>{marker}</span>}
           <MarkdownContent
             text={message.content}
             compact
@@ -5763,12 +5418,12 @@ function TeamChatMessageRow({
 function SystemChatLine({ message }: { message: TeamChatMessage }) {
   const systemClass =
     message.tone === "feedback"
-      ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
-      : "bg-gray-200 text-gray-500";
+      ? "text-emerald-700"
+      : "text-gray-500";
   const timeClass = message.tone === "feedback" ? "text-emerald-500/80" : "text-gray-400";
   return (
     <div className="flex justify-center">
-      <div className={`max-w-[86%] rounded-2xl px-3 py-1.5 text-center text-[11px] leading-5 ${systemClass}`}>
+      <div className={`max-w-full px-3 py-1.5 text-center text-xs leading-5 ${systemClass}`}>
         <div className={`mb-0.5 text-[10px] ${timeClass}`}>{formatChatTime(message.time)}</div>
         {message.content}
       </div>
@@ -5781,7 +5436,7 @@ function MemberAvatar({ name }: { name: string }) {
   const isLeader = name.toLowerCase().includes("leader") || name === "ClawManager";
   return (
     <div
-      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-xs font-semibold shadow-sm ${
+      className={`team-avatar flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${
         isLeader
           ? "border-slate-300 bg-gradient-to-br from-slate-100 to-slate-300 text-slate-700"
           : "border-sky-200 bg-gradient-to-br from-sky-100 to-cyan-200 text-sky-800"
@@ -5971,10 +5626,12 @@ function MarkdownTable({
   const rows = rowLines
     .map(splitMarkdownTableRow)
     .filter((row) => row.length > 0);
+  const widths = markdownColumnWidths(headers, rows);
 
   return (
-    <div className="my-2 max-w-full overflow-x-auto rounded-lg border border-[#e5e7eb] bg-white">
-      <table className="min-w-full border-collapse text-xs leading-5">
+    <CollapsibleTable minimumWidth={widths.reduce((sum, width) => sum + width, 0)} rowCount={rows.length}>
+      <table className="team-markdown-table">
+        <colgroup>{widths.map((width, index) => <col key={index} style={{ width }} />)}</colgroup>
         <thead className="bg-[#fafafa] text-gray-700">
           <tr>
             {headers.map((header, cellIndex) => (
@@ -6002,7 +5659,7 @@ function MarkdownTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </CollapsibleTable>
   );
 }
 

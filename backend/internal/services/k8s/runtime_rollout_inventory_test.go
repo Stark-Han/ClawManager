@@ -42,3 +42,25 @@ func TestRolloutInventoryRejectsMalformedLiveDeploymentBeforeMutation(t *testing
 		}
 	}
 }
+
+func TestRolloutScopedInventoryDoesNotInspectUnrelatedPools(t *testing.T) {
+	live := BuildRuntimeDeployment(RuntimeDeploymentSpec{Name: "selected", Namespace: "tenant", RuntimeType: "hermes", Image: "new", Replicas: 1})
+	unrelated := live.DeepCopy()
+	unrelated.Name = "broken-unrelated"
+	unrelated.Spec.Template.Spec.Containers[0].Name = "wrong"
+	client := fake.NewSimpleClientset(live, unrelated)
+	service := NewRuntimeDeploymentService(client).(RuntimeRolloutScopedInventory)
+	targets, err := service.RolloutTargetsFor(context.Background(), []RuntimeDeploymentRef{{Namespace: "tenant", Name: "selected"}}, "hermes")
+	if err != nil || len(targets) != 1 || targets[0].Name != "selected" {
+		t.Fatalf("unrelated pool blocked frozen plan: %+v %v", targets, err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" {
+			t.Fatalf("unexpected unscoped operation: %+v", action)
+		}
+	}
+	targets, err = service.RolloutTargetsFor(context.Background(), []RuntimeDeploymentRef{{Namespace: "tenant", Name: "gone"}}, "hermes")
+	if err != nil || len(targets) != 0 {
+		t.Fatalf("missing target: %+v %v", targets, err)
+	}
+}

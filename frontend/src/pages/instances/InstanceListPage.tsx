@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { Monitor, MonitorPlay, Play, Plus, Search, Square, Trash2 } from "lucide-react";
 import ConfirmDialog from "../../components/ConfirmDialog";
+import { runtimeFailureSummary } from "../../lib/runtimeFailure";
 import InstanceLifecycleBatches from "../../components/InstanceLifecycleBatches";
 import { collectUnavailableLiteIds, pruneVisibleSelection } from "../../lib/unavailableInstanceSelection";
 import UserLayout from "../../components/UserLayout";
@@ -934,7 +935,7 @@ const InstanceListPage: React.FC = () => {
                       <div className="mt-1 text-xs text-slate-500">最后在线：{instance.last_online_at ? new Date(instance.last_online_at).toLocaleString(locale) : "暂无记录"}</div>
                       {instance.status === "error" && <div tabIndex={0}
                         className="group relative mt-1 text-xs text-red-600"
-                      ><div className="truncate">错误：{instance.runtime_error_message?.split(/\r?\n/).find(line => line.trim()) || "原因未记录"}</div>
+                      ><div className="truncate">错误：{runtimeFailureSummary(instance)}</div>
                         <div role="tooltip" className="absolute left-0 top-full z-50 hidden max-h-64 w-80 max-w-[75vw] overflow-auto whitespace-pre-wrap break-words rounded border border-red-100 bg-white p-3 text-slate-700 shadow-lg group-hover:block group-focus-within:block">{instance.runtime_error_message || "原因未记录"}</div>
                       </div>}
                     </td>

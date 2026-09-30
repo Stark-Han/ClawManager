@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -25,6 +26,34 @@ type RuntimeRolloutTarget struct {
 
 type RuntimeRolloutInventory interface {
 	RolloutTargets(context.Context, string, string) ([]RuntimeRolloutTarget, error)
+}
+
+// Read only the operation's frozen targets during resume/verification. A new,
+// unrelated pool must not widen or break an already persisted rollout plan.
+type RuntimeRolloutScopedInventory interface {
+	RolloutTargetsFor(context.Context, []RuntimeDeploymentRef, string) ([]RuntimeRolloutTarget, error)
+}
+
+func (s *runtimeDeploymentService) RolloutTargetsFor(ctx context.Context, refs []RuntimeDeploymentRef, runtimeType string) ([]RuntimeRolloutTarget, error) {
+	var result []RuntimeRolloutTarget
+	for _, ref := range refs {
+		d, err := s.client.AppsV1().Deployments(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect runtime deployment %s/%s: %w", ref.Namespace, ref.Name, err)
+		}
+		if d.Labels["clawmanager.io/runtime-type"] != runtimeType || !ordinaryRuntimeDeployment(*d) {
+			continue
+		}
+		target, err := runtimeRolloutTarget(*d)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, target)
+	}
+	return result, nil
 }
 
 func ordinaryRuntimeDeployment(d appsv1.Deployment) bool {
@@ -56,33 +85,41 @@ func (s *runtimeDeploymentService) RolloutTargets(ctx context.Context, namespace
 		if !ordinaryRuntimeDeployment(d) {
 			continue
 		}
-		image := ""
-		for _, c := range d.Spec.Template.Spec.Containers {
-			if c.Name == "runtime" {
-				image = strings.TrimSpace(c.Image)
-			}
+		target, err := runtimeRolloutTarget(d)
+		if err != nil {
+			return nil, err
 		}
-		if image == "" {
-			return nil, fmt.Errorf("runtime deployment %s/%s has no runtime image", namespace, d.Name)
-		}
-		desired := int32(1)
-		if d.Spec.Replicas != nil {
-			desired = *d.Spec.Replicas
-		}
-		ready := d.Status.ObservedGeneration >= d.Generation && d.Status.UpdatedReplicas == desired && d.Status.Replicas == desired && d.Status.AvailableReplicas == desired
-		upgrade := d.Labels["clawmanager.io/pool-role"] == "upgrade-target"
-		for _, c := range d.Spec.Template.Spec.Containers {
-			if c.Name != "runtime" {
-				continue
-			}
-			for _, e := range c.Env {
-				if e.Name == "CLAWMANAGER_RUNTIME_UPGRADE_ID" && e.Value != "" {
-					upgrade = true
-				}
-			}
-		}
-		result = append(result, RuntimeRolloutTarget{Namespace: namespace, Name: d.Name, UID: string(d.UID), Image: image, Ready: ready, Upgrade: upgrade})
+		result = append(result, target)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
+}
+
+func runtimeRolloutTarget(d appsv1.Deployment) (RuntimeRolloutTarget, error) {
+	image := ""
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if c.Name == "runtime" {
+			image = strings.TrimSpace(c.Image)
+		}
+	}
+	if image == "" {
+		return RuntimeRolloutTarget{}, fmt.Errorf("runtime deployment %s/%s has no runtime image", d.Namespace, d.Name)
+	}
+	desired := int32(1)
+	if d.Spec.Replicas != nil {
+		desired = *d.Spec.Replicas
+	}
+	ready := d.Status.ObservedGeneration >= d.Generation && d.Status.UpdatedReplicas == desired && d.Status.Replicas == desired && d.Status.AvailableReplicas == desired
+	upgrade := d.Labels["clawmanager.io/pool-role"] == "upgrade-target"
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if c.Name != "runtime" {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == "CLAWMANAGER_RUNTIME_UPGRADE_ID" && e.Value != "" {
+				upgrade = true
+			}
+		}
+	}
+	return RuntimeRolloutTarget{Namespace: d.Namespace, Name: d.Name, UID: string(d.UID), Image: image, Ready: ready, Upgrade: upgrade}, nil
 }

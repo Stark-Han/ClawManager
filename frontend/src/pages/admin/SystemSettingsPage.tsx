@@ -1209,12 +1209,13 @@ const SystemSettingsPage: React.FC = () => {
 			<div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
 			  <div className="font-medium">
 				升级 #{rolloutDetails.rollout.id}：{rolloutDetails.rollout.status} / {rolloutDetails.rollout.phase}
+				{rolloutDetails.items.some((item) => item.recovery_status === 'needs_attention') && <span className="ml-2 text-red-700">恢复受阻，需要处理（升级隔离仍保留）</span>}
 			  </div>
 			  <div className="mt-1">
 				目标：<span className="font-mono break-all">{rolloutDetails.rollout.target_image_ref}</span>
 			  </div>
 			  <div className="mt-1">
-				{rolloutDetails.pool_progress ? <>运行池 {rolloutDetails.pool_progress.completed} / {rolloutDetails.pool_progress.targets.length} 已更新；当前：{rolloutDetails.pool_progress.targets[rolloutDetails.pool_progress.completed]?.Name ?? '等待最终验证'}</> : <>实例 {rolloutDetails.items.length} 个；已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；已恢复 {rolloutDetails.items.filter((item) => ['restored', 'restart_ready'].includes(item.state)).length} 个。</>}
+				{rolloutDetails.pool_progress ? <>运行池 {rolloutDetails.pool_progress.completed} / {rolloutDetails.pool_progress.targets.length} 已更新；当前：{rolloutDetails.pool_progress.targets[rolloutDetails.pool_progress.completed]?.Name ?? '等待最终验证'}</> : <>实例 {rolloutDetails.items.length} 个；Gateway 已验证 {rolloutDetails.items.filter((item) => ['gateway_verified', 'verified'].includes(item.state)).length} 个；等待恢复 {rolloutDetails.items.filter((item) => ['migrated', 'restart_ready'].includes(item.state)).length} 个；数据已回退 {rolloutDetails.items.filter((item) => item.state === 'restored').length} 个。</>}
 			  </div>
 			  {rolloutDetails.rollout.rollback_status && <div className="mt-1">自动回退：{rolloutDetails.rollout.rollback_status}</div>}
 			  {(rolloutDetails.rollout.error_message || rolloutDetails.rollout.rollback_error) && (
@@ -1225,7 +1226,9 @@ const SystemSettingsPage: React.FC = () => {
 				  {rolloutDetails.items.map((item) => (
 					<div key={item.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-blue-100 px-3 py-2 text-xs last:border-b-0">
 					  <span>实例 #{item.instance_id}{item.team_id ? ` · Team #${item.team_id}` : ''}</span>
-					  <span className="font-medium">{item.state}</span>
+					  <span className="font-medium">{({ migrated: '迁移完成，等待恢复', restart_ready: '等待启动验证', gateway_verified: 'Gateway 已验证', verified: '升级验收完成', restored: '数据已回退，待恢复验证' } as Record<string, string>)[item.state] ?? item.state}{item.recovery_status ? ` · ${({ pending: '等待启动', starting: '启动中', retrying: '等待重试', needs_attention: '需要处理', verified: '已验证' } as Record<string, string>)[item.recovery_status] ?? item.recovery_status}` : ''}</span>
+					  {!!item.restart_attempts && <span className="w-full">启动尝试：{item.restart_attempts} 次</span>}
+					  {item.restart_next_retry_at && <span className="w-full">下次重试：{new Date(item.restart_next_retry_at).toLocaleString()}</span>}
 					  {item.error_message && <span className="w-full text-red-700">{item.error_message}</span>}
 					</div>
 				  ))}

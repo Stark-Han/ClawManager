@@ -37,6 +37,7 @@ type Instance struct {
 	WorkspaceUsageBytes      int64      `db:"workspace_usage_bytes" json:"workspace_usage_bytes"`
 	RuntimeGeneration        int        `db:"runtime_generation" json:"runtime_generation"`
 	RuntimeErrorMessage      *string    `db:"runtime_error_message" json:"runtime_error_message,omitempty"`
+	RuntimeErrorCode         *string    `db:"runtime_error_code" json:"runtime_error_code,omitempty"`
 	ProvisioningOperationID  *string    `db:"provisioning_operation_id" json:"-"`
 	PodName                  *string    `db:"pod_name" json:"pod_name,omitempty"`
 	PodNamespace             *string    `db:"pod_namespace" json:"pod_namespace,omitempty"`

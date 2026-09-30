@@ -53,6 +53,14 @@ type RuntimeUpgradeItem struct {
 	PreflightJSON           *string    `db:"preflight_json" json:"-"`
 	PostflightJSON          *string    `db:"postflight_json" json:"-"`
 	ErrorMessage            *string    `db:"error_message" json:"error_message,omitempty"`
+	RecoveryStartedAt       *time.Time `db:"recovery_started_at" json:"recovery_started_at,omitempty"`
+	RestartAttempts         int        `db:"restart_attempts" json:"restart_attempts"`
+	RestartTargetPodUID     *string    `db:"restart_target_pod_uid" json:"-"`
+	RestartStartedAt        *time.Time `db:"restart_started_at" json:"restart_started_at,omitempty"`
+	RestartDeadlineAt       *time.Time `db:"restart_deadline_at" json:"restart_deadline_at,omitempty"`
+	RestartNextRetryAt      *time.Time `db:"restart_next_retry_at" json:"restart_next_retry_at,omitempty"`
+	RecoveryStatus          *string    `db:"recovery_status" json:"recovery_status,omitempty"`
+	RecoveryErrorCode       *string    `db:"recovery_error_code" json:"recovery_error_code,omitempty"`
 	StartedAt               *time.Time `db:"started_at" json:"started_at,omitempty"`
 	FinishedAt              *time.Time `db:"finished_at" json:"finished_at,omitempty"`
 	CreatedAt               time.Time  `db:"created_at" json:"created_at"`

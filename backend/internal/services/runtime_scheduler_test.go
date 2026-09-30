@@ -519,6 +519,7 @@ func TestRuntimeSchedulerEnsureUpgradeGatewayTargetsStandbyRolloutPool(t *testin
 	podRepo.pods[target.ID] = &target
 	bindingRepo := newFakeRuntimeBindingRepo()
 	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-205", Status: "running"}}
+	bindingRepo.upgradePods = podRepo
 	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
 	rollout := &models.RuntimeRollout{ID: 57, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: target.ImageRef, PreflightID: &preflightID}
 
@@ -563,6 +564,7 @@ func TestRuntimeSchedulerEnsureUpgradeGatewayUsesNextTargetPodAtCapacity(t *test
 	podRepo := &fakeRuntimePodRepo{pods: map[int64]*models.RuntimePod{first.ID: &first, second.ID: &second}, claimDenied: map[int64]bool{first.ID: true}}
 	bindingRepo := newFakeRuntimeBindingRepo()
 	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw-206", Status: "running"}}
+	bindingRepo.upgradePods = podRepo
 	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second)
 	rollout := &models.RuntimeRollout{ID: 58, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: targetImage, PreflightID: &preflightID}
 	if err := scheduler.EnsureUpgradeGateway(ctx, rollout, 206, []models.RuntimePod{first, second}); err != nil {
@@ -599,6 +601,7 @@ func TestRuntimeSchedulerEnsureUpgradeGatewayDistributesFiveHundredInstancesWith
 	}
 	bindingRepo := newFakeRuntimeBindingRepo()
 	agent := &fakeRuntimeAgentClient{createResponse: &RuntimeAgentCreateGatewayResponse{GatewayID: "gw", Status: "running"}}
+	bindingRepo.upgradePods = podRepo
 	scheduler := NewRuntimeScheduler(instanceRepo, podRepo, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, &fakeRuntimeEventService{}, nil, &fakeRuntimeDeploymentService{}, time.Second, WithRuntimeSchedulerWorkspaceRoot(workspaceRoot))
 	rollout := &models.RuntimeRollout{ID: 500, RuntimeType: RuntimeTypeOpenClaw, TargetImageRef: targetImage, PreflightID: &preflightID}
 	for id := 1000; id < 1500; id++ {
@@ -3307,6 +3310,7 @@ func (r *fakeRuntimePodRepo) UpdateMetrics(ctx context.Context, podID int64, met
 }
 
 type fakeRuntimeBindingRepo struct {
+	upgradePods           *fakeRuntimePodRepo
 	mu                    sync.Mutex
 	bindings              map[int]*models.InstanceRuntimeBinding
 	deleteCalls           map[int]int

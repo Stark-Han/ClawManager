@@ -1943,6 +1943,14 @@ func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token s
 	// Check if it's a WebSocket upgrade request
 	if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
 		if err := h.proxyService.ProxyWebSocket(c.Request.Context(), id, token, c.Writer, original); err != nil {
+			var coded interface {
+				ErrorCode() string
+				HTTPStatus() int
+			}
+			if errors.As(err, &coded) && !c.Writer.Written() {
+				utils.HandleError(c, err)
+				return
+			}
 			if errors.Is(err, services.ErrInstanceGatewayUnavailable) {
 				http.Error(c.Writer, "Instance gateway is not available", http.StatusServiceUnavailable)
 			} else if errors.Is(err, services.ErrOpenCodeDedicatedOriginRequired) {
@@ -1956,6 +1964,14 @@ func (h *InstanceHandler) proxyInstanceWithToken(c *gin.Context, id int, token s
 
 	// Proxy regular HTTP request
 	if err := h.proxyService.ProxyRequest(c.Request.Context(), id, token, c.Writer, original); err != nil {
+		var coded interface {
+			ErrorCode() string
+			HTTPStatus() int
+		}
+		if errors.As(err, &coded) && !c.Writer.Written() {
+			utils.HandleError(c, err)
+			return
+		}
 		// Log the error
 		fmt.Printf("Proxy error for instance %d: %v\n", id, err)
 

@@ -528,6 +528,9 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		}
 	}
 	if len(targetPods) == 0 {
+		if rollout.Phase == "gateway_restart" {
+			return false, s.recordUnavailableUpgradeTargets(ctx, rollout)
+		}
 		return false, nil
 	}
 	items, err := s.listUpgradeItems(ctx, rollout.ID)
@@ -689,7 +692,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			}
 		}
 		if !allTargetsReady {
-			return false, nil
+			return false, s.recordUnavailableUpgradeTargets(ctx, rollout)
 		}
 		reopened, err := s.reopenMissingVerifiedUpgradeGateway(ctx, rollout, items, pods)
 		if err != nil {
@@ -705,6 +708,9 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 		if len(activeBatch) == 0 {
 			nextBatch := nextRuntimeUpgradeBatch(items, maxInt(rollout.BatchSize, 1), "migrated")
 			for _, item := range nextBatch {
+				if item.RecoveryStatus != nil && *item.RecoveryStatus == "needs_attention" {
+					continue
+				}
 				if err := s.markUpgradeItemRestartReady(ctx, rollout.ID, item.InstanceID); err != nil {
 					return false, err
 				}
@@ -726,18 +732,55 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			if s.gatewayRestarter == nil {
 				return false, fmt.Errorf("OpenClaw upgrade gateway restarter is unavailable")
 			}
-			if upgradeGatewayRestartExpired(item, gatewayRestartNotBefore(*rollout, targetPods), time.Now().UTC()) {
-				return false, fmt.Errorf("restart upgraded instance %d: gateway did not become healthy within %s", item.InstanceID, openClawUpgradeGatewayRestartTimeout)
+			if err := s.initializeUpgradeRecovery(ctx, &item); err != nil {
+				return false, err
 			}
-			if err := s.gatewayRestarter.EnsureUpgradeGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
-				return false, fmt.Errorf("restart upgraded instance %d: %w", item.InstanceID, err)
-			}
+			// Observe success before enforcing deadlines. A response/heartbeat may
+			// have arrived while the controller was offline; never restart it.
 			binding, err := s.bindings.GetRunningByInstanceID(ctx, item.InstanceID)
 			if err != nil {
 				return false, err
 			}
 			if binding == nil {
-				return false, nil
+				if err := s.observeUpgradeGateway(ctx, item, targetPods); err != nil {
+					if runtimeUpgradeReconcileInterrupted(ctx, err) {
+						return false, err
+					}
+					code, hold := upgradeRecoveryError(err)
+					return false, s.recordUpgradeRecoveryFailure(ctx, rollout.ID, item, code, err.Error(), hold)
+				}
+				binding, err = s.bindings.GetRunningByInstanceID(ctx, item.InstanceID)
+				if err != nil {
+					return false, err
+				}
+			}
+			if binding == nil {
+				if item.RecoveryStatus != nil && *item.RecoveryStatus == "needs_attention" {
+					return false, nil
+				}
+				if upgradeGatewayRestartExpired(item, time.Time{}, time.Now().UTC()) {
+					return false, s.recordUpgradeRecoveryFailure(ctx, rollout.ID, item, "UPGRADE_GATEWAY_START_TIMEOUT", "Gateway startup deadline exceeded; reservation and writer fence retained", true)
+				}
+				if item.RecoveryStartedAt != nil && time.Since(*item.RecoveryStartedAt) >= 15*time.Minute {
+					return false, s.recordUpgradeRecoveryFailure(ctx, rollout.ID, item, "UPGRADE_RECOVERY_DEADLINE", "Recovery exceeded its bounded window; inspection required", true)
+				}
+				if item.RestartNextRetryAt != nil && time.Now().UTC().Before(*item.RestartNextRetryAt) {
+					return false, nil
+				}
+				if err := s.gatewayRestarter.EnsureUpgradeGateway(ctx, rollout, item.InstanceID, targetPods); err != nil {
+					if runtimeUpgradeReconcileInterrupted(ctx, err) {
+						return false, err
+					}
+					code, hold := upgradeRecoveryError(err)
+					return false, s.recordUpgradeRecoveryFailure(ctx, rollout.ID, item, code, err.Error(), hold)
+				}
+				binding, err = s.bindings.GetRunningByInstanceID(ctx, item.InstanceID)
+				if err != nil {
+					return false, err
+				}
+				if binding == nil {
+					return false, nil
+				}
 			}
 			var expectedGeneration int
 			row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT runtime_generation FROM instances WHERE id = ?`, item.InstanceID)
@@ -803,11 +846,8 @@ func gatewayRestartNotBefore(rollout models.RuntimeRollout, targetPods []models.
 }
 
 func upgradeGatewayRestartExpired(item models.RuntimeUpgradeItem, notBefore, now time.Time) bool {
-	startedAt := item.UpdatedAt.UTC()
-	if notBefore.After(startedAt) {
-		startedAt = notBefore
-	}
-	return item.State == "restart_ready" && !startedAt.IsZero() && now.Sub(startedAt) >= openClawUpgradeGatewayRestartTimeout
+	// Neither generic updates nor replacement pod creation may reset a deadline.
+	return item.State == "restart_ready" && item.RestartDeadlineAt != nil && !now.Before(*item.RestartDeadlineAt)
 }
 
 func (s *RuntimeUpgradeService) reopenMissingVerifiedUpgradeGateway(ctx context.Context, rollout *models.RuntimeRollout, items []models.RuntimeUpgradeItem, pods []models.RuntimePod) (bool, error) {
@@ -2832,7 +2872,7 @@ func (s *RuntimeUpgradeService) markUpgradeItemRestartReady(ctx context.Context,
 }
 
 func (s *RuntimeUpgradeService) markUpgradeItemGatewayVerified(ctx context.Context, rolloutID int64, instanceID int) error {
-	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'gateway_verified', updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'restart_ready'`, time.Now().UTC(), rolloutID, instanceID)
+	result, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET state = 'gateway_verified', recovery_status = 'verified', recovery_error_code = NULL, error_message = NULL, restart_next_retry_at = NULL, updated_at = ? WHERE rollout_id = ? AND instance_id = ? AND state = 'restart_ready'`, time.Now().UTC(), rolloutID, instanceID)
 	if err != nil {
 		return err
 	}

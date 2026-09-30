@@ -100,6 +100,11 @@ export interface RuntimeUpgradeItem {
   team_id?: number;
   state: string;
   error_message?: string;
+  recovery_status?: "pending" | "starting" | "retrying" | "needs_attention" | "verified";
+  recovery_error_code?: string;
+  restart_attempts?: number;
+  restart_deadline_at?: string;
+  restart_next_retry_at?: string;
 }
 
 export interface RuntimeUpgradeDetails {

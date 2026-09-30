@@ -246,6 +246,7 @@ func main() {
 		aiObservabilityService,
 		services.NewInstanceShellService(),
 		services.WithInstanceProxyRuntimeRepositories(instanceRepo, runtimePodRepo, bindingRepo),
+		services.WithInstanceProxyPolicyCoordinator(runtimeAgentClient, cfg.Runtime.Namespace),
 		services.WithInstanceProxyOwnerUsage(ownerStore),
 	)
 	hermesDesktopService := services.NewHermesDesktopService(services.HermesDesktopConfig{
@@ -363,6 +364,7 @@ func main() {
 				services.WithRuntimeSchedulerMaxGatewaysPerPod(cfg.Runtime.MaxGatewaysPerPod),
 				services.WithRuntimeSchedulerGatewayStartInFlightLimit(cfg.Runtime.GatewayStartInFlightLimit),
 				services.WithRuntimeUpgradeService(runtimeUpgradeService),
+				services.WithRuntimeSchedulerProxyPolicyCoordinator(services.NewRuntimeProxyPolicyCoordinator(k8sClient.Clientset, runtimeAgentClient, cfg.Runtime.Namespace, "clawmanager-frontend")),
 			}
 			if gatewayEnvProvider, ok := instanceService.(interface {
 				BuildGatewayEnv(*models.Instance) (map[string]string, error)

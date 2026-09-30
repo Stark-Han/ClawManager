@@ -453,6 +453,7 @@ func TestInstanceServiceStartV2MarksCreatingWithNextGeneration(t *testing.T) {
 	}
 	service := &instanceService{instanceRepo: instanceRepo}
 
+	configureLifecycleModels(t, service)
 	if err := service.Start(77); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
@@ -496,6 +497,7 @@ func TestInstanceServiceStartV2CleansFailedBindingBeforeNextGeneration(t *testin
 		agentClient:    agent,
 	}
 
+	configureLifecycleModels(t, service)
 	if err := service.Start(78); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
@@ -536,6 +538,7 @@ func TestInstanceServiceStartV2QuarantinesReportedCorruptLegacyTaskDatabase(t *t
 	}
 	service := &instanceService{instanceRepo: instanceRepo}
 
+	configureLifecycleModels(t, service)
 	if err := service.Start(79); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
@@ -751,6 +754,7 @@ func TestInstanceServiceRestartV2RecreatesGatewayViaScheduler(t *testing.T) {
 		agentClient:    agent,
 	}
 
+	configureLifecycleModels(t, service)
 	if err := service.Restart(89); err != nil {
 		t.Fatalf("Restart returned error: %v", err)
 	}
@@ -792,6 +796,7 @@ func TestInstanceServiceRestartWithEnvironmentMergesDesiredState(t *testing.T) {
 	}
 	service := &instanceService{instanceRepo: instanceRepo}
 
+	configureLifecycleModels(t, service)
 	err = service.RestartWithEnvironment(191, map[string]string{
 		"LOG_LEVEL":        "debug",
 		"SKILL_CACHE_PATH": "/workspace/cache",
@@ -924,6 +929,7 @@ func TestInstanceServiceRestartWithEnvironmentRemovesDesiredState(t *testing.T) 
 	}
 	service := &instanceService{instanceRepo: instanceRepo}
 
+	configureLifecycleModels(t, service)
 	err = service.RestartWithEnvironment(
 		195,
 		map[string]string{"RESET_ME": "new-value"},

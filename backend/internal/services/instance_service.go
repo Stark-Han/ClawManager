@@ -1255,6 +1255,9 @@ func (s *instanceService) Start(instanceID int) error {
 	}
 
 	if runtimeType, ok := v2RuntimeTypeForInstance(instance); ok {
+		if err := s.validateInstanceStartConfiguration(ctx, instance); err != nil {
+			return err
+		}
 		if err := s.prepareV2InstanceStart(ctx, instance); err != nil {
 			return err
 		}
@@ -1582,6 +1585,14 @@ requires_openai_auth = true
 }
 
 func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string]string, error) {
+	env, err := s.buildGatewayEnvReadOnly(instance)
+	if err == nil && len(env) > 0 && instance != nil && instance.AccessToken != nil {
+		s.refreshGatewayTokenAlias(instance.ID, strings.TrimSpace(*instance.AccessToken))
+	}
+	return env, err
+}
+
+func (s *instanceService) buildGatewayEnvReadOnly(instance *models.Instance) (map[string]string, error) {
 	if instance == nil || instance.AccessToken == nil || strings.TrimSpace(*instance.AccessToken) == "" {
 		return map[string]string{}, nil
 	}
@@ -1600,7 +1611,6 @@ func (s *instanceService) buildGatewayEnv(instance *models.Instance) (map[string
 	}
 
 	token := strings.TrimSpace(*instance.AccessToken)
-	s.refreshGatewayTokenAlias(instance.ID, token)
 	env := map[string]string{
 		"CLAWMANAGER_LLM_BASE_URL":          baseURL,
 		"CLAWMANAGER_LLM_API_KEY":           token,
@@ -1932,6 +1942,7 @@ func (s *instanceService) startV2Instance(ctx context.Context, instance *models.
 	instance.Status = "creating"
 	instance.RuntimeGeneration = nextGeneration
 	instance.RuntimeErrorMessage = nil
+	instance.RuntimeErrorCode = nil
 	now := time.Now()
 	instance.StartedAt = &now
 	instance.UpdatedAt = now
@@ -2140,6 +2151,9 @@ func (s *instanceService) Restart(instanceID int) error {
 	if instance == nil {
 		return fmt.Errorf("instance not found")
 	}
+	if err := s.validateInstanceStartConfiguration(ctx, instance); err != nil {
+		return err
+	}
 
 	_, isV2 := v2RuntimeTypeForInstance(instance)
 	waitForDesktopPods := !isV2 && instanceUsesDesktopRuntime(instance)
@@ -2149,7 +2163,20 @@ func (s *instanceService) Restart(instanceID int) error {
 		// Otherwise a late "running" update can resurrect the stopped generation
 		// and make Start reject the restart as "already running". No workspace
 		// contents are changed; Start allocates the next running generation.
-		if err := s.instanceRepo.UpdateRuntimeState(ctx, instanceID, "stopped", instance.RuntimeGeneration+1, nil); err != nil {
+		if repo, ok := s.instanceRepo.(interface {
+			FenceRuntimeRestart(context.Context, int, int) (bool, error)
+		}); ok {
+			claimed, err := repo.FenceRuntimeRestart(ctx, instanceID, instance.RuntimeGeneration)
+			if err != nil {
+				return fmt.Errorf("failed to fence previous runtime generation: %w", err)
+			}
+			if !claimed {
+				if err := s.validateInstanceStartConfiguration(ctx, instance); err != nil {
+					return err
+				}
+				return fmt.Errorf("instance changed during restart preparation; retry after the current operation")
+			}
+		} else if err := s.instanceRepo.UpdateRuntimeState(ctx, instanceID, "stopped", instance.RuntimeGeneration+1, nil); err != nil {
 			return fmt.Errorf("failed to fence previous runtime generation: %w", err)
 		}
 	}
@@ -2678,6 +2705,7 @@ func (s *instanceService) resetInstanceRuntimeData(ctx context.Context, instance
 	instance.PodNamespace = nil
 	instance.PodIP = nil
 	instance.RuntimeErrorMessage = nil
+	instance.RuntimeErrorCode = nil
 	instance.WorkspaceUsageBytes = 0
 	instance.StoppedAt = nil
 	return nil
@@ -2808,7 +2836,14 @@ func (s *instanceService) RestartWithEnvironment(instanceID int, environmentOver
 		return err
 	}
 
-	instance.EnvironmentOverridesJSON = encoded
+	// Repositories may return shared pointers. Do not mutate even the in-memory
+	// source until the complete proposed configuration has passed validation.
+	prepared := *instance
+	prepared.EnvironmentOverridesJSON = encoded
+	if err := s.validateInstanceStartConfiguration(context.Background(), &prepared); err != nil {
+		return err
+	}
+	instance = &prepared
 	instance.UpdatedAt = time.Now()
 	if err := s.instanceRepo.Update(instance); err != nil {
 		return fmt.Errorf("failed to persist instance environment overrides: %w", err)

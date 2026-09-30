@@ -43,6 +43,7 @@ type InstanceProxyService struct {
 	cacheMu              sync.RWMutex
 	lookupMu             sync.Mutex
 	serviceTTL           time.Duration
+	proxyPolicy          *RuntimeProxyPolicyCoordinator
 }
 
 type serviceCacheKey struct {
@@ -631,6 +632,8 @@ func setOpenClawRuntimeForwardedClient(header http.Header, request *http.Request
 	if header == nil || request == nil {
 		return
 	}
+	// Never carry a second, caller-controlled attribution chain alongside XFF.
+	header.Del("Forwarded")
 	peer := parseProxyPeerIP(request.RemoteAddr)
 	client := peer
 	if peer != nil && peer.IsLoopback() {
@@ -974,6 +977,11 @@ func (s *InstanceProxyService) resolveV2ProxyTarget(ctx context.Context, accessT
 	}
 	if pod == nil || pod.PodIP == nil || strings.TrimSpace(*pod.PodIP) == "" || binding.GatewayPort <= 0 {
 		return nil, true, ErrInstanceGatewayUnavailable
+	}
+	if isOpenClawRuntimeType(instance.Type) {
+		if err := s.proxyPolicy.Ensure(ctx, pod); err != nil {
+			return nil, true, &runtimeFailure{code: "PROXY_POLICY_NOT_READY", cause: fmt.Errorf("proxy policy is not ready: %w", err)}
+		}
 	}
 	scheme := "http"
 	if websocket {

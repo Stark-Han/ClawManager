@@ -16,12 +16,13 @@ type rolloutCheckpointStore interface {
 }
 
 type RuntimePoolProgress struct {
-	Version     int                        `json:"version"`
-	Targets     []k8s.RuntimeRolloutTarget `json:"targets"`
-	Completed   int                        `json:"completed"`
-	Applying    bool                       `json:"applying"`
-	Submitted   bool                       `json:"submitted"`
-	StepStarted time.Time                  `json:"step_started"`
+	Version             int                        `json:"version"`
+	Targets             []k8s.RuntimeRolloutTarget `json:"targets"`
+	Completed           int                        `json:"completed"`
+	Applying            bool                       `json:"applying"`
+	Submitted           bool                       `json:"submitted"`
+	StepStarted         time.Time                  `json:"step_started"`
+	VerificationStarted time.Time                  `json:"verification_started,omitempty"`
 }
 
 func LoadRuntimePoolProgress(ctx context.Context, repo any, id int64) (*RuntimePoolProgress, error) {
@@ -106,14 +107,9 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 		return err
 	}
 	if p.Completed == len(p.Targets) {
-		now := time.Now().UTC()
-		return s.rolloutRepo.UpdateStatus(ctx, r.ID, "finished", r.StartedAt, &now, nil)
+		return s.finishLiveRuntimeRollout(ctx, r, p)
 	}
-	inventory, ok := s.deployments.(k8s.RuntimeRolloutInventory)
-	if !ok {
-		return fail(fmt.Errorf("runtime rollout inventory unavailable"))
-	}
-	live, err := inventory.RolloutTargets(ctx, s.runtimeNamespace, r.RuntimeType)
+	live, err := s.runtimeRolloutTargets(ctx, r, p.Targets)
 	if err != nil {
 		return err
 	} // transient inspection failure never means an empty pool
@@ -167,5 +163,8 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 	p.Completed++
 	p.Applying, p.Submitted = false, false
 	p.StepStarted = time.Time{}
+	if p.Completed == len(p.Targets) {
+		p.VerificationStarted = time.Now().UTC()
+	}
 	return s.savePoolProgress(ctx, r.ID, p)
 }
