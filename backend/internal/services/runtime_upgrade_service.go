@@ -679,10 +679,9 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			return false, err
 		}
 		rollout.Phase = "gateway_restart"
-		items, err = s.listUpgradeItems(ctx, rollout.ID)
-		if err != nil {
-			return false, err
-		}
+		// Activation changes the remote state, not this round's Pod snapshot.
+		// Observe a fresh heartbeat/inventory on the next reconciliation.
+		return false, nil
 	}
 	if rollout.Phase != "postflight" {
 		allTargetsReady := true
@@ -692,7 +691,14 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 			}
 		}
 		if !allTargetsReady {
-			return false, s.recordUnavailableUpgradeTargets(ctx, rollout)
+			return false, s.waitForUpgradeTargetActivation(ctx, rollout, items)
+		}
+		if err := s.clearUnavailableUpgradeTargets(ctx, rollout.ID); err != nil {
+			return false, err
+		}
+		items, err = s.listUpgradeItems(ctx, rollout.ID)
+		if err != nil {
+			return false, err
 		}
 		reopened, err := s.reopenMissingVerifiedUpgradeGateway(ctx, rollout, items, pods)
 		if err != nil {

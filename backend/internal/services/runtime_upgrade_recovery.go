@@ -9,6 +9,7 @@ import (
 
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
+	"github.com/upper/db/v4"
 )
 
 // One-time adoption of pre-attempt-schema records. Migration receipts and
@@ -114,6 +115,42 @@ func upgradeRecoveryError(err error) (string, bool) {
 	default:
 		return "UPGRADE_GATEWAY_RETRY", false
 	}
+}
+
+// A live, heartbeating standby target can still be publishing activation.
+// Before any Gateway starts, wait within the existing recovery deadline without
+// manufacturing a failed startup or delaying it with a failure retry timestamp.
+func (s *RuntimeUpgradeService) waitForUpgradeTargetActivation(ctx context.Context, rollout *models.RuntimeRollout, items []models.RuntimeUpgradeItem) error {
+	for _, item := range items {
+		if item.RestartAttempts > 0 || item.State == "gateway_verified" || item.State == "verified" {
+			return s.recordUnavailableUpgradeTargets(ctx, rollout)
+		}
+	}
+	for _, item := range items {
+		if item.State != "migrated" && item.State != "restart_ready" {
+			continue
+		}
+		if err := s.initializeUpgradeRecovery(ctx, &item); err != nil {
+			return err
+		}
+		if item.RecoveryStartedAt != nil && time.Since(*item.RecoveryStartedAt) >= 15*time.Minute {
+			return s.recordUnavailableUpgradeTargets(ctx, rollout)
+		}
+	}
+	return nil
+}
+
+// Clear only a retryable target-readiness failure after authoritative readiness.
+// Held failures, other startup errors, attempts, deadlines and bindings survive.
+func (s *RuntimeUpgradeService) clearUnavailableUpgradeTargets(ctx context.Context, rolloutID int64) error {
+	return s.sess.TxContext(ctx, func(tx db.Session) error {
+		_, err := tx.SQL().ExecContext(ctx, `UPDATE runtime_upgrade_items SET recovery_status = CASE WHEN restart_attempts > 0 THEN 'starting' ELSE 'pending' END, recovery_error_code = NULL, error_message = NULL, restart_next_retry_at = NULL WHERE rollout_id = ? AND state IN ('migrated','restart_ready') AND recovery_status = 'retrying' AND recovery_error_code = 'UPGRADE_TARGET_UNAVAILABLE' AND EXISTS (SELECT 1 FROM runtime_rollouts WHERE id = ? AND status = 'running' AND phase = 'gateway_restart')`, rolloutID, rolloutID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.SQL().ExecContext(ctx, `UPDATE runtime_rollouts SET error_message = NULL WHERE id = ? AND status = 'running' AND phase = 'gateway_restart' AND error_message LIKE 'UPGRADE_TARGET_UNAVAILABLE:%' AND NOT EXISTS (SELECT 1 FROM runtime_upgrade_items WHERE rollout_id = ? AND recovery_error_code = 'UPGRADE_TARGET_UNAVAILABLE')`, rolloutID, rolloutID)
+		return err
+	}, nil)
 }
 
 func (s *RuntimeUpgradeService) recordUnavailableUpgradeTargets(ctx context.Context, rollout *models.RuntimeRollout) error {

@@ -24,6 +24,7 @@ type standbyFlowAgent struct {
 	deployments                                   *fakeRuntimeDeploymentService
 	mu                                            sync.Mutex
 	compatibility, migrations, activations, stops int
+	deferReadiness                                bool
 }
 
 func (a *standbyFlowAgent) GatewayState(ctx context.Context, endpoint, id string) (*RuntimeAgentGatewayState, error) {
@@ -70,12 +71,23 @@ func (a *standbyFlowAgent) ActivateUpgrade(ctx context.Context, endpoint, id str
 		return fmt.Errorf("activation before all migrations")
 	}
 	a.activations++
+	if a.deferReadiness {
+		return nil
+	}
 	a.deployments.pods[1].State = "ready"
 	_, err := a.s.SQL().ExecContext(ctx, "UPDATE runtime_pods SET state='ready',last_seen_at=NOW() WHERE id=308")
 	return err
 }
 
 func TestUpgradeStandbyMySQLSchedulerLifecycle(t *testing.T) {
+	for _, delayed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delayed-readiness-%v", delayed), func(t *testing.T) {
+			testUpgradeStandbyMySQLSchedulerLifecycle(t, delayed)
+		})
+	}
+}
+
+func testUpgradeStandbyMySQLSchedulerLifecycle(t *testing.T, delayed bool) {
 	s := upgradeFlowDB(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -105,7 +117,7 @@ func TestUpgradeStandbyMySQLSchedulerLifecycle(t *testing.T) {
 	pods := repository.NewRuntimePodRepository(s)
 	bindings := repository.NewInstanceRuntimeBindingRepository(s)
 	rollouts := repository.NewRuntimeRolloutRepository(s)
-	agent := &standbyFlowAgent{upgradeFlowAgent: &upgradeFlowAgent{fakeRuntimeAgentClient: &fakeRuntimeAgentClient{}, states: map[string]*RuntimeAgentGatewayState{}}, s: s, deployments: deployments}
+	agent := &standbyFlowAgent{upgradeFlowAgent: &upgradeFlowAgent{fakeRuntimeAgentClient: &fakeRuntimeAgentClient{}, states: map[string]*RuntimeAgentGatewayState{}}, s: s, deployments: deployments, deferReadiness: delayed}
 	// Two live source Gateways and one stopped instance exercise both paths.
 	for index, id := range []int{481, 482} {
 		gid := fmt.Sprintf("gw-%d-2", id)
@@ -121,6 +133,8 @@ func TestUpgradeStandbyMySQLSchedulerLifecycle(t *testing.T) {
 	upgrade.deployments = scheduler
 	scheduler.upgrade = upgrade
 	deadline := time.Now().Add(90 * time.Second)
+	waitRounds := 0
+	var recoveryStarted time.Time
 	for n := 0; time.Now().Before(deadline); n++ {
 		r, err := rollouts.GetByID(ctx, 124)
 		if err != nil {
@@ -137,6 +151,38 @@ func TestUpgradeStandbyMySQLSchedulerLifecycle(t *testing.T) {
 		}
 		if agent.activations == 0 && agent.creates != 0 {
 			t.Fatal("Gateway created on standby")
+		}
+		if agent.activations > 0 && agent.creates == 0 {
+			var errors int
+			row, err := s.SQL().QueryRow(`SELECT COUNT(*) FROM runtime_upgrade_items WHERE rollout_id=124 AND (error_message IS NOT NULL OR restart_next_retry_at IS NOT NULL OR restart_attempts <> 0)`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := row.Scan(&errors); err != nil || errors != 0 {
+				t.Fatalf("normal activation wait became a failed startup: count=%d err=%v", errors, err)
+			}
+			var fresh models.RuntimeRollout
+			if err := s.Collection("runtime_rollouts").Find("id", 124).One(&fresh); err != nil || fresh.ErrorMessage != nil {
+				t.Fatalf("activation wrote a rollout error: %+v %v", fresh, err)
+			}
+			if delayed {
+				waitRounds++
+				if waitRounds > 1 {
+					var item models.RuntimeUpgradeItem
+					if err := s.Collection("runtime_upgrade_items").Find("instance_id", 481).One(&item); err != nil || item.RecoveryStartedAt == nil {
+						t.Fatalf("activation wait lacks a bounded deadline: %+v %v", item, err)
+					}
+					if recoveryStarted.IsZero() {
+						recoveryStarted = *item.RecoveryStartedAt
+					} else if !recoveryStarted.Equal(*item.RecoveryStartedAt) {
+						t.Fatal("activation wait reset its recovery deadline")
+					}
+				}
+				if waitRounds == 4 {
+					deployments.pods[1].State = "ready"
+					exec("UPDATE runtime_pods SET state='ready',last_seen_at=NOW() WHERE id=308")
+				}
+			}
 		}
 		current, err := rollouts.GetByID(ctx, 124)
 		if err != nil {
