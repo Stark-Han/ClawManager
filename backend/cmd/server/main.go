@@ -186,6 +186,7 @@ func main() {
 		instanceService,
 		services.WithTeamRuntimeWorkspaceRoot(cfg.Runtime.WorkspaceRoot),
 		services.WithTeamOpenClawConfigService(openClawConfigService),
+		services.WithTeamWorkspaceAuditRepository(repository.NewTeamWorkspaceFileAuditRepository(database)),
 	)
 	var platformRedis services.PlatformRedisClient
 	if redisURL := strings.TrimSpace(cfg.Runtime.RedisURL); redisURL != "" {
@@ -199,6 +200,7 @@ func main() {
 	}
 	runtimeEvents := services.NewRuntimeEventService(platformRedis)
 	workspaceFileService := services.NewWorkspaceFileService(workspaceFileAuditRepo)
+	services.ConfigureWorkspaceUpgradeGuard(workspaceFileService, runtimeUpgradeService)
 	runtimeWorkspaceFileService := services.NewRuntimeWorkspaceFileService(workspaceFileAuditRepo)
 	skillService := services.NewSkillService(skillRepo, instanceRepo, userRepo, instanceCommandService, instanceCommandRepo, objectStorageService, skillScannerClient)
 	materializeJobRepo := repository.NewSkillPackageMaterializeJobRepository(database)
@@ -600,6 +602,9 @@ func main() {
 			instances.POST("/:id/start", instanceHandler.StartInstance)
 			instances.POST("/:id/stop", instanceHandler.StopInstance)
 			instances.POST("/:id/restart", instanceHandler.RestartInstance)
+			recoveryHandler := handlers.NewRuntimeRecoveryHandler(runtimeUpgradeService, instanceRepo)
+			instances.GET("/:id/upgrade-recovery", recoveryHandler.Inspect)
+			instances.POST("/:id/upgrade-recovery", recoveryHandler.Recover)
 			instances.GET("/:id/environment-overrides", instanceHandler.GetInstanceEnvironmentOverrides)
 			instances.GET("/:id/status", instanceHandler.GetInstanceStatus)
 			instances.GET("/:id/runtime", instanceHandler.GetRuntimeDetails)
@@ -686,6 +691,8 @@ func main() {
 			teams.GET("/:id/events", teamHandler.ListEvents)
 			teams.GET("/:id/workspace/files", teamHandler.ListWorkspaceFiles)
 			teams.GET("/:id/workspace/preview", teamHandler.PreviewWorkspaceFile)
+			teams.GET("/:id/workspace/text", teamHandler.WorkspaceText)
+			teams.PUT("/:id/workspace/text", teamHandler.WorkspaceText)
 			teams.GET("/:id/workspace/download", teamHandler.DownloadWorkspaceFile)
 			teams.POST("/:id/workspace/folders", teamHandler.CreateWorkspaceFolder)
 			teams.POST("/:id/workspace/rename", teamHandler.RenameWorkspaceEntry)
@@ -706,6 +713,7 @@ func main() {
 			customTeamTemplates.POST("/:id/revise", customTeamTemplateHandler.Revise)
 			customTeamTemplates.POST("/:id/regenerate", customTeamTemplateHandler.Regenerate)
 			customTeamTemplates.POST("/:id/members/:memberID/adjust", customTeamTemplateHandler.AdjustMember)
+			customTeamTemplates.PUT("/:id/members/:memberID/icon", customTeamTemplateHandler.UpdateMemberIcon)
 			customTeamTemplates.POST("/:id/members/:memberID/regenerate", customTeamTemplateHandler.RegenerateMember)
 		}
 

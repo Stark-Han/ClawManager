@@ -68,7 +68,7 @@ func (r *instanceRuntimeBindingRepository) ReserveUpgradeGateway(ctx context.Con
 		if item.State != "restart_ready" || item.SourceGeneration == nil || req.Generation != *item.SourceGeneration+1 || item.PostflightJSON == nil || item.SnapshotRef == nil {
 			return ErrUpgradeReservationDenied
 		}
-		if item.RecoveryStatus != nil && *item.RecoveryStatus == "needs_attention" {
+		if item.IsolatedAt != nil || (item.RecoveryStatus != nil && *item.RecoveryStatus == "needs_attention") {
 			return ErrUpgradeRecoveryHeld
 		}
 		if item.RestartTargetPodUID != nil && *item.RestartTargetPodUID != *identity {

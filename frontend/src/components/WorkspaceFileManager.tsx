@@ -37,7 +37,7 @@ interface WorkspaceFileManagerProps {
 }
 
 export interface WorkspaceFileOperations {
-  readText?(instanceId: number, path: string): Promise<WorkspaceText>;
+  readText?(instanceId: number, path: string, signal?: AbortSignal): Promise<WorkspaceText>;
   saveText?(instanceId: number, path: string, text: string, version: string): Promise<WorkspaceText>;
   list(instanceId: number, path?: string): Promise<WorkspaceEntry[]>;
   preview(instanceId: number, path: string): Promise<WorkspacePreview>;
@@ -314,7 +314,8 @@ export function WorkspaceFileManager({
     queryFn: () => service.list(instanceId, currentPath),
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: Boolean(service.readText),
+    refetchInterval: service.readText ? 5000 : false,
   });
 
   const previewQuery = useQuery({
@@ -323,7 +324,8 @@ export function WorkspaceFileManager({
     enabled: Boolean(previewPath),
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: Boolean(service.readText),
+    refetchInterval: service.readText ? 5000 : false,
   });
 
   useEffect(() => {

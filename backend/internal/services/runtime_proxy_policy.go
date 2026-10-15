@@ -191,13 +191,13 @@ func (s *RuntimeScheduler) renewRuntimeProxyPolicies(ctx context.Context) error 
 	if s.proxyPolicy == nil || s.podRepo == nil {
 		return nil
 	}
-	pods, err := s.podRepo.List(ctx, RuntimeTypeOpenClaw)
+	pods, err := s.podRepo.List(ctx, "")
 	if err != nil {
 		return err
 	}
 	var failures []error
 	for _, pod := range pods {
-		if pod.Namespace != s.runtimeNamespace || pod.RuntimeType != RuntimeTypeOpenClaw || pod.AgentEndpoint == nil ||
+		if pod.Namespace != s.runtimeNamespace || (pod.RuntimeType != RuntimeTypeOpenClaw && pod.RuntimeType != RuntimeTypeHermes) || pod.AgentEndpoint == nil ||
 			(pod.State != "ready" && !(pod.Draining && pod.UsedSlots > 0)) {
 			continue
 		}

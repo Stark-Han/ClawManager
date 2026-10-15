@@ -19,8 +19,8 @@ assert.equal(latestMiniHandoff({ items: [event(1, 'assignment_heartbeat')] }), u
 assert.equal(latestMiniHandoff({ items: [event(2, 'outbound', { payload: { sent: true, messageDelivered: false } })] }), undefined, 'failed delivery must not animate');
 assert.equal(latestMiniHandoff({ items: [event(3, 'outbound', { to: 'leader' })] }), undefined, 'self action is not transfer');
 assert.equal(latestMiniHandoff({ items: [event(5, 'peer_handoff'), event(4, 'outbound'), event(7, 'message_failed')] }).event.id, 5, 'latest valid transfer uses server event identity');
-assert.equal(workspaceMode(1472), 'dual');
-assert.equal(workspaceMode(1471), 'single');
+assert.equal(workspaceMode(1540), 'dual');
+assert.equal(workspaceMode(1539), 'single');
 assert.equal(workspaceMode(1248), 'single');
 assert.equal(workspaceMode(1247), 'drawer');
 assert.equal(workspaceMode(390), 'drawer');

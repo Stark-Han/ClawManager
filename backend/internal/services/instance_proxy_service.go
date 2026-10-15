@@ -978,7 +978,7 @@ func (s *InstanceProxyService) resolveV2ProxyTarget(ctx context.Context, accessT
 	if pod == nil || pod.PodIP == nil || strings.TrimSpace(*pod.PodIP) == "" || binding.GatewayPort <= 0 {
 		return nil, true, ErrInstanceGatewayUnavailable
 	}
-	if isOpenClawRuntimeType(instance.Type) {
+	if isOpenClawRuntimeType(instance.Type) || strings.EqualFold(instance.Type, RuntimeTypeHermes) {
 		if err := s.proxyPolicy.Ensure(ctx, pod); err != nil {
 			return nil, true, &runtimeFailure{code: "PROXY_POLICY_NOT_READY", cause: fmt.Errorf("proxy policy is not ready: %w", err)}
 		}

@@ -4,13 +4,13 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict');
  const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:900}});const page=await context.newPage();
  page.setDefaultTimeout(12000);
  let content='name: 中文\n',version='v1',saveCount=0,deny=false;
- let name='config.yaml';
+ let name='config.yaml',instanceType='hermes',runtimeType='gateway',lastListPath;
  const failures=[];page.on('pageerror',e=>failures.push(e.message));
  await page.route('**/api/v1/ieisystem/**',async route=>{
   const req=route.request(),p=new URL(req.url()).pathname;let data={};
-  if(p.endsWith('/instances/1'))data={instance:{id:1,name:'异常实例测试',type:'hermes',status:'error',owner:'test@example.com',instance_mode:'lite',workspace_available:true,workspace_root:'Workspace'}};
+  if(p.endsWith('/instances/1'))data={instance:{id:1,name:'异常实例测试',type:instanceType,runtime_type:runtimeType,status:'error',owner:'test@example.com',instance_mode:'lite',workspace_available:true,workspace_root:'Workspace'}};
   else if(p.endsWith('/access'))return route.fulfill({status:409,json:{error:'Instance is not running'}});
-  else if(p.endsWith('/workspace/files'))data={entries:[{name,path:name,is_dir:false,size:50,previewable:true,downloadable:true,modified_at:'2026-09-18T08:00:00Z'},{name:'state.db',path:'state.db',size:22,is_dir:false,downloadable:true,modified_at:'2026-09-18T08:00:00Z'}]};
+  else if(p.endsWith('/workspace/files')){lastListPath=new URL(req.url()).searchParams.get('path');data={entries:[{name,path:name,is_dir:false,size:50,previewable:true,downloadable:true,modified_at:'2026-09-18T08:00:00Z'},{name:'state.db',path:'state.db',size:22,is_dir:false,downloadable:true,modified_at:'2026-09-18T08:00:00Z'}]};}
   else if(p.endsWith('/workspace/text')){
    if(req.method()==='PUT'){saveCount++;const body=req.postDataJSON();if(deny)return route.fulfill({status:409,json:{error:'文件已被修改，请重新载入后再保存；当前编辑内容已保留。'}});assert.equal(body.version,version);content=body.text;version='v'+(saveCount+1)}
    data={text:content,version};
@@ -32,6 +32,8 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict');
  assert.equal(await page.getByRole('button',{name:'重命名 state.db',exact:true}).count(),1);
  await page.getByRole('button',{name:'重新连接',exact:true}).click();await page.getByRole('button',{name:'编辑 renamed.yaml',exact:true}).waitFor();
  await page.screenshot({path:'.tmp/workspace-maintenance-error.png',fullPage:true});
+ instanceType='workbuddy';await page.reload();await page.getByRole('button',{name:'重命名 renamed.yaml',exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'编辑 renamed.yaml',exact:true}).count(),0);assert.equal(lastListPath,''); // API paths are relative to the Runtime-selected root.
  assert.deepEqual(failures,[]);
  await browser.close();console.log('PASS abnormal runtime + independent workspace, editing, validation, Ctrl+S, conflict preservation, rename, differentiated actions, retry');
 })().catch(e=>{console.error(e);process.exit(1)});

@@ -1236,6 +1236,14 @@ func hydrateInstanceDesktopStreamProfile(instance *models.Instance) {
 
 // Start starts an instance
 func (s *instanceService) Start(instanceID int) error {
+	if guard, ok := s.runtimeUpgradeGuard.(interface {
+		WithInstanceMutation(context.Context, int, func() error) error
+	}); ok {
+		return guard.WithInstanceMutation(context.Background(), instanceID, func() error { return s.startWithoutUpgradeMutationRace(instanceID) })
+	}
+	return s.startWithoutUpgradeMutationRace(instanceID)
+}
+func (s *instanceService) startWithoutUpgradeMutationRace(instanceID int) error {
 	ctx := context.Background()
 
 	instance, err := s.instanceRepo.GetByID(instanceID)
@@ -2086,6 +2094,14 @@ func ensureRuntimeWorkspaceDirectories(root, runtimeType string, userID, instanc
 
 // Stop stops an instance
 func (s *instanceService) Stop(instanceID int) error {
+	if guard, ok := s.runtimeUpgradeGuard.(interface {
+		WithInstanceMutation(context.Context, int, func() error) error
+	}); ok {
+		return guard.WithInstanceMutation(context.Background(), instanceID, func() error { return s.stopWithoutUpgradeMutationRace(instanceID) })
+	}
+	return s.stopWithoutUpgradeMutationRace(instanceID)
+}
+func (s *instanceService) stopWithoutUpgradeMutationRace(instanceID int) error {
 	ctx := context.Background()
 
 	instance, err := s.instanceRepo.GetByID(instanceID)

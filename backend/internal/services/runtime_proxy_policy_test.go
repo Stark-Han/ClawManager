@@ -141,7 +141,7 @@ func TestIdlePolicyRenewalKeepsTenantAndRuntimeBoundaries(t *testing.T) {
 	if err := s.renewRuntimeProxyPolicies(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if agent.writes != 1 {
+	if agent.writes != 2 {
 		t.Fatalf("writes=%d", agent.writes)
 	}
 	// Renewal works without any instance/page access, and doesn't reuse an
@@ -153,8 +153,24 @@ func TestIdlePolicyRenewalKeepsTenantAndRuntimeBoundaries(t *testing.T) {
 	if err := s.renewRuntimeProxyPolicies(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if agent.writes != 2 || !reflect.DeepEqual(agent.addresses, []string{"10.1.1.3"}) {
+	if agent.writes != 4 || !reflect.DeepEqual(agent.addresses, []string{"10.1.1.3"}) {
 		t.Fatalf("renewal=%v", agent.addresses)
+	}
+}
+
+func TestHermesStartupPolicyPrecedesWorkspaceReservation(t *testing.T) {
+	endpoint := "http://hermes:19090"
+	binding := newFakeRuntimeBindingRepo()
+	coordinator := NewRuntimeProxyPolicyCoordinator(fake.NewSimpleClientset(), &policyAgentStub{readErr: errors.New("unavailable")}, "tenant", "frontend")
+	s := NewRuntimeScheduler(newFakeRuntimeInstanceRepo(), &fakeRuntimePodRepo{}, binding, nil, &fakeRuntimeAgentClient{}, nil, nil, nil, time.Second,
+		WithRuntimeSchedulerProxyPolicyCoordinator(coordinator),
+		WithRuntimeSchedulerGatewayEnvBuilder(func(*models.Instance) (map[string]string, error) {
+			t.Fatal("Hermes workspace/environment prepared before policy")
+			return nil, nil
+		}))
+	_, err := s.prepareGatewayStartOwned(context.Background(), models.Instance{ID: 42}, RuntimeTypeHermes, models.RuntimePod{ID: 1, Namespace: "tenant", AgentEndpoint: &endpoint}, nil, nil)
+	if runtimeFailureCode(err) != "PROXY_POLICY_NOT_READY" || len(binding.bindings) != 0 {
+		t.Fatalf("Hermes policy failure was not ownership-safe: %v", err)
 	}
 }
 

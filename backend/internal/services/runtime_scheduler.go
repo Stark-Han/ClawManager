@@ -17,6 +17,7 @@ import (
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
+	"github.com/upper/db/v4"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -473,6 +474,19 @@ func (s *RuntimeScheduler) reconcileRestoredUpgradePools(ctx context.Context) er
 		return nil
 	}
 	s.lastPoolCleanupAt = now
+	var partial []models.RuntimeRollout
+	if s.upgrade.sess != nil {
+		if err := s.upgrade.sess.Collection("runtime_rollouts").Find(db.Cond{"runtime_type": RuntimeTypeOpenClaw, "status IN": []string{"finished", "error"}}).All(&partial); err != nil {
+			return err
+		}
+		for index := range partial {
+			if s.upgrade.hasIsolatedUpgradeItems(ctx, partial[index].ID) {
+				if err := s.upgrade.settleIsolatedUpgradeGroups(ctx, &partial[index]); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	rollouts, err := s.upgrade.RollbackCleanupCandidates(ctx)
 	if err != nil {
 		return fmt.Errorf("list restored OpenClaw rollout cleanup candidates: %w", err)
@@ -892,24 +906,44 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 	}
 	if inventoryErr != nil {
 		if dataSafeOpenClaw && runtimeUpgradeInfrastructureRetryable(inventoryErr) {
+			if s.upgrade != nil {
+				return s.upgrade.waitOrHoldUpgrade(ctx, &rollout)
+			}
 			return nil
 		}
 		return inventoryErr
 	}
 	pods = annotateRuntimePods(pods, inventory)
 	if dataSafeOpenClaw {
+		if rollout.Phase == "image_rollout" {
+			problem := upgradeTargetIdentityProblem(pods, inventory)
+			previous := stringValue(rollout.ErrorMessage)
+			if (previous == "" || strings.HasPrefix(previous, upgradeTargetIdentityMismatch)) && previous != problem {
+				message := stringPtrOrNil(problem)
+				if err := s.rolloutRepo.UpdateStatus(ctx, rollout.ID, rollout.Status, rollout.StartedAt, rollout.FinishedAt, message); err != nil {
+					return err
+				}
+				rollout.ErrorMessage = message
+			}
+		}
 		pods = upgradePodsWithLiveIdentity(pods, inventory)
 	}
 	pods = s.currentRuntimePods(pods, time.Now().UTC())
 	if len(pods) == 0 {
 		if dataSafeOpenClaw && !canAutoRollbackOpenClaw(rollout.Phase) && s.upgrade != nil {
-			return s.upgrade.recordUnavailableUpgradeTargets(ctx, &rollout)
+			if err := s.upgrade.recordUnavailableUpgradeTargets(ctx, &rollout); err != nil {
+				return err
+			}
+			return s.upgrade.waitOrHoldUpgrade(ctx, &rollout)
 		}
 		if !dataSafeOpenClaw {
 			return s.waitForLegacyRollout(ctx, rollout, "no current Runtime Agent has registered")
 		}
 		if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
 			timeoutErr := fmt.Errorf("OpenClaw target runtime did not register within 15 minutes")
+			if strings.HasPrefix(stringValue(rollout.ErrorMessage), upgradeTargetIdentityMismatch) {
+				timeoutErr = fmt.Errorf("OpenClaw target runtime did not register within 15 minutes: %s", *rollout.ErrorMessage)
+			}
 			message := timeoutErr.Error()
 			if rollout.AutoRollback && canAutoRollbackOpenClaw(rollout.Phase) {
 				if rollbackErr := s.rollbackOpenClawRollout(ctx, &rollout, timeoutErr); rollbackErr != nil {
@@ -957,6 +991,16 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 		}
 		ready, err := s.upgrade.ValidateTargetRuntime(ctx, &rollout, pods)
 		if err != nil {
+			if errors.Is(err, errUpgradeImageSuspect) {
+				finished := time.Now().UTC()
+				message := err.Error()
+				return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, &finished, &message)
+			}
+			if errors.Is(err, errAllUpgradeGroupsIsolated) {
+				finished := time.Now().UTC()
+				message := err.Error()
+				return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", rollout.StartedAt, &finished, &message)
+			}
 			// Losing the control-plane lease cancels this scheduler context. That
 			// is an ownership hand-off, not evidence that the image or user data
 			// failed validation. Persisted item states and Runtime receipts let the
@@ -965,14 +1009,16 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 				return nil
 			}
 			if runtimeUpgradeInfrastructureRetryable(err) {
-				return nil
+				return s.upgrade.waitOrHoldUpgrade(ctx, &rollout)
+			}
+			if !rollout.AutoRollback {
+				return s.upgrade.holdFailedUpgrade(ctx, &rollout, err.Error())
 			}
 			if !canAutoRollbackOpenClaw(rollout.Phase) {
-				// The target has crossed the activation boundary. Keep the rollout
-				// active and Team dispatch fenced so reconciliation can forward-repair
-				// transient pod/Gateway failures without hiding new SQLite writes.
-				message := fmt.Sprintf("OpenClaw forward repair pending in %s: %v", rollout.Phase, err)
-				if persistErr := s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "running", rollout.StartedAt, nil, &message); persistErr != nil {
+				// Infrastructure retries were handled above. A deterministic failure
+				// after activation requires a scoped forward recovery, never rollback.
+				message := fmt.Sprintf("OpenClaw upgrade recovery required in %s: %v", rollout.Phase, err)
+				if persistErr := s.upgrade.holdFailedUpgrade(ctx, &rollout, message); persistErr != nil {
 					return errors.Join(err, persistErr)
 				}
 				return errors.New(message)
@@ -990,6 +1036,15 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 			return errors.New(message)
 		}
 		if !ready {
+			{
+				problem, err := s.upgrade.upgradeWaitingFailure(ctx, &rollout)
+				if err != nil {
+					return err
+				}
+				if problem != "" {
+					return s.upgrade.holdFailedUpgrade(ctx, &rollout, problem)
+				}
+			}
 			if rollout.Phase == "image_rollout" && rollout.StartedAt != nil && time.Since(rollout.StartedAt.UTC()) > 15*time.Minute {
 				timeoutErr := fmt.Errorf("OpenClaw standby target runtime did not register within 15 minutes")
 				message := timeoutErr.Error()
@@ -1016,16 +1071,37 @@ func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout mod
 				return fmt.Errorf("invalid OpenClaw source deployment entry %q", deployment)
 			}
 			targetName := runtimeUpgradeTargetDeploymentName(parts[1], rollout.ID)
+			hasBindings, err := s.runtimeDeploymentHasActiveBindings(ctx, parts[0], parts[1])
+			if err != nil {
+				return err
+			}
+			if runtimeUpgradeScopeFromRollout(&rollout).scoped() || s.upgrade.hasIsolatedUpgradeItems(ctx, rollout.ID) {
+				preserver, ok := s.deployments.(interface {
+					SetUpgradePoolActivePreservingSource(context.Context, string, string, string, string) error
+				})
+				if !ok {
+					return fmt.Errorf("scoped upgrade source preservation is unavailable")
+				}
+				if err := preserver.SetUpgradePoolActivePreservingSource(ctx, parts[0], parts[1], targetName, strconv.FormatInt(rollout.ID, 10)); err != nil {
+					return err
+				}
+				// Retain even stopped excluded instances' pool. Their workspace has
+				// deliberately not been migrated and restart must use its old image.
+				continue
+			}
 			if err := s.deployments.SetUpgradePoolActive(ctx, parts[0], parts[1], targetName, strconv.FormatInt(rollout.ID, 10), true); err != nil {
 				return fmt.Errorf("activate committed OpenClaw target pool for %s: %w", deployment, err)
 			}
+			if hasBindings {
+				continue
+			} // error/unknown bindings also retain the source
 			if err := s.deployments.Scale(ctx, parts[0], parts[1], 0); err != nil {
 				return fmt.Errorf("scale committed OpenClaw source pool %s to zero: %w", deployment, err)
 			}
 		}
 	}
 	finishedAt := time.Now().UTC()
-	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, nil)
+	return s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "finished", rollout.StartedAt, &finishedAt, rollout.ErrorMessage)
 }
 
 // A failed/unregistered Agent must not leave a generic rollout running forever.
@@ -1044,14 +1120,48 @@ func runtimeUpgradeReconcileInterrupted(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	return ctx.Err() != nil || errors.Is(err, context.Canceled)
+	if ctx.Err() != nil {
+		return true
+	}
+	if parts := runtimeUpgradeJoinedErrors(err); len(parts) > 0 {
+		for _, part := range parts {
+			if !runtimeUpgradeReconcileInterrupted(ctx, part) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
+
+// A parallel wave can contain both an I/O delay and a deterministic migration
+// failure. A retryable sibling must not hide that failure or delay rollback.
+func runtimeUpgradeJoinedErrors(err error) []error {
+	for err != nil {
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			return joined.Unwrap()
+		}
+		err = errors.Unwrap(err)
+	}
+	return nil
 }
 
 func runtimeUpgradeInfrastructureRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, ErrUpgradeSourceState) {
+		return false
+	}
+	if parts := runtimeUpgradeJoinedErrors(err); len(parts) > 0 {
+		for _, part := range parts {
+			if !runtimeUpgradeInfrastructureRetryable(part) {
+				return false
+			}
+		}
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrRuntimeUpgradeBusy) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return true
 	}
 	var networkErr net.Error
@@ -1059,7 +1169,7 @@ func runtimeUpgradeInfrastructureRetryable(err error) bool {
 		return true
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "i/o timeout", "connection refused", "connection reset by peer", "transport is closing", "unexpected eof", "runtime reconciliation is required before migration"} {
+	for _, marker := range []string{"etcdserver: request timed out", "client.timeout exceeded", "timeout awaiting response headers", "i/o timeout", "connection refused", "connection reset by peer", "transport is closing", "unexpected eof"} {
 		if strings.Contains(message, marker) {
 			return true
 		}
@@ -1475,7 +1585,7 @@ func (s *RuntimeScheduler) syncInstanceStateFromBinding(ctx context.Context, ins
 			return nil
 		}
 		return s.instanceRepo.UpdateRuntimeState(ctx, instance.ID, "running", maxInt(instance.RuntimeGeneration, binding.Generation), nil)
-	case "error", "failed":
+	case "error", "failed", RuntimeGatewayBindingUnhealthy:
 		message := "runtime gateway failed"
 		if binding.ErrorMessage != nil && strings.TrimSpace(*binding.ErrorMessage) != "" {
 			message = strings.TrimSpace(*binding.ErrorMessage)
@@ -1786,6 +1896,12 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 			return fmt.Errorf("%w: classify schedulable runtime pods: %v", errRuntimeControlPlanePending, err)
 		}
 		return fmt.Errorf("classify schedulable %s runtime pods: %w", runtimeType, err)
+	}
+	if runtimeType == RuntimeTypeOpenClaw && s.upgrade != nil {
+		pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
+		if err != nil {
+			return err
+		}
 	}
 	if len(pods) == 0 {
 		scaled, err := s.scaleOutIfAtCapacity(ctx, runtimeType)
@@ -2142,7 +2258,7 @@ func (s *RuntimeScheduler) prepareGatewayStartOwned(ctx context.Context, instanc
 	}
 	// Shared by ordinary creation, restart and upgrade recovery. Publish before
 	// writing a workspace, reserving ports, or starting any Gateway process.
-	if runtimeType == RuntimeTypeOpenClaw {
+	if runtimeType == RuntimeTypeOpenClaw || runtimeType == RuntimeTypeHermes {
 		if err := s.proxyPolicy.Ensure(ctx, &pod); err != nil {
 			return nil, &runtimeFailure{code: "PROXY_POLICY_NOT_READY", cause: fmt.Errorf("prepare Gateway proxy policy: %w", err)}
 		}

@@ -15,6 +15,9 @@ import {
   type IEISystemInstanceAccess,
 } from "../../services/ieiSystemService";
 
+// Preserve the personal branch's capability boundary: this Runtime cannot CAS-save text.
+const workBuddyWorkspaceService = { ...ieiSystemWorkspaceService, readText: undefined, saveText: undefined };
+
 function resolveEmbedUrl(url: string) {
   if (/^https?:\/\//i.test(url)) return url;
   const explicitOrigin = import.meta.env.VITE_BACKEND_ORIGIN as string | undefined;
@@ -283,6 +286,7 @@ export default function IEISystemInstancePage() {
   }
 
   const canShowWorkspace = instance.workspace_available ?? access?.workspace_available ?? false;
+  const isWorkBuddyLite = instance.type.trim().toLowerCase() === "workbuddy" && instance.runtime_type === "gateway";
 
   return (
     <main className="flex h-screen min-h-[560px] flex-col overflow-hidden bg-slate-100">
@@ -406,8 +410,8 @@ export default function IEISystemInstancePage() {
             <WorkspaceFileManager
               instanceId={instance.id}
               key={instance.id}
-              initialPath={(instance.workspace_root ?? access?.workspace_root) === "/config" ? "/config" : undefined}
-              service={ieiSystemWorkspaceService}
+              initialPath={isWorkBuddyLite ? "/home" : (instance.workspace_root ?? access?.workspace_root) === "/config" ? "/config" : undefined}
+              service={isWorkBuddyLite ? workBuddyWorkspaceService : ieiSystemWorkspaceService}
               workspaceKey={`iei:${instance.owner}:${instance.id}`}
               canWrite={!restartInProgress && !["creating", "deleting"].includes(instance.status)}
               localeOverride="zh"

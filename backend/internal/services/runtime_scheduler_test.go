@@ -636,7 +636,6 @@ func TestRuntimeUpgradeInfrastructureRetryable(t *testing.T) {
 		io.EOF,
 		fmt.Errorf("list pods: etcdserver: request timed out"),
 		fmt.Errorf("request: Client.Timeout exceeded while awaiting headers"),
-		fmt.Errorf("restore: runtime reconciliation is required before migration"),
 	} {
 		if !runtimeUpgradeInfrastructureRetryable(err) {
 			t.Fatalf("%v must remain retryable without starting data rollback", err)
@@ -2119,6 +2118,36 @@ func TestRuntimeSchedulerSyncsCreatingInstanceFromRunningBinding(t *testing.T) {
 	state := instanceRepo.runtimeStates[25]
 	if state.status != "running" || state.generation != 2 || state.message != nil {
 		t.Fatalf("expected instance to sync to running from binding, got %+v", state)
+	}
+}
+
+func TestRuntimeSchedulerUnhealthyGatewayRetainsWriterAndCanRecover(t *testing.T) {
+	ctx := context.Background()
+	instanceRepo := newFakeRuntimeInstanceRepo()
+	instance := models.Instance{ID: 25, UserID: 1, Type: RuntimeTypeOpenClaw, RuntimeType: RuntimeBackendGateway, InstanceMode: InstanceModeLite, Status: "creating", RuntimeGeneration: 2}
+	message := "gateway_health_unavailable"
+	bindingRepo := newFakeRuntimeBindingRepo()
+	pid := 1234
+	binding := &models.InstanceRuntimeBinding{InstanceID: 25, RuntimePodID: 9, RuntimeType: RuntimeTypeOpenClaw, GatewayID: "gw-25-2", GatewayPort: 20001, GatewayPID: &pid, State: RuntimeGatewayBindingUnhealthy, Generation: 2, ErrorMessage: &message}
+	bindingRepo.bindings[25] = binding
+	agent := &fakeRuntimeAgentClient{}
+	scheduler := NewRuntimeScheduler(instanceRepo, &fakeRuntimePodRepo{}, bindingRepo, &fakeRuntimeRolloutRepo{}, agent, NewRuntimeEventService(nil), nil, &fakeRuntimeDeploymentService{}, time.Second)
+	if errs := scheduler.reconcileCreatingInstance(ctx, instance); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	state := instanceRepo.runtimeStates[25]
+	if state.status != "error" || state.generation != 2 || state.message == nil || *state.message != message {
+		t.Fatalf("unhealthy writer projected incorrectly: %+v", state)
+	}
+	if len(agent.createRequests) != 0 || len(agent.deleteRequests) != 0 || bindingRepo.deleteAndReleaseCalls[25] != 0 || bindingRepo.bindings[25] != binding {
+		t.Fatal("health failure replaced or released the live writer")
+	}
+	binding.State, binding.ErrorMessage = RuntimeGatewayBindingRunning, nil
+	if err := scheduler.syncInstanceStateFromBinding(ctx, instance, binding); err != nil {
+		t.Fatal(err)
+	}
+	if state := instanceRepo.runtimeStates[25]; state.status != "running" || state.message != nil || state.generation != 2 {
+		t.Fatalf("health recovery did not clear the diagnostic: %+v", state)
 	}
 }
 
@@ -3642,6 +3671,10 @@ func (s *fakeRuntimeDeploymentService) EnsureUpgradePool(ctx context.Context, na
 }
 
 func (s *fakeRuntimeDeploymentService) SetUpgradePoolActive(ctx context.Context, namespace, sourceName, targetName, upgradeID string, active bool) error {
+	return nil
+}
+
+func (s *fakeRuntimeDeploymentService) SetUpgradePoolActivePreservingSource(ctx context.Context, namespace, sourceName, targetName, upgradeID string) error {
 	return nil
 }
 

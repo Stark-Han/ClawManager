@@ -40,6 +40,7 @@ var (
 
 type WorkspaceFileScope struct {
 	InstanceID        int
+	TeamID            int
 	UserID            int
 	WorkspacePath     string
 	AuditActionPrefix string
@@ -75,7 +76,9 @@ type WorkspaceFileService interface {
 }
 
 type workspaceFileService struct {
-	auditRepo repository.WorkspaceFileAuditRepository
+	auditRepo     repository.WorkspaceFileAuditRepository
+	teamAuditRepo repository.TeamWorkspaceFileAuditRepository
+	mutationGuard WorkspaceUpgradeMutationGuard
 }
 
 func NewWorkspaceFileService(auditRepo repository.WorkspaceFileAuditRepository) WorkspaceFileService {
@@ -397,7 +400,7 @@ func appendWorkspaceDirectoryToArchive(ctx context.Context, root *os.Root, relat
 	return nil
 }
 
-func (s *workspaceFileService) Upload(ctx context.Context, scope WorkspaceFileScope, relativeDir string, filename string, reader io.Reader, size int64) (*WorkspaceEntry, error) {
+func (s *workspaceFileService) upload(ctx context.Context, scope WorkspaceFileScope, relativeDir string, filename string, reader io.Reader, size int64) (*WorkspaceEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -481,7 +484,7 @@ func (s *workspaceFileService) Upload(ctx context.Context, scope WorkspaceFileSc
 	return &entry, nil
 }
 
-func (s *workspaceFileService) Mkdir(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*WorkspaceEntry, error) {
+func (s *workspaceFileService) mkdir(ctx context.Context, scope WorkspaceFileScope, relativePath string) (*WorkspaceEntry, error) {
 	if isWorkspaceRootRelative(relativePath) {
 		return nil, ErrWorkspaceRootOperation
 	}
@@ -518,7 +521,7 @@ func (s *workspaceFileService) Mkdir(ctx context.Context, scope WorkspaceFileSco
 	return &entry, nil
 }
 
-func (s *workspaceFileService) Rename(ctx context.Context, scope WorkspaceFileScope, oldPath, newPath string) (*WorkspaceEntry, error) {
+func (s *workspaceFileService) rename(ctx context.Context, scope WorkspaceFileScope, oldPath, newPath string) (*WorkspaceEntry, error) {
 	if isWorkspaceRootRelative(oldPath) || isWorkspaceRootRelative(newPath) {
 		return nil, ErrWorkspaceRootOperation
 	}
@@ -563,7 +566,7 @@ func (s *workspaceFileService) Rename(ctx context.Context, scope WorkspaceFileSc
 	return &entry, nil
 }
 
-func (s *workspaceFileService) Delete(ctx context.Context, scope WorkspaceFileScope, relativePath string) error {
+func (s *workspaceFileService) delete(ctx context.Context, scope WorkspaceFileScope, relativePath string) error {
 	if isWorkspaceRootRelative(relativePath) {
 		return ErrWorkspaceRootOperation
 	}
@@ -612,6 +615,12 @@ func (s *workspaceFileService) openExistingFile(ctx context.Context, scope Works
 }
 
 func (s *workspaceFileService) recordAudit(ctx context.Context, scope WorkspaceFileScope, action, relativePath string, bytes int64) error {
+	if scope.TeamID != 0 {
+		if s.teamAuditRepo == nil {
+			return nil
+		}
+		return s.teamAuditRepo.Create(ctx, &models.TeamWorkspaceFileAudit{TeamID: scope.TeamID, UserID: scope.UserID, Action: strings.TrimSpace(scope.AuditActionPrefix) + action, RelativePath: relativePath, Bytes: bytes, CreatedAt: time.Now().UTC()})
+	}
 	if s.auditRepo == nil {
 		return nil
 	}

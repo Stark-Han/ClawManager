@@ -1,25 +1,14 @@
 /* Team-only floating tools. The white transcript remains the single canvas. */
-.team-chat-workspace{--member-space:92px;--tools-space:206px;position:relative;flex:1;min-height:0;min-width:0;background:#fff;border:1px solid #e2e8f0;border-radius:20px;overflow:hidden;isolation:isolate}
-.team-chat-workspace[data-left=true]:not([data-mode=drawer]){--member-space:312px}
+.team-chat-workspace{--member-space:144px;--tools-space:206px;position:relative;flex:1;min-height:0;min-width:0;background:#fff;border:1px solid #e2e8f0;border-radius:20px;overflow:hidden;isolation:isolate}
+.team-chat-workspace[data-left=true]:not([data-mode=drawer]){--member-space:378px}
 .team-chat-workspace:not([data-right=closed]):not([data-mode=drawer]){--tools-space:592px}
 .team-chat-workspace [hidden]{display:none!important}
 .team-chat-workspace button:focus-visible,.team-chat-workspace a:focus-visible{outline:2px solid #0284c7;outline-offset:2px}
 .team-chat-main{height:100%;min-height:0;min-width:0;padding-top:80px;padding-left:var(--member-space);padding-right:var(--tools-space);overflow:hidden}
-.team-member-rail{position:absolute;left:14px;top:86px;width:62px;max-height:calc(100% - 116px);overflow:auto;padding:10px 5px;display:flex;flex-direction:column;gap:11px;background:linear-gradient(160deg,#f8faff,#f1f5f9);border:1px solid #e3e9f1;border-radius:18px;box-shadow:0 8px 24px -14px #263b5b30;z-index:3}
-.team-member-rail button{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;width:100%;padding:4px;min-height:44px;border-radius:10px;color:#475569}
-.team-member-rail button:hover{background:#e8effa}
-.team-member-rail>button:first-child{color:#4755a5;border-bottom:1px solid #dfe7f2;border-radius:0;padding-bottom:10px}
-.team-member-initial{display:grid;place-items:center;width:30px;height:30px;border-radius:11px;background:linear-gradient(135deg,#ede9fe,#e0e7ff);color:#5b4da0;border:1px solid #d9ddf4}
-.team-member-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .team-chat-workspace[data-left=true]:not([data-mode=drawer]) .team-member-rail{display:none}
-.team-members-panel{position:absolute;top:86px;left:16px;height:min(720px,calc(100% - 110px));width:280px;display:flex;flex-direction:column;min-height:0;min-width:0;background:#f8fafc;border:1px solid #dce4ee;border-radius:18px;box-shadow:0 12px 38px -16px #2342683b;overflow:hidden;z-index:5}
-.team-members-panel>header,.team-tools-toolbar{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:12px;flex:none;font-size:13px}
-.team-members-panel>header{background:linear-gradient(120deg,#eef2ff,#f8fafc);border-bottom:1px solid #e2e8f0;color:#334155}
-.team-members-panel>header button,.team-tools-toolbar button{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:8px 11px;border-radius:10px;min-height:36px}
+.team-tools-toolbar{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:12px;flex:none;font-size:13px}
+.team-tools-toolbar button{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:8px 11px;border-radius:10px;min-height:36px}
 .team-tools-toolbar button:hover,.team-tools-toolbar button[aria-pressed=true],.team-tools-toolbar button[aria-expanded=true]{background:#e8f2fb;color:#0369a1}
-.team-members-body{overflow:auto;padding:14px;min-height:0;overflow-wrap:anywhere}
-.team-member-detail{padding:14px;margin:12px 0;border:1px solid #e2e8f0;border-radius:12px;background:#fff;font-size:12px;line-height:1.7;box-shadow:0 3px 10px -7px #33415530}
-.team-member-detail summary{cursor:pointer;margin:7px 0;color:#64748b}
 .team-tools-panel{position:absolute;right:16px;top:86px;height:min(720px,calc(100% - 110px));width:560px;display:flex;flex-direction:column;min-height:0;min-width:0;border:1px solid #d7e2ed;border-radius:18px;background:#f3f7fb;box-shadow:0 18px 50px -18px #183c6940,0 3px 12px #183c690a;overflow:hidden;z-index:5}
 .team-tools-toolbar{background:linear-gradient(110deg,#f4f8fd,#fff);border-bottom:1px solid #dfe8f1;color:#475569}
 .team-tools-toolbar>strong{font-size:13px;letter-spacing:.02em;flex:1}
@@ -61,9 +50,13 @@
 .team-workflow-nodes li[data-tone=error] .team-workflow-marker{background:#ffedd5;color:#c2410c}
 .team-workflow-nodes li[data-tone=error] .team-workflow-state{color:#c2410c}
 .team-workflow-handoff{position:relative;border-top:1px solid #d9e8ed;padding-top:10px;margin-top:13px;overflow:hidden}
-.team-workflow-handoff>span{font-size:9px;color:#8195a8}
-.team-workflow-handoff>div{font-size:10px;overflow-wrap:anywhere;line-height:1.6;margin-top:4px;color:#526c83}
-.team-workflow-handoff>div>span{color:#0ea5e9}
+.team-workflow-handoff-caption{font-size:12px;color:#64748b;line-height:1.6}
+.team-workflow-handoff-route{display:flex;flex-direction:column;gap:4px;margin-top:8px;min-width:0;line-height:1.6;color:#334155}
+.team-workflow-handoff-row{display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px;align-items:baseline;min-width:0}
+.team-workflow-handoff-row>span{font-size:12px;color:#64748b}
+.team-workflow-handoff-row>strong{font-size:13px;font-weight:600;overflow-wrap:anywhere;min-width:0}
+.team-workflow-handoff-arrow{margin-left:36px;color:#0284c7;flex:none}
+.team-workflow-handoff:focus-visible{outline:2px solid #0284c7;outline-offset:-2px;border-radius:4px}
 .team-workflow-handoff[data-fresh=true]::before{content:"";position:absolute;left:0;top:0;width:24%;height:2px;background:#0ea5e9;animation:team-handoff 1.4s ease-out 2}
 .team-workflow-empty{width:100%;padding:20px 3px;color:#8091a5}
 .team-workflow-tooltip{position:fixed;z-index:90;padding:16px;border:1px solid #d6e3ef;border-radius:13px;background:#fff;box-shadow:0 16px 44px -10px #18365540;font-size:12px;color:#334155;line-height:1.7;max-height:min(340px,calc(100dvh - 24px));overflow:auto;overflow-wrap:anywhere}
@@ -127,14 +120,15 @@
 .team-file-row>.team-file-name{grid-column:1/-1;overflow-wrap:anywhere}
 .team-file-meta{color:#64748b;font-size:11px;align-self:center}
 .team-drawer-backdrop{position:absolute;inset:0;background:rgba(24,40,62,.18);backdrop-filter:blur(2px);z-index:30}
-.team-chat-workspace[data-mode=drawer][data-left=true] .team-members-panel{inset:12px auto 12px 12px;height:auto;width:min(320px,calc(100% - 24px));z-index:40}
+.team-chat-workspace[data-mode=drawer][data-left=true] .team-members-panel{top:12px;left:12px;width:min(346px,calc(100% - 24px));z-index:40}
 .team-chat-workspace[data-mode=drawer]:not([data-right=closed]) .team-tools-panel{inset:12px 12px 12px auto;height:auto;width:min(560px,calc(100% - 24px));z-index:40}
 @media(max-width:767px){.team-chat-workspace{height:75dvh;min-height:480px}}
 @media(max-width:640px){
   .team-chat-workspace{--member-space:0px;--tools-space:0px;border-radius:14px}
   .team-member-rail{top:auto;bottom:86px;left:10px;width:42px;padding:3px;border-radius:12px}
-  .team-member-rail>button:not(:first-child){display:none}
-  .team-member-rail>button:first-child{border:0;padding:4px}
+  .team-member-rail>:not(.team-roster-rail-heading){display:none}
+  .team-roster-rail-heading{border:0;padding:4px;height:auto;flex-direction:column;font-size:10px}
+  .team-roster-rail-heading>span{text-align:center;font-size:10px}
   .team-chat-workspace[data-right=closed] .team-tools-panel{width:104px;right:10px;top:12px;bottom:86px}
   .team-chat-workspace[data-right=closed] .team-kanban-host{top:auto;bottom:0;transform:none;max-height:190px}
   .team-workflow-mini{padding:8px 6px}.team-workflow-heading>span{font-size:10px;gap:3px}.team-workflow-heading small,.team-workflow-heading>span>svg,.team-workflow-order,.team-workflow-person small,.team-workflow-handoff{display:none}

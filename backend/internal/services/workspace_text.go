@@ -132,7 +132,7 @@ func (s *workspaceFileService) ReadText(ctx context.Context, scope WorkspaceFile
 	doc, _, err := readTextAt(root, name)
 	return doc, err
 }
-func (s *workspaceFileService) SaveText(ctx context.Context, scope WorkspaceFileScope, relative, text, version string) (*WorkspaceText, error) {
+func (s *workspaceFileService) saveText(ctx context.Context, scope WorkspaceFileScope, relative, text, version string) (*WorkspaceText, error) {
 	if len(text) > int(textPreviewMaxBytes) {
 		return nil, ErrWorkspacePreviewTooLarge
 	}
@@ -199,5 +199,10 @@ func (s *workspaceFileService) SaveText(ctx context.Context, scope WorkspaceFile
 		return nil, err
 	}
 	doc, _, err := readTextAt(root, name)
+	// A non-cooperating writer may replace the file after our commit. Never acknowledge
+	// its different contents as the user's successfully saved document.
+	if err == nil && doc.Text != text {
+		return nil, ErrWorkspaceTextConflict
+	}
 	return doc, err
 }

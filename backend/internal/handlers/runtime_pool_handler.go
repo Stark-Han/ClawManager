@@ -44,10 +44,11 @@ type startRuntimeRolloutRequest struct {
 }
 
 type runtimeUpgradePreflightRequest struct {
-	TargetImageRef string `json:"target_image_ref" binding:"required"`
-	BatchSize      int    `json:"batch_size"`
-	MaxUnavailable int    `json:"max_unavailable"`
-	AutoRollback   *bool  `json:"auto_rollback,omitempty"`
+	TargetImageRef     string `json:"target_image_ref" binding:"required"`
+	BatchSize          int    `json:"batch_size"`
+	MaxUnavailable     int    `json:"max_unavailable"`
+	AutoRollback       *bool  `json:"auto_rollback,omitempty"`
+	ExcludeInstanceIDs []int  `json:"exclude_instance_ids,omitempty"`
 }
 
 type runtimePoolPodListItem struct {
@@ -77,6 +78,7 @@ func (h *RuntimePoolHandler) PreflightOpenClawRollout(c *gin.Context) {
 	result, err := h.upgrade.Preflight(c.Request.Context(), services.RuntimeUpgradePreflightRequest{
 		TargetImageRef: strings.TrimSpace(req.TargetImageRef), BatchSize: req.BatchSize,
 		MaxUnavailable: req.MaxUnavailable, AutoRollback: autoRollback, ActorUserID: currentUserIDPtr(c),
+		ExcludeInstanceIDs: req.ExcludeInstanceIDs,
 	})
 	if err != nil {
 		utils.HandleError(c, err)
@@ -110,7 +112,7 @@ func (h *RuntimePoolHandler) GetRollout(c *gin.Context) {
 		return
 	}
 	utils.Success(c, http.StatusOK, "Runtime rollout retrieved successfully", gin.H{
-		"rollout": details.Rollout, "items": details.Items, "audits": details.Audits, "pool_progress": progress,
+		"rollout": details.Rollout, "items": details.Items, "audits": details.Audits, "pool_progress": progress, "execution": details.Execution,
 	})
 }
 

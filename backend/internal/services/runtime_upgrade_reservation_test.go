@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,5 +106,30 @@ func TestUpgradePodIdentityDoesNotRequireTrafficReadiness(t *testing.T) {
 	report.PodUID = &wrongUID
 	if len(upgradePodsWithLiveIdentity([]models.RuntimePod{report}, []models.RuntimePod{live})) != 0 {
 		t.Fatal("standby accepted a replaced Pod UID")
+	}
+}
+
+func TestUpgradeReportsLongPodDeploymentMismatchWithoutAcceptingIt(t *testing.T) {
+	uid, ip, endpoint := "target-uid", "10.1.2.3", "http://10.1.2.3:19090"
+	live := models.RuntimePod{Namespace: "tenant", DeploymentName: "pool-u134", PodName: "pool-u134-truncatedsuffix", PodUID: &uid, PodIP: &ip}
+	report := live
+	report.DeploymentName = "pool"
+	report.AgentEndpoint = &endpoint
+	if got := upgradeTargetIdentityProblem([]models.RuntimePod{report}, []models.RuntimePod{live}); !strings.HasPrefix(got, upgradeTargetIdentityMismatch) {
+		t.Fatalf("missing rejection reason: %s", got)
+	}
+	if got := upgradePodsWithLiveIdentity([]models.RuntimePod{report}, []models.RuntimePod{live}); len(got) != 0 {
+		t.Fatal("mismatched identity accepted")
+	}
+	report.DeploymentName = live.DeploymentName
+	if got := upgradeTargetIdentityProblem([]models.RuntimePod{report}, []models.RuntimePod{live}); got != "" {
+		t.Fatal(got)
+	}
+	if got := upgradePodsWithLiveIdentity([]models.RuntimePod{report}, []models.RuntimePod{live}); len(got) != 1 {
+		t.Fatal("corrected identity rejected")
+	}
+	report.Namespace = "other-tenant"
+	if got := upgradeTargetIdentityProblem([]models.RuntimePod{report}, []models.RuntimePod{live}); got != "" {
+		t.Fatal("cross-tenant diagnostic")
 	}
 }

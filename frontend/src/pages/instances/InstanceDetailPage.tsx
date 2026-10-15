@@ -37,6 +37,7 @@ import InstanceSessionUsagePanel from "../../components/InstanceSessionUsagePane
 import { InstanceServiceFrame } from "../../components/InstanceServiceFrame";
 import RestartWithEnvironmentDialog from "../../components/RestartWithEnvironmentDialog";
 import UserLayout from "../../components/UserLayout";
+import UpgradeRecoveryActions from "../../components/UpgradeRecoveryActions";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
 import { useI18n } from "../../contexts/I18nContext";
 import { useInstanceStatusWebSocket } from "../../hooks/useWebSocket";
@@ -1958,6 +1959,7 @@ const InstanceDetailPage: React.FC = () => {
         !isDedicatedInstance && (skillPanelExpanded || sessionPanelExpanded)
       }
     >
+      {instance.type==='openclaw'&&instance.instance_mode==='lite'&&<UpgradeRecoveryActions instanceId={instance.id} onRecovered={()=>void fetchMeta(instance.id,{background:true})}/>}
       <ConfirmDialog
         open={externalResetTarget !== null}
         title={externalResetTarget === "password" ? "Reset share password" : "Reset share URL"}

@@ -12,6 +12,22 @@ import (
 	"clawreef/internal/repository"
 )
 
+const upgradeTargetIdentityMismatch = "UPGRADE_TARGET_IDENTITY_MISMATCH: "
+
+// Explain a live target's rejected identity without trusting the Agent's
+// deployment name or silently rewriting persisted placement metadata.
+func upgradeTargetIdentityProblem(reported, inventory []models.RuntimePod) string {
+	for _, live := range inventory {
+		for _, p := range reported {
+			if p.Namespace != live.Namespace || p.PodName != live.PodName || p.DeploymentName == live.DeploymentName {
+				continue
+			}
+			return fmt.Sprintf("%sPod %s reports deployment %q; Kubernetes owner is %q", upgradeTargetIdentityMismatch, live.PodName, p.DeploymentName, live.DeploymentName)
+		}
+	}
+	return ""
+}
+
 // Use exact pod identity, not the deployment-level metadata annotation (which
 // can represent several replicas). Missing inventory never means permission.
 // Traffic readiness is not identity: upgrade standby deliberately reports

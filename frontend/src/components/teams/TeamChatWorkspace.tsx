@@ -1,21 +1,26 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { FolderOpen, PanelLeftClose, Users, X } from "lucide-react";
-import type { TeamMember } from "../../types/team";
+import { FolderOpen, PanelLeftClose, Settings2, X } from "lucide-react";
+import type { Team, TeamMember } from "../../types/team";
+import { MemberCards, MemberInfoDialog, MemberPager, MemberRail } from "./TeamMembers";
+import { memberPageSize } from "./teamMemberPresentation";
 import "./team-chat-workspace.css";
+import "./team-continuous-chat.css";
 
 export type TeamWorkspacePanel = "closed" | "kanban" | "files";
 
 // Width is the workspace's usable width, not the browser viewport.
 export function workspaceMode(width: number) {
-  return width >= 1472 ? "dual" : width >= 1248 ? "single" : "drawer";
+  return width >= 1540 ? "dual" : width >= 1248 ? "single" : "drawer";
 }
 
-export default function TeamChatWorkspace({ members, membersContent, chat, renderKanban, files }: {
+export default function TeamChatWorkspace({ members, team, leaderKey, renderMemberDetails, chat, renderKanban, files }: {
   members: TeamMember[];
-  membersContent: ReactNode;
+  team: Team;
+  leaderKey?: string;
+  renderMemberDetails: (member: TeamMember) => ReactNode;
   chat: ReactNode;
   renderKanban: (mini: boolean, open: () => void) => ReactNode;
-  files: ReactNode;
+  files: ReactNode | ((active: boolean) => ReactNode);
 }) {
   const root = useRef<HTMLDivElement>(null);
   const leftPanel = useRef<HTMLElement>(null);
@@ -23,15 +28,25 @@ export default function TeamChatWorkspace({ members, membersContent, chat, rende
   const lastTrigger = useRef<HTMLElement | null>(null);
   const membersPanelId = useId();
   const [width, setWidth] = useState(0);
+  const [height, setHeight] = useState(0);
+  const [memberPage, setMemberPage] = useState(0);
+  const [memberInfo, setMemberInfo] = useState<number | "team" | null>(null);
   const [left, setLeft] = useState(false);
   const [right, setRight] = useState<TeamWorkspacePanel>("closed");
   const [filesVisited, setFilesVisited] = useState(false);
   const [lastSide, setLastSide] = useState<"left" | "right">("right");
   const mode = workspaceMode(width);
+  // Leave space for the rail too, so both states can always show the same page.
+  const pageSize = memberPageSize(Math.max(0, height - 110), members.length);
+  const pages = Math.max(1, Math.ceil(members.length / pageSize));
+  const page = Math.min(memberPage, pages - 1);
+  const start = page * pageSize;
+  const pageMembers = members.slice(start, start + pageSize);
+  const inspectedMember = members.find(member => member.id === memberInfo);
   useLayoutEffect(() => {
     const node = root.current;
     if (!node) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    const observer = new ResizeObserver(([entry]) => { setWidth(entry.contentRect.width); setHeight(entry.contentRect.height); });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
@@ -66,7 +81,7 @@ export default function TeamChatWorkspace({ members, membersContent, chat, rende
     panel?.querySelector<HTMLButtonElement>("button")?.focus();
     const onKey = (event: KeyboardEvent) => {
       // File previews have their own modal layer and keyboard lifecycle.
-      if (document.querySelector('[data-workspace-preview]')) return;
+      if (document.querySelector('[data-workspace-preview], [data-workspace-editor], [data-team-member-dialog]')) return;
       if (event.key === "Escape") { event.preventDefault(); close(); }
       if (event.key !== "Tab" || !panel) return;
       const controls = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input, textarea, select, summary')]
@@ -81,22 +96,14 @@ export default function TeamChatWorkspace({ members, membersContent, chat, rende
 
   return <div ref={root} className="team-chat-workspace" data-mode={mode} data-left={left} data-right={right}>
     <div className="team-member-rail" inert={drawerOpen}>
-      <button type="button" aria-label="展开成员与团队配置" aria-expanded={left} aria-controls={membersPanelId} onClick={() => {
+      <MemberRail members={pageMembers} start={start} leaderKey={leaderKey} total={members.length} expanded={left} panelId={membersPanelId} onDetails={setMemberInfo} onOpen={() => {
         rememberTrigger(); setLastSide("left"); setLeft(value => !value); if (mode !== "dual") setRight("closed");
-      }}><Users size={19} /><span>成员</span><small>{members.length} 人</small></button>
-      {members.slice(0, 5).map(member => <button type="button" key={member.id} title={`${member.display_name} · ${member.role} · 调度 ${member.status} · Runtime ${member.availability || "unknown"}`}
-        onClick={() => { rememberTrigger(); setLastSide("left"); setLeft(true); if (mode !== "dual") setRight("closed"); }}>
-        <span className="team-member-initial">{member.display_name.slice(0, 2).toUpperCase()}</span>
-        <span className="team-member-name">{member.display_name}</span>
-        <small className={member.availability === "blocked" || member.availability === "offline" ? "text-red-600" : "text-slate-500"}>
-          {member.availability === "blocked" || member.availability === "offline" ? "不可用" : member.availability === "busy" ? "忙碌" : member.availability === "idle" ? "空闲" : "未知"}
-        </small>
-      </button>)}
-      {members.length > 5 && <button type="button" onClick={() => { rememberTrigger(); setLeft(true); setLastSide("left"); if (mode !== "dual") setRight("closed"); }}>+{members.length - 5}</button>}
+      }} pager={<MemberPager page={page} pages={pages} onPage={setMemberPage} />} />
     </div>
     <aside id={membersPanelId} ref={leftPanel} hidden={!left} className="team-members-panel" role={mode === "drawer" ? "dialog" : undefined} aria-modal={mode === "drawer" ? true : undefined} aria-label="成员与团队配置">
-      <header><strong>成员与团队配置</strong><button type="button" aria-label="收起成员" onClick={() => { setLeft(false); restoreFocus(); }}><PanelLeftClose size={18} /></button></header>
-      <div className="team-members-body">{membersContent}</div>
+      <header><strong>成员 <span className="team-roster-count">{members.length}</span></strong><div className="team-roster-header-actions"><button type="button" aria-label="团队配置" title="团队配置" onClick={() => setMemberInfo("team")}><Settings2 size={17} /></button><button type="button" aria-label="收起成员" onClick={() => { setLeft(false); restoreFocus(); }}><PanelLeftClose size={18} /></button></div></header>
+      <div className="team-members-body"><MemberCards members={pageMembers} start={start} leaderKey={leaderKey} onDetails={setMemberInfo} /></div>
+      <MemberPager page={page} pages={pages} onPage={setMemberPage} />
     </aside>
     <main className="team-chat-main" inert={drawerOpen}>{chat}</main>
     <aside ref={rightPanel} className="team-tools-panel" role={drawerOpen && right !== "closed" ? "dialog" : undefined} aria-modal={drawerOpen && right !== "closed" ? true : undefined} aria-label="任务看板与文件" inert={drawerOpen && left}>
@@ -107,8 +114,9 @@ export default function TeamChatWorkspace({ members, membersContent, chat, rende
         {right !== "closed" && <button type="button" aria-label="收起右侧面板" onClick={() => { setRight("closed"); restoreFocus(); }}><X size={18} /></button>}
       </header>
       <div className="team-kanban-host" hidden={right === "files"}>{renderKanban(right === "closed", () => openRight("kanban"))}</div>
-      <div className="team-files-host" hidden={right !== "files"}>{filesVisited && files}</div>
+      <div className="team-files-host" hidden={right !== "files"}>{filesVisited && (typeof files === "function" ? files(right === "files" && width > 0) : files)}</div>
     </aside>
     {drawerOpen && <button type="button" className="team-drawer-backdrop" aria-label="关闭工具抽屉" onClick={close} />}
+    {(memberInfo === "team" || inspectedMember) && <MemberInfoDialog member={inspectedMember} team={team} renderDetails={renderMemberDetails} onClose={() => setMemberInfo(null)} />}
   </div>;
 }
