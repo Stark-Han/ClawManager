@@ -43,6 +43,100 @@ func TestRuntimeManifestsAreValidYAML(t *testing.T) {
 	}
 }
 
+func TestDeploymentManifestsConfigureHermesDesktopWeb(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	wantDeployments := map[string]string{
+		"clawmanager-app": "clawmanager-app",
+		"hermes-runtime":  "runtime",
+	}
+	const (
+		wantOrigin      = "http://clawmanager-gateway.clawmanager-system.svc.cluster.local:9001"
+		wantHermesImage = "ghcr.io/yuan-lab-llm/agentsruntime/hermes-lite@sha256:4fd519962d0afe796b36dade6f8e66379e7030a2c6f3c62b4a6574352b2eac44"
+	)
+
+	for _, manifest := range deploymentRuntimeManifests(repoRoot) {
+		t.Run(manifest, func(t *testing.T) {
+			file, err := os.Open(manifest)
+			if err != nil {
+				t.Fatalf("open manifest: %v", err)
+			}
+			defer file.Close()
+
+			found := make(map[string]bool, len(wantDeployments))
+			decoder := yaml.NewDecoder(file)
+			for {
+				var document struct {
+					Kind     string `yaml:"kind"`
+					Metadata struct {
+						Name string `yaml:"name"`
+					} `yaml:"metadata"`
+					Spec struct {
+						Template struct {
+							Spec struct {
+								Containers []struct {
+									Name  string `yaml:"name"`
+									Image string `yaml:"image"`
+									Env   []struct {
+										Name  string `yaml:"name"`
+										Value string `yaml:"value"`
+									} `yaml:"env"`
+								} `yaml:"containers"`
+							} `yaml:"spec"`
+						} `yaml:"template"`
+					} `yaml:"spec"`
+				}
+				if err := decoder.Decode(&document); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatalf("parse manifest: %v", err)
+				}
+
+				containerName, wanted := wantDeployments[document.Metadata.Name]
+				if document.Kind != "Deployment" || !wanted {
+					continue
+				}
+				for _, container := range document.Spec.Template.Spec.Containers {
+					if container.Name != containerName {
+						continue
+					}
+					found[document.Metadata.Name] = true
+					environment := make(map[string]string, len(container.Env))
+					for _, variable := range container.Env {
+						environment[variable.Name] = variable.Value
+					}
+					if environment["CLAWMANAGER_HERMES_DESKTOP_WEB_ENABLED"] != "true" {
+						t.Fatalf("%s must explicitly enable Hermes Desktop Web", document.Metadata.Name)
+					}
+					if got := environment["CLAWMANAGER_CONTROL_UI_ORIGIN"]; got != wantOrigin {
+						t.Fatalf("%s has unexpected Hermes control UI origin %q", document.Metadata.Name, got)
+					}
+					if document.Metadata.Name == "hermes-runtime" {
+						if container.Image != wantHermesImage {
+							t.Fatalf("Hermes runtime must use immutable image %q, got %q", wantHermesImage, container.Image)
+						}
+						if got := environment["CLAWMANAGER_RUNTIME_IMAGE_REF"]; got != wantHermesImage {
+							t.Fatalf("Hermes runtime must report immutable image ref %q, got %q", wantHermesImage, got)
+						}
+						wantProxyCIDR := "10.244.0.0/16"
+						if strings.Contains(filepath.Clean(manifest), filepath.Join("deployments", "k3s")) {
+							wantProxyCIDR = "10.42.0.0/16"
+						}
+						if got := environment["CLAWMANAGER_TRUSTED_PROXY_CIDRS"]; got != wantProxyCIDR {
+							t.Fatalf("Hermes runtime has unexpected trusted proxy CIDR %q", got)
+						}
+					}
+				}
+			}
+
+			for deployment := range wantDeployments {
+				if !found[deployment] {
+					t.Fatalf("manifest does not contain configured %s deployment", deployment)
+				}
+			}
+		})
+	}
+}
+
 func TestNineNodeProductionDatabaseLoadControls(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	manifest := filepath.Join(repoRoot, "deployments", "k8s", "sites", "nine-node-production", "20-clawmanager-production.yaml")
@@ -213,6 +307,26 @@ func TestNginxRoutesOpenCodeDedicatedOrigins(t *testing.T) {
 	}
 }
 
+func TestNginxBrowserWorkerPreservesPublicOriginAndWebSocket(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`location ~ ^/api/v1/instances/[0-9]+/browser-proxy(?:/|$)`,
+		"proxy_set_header Host $http_host;",
+		"proxy_set_header X-Forwarded-Host $http_host;",
+		"proxy_set_header Upgrade $http_upgrade;",
+		"proxy_read_timeout 86400s;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("browser worker nginx route must contain %q", want)
+		}
+	}
+}
+
 func TestNginxWorkersAreBoundedOnLargeClusterNodes(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	raw, err := os.ReadFile(filepath.Join(repoRoot, "deployments", "nginx", "nginx.conf"))
@@ -274,8 +388,8 @@ func TestNginxAgentRoutesSupportSilentRenewalAndLongRunningWork(t *testing.T) {
 		"proxy_read_timeout 86400s;",
 		"proxy_send_timeout 86400s;",
 	} {
-		if count := strings.Count(text, want); count != 4 {
-			t.Fatalf("nginx agent routes must contain %q four times, got %d", want, count)
+		if count := strings.Count(text, want); count != 5 {
+			t.Fatalf("nginx long-running routes must contain %q five times, got %d", want, count)
 		}
 	}
 }
