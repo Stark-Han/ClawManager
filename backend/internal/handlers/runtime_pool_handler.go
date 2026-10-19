@@ -276,7 +276,9 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		// A recognized pre-8.1 OpenClaw target deliberately rejoins the
 		// unchanged generic Lite rolling-update path below.
 		targetImage = classification.ImageRef
-		if classification.EmptyPoolReset {
+		{
+			// Ordinary legacy updates also need a frozen serving-pool scope for
+			// subsequent placement; otherwise an earlier empty reset pins its image.
 			encoded, marshalErr := json.Marshal(classification.SourceImages)
 			if marshalErr != nil {
 				utils.Error(c, http.StatusInternalServerError, "failed to preserve the current OpenClaw pool image inventory")
@@ -284,7 +286,9 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 			}
 			value := string(encoded)
 			sourceImagesJSON = &value
-			rolloutPhase = services.RuntimeUpgradePhaseEmptyPoolReset
+			if classification.EmptyPoolReset {
+				rolloutPhase = services.RuntimeUpgradePhaseEmptyPoolReset
+			}
 		}
 		if classification.ImageDigest != "" {
 			value := classification.ImageDigest

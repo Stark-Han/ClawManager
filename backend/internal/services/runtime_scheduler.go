@@ -1890,7 +1890,7 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		}
 		return err
 	}
-	pods, err = s.annotateAndFilterOrdinaryRuntimePods(ctx, runtimeType, pods)
+	pods, err = s.verifiedOrdinaryRuntimePods(ctx, runtimeType, pods)
 	if err != nil {
 		if runtimeUpgradeInfrastructureRetryable(err) {
 			return fmt.Errorf("%w: classify schedulable runtime pods: %v", errRuntimeControlPlanePending, err)
@@ -1932,7 +1932,7 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 			lastErr = fmt.Errorf("runtime pod %d has gateway start in flight: %w", pod.ID, errRuntimeGatewayStartPending)
 			continue
 		}
-		claimed, err := s.podRepo.TryClaimSlot(ctx, pod.ID)
+		claimed, err := s.claimRuntimeSlot(ctx, pod.ID)
 		if err != nil {
 			unlock()
 			lastErr = err
@@ -1967,6 +1967,9 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		return nil
 	}
 	if lastErr != nil {
+		if isRuntimeAssignmentPending(lastErr) {
+			return lastErr
+		}
 		if runtimeFailureCode(lastErr) == "PROXY_POLICY_NOT_READY" {
 			return lastErr
 		}
@@ -2256,6 +2259,11 @@ func (s *RuntimeScheduler) prepareGatewayStartOwned(ctx context.Context, instanc
 	if s.agentClient == nil || s.bindingRepo == nil || s.instanceRepo == nil {
 		return nil, fmt.Errorf("runtime scheduler gateway dependencies are not configured")
 	}
+	if rollout == nil {
+		if err := s.verifyOrdinaryRuntimePod(ctx, pod); err != nil {
+			return nil, err
+		}
+	}
 	// Shared by ordinary creation, restart and upgrade recovery. Publish before
 	// writing a workspace, reserving ports, or starting any Gateway process.
 	if runtimeType == RuntimeTypeOpenClaw || runtimeType == RuntimeTypeHermes {
@@ -2317,6 +2325,13 @@ func (s *RuntimeScheduler) prepareGatewayStartOwned(ctx context.Context, instanc
 func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance models.Instance, runtimeType string, pod models.RuntimePod, start *runtimeGatewayStart) error {
 	if start == nil || start.reservedBinding == nil {
 		return fmt.Errorf("runtime gateway start is not prepared")
+	}
+	if start.upgradeID == "" {
+		if err := s.verifyOrdinaryRuntimePod(ctx, pod); err != nil {
+			// A reservation exists: preserve it for authoritative reconciliation,
+			// never try another Pod after an uncertain start boundary.
+			return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, err)
+		}
 	}
 	resp, err := s.agentClient.CreateGateway(ctx, start.endpoint, RuntimeAgentCreateGatewayRequest{
 		InstanceID:          instance.ID,
