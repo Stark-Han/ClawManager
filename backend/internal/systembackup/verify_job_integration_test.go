@@ -136,4 +136,108 @@ func runRealVerifyJob(t *testing.T, ctx context.Context, store ImmutableObjectSt
 		case <-time.After(time.Second):
 		}
 	}
+	if os.Getenv("TEST_SYSTEM_BACKUP_CONTROLLER_JOB") == "1" {
+		runControllerWithRealVerifyJob(t, ctx, jobs, request)
+	}
+}
+
+// This tests the actual SQL controller + Kubernetes driver together, while
+// explicit fixture admission remains separate from production readiness.
+func runControllerWithRealVerifyJob(t *testing.T, ctx context.Context, jobs VerifyJobs, request VerifyJobRequest) {
+	t.Helper()
+	s := Store{DB: controlDB(t), InstallationID: request.Origin}
+	if e := s.Bootstrap(ctx); e != nil {
+		t.Fatal(e)
+	}
+	config := testConfig()
+	config.MaxArtifactBytes = request.MaxBytes
+	if _, e := s.SaveConfig(ctx, 0, 1, config, permitConfig); e != nil {
+		t.Fatal(e)
+	}
+	task, _, e := s.Create(ctx, 1, "real-controller-verification", CreateTaskRequest{Type: ArtifactVerify, Purpose: "functional_test", SourceID: request.BackupID}, permitTask)
+	if e != nil {
+		t.Fatal(e)
+	}
+	controller := Controller{Store: s, Owner: "real-controller-first", PollInterval: time.Second, Verifier: &VerifyTaskRunner{Jobs: jobs, Template: request}}
+	t.Cleanup(func() {
+		a, e := s.GetAttempt(context.Background(), task.ID, "verify")
+		if e != nil {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for cleanup.Err() == nil {
+			stopped, e := jobs.Stop(cleanup, a)
+			if e != nil {
+				t.Error(e)
+				return
+			}
+			if stopped {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+		t.Error("controller fixture cleanup timeout")
+	})
+	if e = controller.Tick(ctx); e != nil {
+		t.Fatal(e)
+	}
+	a, e := s.GetAttempt(ctx, task.ID, "verify")
+	if e != nil {
+		t.Fatal(e)
+	}
+	first, e := jobs.Ensure(ctx, a)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Simulate a stopped leader after its external Create response. The real
+	// replacement controller must reuse the frozen attempt and original UID.
+	if _, e = s.DB.Exec("UPDATE system_backup_controller_leases SET expires_at=TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)) WHERE scope=?", s.InstallationID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.DB.Exec("UPDATE system_backup_tasks SET lease_until=TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)) WHERE public_id=?", task.ID); e != nil {
+		t.Fatal(e)
+	}
+	controller.Owner = "real-controller-replacement"
+	adopted, e := jobs.Ensure(ctx, a)
+	if e != nil || adopted.UID != first.UID {
+		t.Fatal("controller replaced original Job", e)
+	}
+	for {
+		if e = controller.Tick(ctx); e != nil {
+			t.Fatal(e)
+		}
+		current, e := s.Get(ctx, task.ID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if current.Terminal() {
+			if current.Status != "succeeded" || current.Eligible {
+				t.Fatal("controller verification failed", current.Status)
+			}
+			report, e := s.VerificationReport(ctx, task.ID)
+			if e != nil || !report.IntegrityVerified || report.AcceptanceEligible {
+				t.Fatal("controller report invalid", e)
+			}
+			stopped, e := jobs.Stop(ctx, a)
+			if e != nil || !stopped {
+				t.Fatal("success left a running verification Job", e)
+			}
+			pods, e := jobs.Client.CoreV1().Pods(request.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "backup.clawmanager.io/attempt=" + a.ID})
+			if e != nil || len(pods.Items) != 0 {
+				t.Fatal("success left verifier Pods", e)
+			}
+			var count int
+			if e = s.DB.QueryRow("SELECT COUNT(*) FROM system_backup_attempts WHERE task_id=?", task.ID).Scan(&count); e != nil || count != 1 {
+				t.Fatal("controller duplicated attempt", e)
+			}
+			t.Log("real SQL controller + Kubernetes Job: leader replacement, single attempt, persisted report, foreground Job/Pod cleanup")
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("controller Job deadline")
+		case <-time.After(time.Second):
+		}
+	}
 }

@@ -97,9 +97,51 @@ func TestVerifyJobAdoptionCollisionAndBoundResult(t *testing.T) {
 }
 
 type observedJobs struct {
-	ids    []string
-	result VerifyJobResult
-	stop   bool
+	ids     []string
+	stopIDs []string
+	result  VerifyJobResult
+	stop    bool
+}
+
+func TestVerificationSuccessWaitsForOwnedRunnerCleanup(t *testing.T) {
+	ctx := context.Background()
+	s := Store{DB: controlDB(t), InstallationID: "verify-installation"}
+	if e := s.Bootstrap(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := s.SaveConfig(ctx, 0, 1, testConfig(), permitConfig); e != nil {
+		t.Fatal(e)
+	}
+	task, _, e := s.Create(ctx, 1, "verify-cleanup-test", CreateTaskRequest{Type: ArtifactVerify, Purpose: "functional_test", SourceID: verifyFixtureRequest().BackupID}, permitTask)
+	if e != nil {
+		t.Fatal(e)
+	}
+	jobs := &observedJobs{result: VerifyJobResult{State: "succeeded", JobUID: "uid", Report: &IntegrityReport{BackupID: task.SourceID, Origin: s.InstallationID, IntegrityVerified: true, PartsVerified: 6}}}
+	c := Controller{Store: s, Owner: "cleanup-controller", PollInterval: time.Second, Verifier: &VerifyTaskRunner{Jobs: jobs, Template: verifyFixtureRequest()}}
+	if e = c.Tick(ctx); e != nil {
+		t.Fatal(e)
+	}
+	pending, e := s.Get(ctx, task.ID)
+	if e != nil || pending.Status != "running" {
+		t.Fatal("success reported before physical cleanup", pending.Status, e)
+	}
+	attempt, e := s.GetAttempt(ctx, task.ID, "verify")
+	if e != nil || attempt.Status != "succeeded" {
+		t.Fatal("result not durable before cleanup", e)
+	}
+	// Subsequent ticks use the durable result, never start another verifier.
+	jobs.result = VerifyJobResult{State: "failed"}
+	jobs.stop = true
+	if e = c.Tick(ctx); e != nil {
+		t.Fatal(e)
+	}
+	done, e := s.Get(ctx, task.ID)
+	if e != nil || done.Status != "succeeded" || len(jobs.ids) != 1 {
+		t.Fatal("cleanup did not settle original result", done.Status, e)
+	}
+	if _, e = s.VerificationReport(ctx, task.ID); e != nil {
+		t.Fatal("cleanup lost report", e)
+	}
 }
 
 func (j *observedJobs) Observe(_ context.Context, a Attempt) (VerifyJobResult, error) {
@@ -107,7 +149,7 @@ func (j *observedJobs) Observe(_ context.Context, a Attempt) (VerifyJobResult, e
 	return j.result, nil
 }
 func (j *observedJobs) Stop(_ context.Context, a Attempt) (bool, error) {
-	j.ids = append(j.ids, a.ID)
+	j.stopIDs = append(j.stopIDs, a.ID)
 	return j.stop, nil
 }
 func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T) {
@@ -128,7 +170,7 @@ func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T)
 	if _, e = s.SaveConfig(ctx, 1, 1, changed, permitConfig); e != nil {
 		t.Fatal(e)
 	}
-	jobs := &observedJobs{result: VerifyJobResult{State: "running", JobUID: "uid"}}
+	jobs := &observedJobs{stop: true, result: VerifyJobResult{State: "running", JobUID: "uid"}}
 	runner := &VerifyTaskRunner{Jobs: jobs, Template: verifyFixtureRequest()}
 	c := Controller{Store: s, Owner: "first-controller", PollInterval: time.Second, Verifier: runner}
 	if e = c.Tick(ctx); e != nil {
@@ -185,6 +227,7 @@ func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T)
 		t.Fatal(e)
 	}
 	jobs.result = VerifyJobResult{State: "running"}
+	jobs.stop = false
 	if e = c.Tick(ctx); e != nil {
 		t.Fatal(e)
 	}

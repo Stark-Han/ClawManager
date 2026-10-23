@@ -139,6 +139,10 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	consume := func(name string, fn func(io.Reader) error) error {
 		return ConsumePublishedPart(ctx, store, artifact, name, wrapper, budget.MaxBytes, fn)
 	}
+	// Authenticate complete SQL coverage before any target business write.
+	if e = consume("mysql", ValidateBusinessSQLSnapshot); e != nil {
+		return report, e
+	}
 	var teamReport teamReportCollector
 	report.Phase = "mysql"
 	if e = consume("mysql", func(r io.Reader) error {

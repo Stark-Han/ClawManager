@@ -73,6 +73,15 @@ type restoreConfig struct {
 	Directory             string            `json:"directory"`
 }
 
+type restoredVerificationConfig struct {
+	Intent          systembackup.RestoreVerificationIntent `json:"intent"`
+	VerifierDSNFile string                                 `json:"verifier_dsn_file"`
+	Redis           redisConfig                            `json:"redis"`
+	Objects         objectConfig                           `json:"objects"`
+	BucketMapping   map[string]string                      `json:"bucket_mapping"`
+	Directory       string                                 `json:"directory"`
+}
+
 func connectDB(ctx context.Context, path string) (*sql.DB, string, error) {
 	raw, e := readBounded(path, 16384)
 	if e != nil {
@@ -180,6 +189,37 @@ func connectKubernetes(c kubeConfig) (dynamic.Interface, error) {
 func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPath, origin, id string, budget systembackup.CaptureBudget, out io.Writer) error {
 	return withBootstrap(ctx, bootstrapPath, func(cfg bootstrap, store systembackup.ImmutableObjectStore, pub ed25519.PublicKey, wrapper systembackup.AESKeyWrapper) error {
 		switch operation {
+		case "verify-restored":
+			var c restoredVerificationConfig
+			if e := decodeFile(operationPath, &c); e != nil {
+				return e
+			}
+			artifact, e := systembackup.OpenPublishedArtifact(ctx, store, origin, id, pub, cfg.VerificationKeyVersion)
+			if e != nil {
+				return e
+			}
+			target := systembackup.RestoredDataReader{Directory: c.Directory, BucketMapping: c.BucketMapping}
+			target.MySQL, target.Database, e = connectDB(ctx, c.VerifierDSNFile)
+			if e != nil {
+				return e
+			}
+			defer target.MySQL.Close()
+			target.Redis, e = connectRedis(ctx, c.Redis)
+			if e != nil {
+				return e
+			}
+			defer target.Redis.Close()
+			var closeObjects func()
+			target.Objects, closeObjects, e = connectObjects(c.Objects)
+			if e != nil {
+				return e
+			}
+			defer closeObjects()
+			report, e := systembackup.VerifyRestoredData(ctx, store, artifact, wrapper, c.Intent, target, budget)
+			if writeErr := json.NewEncoder(out).Encode(report); e == nil {
+				e = writeErr
+			}
+			return e
 		case "capture":
 			var c captureConfig
 			if e := decodeFile(operationPath, &c); e != nil {

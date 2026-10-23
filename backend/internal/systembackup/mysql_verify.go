@@ -14,6 +14,8 @@ import (
 )
 
 // VerifyMySQL only issues SELECTs, using a read-only repeatable-read transaction.
+// Rows are compared through one ordered cursor per table, avoiding a SQL round
+// trip for every row while retaining exact value and extra/missing-row checks.
 // expected must describe the normalized copy, not the unmodified source archive.
 // The caller supplies a separate SELECT-only credential; this code cannot turn
 // a privileged restore account into a verifier account.
@@ -28,19 +30,29 @@ func VerifyMySQL(ctx context.Context, db *sql.DB, expected io.Reader, maxRows in
 	defer tx.Rollback()
 	var checked int64
 	var current SQLTable
-	var count int64
+	var actualRows *sql.Rows
+	defer func() {
+		if actualRows != nil {
+			actualRows.Close()
+		}
+	}()
 	finish := func() error {
 		if current.Name == "" {
 			return nil
 		}
-		q, _ := QuoteIdentifier(current.Name)
-		var actual int64
-		if e := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+q).Scan(&actual); e != nil {
-			return e
+		if actualRows == nil {
+			return errors.New("missing verification cursor")
 		}
-		if actual != count {
+		if actualRows.Next() {
 			return fmt.Errorf("row count mismatch: %s", current.Name)
 		}
+		if e := actualRows.Err(); e != nil {
+			return e
+		}
+		if e := actualRows.Close(); e != nil {
+			return e
+		}
+		actualRows = nil
 		return nil
 	}
 	result, err := ReadSQLSnapshot(expected, func(table SQLTable) error {
@@ -55,38 +67,40 @@ func VerifyMySQL(ctx context.Context, db *sql.DB, expected io.Reader, maxRows in
 			return fmt.Errorf("schema mismatch: %s", table.Name)
 		}
 		current = table
-		count = 0
-		return nil
-	}, func(table SQLTable, row team.Row) error {
-		checked++
-		count++
-		if checked > maxRows {
-			return errors.New("verification row budget exceeded")
+		if len(table.PrimaryKey) == 0 {
+			return errors.New("missing primary key")
 		}
-		var predicates []string
-		var args []any
+		order := make([]string, 0, len(table.PrimaryKey))
 		for _, pk := range table.PrimaryKey {
-			c, ok := row[pk]
-			if !ok || c.IsNull {
-				return errors.New("invalid primary key")
-			}
-			q, e := QuoteIdentifier(pk)
+			quoted, e := QuoteIdentifier(pk)
 			if e != nil {
 				return e
 			}
-			predicates = append(predicates, q+"=?")
-			args = append(args, nonNullSQLBytes(c.Data))
+			order = append(order, quoted)
 		}
-		if len(predicates) == 0 {
-			return errors.New("missing primary key")
+		quoted, e := QuoteIdentifier(table.Name)
+		if e != nil {
+			return e
 		}
-		q, _ := QuoteIdentifier(table.Name)
+		actualRows, e = tx.QueryContext(ctx, "SELECT * FROM "+quoted+" ORDER BY "+strings.Join(order, ","))
+		return e
+	}, func(table SQLTable, row team.Row) error {
+		checked++
+		if checked > maxRows {
+			return errors.New("verification row budget exceeded")
+		}
+		if actualRows == nil || !actualRows.Next() {
+			if actualRows != nil && actualRows.Err() != nil {
+				return actualRows.Err()
+			}
+			return errors.New("expected row unavailable")
+		}
 		cells := make([]any, len(table.Columns))
 		targets := make([]any, len(cells))
 		for i := range cells {
 			targets[i] = &cells[i]
 		}
-		if e := tx.QueryRowContext(ctx, "SELECT * FROM "+q+" WHERE "+strings.Join(predicates, " AND "), args...).Scan(targets...); e != nil {
+		if e := actualRows.Scan(targets...); e != nil {
 			return errors.New("expected row unavailable")
 		}
 		for i, c := range table.Columns {

@@ -18,6 +18,9 @@ import (
 func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	budget := CaptureBudget{64 << 20, 10000}
 	timeout := 3 * time.Minute
+	if os.Getenv("TEST_SYSTEM_BACKUP_CONTROLLER_JOB") == "1" {
+		timeout = 5 * time.Minute
+	}
 	if os.Getenv("TEST_SYSTEM_BACKUP_LARGE_SMOKE") == "1" {
 		budget = CaptureBudget{4 << 30, 200000}
 		timeout = 30 * time.Minute
@@ -196,6 +199,7 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, budget); e == nil {
 		t.Fatal("restore retry overwrote owned targets")
 	}
+	verifyRestoredWithReadOnlyAccounts(t, ctx, external, recovered, wrapper, pub, report, restoreTarget, verifierDSN, budget)
 	if published.Manifest.Payload.Consistency != "best_effort" || published.Manifest.Payload.Purpose != "functional_test" {
 		t.Fatal("unproven strong backup claimed")
 	}

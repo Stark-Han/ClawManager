@@ -143,7 +143,7 @@ func verify(ctx context.Context, path, origin, id string, max int64, out io.Writ
 
 func main() {
 	reportFile := flag.String("report-file", "", "bounded integrity result file (verify only)")
-	operation := flag.String("operation", "verify", "verify, capture or restore (data-only)")
+	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
 	config := flag.String("bootstrap", "", "disaster-side bootstrap JSON file")
@@ -173,7 +173,7 @@ func main() {
 	switch *operation {
 	case "verify":
 		e = verify(ctx, *config, *origin, *id, *max, output)
-	case "capture", "restore":
+	case "capture", "restore", "verify-restored":
 		if *operationConfig == "" || *maxItems < 1 || *maxItems > 100000000 {
 			e = errors.New("validation_failed")
 		} else {

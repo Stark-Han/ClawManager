@@ -91,8 +91,7 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 		return e
 	}
 	if a.Status == "succeeded" {
-		_, e = s.Advance(ctx, t, l.Owner, "succeeded", "none")
-		return e
+		return r.completeVerified(ctx, s, l, t, a)
 	}
 	if a.Status == "failed" {
 		_, e = s.Advance(ctx, t, l.Owner, "failed", "runner_failed")
@@ -117,10 +116,26 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 	if e = s.FinishAttempt(ctx, l, t, a, result.State, result); e != nil {
 		return e
 	}
+	if result.State == "succeeded" {
+		return r.completeVerified(ctx, s, l, t, a)
+	}
 	failure := "none"
 	if result.State == "failed" {
 		failure = "runner_failed"
 	}
 	_, e = s.Advance(ctx, t, l.Owner, result.State, failure)
+	return e
+}
+
+// Persist evidence before deleting the exact owned Job. A lost deletion
+// response is retried from the durable successful attempt, without executing
+// verification again. The externally supplied bootstrap Secret is reusable
+// configuration and is deliberately not deleted by this task.
+func (r VerifyTaskRunner) completeVerified(ctx context.Context, s Store, l Leadership, t Task, a Attempt) error {
+	stopped, e := r.Jobs.Stop(ctx, a)
+	if e != nil || !stopped {
+		return e
+	}
+	_, e = s.Advance(ctx, t, l.Owner, "succeeded", "none")
 	return e
 }

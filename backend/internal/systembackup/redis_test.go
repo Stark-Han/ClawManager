@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,13 +20,26 @@ func TestRESPRejectsUnboundedMalformedAndNestedReplies(t *testing.T) {
 		}
 	}
 }
+func redisFixtureDatabase(t *testing.T) int {
+	t.Helper()
+	raw := os.Getenv("TEST_SYSTEM_BACKUP_REDIS_DATABASE")
+	if raw == "" {
+		return 0
+	}
+	value, e := strconv.Atoi(raw)
+	if e != nil || value < 0 || value > 15 {
+		t.Fatal("invalid fixture Redis database")
+	}
+	return value
+}
+
 func redisFixture(t *testing.T, variable string) *RedisClient {
 	t.Helper()
 	port := os.Getenv(variable)
 	if port == "" {
 		t.Skip("requires disposable Redis fixtures")
 	}
-	c, e := ConnectRedis(context.Background(), RedisOptions{Address: "127.0.0.1:" + port, Password: os.Getenv("TEST_SYSTEM_BACKUP_REDIS_PASSWORD"), MaxReplyBytes: 8 << 20})
+	c, e := ConnectRedis(context.Background(), RedisOptions{Database: redisFixtureDatabase(t), Address: "127.0.0.1:" + port, Password: os.Getenv("TEST_SYSTEM_BACKUP_REDIS_PASSWORD"), MaxReplyBytes: 8 << 20})
 	if e != nil {
 		t.Fatal(e)
 	}

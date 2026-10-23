@@ -95,3 +95,16 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 接管回归先复现网络隔离标签、并发数/完成数、资源预算及额外 lifecycle/probe 被修改后仍被接受的问题，再补冻结条件核对。新负测与真实 Job 接管均通过。
 
 容量测试使用 2 GiB/2048 文件、10000 Skill 对象、100000 Team 事件、100000 Redis 记录，固定 4 GiB/200000 项预算。首轮外部发布与验证 Job 通过，但服务器测试包缺少控制迁移文件，尚未恢复；补齐运行材料后重跑，不把首轮算成功。
+
+## 独立恢复读验、自动收尾和容量结果（01:05）
+
+- 新增 `system-backup-artifact --operation verify-restored`：operation-config 只接受冻结 intent（run_id、normalized_at、history_parts）、verifier_dsn_file、只读 Redis/object 连接、bucket_mapping 和 directory；不接收恢复写 SQL、控制库或源 Kubernetes 凭据。对照认证源重新归一化并核对 SQL、工作区、对象、Redis 和两份加密资源历史，不写目标，不启动业务。intent 必须由可信控制证据提供，不能把目标上的可编辑 JSON 当作可信 intent；当前尚未自动绑定该意图或证明写凭据已销毁，结果始终不授予 acceptance。
+- 真实测试使用 SELECT-only SQL、独立 Redis ACL、独立 MinIO 读取账号，实际确认对象 PUT/DELETE 和 Redis SET 被拒绝。独立 CLI 核对通过，修改恢复后的加密历史可被检出。
+- artifact_verify 成功结果先写入 durable attempt，再按固定身份删除 Job并等待 Foreground 清理确认，才将任务置为成功；复用的外部 bootstrap Secret 不由该任务删除。真实控制库与 Kubernetes Job 联合通过换主、同 attempt、持久报告、Job/Pod 完全清理验收。
+- 复现 SQL verifier 对 1000 行发出 1007 次查询；改为每表一个按主键排序的流式 cursor。真实测试验证查询次数不随行数增长，并继续检出字段损坏、额外行和超预算。全 75 表/多 owner/状态与结果保留回归通过（47.937 秒）。
+- large-smoke 重跑通过：2 GiB/2048 文件、10000 Skill 对象、100000 Team 事件、100000 Redis 记录；加基础样本，恢复2052文件条目、10001对象、100001Redis记录。1237.17秒，测试进程峰值83944KiB；详细元数据见 `20261023-large-smoke.json`。该次运行在流式 SQL verifier 优化前启动，不声称已测得新版本容量耗时；指标不包括数据库/Redis/对象存储/Job Pod。
+
+上述新增只补齐组件能力；自动创建/销毁恢复资源、全部 writer 与 Runtime 停写、正式 checkpoint/finalizer/catalog、强认证和完整 UI 等原有缺口仍存在。
+
+- 独立校验和控制器联合链路在流式 SQL 优化后再次通过（100.40秒，包含真实 capture/restore/verify-restored 三个 CLI、真实 Job、控制器换主与清理）。
+- 系统级恢复新增完整 SQL inventory 预检：在任何业务数据写入前验证 75 张登记表全部出现，即使空表也不能省略。合法的逐表 checksum 不再能掩盖缺少 Team 表；独立恢复读验同样要求完整 inventory。单表工具仍保留其显式局部处理能力。
