@@ -48,7 +48,7 @@ func fixtureDatabase(t *testing.T) *sql.DB {
 func controlDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := fixtureDatabase(t)
-	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql", "082_add_backup_attempt_request.sql"} {
+	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql", "082_add_backup_attempt_request.sql", "083_add_backup_strong_auth_nonce.sql"} {
 		directory := os.Getenv("TEST_SYSTEM_BACKUP_MIGRATIONS_DIR")
 		if directory == "" {
 			directory = "../db/migrations"

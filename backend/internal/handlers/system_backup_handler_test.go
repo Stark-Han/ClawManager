@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -47,5 +48,17 @@ func TestBackupPermissionChecksPrecedeDatabaseAccess(t *testing.T) {
 				t.Fatalf("got %d: %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestBackupStrongAuthFailuresStayExplicit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, code := range []string{"strong_auth_required", "strong_auth_expired", "strong_auth_invalid_issuer", "strong_auth_invalid", "strong_auth_replayed"} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		backupError(c, errors.New(code))
+		if w.Code != 401 || !strings.Contains(w.Body.String(), code) || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal(code, w.Code, w.Body.String())
+		}
 	}
 }

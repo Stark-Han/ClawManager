@@ -877,6 +877,12 @@ func main() {
 		}
 		backupStore := systembackup.Store{DB: backupSQL, InstallationID: strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_INSTALLATION_ID"))}
 		backupHandler := handlers.NewSystemBackupHandler(backupStore, backupBindings)
+		backupMFA, backupMFAErr := systembackup.LoadStrongAuthVerifier(strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_STRONG_AUTH_FILE")))
+		if backupMFAErr != nil || backupMFA != nil && backupMFA.Audience != backupStore.InstallationID {
+			log.Println("System backup MFA bootstrap is invalid; sensitive configuration changes disabled")
+		} else {
+			backupHandler.SetStrongAuthVerifier(backupMFA)
+		}
 		backupAdmin := api.Group("/admin/system-backup")
 		backupAdmin.Use(middleware.Auth(), middleware.SetUserInfo(userRepo), middleware.NewAdminAuth(userRepo))
 		backupHandler.Register(backupAdmin)

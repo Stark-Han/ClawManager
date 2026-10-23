@@ -1,6 +1,7 @@
 import type {Locale} from '../../../lib/i18n';
 
 const en = {
+  profile:'Storage profile', gateTimeout:'Drain acquisition timeout (seconds)', holdTimeout:'Maximum pause (seconds)', taskTimeout:'Task deadline (seconds)', artifactBytes:'Maximum artifact size (bytes)', stagingBytes:'Staging capacity (bytes)', indexBytes:'Maximum index size (bytes)', sourceItems:'Maximum source items', artifactTarget:'Artifact storage', encryptionKey:'Encryption key', signingKey:'Signing key', catalog:'Recovery catalog', provider:'Provider', referenceName:'Immutable reference name', referenceVersion:'Immutable version', limits:'Capacity and time limits', changeReason:'Reason for change (required when reducing retention)', prepareAuth:'Prepare MFA approval', approvalRequest:'Approval request for your trusted MFA provider', approvalProof:'MFA approval credential', approvalHelp:'Complete MFA with the configured provider, then paste its signed approval. Approval is bound to this change and login session.',
   reportTitle:'Integrity verification passed', reportParts:'Backup parts read, decrypted and verified', reportNote:'This confirms artifact integrity. Accepted recovery status still requires the complete acceptance checks.',
   title: 'System backup', intro: 'Preserve Team tasks, results, files and their captured state. Restoring data does not resume interrupted work.',
   refresh: 'Refresh', config: 'Configuration', create: 'Create backup', creating: 'Submitting…', loading: 'Loading…',
@@ -18,6 +19,7 @@ const en = {
 };
 type Messages = typeof en;
 const zh: Messages = {
+ profile:'存储类型',gateTimeout:'停写等待上限（秒）',holdTimeout:'最长暂停时间（秒）',taskTimeout:'任务截止时长（秒）',artifactBytes:'备份容量上限（字节）',stagingBytes:'暂存容量（字节）',indexBytes:'索引容量上限（字节）',sourceItems:'来源条目上限',artifactTarget:'备份存储',encryptionKey:'加密密钥',signingKey:'签名密钥',catalog:'灾备目录',provider:'提供方',referenceName:'固定引用名称',referenceVersion:'固定版本',limits:'容量与时长限制',changeReason:'变更原因（减少保留时必填）',prepareAuth:'准备多因素认证授权',approvalRequest:'交给受信任认证提供方的授权请求',approvalProof:'多因素认证授权凭据',approvalHelp:'在已配置的认证提供方完成多因素认证，再填写其签发的授权凭据。授权仅适用于本次修改和当前登录会话。',
  reportTitle:'完整性校验通过',reportParts:'已读取、解密并校验的备份数据类别',reportNote:'此结果证明备份内容通过完整性检查；正式恢复资格仍以完整验收结果为准。',
  title:'系统备份',intro:'保留 Team 任务、产物、文件与捕获时的状态。恢复数据后不会继续执行被打断的任务。',refresh:'刷新',config:'配置',create:'创建备份',creating:'正在提交…',loading:'正在加载…',noPoints:'尚无合格恢复点',points:'合格恢复点',disabled:'备份功能未启用',notReady:'备份依赖尚未就绪',ready:'可以创建备份',dependencies:'就绪检查',passed:'通过',pending:'未就绪',tasks:'任务记录',empty:'尚无备份或恢复验证任务。',task:'任务',type:'类型',status:'状态',created:'创建时间',details:'详情',back:'返回备份',cancel:'取消任务',events:'执行事件',noEvents:'尚无执行事件。',failure:'失败原因',eligibility:'恢复资格',eligible:'已合格',ineligible:'未合格',enabled:'启用备份',retention:'保留天数',minimum:'最少保留恢复点',save:'保存配置',close:'关闭',saved:'配置已保存，仍需通过捕获与恢复验证。',version:'配置版本',scope:'包含用户、实例、AI 网关、Team、系统资源和技能库六个数据域。',auth:'当前管理员尚未获得备份权限。',bootstrap:'备份身份、权限或依赖尚未配置完成，尚未创建备份。',error:'请求失败，请刷新后重试。',conflict:'配置或任务状态已变化，请刷新后重试。',mfa:'此变更需要近期多因素认证及安全配置权限。',active:'中断任务保留为历史记录，不会重新执行。',storage:'存储与密钥引用',unconfigured:'未配置',unavailable:'没有可用的合格备份。',deadline:'截止时间',purpose:'用途',functional:'功能测试，不属于合格恢复点',
 };

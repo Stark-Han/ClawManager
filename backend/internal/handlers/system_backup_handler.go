@@ -14,6 +14,11 @@ type SystemBackupHandler struct {
 	store      systembackup.Store
 	bindings   systembackup.RoleBindings
 	configured bool
+	strongAuth *systembackup.StrongAuthVerifier
+}
+
+func (h *SystemBackupHandler) SetStrongAuthVerifier(v *systembackup.StrongAuthVerifier) {
+	h.strongAuth = v
 }
 
 func NewSystemBackupHandler(s systembackup.Store, b systembackup.RoleBindings) *SystemBackupHandler {
@@ -23,6 +28,7 @@ func (h *SystemBackupHandler) Register(r *gin.RouterGroup) {
 	r.GET("/overview", h.overview)
 	r.GET("/config", h.config)
 	r.PUT("/config", h.saveConfig)
+	r.POST("/config/authorization", h.configAuthorization)
 	r.GET("/tasks", h.list)
 	r.POST("/tasks", h.create)
 	r.GET("/tasks/:id", h.detail)
@@ -58,7 +64,7 @@ func backupError(c *gin.Context, err error) {
 		status = 409
 	case "unsupported_runner_p1", "unsupported_profile_p1", "capacity_exceeded":
 		status = 422
-	case "strong_auth_required":
+	case "strong_auth_required", "strong_auth_expired", "strong_auth_invalid_issuer", "strong_auth_invalid", "strong_auth_replayed":
 		status = 401
 	case "rate_limited":
 		status = 429
@@ -136,27 +142,43 @@ func (h *SystemBackupHandler) saveConfig(c *gin.Context) {
 	if !h.allow(c, systembackup.Configure) {
 		return
 	}
-	var input struct {
-		Expected uint64                    `json:"expected_version"`
-		Config   systembackup.BackupConfig `json:"config"`
-	}
+	var input systembackup.ConfigChange
 	if !backupBody(c, &input) {
 		return
 	}
-	v, replay, e := h.store.SaveConfigIdempotent(c.Request.Context(), input.Expected, c.GetInt("userID"), c.GetHeader("Idempotency-Key"), input.Config, func(before, after systembackup.BackupConfig) error {
-		if systembackup.SecurityConfigChanged(before, after) || after.RetentionSeconds < before.RetentionSeconds || after.MinimumRecoveryPoints < before.MinimumRecoveryPoints {
-			if !h.bindings.Allows(c.GetInt("userID"), systembackup.SecurityConfigure) {
-				return errors.New("permission_denied")
-			}
-			return errors.New("strong_auth_required")
-		}
-		return nil
-	})
+	v, replay, e := h.store.SaveConfigAuthorized(c.Request.Context(), c.GetInt("userID"), c.GetHeader("Idempotency-Key"), input, systembackup.SessionBinding(c.GetHeader("Authorization")), c.GetHeader("X-System-Backup-Proof"), h.bindings, h.strongAuth)
 	if e != nil {
 		backupError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": v, "idempotent_replay": replay})
+}
+
+// This prepares a binding for a trusted MFA issuer, not an MFA proof. It never
+// consumes a nonce or gives the application the issuer's signing capability.
+func (h *SystemBackupHandler) configAuthorization(c *gin.Context) {
+	if !h.allow(c, systembackup.Configure) {
+		return
+	}
+	var input systembackup.ConfigChange
+	if !backupBody(c, &input) {
+		return
+	}
+	if h.strongAuth == nil || h.strongAuth.Validate() != nil || h.strongAuth.Audience != h.store.InstallationID {
+		backupError(c, errors.New("not_ready"))
+		return
+	}
+	key := c.GetHeader("Idempotency-Key")
+	if len(key) < 8 || len(key) > 128 {
+		backupError(c, errors.New("validation_failed"))
+		return
+	}
+	hash, e := systembackup.RequestHash(input)
+	if e != nil {
+		backupError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"aud": h.store.InstallationID, "sub": strconv.Itoa(c.GetInt("userID")), "session": systembackup.SessionBinding(c.GetHeader("Authorization")), "endpoint": "PUT /config", "request_hash": hash, "idempotency_key": key}})
 }
 func (h *SystemBackupHandler) list(c *gin.Context) {
 	if !h.allow(c, systembackup.Read) {

@@ -10,7 +10,7 @@ import (
 // SQL-only mutations and their replay response commit in one transaction.
 // Installation -> operation -> business/control rows is the fixed lock order.
 // External effects require a separate durable intent and must not use this.
-func idempotentOperation[T any](ctx context.Context, s Store, actor int, endpoint, key string, request any, apply func(*sql.Tx) (T, error)) (T, bool, error) {
+func idempotentOperation[T any](ctx context.Context, s Store, actor int, endpoint, key string, request any, apply func(*sql.Tx) (T, error), beforeCommit ...func(*sql.Tx) error) (T, bool, error) {
 	var zero T
 	if actor < 1 || !idemPattern.MatchString(key) || len(endpoint) > 160 || apply == nil {
 		return zero, false, errors.New("validation_failed")
@@ -63,6 +63,11 @@ func idempotentOperation[T any](ctx context.Context, s Store, actor int, endpoin
 	}
 	if e = appendEvent(ctx, tx, "", "operation_succeeded", map[string]any{"operation_id": id, "actor_id": actor, "endpoint": endpoint}); e != nil {
 		return zero, false, e
+	}
+	for _, check := range beforeCommit {
+		if e = check(tx); e != nil {
+			return zero, false, e
+		}
 	}
 	return result, false, tx.Commit()
 }
