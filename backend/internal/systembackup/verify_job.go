@@ -229,6 +229,14 @@ func (j VerifyJobs) Stop(ctx context.Context, a Attempt) (bool, error) {
 	if !matchesVerifyJob(w, g) {
 		return false, errors.New("cleanup_unsafe_target")
 	}
+	// A completed observation binds the original execution UID. A new object
+	// with identical name/spec is not the execution whose result was persisted.
+	if a.Status == "succeeded" || a.Status == "failed" {
+		var result VerifyJobResult
+		if strictDecode(a.Result, &result) != nil || result.State != a.Status || result.JobUID == "" || result.JobUID != string(g.UID) {
+			return false, errors.New("cleanup_unsafe_target")
+		}
+	}
 	uid := types.UID(g.UID)
 	policy := metav1.DeletePropagationForeground
 	e = j.Client.BatchV1().Jobs(r.Namespace).Delete(ctx, g.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: &policy})

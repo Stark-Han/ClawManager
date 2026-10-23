@@ -111,4 +111,10 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 
 ## 执行身份与绝对截止时间（01:17）
 
-先用回归复现后补齐：Job 完成结果还要核对实际 Pod 的冻结配置（含网络隔离标签、唯一容器、Secret 卷、权限、资源预算与无额外执行钩子），拒绝 Pod admission 后的替换配置。新 attempt 固定 task 的绝对 deadline_at，传给 CLI 的 --deadline-at；进程使用绝对期限与 --timeout 较早者，Job 被重建或延迟启动也不能重新获得原时长。旧冻结请求仍可读取/清理，但没有新请求的绝对期限保证；不能改写旧请求 bytes 来伪称已补齐。真实 MySQL/单元回归通过，当前候选待实际新镜像 Job 验收。
+先用回归复现后补齐：Job 完成结果还要核对实际 Pod 的冻结配置（含网络隔离标签、唯一容器、Secret 卷、权限、资源预算与无额外执行钩子），拒绝 Pod admission 后的替换配置。新 attempt 固定 task 的绝对 deadline_at，传给 CLI 的 --deadline-at；进程使用绝对期限与 --timeout 较早者，Job 被重建或延迟启动也不能重新获得原时长。旧冻结请求仍可读取/清理，但没有新请求的绝对期限保证；不能改写旧请求 bytes 来伪称已补齐。真实 MySQL/单元回归通过，`995a364b` 实际新镜像 Job 与真实控制器联合验收通过（98.58 秒）。
+
+## 清理身份回归（01:35）
+
+先复现成功结果已保存原 Job UID，但清理只比同名/同配置而误删替代 Job 的问题；修复为成功/失败 attempt 清理必须匹配持久结果中的 UID，缺失或冲突拒绝删除。首次成功收尾也重新读取已提交 attempt，避免使用 FinishAttempt 之前的内存值。对应替换对象负测、首次清理与真实 MySQL 控制器回归通过（7.557 秒）。这仅补齐已持久结果的身份检查；运行中 Job 的完整 incarnation/observation 账本仍待补充，不能声称已解决所有同名重建的接管问题。失败现场保持原保留策略。
+
+清理 UID 修复后的真实六源与控制器联合回归通过（96.84 秒）；本地控制器/driver 使用本次修复，Job 及 capture/restore/verify-restored CLI 使用未改变的 995a364b 二进制。没有将此描述成尚未构建的新镜像已运行。

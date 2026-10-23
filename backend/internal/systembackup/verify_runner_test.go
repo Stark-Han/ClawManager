@@ -104,10 +104,37 @@ func TestVerifyJobAdoptionCollisionAndBoundResult(t *testing.T) {
 }
 
 type observedJobs struct {
-	ids     []string
-	stopIDs []string
-	result  VerifyJobResult
-	stop    bool
+	ids          []string
+	stopIDs      []string
+	stopAttempts []Attempt
+	result       VerifyJobResult
+	stop         bool
+}
+
+func TestVerificationCleanupRejectsReplacedJobUID(t *testing.T) {
+	ctx := context.Background()
+	raw, _ := json.Marshal(verifyFixtureRequest())
+	result, _ := json.Marshal(VerifyJobResult{State: "succeeded", JobUID: "original-job-uid"})
+	a := Attempt{ID: "sat_" + strings.Repeat("2", 32), TaskID: "sav_" + strings.Repeat("3", 32), Status: "succeeded", Request: raw, Result: result}
+	job, request, e := verifyJob(a)
+	if e != nil {
+		t.Fatal(e)
+	}
+	job.UID = "replacement-job-uid"
+	client := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: request.Namespace, UID: types.UID(request.NamespaceUID)}}, job)
+	if _, e := (VerifyJobs{Client: client}).Stop(ctx, a); e == nil {
+		t.Fatal("cleanup deleted a replacement Job despite the persisted original UID")
+	}
+	if _, e := client.BatchV1().Jobs(request.Namespace).Get(ctx, job.Name, metav1.GetOptions{}); e != nil {
+		t.Fatal("replacement Job was deleted", e)
+	}
+	job.UID = "original-job-uid"
+	if _, e = client.BatchV1().Jobs(request.Namespace).Update(ctx, job, metav1.UpdateOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = (VerifyJobs{Client: client}).Stop(ctx, a); e != nil {
+		t.Fatal("matching original Job could not be cleaned", e)
+	}
 }
 
 func TestVerificationSuccessWaitsForOwnedRunnerCleanup(t *testing.T) {
@@ -136,6 +163,9 @@ func TestVerificationSuccessWaitsForOwnedRunnerCleanup(t *testing.T) {
 	if e != nil || attempt.Status != "succeeded" {
 		t.Fatal("result not durable before cleanup", e)
 	}
+	if len(jobs.stopAttempts) != 1 || jobs.stopAttempts[0].Status != "succeeded" || string(jobs.stopAttempts[0].Result) != string(attempt.Result) {
+		t.Fatal("first cleanup did not receive the persisted Job identity")
+	}
 	// Subsequent ticks use the durable result, never start another verifier.
 	jobs.result = VerifyJobResult{State: "failed"}
 	jobs.stop = true
@@ -157,6 +187,7 @@ func (j *observedJobs) Observe(_ context.Context, a Attempt) (VerifyJobResult, e
 }
 func (j *observedJobs) Stop(_ context.Context, a Attempt) (bool, error) {
 	j.stopIDs = append(j.stopIDs, a.ID)
+	j.stopAttempts = append(j.stopAttempts, a)
 	return j.stop, nil
 }
 func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T) {

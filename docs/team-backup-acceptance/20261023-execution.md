@@ -7,7 +7,20 @@
 - 测试环境原 App 镜像：10.130.14.23:5000/clawmanager-hxc-app:team-owner-placement-cards-20261023-v1。
 - 初始只读检查：32543 对应指定租户；App 就绪。App 工作区通过 NFS service 挂载，底层受管 PV 为 HostPath；尚未证明符合 strong capture，不冒充 CSI 快照能力。
 
-## 当前结果（持续更新，2026-10-23 23:52）
+## 最新结果（2026-10-24 01:35）
+
+完整功能未交付，按全部必需条件统计为 **0/5 完整阶段通过**。六源加密发布、隔离数据恢复、独立只读核对和验证 Job 协调已通过组件/联合测试，但控制台一键备份与自动演练尚未贯通。详细逐项缺口及继续开发顺序见 [remaining-work.md](remaining-work.md)，不能把部署成功视为整体验收。
+
+- ClawManager 当前已部署代码 `995a364b13321ed676e41cd8e00610dc9d11cb89`，镜像 `10.130.14.23:5000/clawmanager-hxc-app:team-backup-jobs-20261023-995a364b`，digest `sha256:6d933e983e577fdfa4e5baf570b0b113ad5c3afefca9427c0a2a4d9e6dc5b1ae`。32543 version API 已返回此 commit，32556 auth challenge 复查返回 201。App/gateway 最终就绪状态另在收尾证据中登记。
+- `/home/hxc/clawmanager-apply.sh` 首次网关探测短暂不可达，命令退出 1；后续探测成功。保留此失败事实，不记作部署命令全程成功；共享部署脚本未修改。
+- 最新实际 Job + SQL 控制器联合测试通过 98.58 秒，覆盖实际 Pod 身份、绝对期限、换主、报告保存与 Foreground 清理，见 `20261024-final-candidate.json`。
+- 容量验证通过：2 GiB 文件、10000 Skill 对象、100000 Team 事件、100000 Redis 记录；含基础样本的实际计数及资源测量边界见 `20261023-large-smoke.json`。该容量测试使用较早的 `a989ca13` 代码，不冒称测得后续优化的容量耗时。
+- AgentsRuntime 本地 `9e9a64191b3232bc9c77b9c02da4e3c532710dd9`；未构建、推送或部署 Runtime 镜像。两个仓库均为 `codex/team-personal-integration`，未推送 Git，未操作正式环境。
+- SQL/HTTP gate 与正式备份依赖尚未在租户开启；界面保持未就绪。没有伪造正式资格或手工绕过门禁。
+
+下面是各时点历史记录，较早的镜像和未完成项不得覆盖本节或后续收尾记录。
+
+## 历史结果（2026-10-23 23:52）
 
 | 项目 | 状态 | 证据/限制 |
 | --- | --- | --- |

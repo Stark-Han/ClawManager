@@ -133,6 +133,16 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 // verification again. The externally supplied bootstrap Secret is reusable
 // configuration and is deliberately not deleted by this task.
 func (r VerifyTaskRunner) completeVerified(ctx context.Context, s Store, l Leadership, t Task, a Attempt) error {
+	// FinishAttempt does not mutate the caller's Attempt value. Read the
+	// committed result even on the first cleanup tick so Stop sees its Job UID.
+	persisted, e := s.GetAttempt(ctx, t.ID, "verify")
+	if e != nil {
+		return e
+	}
+	if persisted.ID != a.ID || persisted.Status != "succeeded" {
+		return errors.New("state_conflict")
+	}
+	a = persisted
 	stopped, e := r.Jobs.Stop(ctx, a)
 	if e != nil || !stopped {
 		return e
