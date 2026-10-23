@@ -165,6 +165,7 @@ type Controller struct {
 	Owner        string
 	PollInterval time.Duration
 	Verifier     *VerifyTaskRunner
+	Capturer     *CaptureTaskRunner
 }
 
 // Run maintains the leader and safely closes unstarted canceled/expired work.
@@ -199,7 +200,7 @@ func (c Controller) Tick(ctx context.Context) error {
 	if e = c.Store.RecordHealth(ctx, cfg.Version, "controller", "healthy", "none", RegistryHash(), 30); e != nil {
 		return e
 	}
-	rows, e := c.Store.DB.QueryContext(ctx, "SELECT public_id,row_version FROM system_backup_tasks WHERE origin_installation_id=? AND (status IN ('pending','canceling') OR (task_type='artifact_verify' AND status='running')) AND (lease_owner IS NULL OR lease_owner=? OR lease_until<=UTC_TIMESTAMP(6)) ORDER BY created_at,public_id LIMIT 100", c.Store.InstallationID, c.Owner)
+	rows, e := c.Store.DB.QueryContext(ctx, "SELECT public_id,row_version FROM system_backup_tasks WHERE origin_installation_id=? AND (status IN ('pending','canceling') OR (task_type='artifact_verify' AND status='running') OR (task_type='backup' AND status NOT IN ('succeeded','failed','canceled'))) AND (lease_owner IS NULL OR lease_owner=? OR lease_until<=UTC_TIMESTAMP(6)) ORDER BY created_at,public_id LIMIT 100", c.Store.InstallationID, c.Owner)
 	if e != nil {
 		return e
 	}
@@ -235,6 +236,12 @@ func (c Controller) Tick(ctx context.Context) error {
 		}
 		if e != nil {
 			return e
+		}
+		if c.Capturer != nil && t.Type == Backup && !t.Terminal() {
+			if e = c.Capturer.Tick(ctx, c.Store, l, t, cfg); e != nil && !errors.Is(e, ErrFence) {
+				return e
+			}
+			continue
 		}
 		if c.Verifier != nil && t.Type == ArtifactVerify && !t.Terminal() {
 			if e = c.Verifier.Tick(ctx, c.Store, l, t, cfg); e != nil && !errors.Is(e, ErrFence) {

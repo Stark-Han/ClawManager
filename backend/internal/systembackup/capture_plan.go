@@ -200,7 +200,7 @@ func (s Store) BindCaptureJob(ctx context.Context, l Leadership, t Task, a Attem
 		return err
 	}
 	defer tx.Rollback()
-	if x.Status != "preparing" || a.TaskID != x.ID {
+	if x.Status != "preparing" && x.Status != "canceling" || a.TaskID != x.ID {
 		return errors.New("state_conflict")
 	}
 	stored, err := scanAttempt(tx.QueryRowContext(ctx, "SELECT "+attemptColumns+" FROM system_backup_attempts WHERE public_id=? AND task_id=? FOR UPDATE", a.ID, x.ID))

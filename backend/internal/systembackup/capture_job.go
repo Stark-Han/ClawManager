@@ -47,6 +47,24 @@ type CaptureJobResult struct {
 }
 type CaptureJobs struct{ Client kubernetes.Interface }
 
+func (j CaptureJobs) Existing(ctx context.Context, a Attempt) (*batchv1.Job, error) {
+	want, r, err := captureJob(a)
+	if err != nil {
+		return nil, err
+	}
+	if err = (VerifyJobs{Client: j.Client}).namespace(ctx, r.VerifyJobRequest); err != nil {
+		return nil, err
+	}
+	job, err := j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, want.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !matchesCaptureJob(want, job) {
+		return nil, errors.New("artifact_conflict")
+	}
+	return job, nil
+}
+
 func captureJob(a Attempt) (*batchv1.Job, CaptureJobRequest, error) {
 	var r CaptureJobRequest
 	if !attemptIDPattern.MatchString(a.ID) || strictDecode(a.Request, &r) != nil || r.VerifyJobRequest.Validate() != nil || r.DeadlineAt.IsZero() || r.MaxItems < 1 || r.MaxItems > 100000000 || r.BackupID != a.TaskID || r.Phase != a.Phase || (r.Phase != "capture" && r.Phase != "secret_capture") || r.Gate.Owner != a.TaskID || r.Gate.Generation == 0 || r.Gate.Token == 0 || !refPattern.MatchString(r.BootstrapUID) || !refPattern.MatchString(r.OperationSecretUID) || r.OperationSecret == r.BootstrapSecret || r.NodeName != "" && len(validation.IsDNS1123Subdomain(r.NodeName)) != 0 {

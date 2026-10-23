@@ -74,10 +74,16 @@ func TestRealSecretCaptureJobBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal("fixture migrations unavailable")
 	}
-	for _, statement := range strings.Split(string(ddl), ";") {
-		if strings.TrimSpace(statement) != "" {
-			if _, err = db.ExecContext(ctx, statement); err != nil {
-				t.Fatal("fixture migration failed", err)
+	var initialized int
+	if err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='system_backup_capture_jobs'").Scan(&initialized); err != nil {
+		t.Fatal("fixture schema status unavailable")
+	}
+	if initialized == 0 {
+		for _, statement := range strings.Split(string(ddl), ";") {
+			if strings.TrimSpace(statement) != "" {
+				if _, err = db.ExecContext(ctx, statement); err != nil {
+					t.Fatal("fixture migration failed", err)
+				}
 			}
 		}
 	}

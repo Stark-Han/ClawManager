@@ -118,7 +118,7 @@ func (g Gate) WriteWithLease(ctx context.Context, lease MutationLease, write fun
 }
 
 func (g Gate) Begin(ctx context.Context, scope, owner, registryHash string, acquire, hold time.Duration) (GateOwnership, error) {
-	if owner == "" || len(owner) > 128 || len(registryHash) != 64 || acquire <= 0 || hold <= acquire || hold > 15*time.Minute {
+	if owner == "" || len(owner) > 128 || len(registryHash) != 64 || acquire <= 0 || acquire > 10*time.Minute || hold <= 0 || hold > time.Hour {
 		return GateOwnership{}, errors.New("invalid gate acquisition")
 	}
 	tx, err := g.DB.BeginTx(ctx, nil)

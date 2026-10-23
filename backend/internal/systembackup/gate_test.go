@@ -48,7 +48,7 @@ func fixtureDatabase(t *testing.T) *sql.DB {
 func controlDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := fixtureDatabase(t)
-	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql", "082_add_backup_attempt_request.sql", "083_add_backup_strong_auth_nonce.sql", "084_add_backup_external_actions.sql", "085_add_backup_capture_coordination.sql"} {
+	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql", "082_add_backup_attempt_request.sql", "083_add_backup_strong_auth_nonce.sql", "084_add_backup_external_actions.sql", "085_add_backup_capture_coordination.sql", "086_add_backup_capture_abort.sql"} {
 		directory := os.Getenv("TEST_SYSTEM_BACKUP_MIGRATIONS_DIR")
 		if directory == "" {
 			directory = "../db/migrations"
@@ -66,6 +66,25 @@ func controlDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+func TestGateAcceptsIndependentConfiguredAcquireAndHoldBudgets(t *testing.T) {
+	db := controlDB(t)
+	g := Gate{db}
+	ctx := context.Background()
+	for i, budget := range [][2]time.Duration{{60 * time.Second, 30 * time.Second}, {10 * time.Second, time.Hour}} {
+		scope := "budget-" + string(rune('a'+i))
+		if err := g.EnsureScope(ctx, scope); err != nil {
+			t.Fatal(err)
+		}
+		own, err := g.Begin(ctx, scope, "backup-budget", RegistryHash(), budget[0], budget[1])
+		if err != nil {
+			t.Fatalf("valid backup configuration rejected: %v", err)
+		}
+		if _, err = g.Hold(ctx, own); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestGateRequiresExpiredWritersToStopAndAllParticipantsToAck(t *testing.T) {
