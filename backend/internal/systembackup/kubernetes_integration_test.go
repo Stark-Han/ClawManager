@@ -40,7 +40,7 @@ func realKubernetesCaptureSources(t *testing.T) CaptureSources {
 		t.Fatal("fixture credential invalid")
 	}
 	client := func(token string) dynamic.Interface {
-		d, e := dynamic.NewForConfig(&rest.Config{Host: "https://127.0.0.1:36443", BearerToken: token, Timeout: 10 * time.Second, TLSClientConfig: rest.TLSClientConfig{CAData: []byte(c.CA), ServerName: "10.130.14.23"}})
+		d, e := dynamic.NewForConfig(&rest.Config{Host: fixtureKubernetesServer(), BearerToken: token, Timeout: 10 * time.Second, TLSClientConfig: rest.TLSClientConfig{CAData: []byte(c.CA), ServerName: "10.130.14.23"}})
 		if e != nil {
 			t.Fatal("fixture client invalid")
 		}

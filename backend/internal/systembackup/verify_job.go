@@ -116,10 +116,23 @@ func (j VerifyJobs) Ensure(ctx context.Context, a Attempt) (*batchv1.Job, error)
 }
 func matchesVerifyJob(want, got *batchv1.Job) bool {
 	w, g := want.Spec.Template.Spec, got.Spec.Template.Spec
+	// These labels select the verifier-only NetworkPolicy. A matching request
+	// annotation is insufficient when isolation or the fixed budget changed.
+	for _, key := range []string{"backup.clawmanager.io/attempt", "backup.clawmanager.io/task"} {
+		if got.Labels[key] != want.Labels[key] || got.Spec.Template.Labels[key] != want.Spec.Template.Labels[key] {
+			return false
+		}
+	}
+	if got.Spec.Parallelism == nil || *got.Spec.Parallelism != 1 || got.Spec.Completions == nil || *got.Spec.Completions != 1 || len(g.EphemeralContainers) != 0 || (g.ShareProcessNamespace != nil && *g.ShareProcessNamespace) {
+		return false
+	}
 	if got.Name != want.Name || got.Namespace != want.Namespace || got.Annotations["backup.clawmanager.io/request-sha256"] != want.Annotations["backup.clawmanager.io/request-sha256"] || got.Labels["backup.clawmanager.io/attempt"] != want.Labels["backup.clawmanager.io/attempt"] || len(g.Containers) != 1 || len(g.InitContainers) != 0 || g.HostNetwork || g.HostPID || g.HostIPC || g.ServiceAccountName != w.ServiceAccountName || g.AutomountServiceAccountToken == nil || *g.AutomountServiceAccountToken || g.RestartPolicy != w.RestartPolicy || !reflect.DeepEqual(g.Volumes, w.Volumes) || !reflect.DeepEqual(g.SecurityContext, w.SecurityContext) {
 		return false
 	}
 	a, b := w.Containers[0], g.Containers[0]
+	if !reflect.DeepEqual(a.Resources, b.Resources) || b.Lifecycle != nil || b.LivenessProbe != nil || b.ReadinessProbe != nil || b.StartupProbe != nil {
+		return false
+	}
 	return a.Name == b.Name && a.Image == b.Image && reflect.DeepEqual(a.Command, b.Command) && reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.VolumeMounts, b.VolumeMounts) && reflect.DeepEqual(a.SecurityContext, b.SecurityContext) && len(b.Env) == 0 && len(b.EnvFrom) == 0 && b.TerminationMessagePath == a.TerminationMessagePath && b.TerminationMessagePolicy == a.TerminationMessagePolicy && got.Spec.BackoffLimit != nil && *got.Spec.BackoffLimit == 0 && got.Spec.ActiveDeadlineSeconds != nil && *got.Spec.ActiveDeadlineSeconds == *want.Spec.ActiveDeadlineSeconds
 }
 func (j VerifyJobs) Observe(ctx context.Context, a Attempt) (VerifyJobResult, error) {

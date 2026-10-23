@@ -42,7 +42,7 @@ func runRealVerifyJob(t *testing.T, ctx context.Context, store ImmutableObjectSt
 	if json.Unmarshal(raw, &cfg) != nil {
 		t.Fatal("Job fixture credentials invalid")
 	}
-	client, e := kubernetes.NewForConfig(&rest.Config{Host: "https://127.0.0.1:36443", BearerToken: cfg.Token, Timeout: 10 * time.Second, TLSClientConfig: rest.TLSClientConfig{CAData: []byte(cfg.CA), ServerName: "10.130.14.23"}})
+	client, e := kubernetes.NewForConfig(&rest.Config{Host: fixtureKubernetesServer(), BearerToken: cfg.Token, Timeout: 10 * time.Second, TLSClientConfig: rest.TLSClientConfig{CAData: []byte(cfg.CA), ServerName: "10.130.14.23"}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -76,6 +76,10 @@ func runRealVerifyJob(t *testing.T, ctx context.Context, store ImmutableObjectSt
 	aid, _ := RandomID("sat_")
 	tid, _ := RandomID("sav_")
 	request := VerifyJobRequest{Namespace: cfg.Namespace, NamespaceUID: cfg.NamespaceUID, Image: os.Getenv("TEST_SYSTEM_BACKUP_JOB_IMAGE"), ServiceAccount: "backup-verifier", BootstrapSecret: secretName, Origin: artifact.Manifest.Payload.OriginInstallationID, BackupID: artifact.Manifest.Payload.BackupID, MaxBytes: 64 << 20, DeadlineSeconds: 90}
+	if os.Getenv("TEST_SYSTEM_BACKUP_LARGE_SMOKE") == "1" {
+		request.MaxBytes = 4 << 30
+		request.DeadlineSeconds = 600
+	}
 	a := Attempt{ID: aid, TaskID: tid, Request: encode(request)}
 	jobs := VerifyJobs{Client: client}
 	t.Cleanup(func() {

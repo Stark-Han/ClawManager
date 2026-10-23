@@ -49,7 +49,11 @@ func controlDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := fixtureDatabase(t)
 	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql", "082_add_backup_attempt_request.sql"} {
-		ddl, err := os.ReadFile("../db/migrations/" + file)
+		directory := os.Getenv("TEST_SYSTEM_BACKUP_MIGRATIONS_DIR")
+		if directory == "" {
+			directory = "../db/migrations"
+		}
+		ddl, err := os.ReadFile(directory + "/" + file)
 		if err != nil {
 			t.Fatal(err)
 		}

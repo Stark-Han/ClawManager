@@ -18,6 +18,36 @@ import (
 func verifyFixtureRequest() VerifyJobRequest {
 	return VerifyJobRequest{Namespace: "restore-fixture", NamespaceUID: "namespace-uid", Image: "registry.invalid/backup@sha256:" + strings.Repeat("a", 64), ServiceAccount: "verifier", BootstrapSecret: "verifier-bootstrap", Origin: "verify-installation", BackupID: "sbk_" + strings.Repeat("1", 32), MaxBytes: 1 << 20, DeadlineSeconds: 60}
 }
+
+func TestVerifyJobRejectsChangedIsolationAndResourceBudget(t *testing.T) {
+	raw, _ := json.Marshal(verifyFixtureRequest())
+	a := Attempt{ID: "sat_" + strings.Repeat("2", 32), TaskID: "sav_" + strings.Repeat("3", 32), Request: raw}
+	want, _, e := verifyJob(a)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for name, mutate := range map[string]func(*batchv1.Job){
+		"network-policy-label": func(j *batchv1.Job) { delete(j.Spec.Template.Labels, "backup.clawmanager.io/attempt") },
+		"task-label":           func(j *batchv1.Job) { j.Labels["backup.clawmanager.io/task"] = "other" },
+		"parallelism":          func(j *batchv1.Job) { v := int32(2); j.Spec.Parallelism = &v },
+		"completions":          func(j *batchv1.Job) { v := int32(2); j.Spec.Completions = &v },
+		"resource-limits":      func(j *batchv1.Job) { j.Spec.Template.Spec.Containers[0].Resources.Limits = nil },
+		"lifecycle-exec": func(j *batchv1.Job) {
+			j.Spec.Template.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh"}}}}
+		},
+		"probe-exec": func(j *batchv1.Job) {
+			j.Spec.Template.Spec.Containers[0].LivenessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh"}}}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := want.DeepCopy()
+			mutate(got)
+			if matchesVerifyJob(want, got) {
+				t.Fatal("changed frozen execution adopted")
+			}
+		})
+	}
+}
 func TestVerifyJobAdoptionCollisionAndBoundResult(t *testing.T) {
 	ctx := context.Background()
 	request := verifyFixtureRequest()

@@ -16,7 +16,13 @@ import (
 )
 
 func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	budget := CaptureBudget{64 << 20, 10000}
+	timeout := 3 * time.Minute
+	if os.Getenv("TEST_SYSTEM_BACKUP_LARGE_SMOKE") == "1" {
+		budget = CaptureBudget{4 << 30, 200000}
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	source := realKubernetesCaptureSources(t)
 	source.MySQL = fullSchemaDB(t)
@@ -50,6 +56,9 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if _, e := source.Redis.command(ctx, []byte("SET"), key, payload); e != nil {
 		t.Fatal(e)
 	}
+	if os.Getenv("TEST_SYSTEM_BACKUP_LARGE_SMOKE") == "1" {
+		populateLargeSmoke(t, ctx, source, root, sourceObjects.Bucket, redisKey)
+	}
 	run, _ := RandomID("sdr_")
 	redisTarget := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT")
 	t.Cleanup(func() {
@@ -77,8 +86,10 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 				break
 			}
 		}
-		for _, k := range owned {
-			if _, e := redisTarget.command(context.Background(), []byte("DEL"), k); e != nil {
+		for start := 0; start < len(owned); start += 1000 {
+			end := min(start+1000, len(owned))
+			args := append([][]byte{[]byte("DEL")}, owned[start:end]...)
+			if _, e := redisTarget.command(context.Background(), args...); e != nil {
 				t.Error(e)
 			}
 		}
@@ -97,11 +108,11 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 			t.Fatal(e)
 		}
 	} else {
-		signed, e := CaptureFunctionalBundle(ctx, stage, "fixture-installation", id, source, CaptureBudget{64 << 20, 10000}, wrapper, signer, "v1")
+		signed, e := CaptureFunctionalBundle(ctx, stage, "fixture-installation", id, source, budget, wrapper, signer, "v1")
 		if e != nil {
 			t.Fatal("six-part capture:", e)
 		}
-		published, e = PublishFunctionalArtifact(ctx, external, stage, signed, signer, "v1", 64<<20)
+		published, e = PublishFunctionalArtifact(ctx, external, stage, signed, signer, "v1", budget.MaxBytes)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -111,14 +122,16 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 			}
 		}
 	}
+	t.Log("capture and publication complete")
 	// From here no source adapter is supplied to any restoration function.
 	recovered, e := OpenPublishedArtifact(ctx, external, "fixture-installation", id, pub, "v1")
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = VerifyPublishedArtifact(ctx, external, recovered, wrapper, 64<<20); e != nil {
+	if e = VerifyPublishedArtifact(ctx, external, recovered, wrapper, budget.MaxBytes); e != nil {
 		t.Fatal(e)
 	}
+	t.Log("independent artifact integrity verified")
 	runRealVerifyJob(t, ctx, external, recovered, wrapper, pub)
 	target, targetName := isolatedSchemaDB(t, source.MySQL)
 	control := Store{DB: controlDB(t), InstallationID: "restore-controller"}
@@ -141,10 +154,28 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if exe := os.Getenv("TEST_SYSTEM_BACKUP_VERIFY_EXE"); exe != "" {
 		report = runRestoreCLI(t, ctx, exe, external, recovered, wrapper, pub, run, restoreTarget, verifierDSN)
 	} else {
-		report, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, CaptureBudget{64 << 20, 10000})
+		report, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, budget)
 	}
 	if e != nil || report.Status != "succeeded" || report.Phase != "complete" || report.AcceptanceEligible || len(report.SQL.Tables) != 75 || len(report.HistoryParts) != 2 {
 		t.Fatal("data restore runner", report.Phase, e)
+	}
+	t.Logf("restored and read back: files=%d objects=%d redis=%d", report.VerifiedFileCount, report.VerifiedObjectCount, report.VerifiedRedisCount)
+	if os.Getenv("TEST_SYSTEM_BACKUP_LARGE_SMOKE") == "1" {
+		if report.SQL.Tables["team_events"] != 100000 || report.VerifiedObjectCount != 10001 || report.VerifiedRedisCount != 100001 || report.VerifiedFileCount < 2050 {
+			t.Fatal("large fixture count mismatch", report.SQL.Tables["team_events"], report.VerifiedObjectCount, report.VerifiedRedisCount, report.VerifiedFileCount)
+		}
+	}
+	if !report.Team.SQLReadbackVerified {
+		t.Fatal("Team report lacks SQL readback")
+	}
+	foundTransition := false
+	for _, state := range report.Team.States {
+		if state.Table == "team_tasks" && state.Field == "status" && state.Captured != nil && *state.Captured == "running" && state.Restored != nil && *state.Restored == "failed" && state.Rows == 1 {
+			foundTransition = true
+		}
+	}
+	if !foundTransition {
+		t.Fatal("Team captured/restored state report missing")
 	}
 	var status, result string
 	if e = verifier.QueryRow("SELECT status,result_json FROM team_tasks WHERE id=901").Scan(&status, &result); e != nil || status != "failed" || result != "{\"partial\":\"preserve this result\"}" {
@@ -162,7 +193,7 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if e != nil || json.Unmarshal(raw, &saved) != nil || saved.Status != "succeeded" || saved.HistoryCounts["secret_bundle"] == 0 {
 		t.Fatal("restore report missing", e)
 	}
-	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, CaptureBudget{64 << 20, 10000}); e == nil {
+	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, budget); e == nil {
 		t.Fatal("restore retry overwrote owned targets")
 	}
 	if published.Manifest.Payload.Consistency != "best_effort" || published.Manifest.Payload.Purpose != "functional_test" {

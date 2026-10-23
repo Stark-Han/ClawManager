@@ -28,22 +28,23 @@ type DataRestoreTarget struct {
 }
 
 type DataRestoreReport struct {
-	RunID                string         `json:"run_id"`
-	BackupID             string         `json:"backup_id"`
-	OriginInstallationID string         `json:"origin_installation_id"`
-	Status               string         `json:"status"`
-	Phase                string         `json:"phase"`
-	Failure              string         `json:"failure,omitempty"`
-	StartedAt            time.Time      `json:"started_at"`
-	FinishedAt           *time.Time     `json:"finished_at,omitempty"`
-	SQL                  SQLResult      `json:"sql"`
-	FileCount            int            `json:"file_count"`
-	VerifiedFileCount    int            `json:"verified_file_count"`
-	VerifiedObjectCount  int            `json:"verified_object_count"`
-	VerifiedRedisCount   int            `json:"verified_redis_count"`
-	HistoryCounts        map[string]int `json:"history_counts"`
-	HistoryParts         []ArtifactPart `json:"history_parts"`
-	AcceptanceEligible   bool           `json:"acceptance_eligible"`
+	RunID                string              `json:"run_id"`
+	BackupID             string              `json:"backup_id"`
+	OriginInstallationID string              `json:"origin_installation_id"`
+	Status               string              `json:"status"`
+	Phase                string              `json:"phase"`
+	Failure              string              `json:"failure,omitempty"`
+	StartedAt            time.Time           `json:"started_at"`
+	FinishedAt           *time.Time          `json:"finished_at,omitempty"`
+	Team                 TeamRecoverySummary `json:"team"`
+	SQL                  SQLResult           `json:"sql"`
+	FileCount            int                 `json:"file_count"`
+	VerifiedFileCount    int                 `json:"verified_file_count"`
+	VerifiedObjectCount  int                 `json:"verified_object_count"`
+	VerifiedRedisCount   int                 `json:"verified_redis_count"`
+	HistoryCounts        map[string]int      `json:"history_counts"`
+	HistoryParts         []ArtifactPart      `json:"history_parts"`
+	AcceptanceEligible   bool                `json:"acceptance_eligible"`
 }
 
 // RestorePublishedData is a one-shot, data-only restore. It authenticates every
@@ -138,6 +139,7 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	consume := func(name string, fn func(io.Reader) error) error {
 		return ConsumePublishedPart(ctx, store, artifact, name, wrapper, budget.MaxBytes, fn)
 	}
+	var teamReport teamReportCollector
 	report.Phase = "mysql"
 	if e = consume("mysql", func(r io.Reader) error {
 		_, e := RestoreMySQL(ctx, target.MySQL, "", actualDB, r, func(table SQLTable, row team.Row) (team.Row, error) {
@@ -145,6 +147,7 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 			if e != nil {
 				return nil, e
 			}
+			teamReport.record(change)
 			if e = evidence(table, change); e != nil {
 				return nil, e
 			}
@@ -154,6 +157,7 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	}); e != nil {
 		return report, e
 	}
+	report.Team = teamReport.summary(false)
 	report.Phase = "mysql_verification"
 	// Stream normalized expectations into the independent SELECT-only verifier;
 	// no plaintext snapshot file and no whole-database memory buffer are needed.
@@ -175,6 +179,7 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	}); e != nil {
 		return report, e
 	}
+	report.Team.SQLReadbackVerified = true
 	report.Phase = "workspace"
 	workspace := filepath.Join(target.Directory, "workspace")
 	if e = os.Mkdir(workspace, 0700); e != nil {
