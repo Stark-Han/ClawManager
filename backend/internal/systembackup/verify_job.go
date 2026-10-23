@@ -138,7 +138,7 @@ func matchesVerifyJob(want, got *batchv1.Job) bool {
 		return false
 	}
 	a, b := w.Containers[0], g.Containers[0]
-	if !reflect.DeepEqual(a.Resources, b.Resources) || b.Lifecycle != nil || b.LivenessProbe != nil || b.ReadinessProbe != nil || b.StartupProbe != nil {
+	if !reflect.DeepEqual(a.Resources, b.Resources) || !reflect.DeepEqual(a.Lifecycle, b.Lifecycle) || !reflect.DeepEqual(a.LivenessProbe, b.LivenessProbe) || !reflect.DeepEqual(a.ReadinessProbe, b.ReadinessProbe) || !reflect.DeepEqual(a.StartupProbe, b.StartupProbe) {
 		return false
 	}
 	return a.Name == b.Name && a.Image == b.Image && reflect.DeepEqual(a.Command, b.Command) && reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.VolumeMounts, b.VolumeMounts) && reflect.DeepEqual(a.SecurityContext, b.SecurityContext) && len(b.Env) == 0 && len(b.EnvFrom) == 0 && b.TerminationMessagePath == a.TerminationMessagePath && b.TerminationMessagePolicy == a.TerminationMessagePolicy && got.Spec.BackoffLimit != nil && *got.Spec.BackoffLimit == 0 && got.Spec.ActiveDeadlineSeconds != nil && *got.Spec.ActiveDeadlineSeconds == *want.Spec.ActiveDeadlineSeconds

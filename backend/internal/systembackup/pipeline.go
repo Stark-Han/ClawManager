@@ -50,32 +50,7 @@ func CaptureFunctionalBundle(ctx context.Context, stage, origin, id string, sour
 		return zero, e
 	}
 	m := Manifest{Schema: "system-backup.v1", Contract: ContractVersion, BackupID: id, OriginInstallationID: origin, Purpose: "functional_test", RegistryHash: RegistryHash(), CapturedAt: time.Now().UTC(), Consistency: "best_effort"}
-	objectBudget := ObjectBudget{b.MaxBytes, b.MaxItems}
-	adapters := []struct {
-		name    string
-		capture func(context.Context, io.Writer) error
-	}{
-		{"mysql", func(ctx context.Context, w io.Writer) error {
-			_, e := ExportMySQL(ctx, source.MySQL, w, tables)
-			return e
-		}},
-		{"redis", func(ctx context.Context, w io.Writer) error {
-			return CaptureRedisLogical(ctx, source.Redis, w, RedisBudget{MaxBytes: b.MaxBytes, MaxItems: b.MaxItems, MaxInventoryBytes: min(b.MaxBytes/8, 64<<20)})
-		}},
-		{"object_storage", func(ctx context.Context, w io.Writer) error {
-			return CaptureObjects(ctx, source.Objects, w, source.ObjectBuckets, objectBudget)
-		}},
-		{"workspace", func(ctx context.Context, w io.Writer) error {
-			_, e := CaptureFiles(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems})
-			return e
-		}},
-		{"deployment_resources", func(ctx context.Context, w io.Writer) error {
-			return CaptureKubernetesResources(ctx, source.DeploymentClient, w, source.Namespace, source.NamespaceUID, "deployment_resources", source.Deployments, objectBudget)
-		}},
-		{"secret_bundle", func(ctx context.Context, w io.Writer) error {
-			return CaptureKubernetesResources(ctx, source.SecretClient, w, source.Namespace, source.NamespaceUID, "secret_bundle", source.Secrets, objectBudget)
-		}},
-	}
+	adapters := captureAdapters(source, b, tables)
 	remaining := b.MaxBytes
 	for _, adapter := range adapters {
 		if remaining < 1 {
@@ -115,4 +90,35 @@ func ConsumePublishedPart(ctx context.Context, store ImmutableObjectStore, artif
 		return e
 	}
 	return producerError
+}
+
+type captureAdapter struct {
+	name    string
+	capture func(context.Context, io.Writer) error
+}
+
+func captureAdapters(source CaptureSources, b CaptureBudget, tables []string) []captureAdapter {
+	objectBudget := ObjectBudget{b.MaxBytes, b.MaxItems}
+	return []captureAdapter{
+		{"mysql", func(ctx context.Context, w io.Writer) error {
+			_, e := ExportMySQL(ctx, source.MySQL, w, tables)
+			return e
+		}},
+		{"redis", func(ctx context.Context, w io.Writer) error {
+			return CaptureRedisLogical(ctx, source.Redis, w, RedisBudget{MaxBytes: b.MaxBytes, MaxItems: b.MaxItems, MaxInventoryBytes: min(b.MaxBytes/8, 64<<20)})
+		}},
+		{"object_storage", func(ctx context.Context, w io.Writer) error {
+			return CaptureObjects(ctx, source.Objects, w, source.ObjectBuckets, objectBudget)
+		}},
+		{"workspace", func(ctx context.Context, w io.Writer) error {
+			_, e := CaptureFiles(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems})
+			return e
+		}},
+		{"deployment_resources", func(ctx context.Context, w io.Writer) error {
+			return CaptureKubernetesResources(ctx, source.DeploymentClient, w, source.Namespace, source.NamespaceUID, "deployment_resources", source.Deployments, objectBudget)
+		}},
+		{"secret_bundle", func(ctx context.Context, w io.Writer) error {
+			return CaptureKubernetesResources(ctx, source.SecretClient, w, source.Namespace, source.NamespaceUID, "secret_bundle", source.Secrets, objectBudget)
+		}},
+	}
 }

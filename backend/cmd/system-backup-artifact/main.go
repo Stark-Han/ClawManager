@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -160,7 +161,9 @@ func executionDeadline(now time.Time, timeout time.Duration, absolute string) (t
 }
 
 func main() {
-	reportFile := flag.String("report-file", "", "bounded integrity result file (verify only)")
+	reportFile := flag.String("report-file", "", "bounded operation result file")
+	readyFile := flag.String("ready-file", "", "capture-phase readiness file")
+	captureRequest := flag.String("capture-request", "", "frozen non-secret capture request (base64url)")
 	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
@@ -171,6 +174,20 @@ func main() {
 	deadline := flag.Duration("timeout", 30*time.Minute, "verification deadline")
 	absoluteDeadline := flag.String("deadline-at", "", "frozen absolute task deadline (RFC3339)")
 	flag.Parse()
+	if *operation == "readiness" {
+		if *readyFile != "/run/backup-status/ready" {
+			os.Exit(2)
+		}
+		info, err := os.Lstat(*readyFile)
+		if err != nil || !info.Mode().IsRegular() || info.Size() != 6 {
+			os.Exit(1)
+		}
+		raw, err := os.ReadFile(*readyFile)
+		if err != nil || string(raw) != "ready\n" {
+			os.Exit(1)
+		}
+		return
+	}
 	if *config == "" || *origin == "" || *id == "" || *max < 1<<20 || *max > 900<<30 || *deadline < time.Second || *deadline > 12*time.Hour {
 		fmt.Fprintln(os.Stderr, "invalid verification arguments")
 		os.Exit(2)
@@ -188,8 +205,8 @@ func main() {
 	var report bytes.Buffer
 	var output io.Writer = os.Stdout
 	if *reportFile != "" {
-		if *operation != "verify" {
-			fmt.Fprintln(os.Stderr, "report file requires verify operation")
+		if *operation != "verify" && *operation != "capture-phase" {
+			fmt.Fprintln(os.Stderr, "report file is unsupported for this operation")
 			os.Exit(2)
 		}
 		output = io.MultiWriter(os.Stdout, &report)
@@ -197,6 +214,16 @@ func main() {
 	switch *operation {
 	case "verify":
 		e = verify(ctx, *config, *origin, *id, *max, output)
+	case "capture-phase":
+		var request systembackup.CapturePhaseRequest
+		raw, decodeErr := base64.RawURLEncoding.Strict().DecodeString(*captureRequest)
+		if *operationConfig == "" || *maxItems < 1 || *maxItems > 100000000 {
+			e = errors.New("validation_failed")
+		} else if decodeErr != nil || len(raw) > 8192 || systembackup.DecodeStrictJSON(raw, &request) != nil {
+			e = errors.New("validation_failed")
+		} else {
+			e = runCapturePhase(ctx, *config, *operationConfig, *origin, *id, *readyFile, request, systembackup.CaptureBudget{MaxBytes: *max, MaxItems: *maxItems}, output)
+		}
 	case "capture", "restore", "verify-restored":
 		if *operationConfig == "" || *maxItems < 1 || *maxItems > 100000000 {
 			e = errors.New("validation_failed")

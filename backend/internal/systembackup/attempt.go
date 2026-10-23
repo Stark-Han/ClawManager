@@ -97,7 +97,10 @@ func (s Store) GetAttempt(ctx context.Context, taskID, phase string) (Attempt, e
 // FinishAttempt requires the CURRENT leader and live task lease. Original
 // attempt ownership is historical evidence, not permission for a stale worker.
 func (s Store) FinishAttempt(ctx context.Context, l Leadership, t Task, a Attempt, status string, result any) error {
-	if status != "succeeded" && status != "failed" && status != "abandoned" {
+	if status != "succeeded" && status != "failed" && status != "abandoned" && status != "sealed" {
+		return errors.New("validation_failed")
+	}
+	if status == "sealed" && (t.Type != Backup || a.Phase != "capture" && a.Phase != "secret_capture") {
 		return errors.New("validation_failed")
 	}
 	raw, e := json.Marshal(result)

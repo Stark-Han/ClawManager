@@ -20,8 +20,10 @@ type MutationLease struct {
 	Generation uint64
 }
 type GateOwnership struct {
-	Scope, Owner      string
-	Generation, Token uint64
+	Scope      string `json:"scope"`
+	Owner      string `json:"owner"`
+	Generation uint64 `json:"generation"`
+	Token      uint64 `json:"fencing_token"`
 }
 
 func RandomID(prefix string) (string, error) {
@@ -221,6 +223,9 @@ func (g Gate) FinishRelease(ctx context.Context, ownership GateOwnership) error 
 	if active != 0 {
 		return ErrMaintenance
 	}
+	if _, err = tx.ExecContext(ctx, "UPDATE system_backup_capture_plans SET source_resumed_at=COALESCE(source_resumed_at,UTC_TIMESTAMP(6)) WHERE scope=? AND generation=?", ownership.Scope, ownership.Generation); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, "UPDATE system_backup_gate SET phase='idle',owner=NULL,acquire_deadline=NULL,hold_deadline=NULL,updated_at=UTC_TIMESTAMP(6) WHERE scope=?", ownership.Scope)
 	if err != nil {
 		return err
@@ -314,6 +319,9 @@ func (g Gate) AckResumed(ctx context.Context, ownership GateOwnership, id string
 		return err
 	}
 	if forced {
+		if _, err = tx.ExecContext(ctx, "UPDATE system_backup_capture_plans SET forced_resume_at=COALESCE(forced_resume_at,UTC_TIMESTAMP(6)) WHERE scope=? AND generation=?", ownership.Scope, ownership.Generation); err != nil {
+			return err
+		}
 		if _, err = tx.ExecContext(ctx, "UPDATE system_backup_gate SET phase='releasing',updated_at=UTC_TIMESTAMP(6) WHERE scope=?", ownership.Scope); err != nil {
 			return err
 		}
