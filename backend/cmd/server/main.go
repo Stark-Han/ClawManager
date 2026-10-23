@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"clawreef/internal/aigateway"
+	"clawreef/internal/backupgate"
 	"clawreef/internal/buildinfo"
 	"clawreef/internal/config"
 	"clawreef/internal/db"
@@ -414,6 +415,23 @@ func main() {
 	workbuddyPrewarmController := k8s.NewWorkbuddyPrewarmController()
 
 	leaderCtx, leaderCancel := context.WithCancel(context.Background())
+	var backupHTTPPool *sql.DB
+	if db.SQLGateScope() != "" {
+		openCtx, openCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var openErr error
+		backupHTTPPool, openErr = systembackup.OpenControlDatabase(openCtx, os.Getenv("SYSTEM_BACKUP_CONTROL_DSN_FILE"))
+		if openErr == nil {
+			businessSQL, _ := database.Driver().(*sql.DB)
+			openErr = backupgate.RequireSameDatabase(openCtx, businessSQL, backupHTTPPool)
+		}
+		openCancel()
+		if openErr != nil {
+			log.Fatal("backup HTTP boundary requires an available independent control credential")
+		}
+		// Do not consume the business SQL pool while a handler is awaiting I/O.
+		backupHTTPPool.SetMaxOpenConns(64)
+		defer backupHTTPPool.Close()
+	}
 	defer leaderCancel()
 	go ownerStore.RunBuffered(leaderCtx)
 	go db.RetryOwnerAnalytics(leaderCtx, database)
@@ -481,6 +499,7 @@ func main() {
 	// Setup router
 	r := gin.New()
 	r.Use(handlers.HermesDesktopRedactTickets(), gin.Logger(), gin.Recovery())
+	r.Use(middleware.BackupRequestBoundary(backupHTTPPool, db.SQLGateScope()))
 
 	// Middleware
 	r.Use(middleware.CORS())
@@ -838,8 +857,14 @@ func main() {
 		if controlFile := strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_CONTROL_DSN_FILE")); controlFile != "" {
 			controlContext, controlCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			controlSQL, controlErr := systembackup.OpenControlDatabase(controlContext, controlFile)
+			if controlErr == nil && db.SQLGateScope() != "" {
+				controlErr = backupgate.RequireSameDatabase(controlContext, backupSQL, controlSQL)
+			}
 			controlCancel()
 			if controlErr != nil {
+				if controlSQL != nil {
+					controlSQL.Close()
+				}
 				log.Println("System backup control database unavailable; access disabled")
 				backupSQL = nil
 			} else {

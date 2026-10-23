@@ -40,7 +40,7 @@ system-backup-artifact --operation restore --bootstrap /run/backup/bootstrap.jso
 
 ## 控制协调进程
 
-构建入口：`backend/cmd/system-backup-controller`；不调用 app 初始化或 schema migration。部署前由独立 migration 身份建立 078～081 所需结构。
+构建入口：`backend/cmd/system-backup-controller`；不调用 app 初始化或 schema migration。部署前由独立 migration 身份建立 078～082 所需结构。
 
 - `SYSTEM_BACKUP_CONTROL_DSN_FILE`：只含控制数据库 DSN 的挂载文件。
 - `SYSTEM_BACKUP_INSTALLATION_ID`：稳定安装标识，首次登记后不能静默更换。
@@ -81,3 +81,9 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 ## 配置与取消的重试一致性
 
 配置保存和任务取消现在要求 Idempotency-Key，前端在同一请求重试时保留该 key，修改请求后生成新 key。配置/状态变更、操作响应和审计事件在同一事务提交；同 key 不同内容拒绝，成功重试返回原响应。真实 MySQL 已验证八路并发配置请求只提交一次、取消只写一次事件，并在最终操作账本写入故障时回滚此前配置和审计写入。安全配置修改仍需尚未完成的近期强认证，不通过该改动绕过。
+
+## 请求边界停写（2026-10-24 00:28）
+
+启用 SQL 门禁时，App/gateway 同时在同步 HTTP handler 外持有同一物理数据库 gate 的共享锁，覆盖请求内的文件、Redis、对象操作；包括可能有写副作用的 GET。只有已注册的备份控制路由和纯 version 路由豁免。请求取消不会提前释放锁，必须等 handler 真正返回；维护中请求返回可重试 503。独立连接池缺失或数据库身份不一致时拒绝启动。真实 MySQL 已验证客户端取消后仍排空、维护拒绝和错误控制库识别；middleware 回归覆盖异常返回释放与未知路径不能借前缀绕过。
+
+默认仍未启用；异步 goroutine、后台任务、反向代理和 Runtime 必须另外参与排空，不能把同步请求边界当作完整 strong checkpoint。
