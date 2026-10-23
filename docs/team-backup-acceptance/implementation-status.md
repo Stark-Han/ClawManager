@@ -108,3 +108,7 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 
 - 独立校验和控制器联合链路在流式 SQL 优化后再次通过（100.40秒，包含真实 capture/restore/verify-restored 三个 CLI、真实 Job、控制器换主与清理）。
 - 系统级恢复新增完整 SQL inventory 预检：在任何业务数据写入前验证 75 张登记表全部出现，即使空表也不能省略。合法的逐表 checksum 不再能掩盖缺少 Team 表；独立恢复读验同样要求完整 inventory。单表工具仍保留其显式局部处理能力。
+
+## 执行身份与绝对截止时间（01:17）
+
+先用回归复现后补齐：Job 完成结果还要核对实际 Pod 的冻结配置（含网络隔离标签、唯一容器、Secret 卷、权限、资源预算与无额外执行钩子），拒绝 Pod admission 后的替换配置。新 attempt 固定 task 的绝对 deadline_at，传给 CLI 的 --deadline-at；进程使用绝对期限与 --timeout 较早者，Job 被重建或延迟启动也不能重新获得原时长。旧冻结请求仍可读取/清理，但没有新请求的绝对期限保证；不能改写旧请求 bytes 来伪称已补齐。真实 MySQL/单元回归通过，当前候选待实际新镜像 Job 验收。

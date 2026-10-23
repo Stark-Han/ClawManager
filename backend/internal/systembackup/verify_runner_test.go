@@ -77,7 +77,7 @@ func TestVerifyJobAdoptionCollisionAndBoundResult(t *testing.T) {
 	yes := true
 	report := IntegrityReport{BackupID: request.BackupID, Origin: request.Origin, Purpose: "functional_test", Consistency: "best_effort", IntegrityVerified: true, PartsVerified: 6}
 	message, _ := json.Marshal(report)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "verify-pod", Namespace: request.Namespace, Labels: created.Labels, OwnerReferences: []metav1.OwnerReference{{UID: created.UID, Kind: "Job", Controller: &yes}}}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "verify", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: string(message)}}}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "verify-pod", Namespace: request.Namespace, Labels: created.Labels, OwnerReferences: []metav1.OwnerReference{{UID: created.UID, Kind: "Job", Controller: &yes}}}, Spec: *created.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "verify", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: string(message)}}}}}}
 	if _, e = client.CoreV1().Pods(request.Namespace).Create(ctx, pod, metav1.CreateOptions{}); e != nil {
 		t.Fatal(e)
 	}
@@ -85,6 +85,13 @@ func TestVerifyJobAdoptionCollisionAndBoundResult(t *testing.T) {
 	if e != nil || result.State != "succeeded" || result.Report.AcceptanceEligible {
 		t.Fatal(result, e)
 	}
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "UNREGISTERED_SOURCE", Value: "forbidden"}}
+	client.CoreV1().Pods(request.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	if _, e = j.Observe(ctx, a); e == nil {
+		t.Fatal("report accepted from Pod with substituted runtime configuration")
+	}
+	pod.Spec = *created.Spec.Template.Spec.DeepCopy()
+	client.CoreV1().Pods(request.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 	// A matching annotation does not authorize a substituted command/image.
 	created.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh"}
 	client.BatchV1().Jobs(request.Namespace).Update(ctx, created, metav1.UpdateOptions{})
@@ -180,8 +187,12 @@ func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T)
 	if e != nil {
 		t.Fatal(e)
 	}
+	var wire map[string]json.RawMessage
+	if json.Unmarshal(a.Request, &wire) != nil || wire["deadline_at"] == nil {
+		t.Fatal("attempt does not bind the absolute task deadline")
+	}
 	var frozen VerifyJobRequest
-	if json.Unmarshal(a.Request, &frozen) != nil || frozen.MaxBytes != testConfig().MaxArtifactBytes {
+	if json.Unmarshal(a.Request, &frozen) != nil || frozen.MaxBytes != testConfig().MaxArtifactBytes || !frozen.DeadlineAt.Equal(task.DeadlineAt) {
 		t.Fatal("queued task used changed configuration")
 	}
 	if len(jobs.ids) != 1 || jobs.ids[0] != a.ID {

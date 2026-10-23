@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -23,15 +24,16 @@ import (
 // immutable bootstrap Secret contains config.json, key and credential files.
 // Its configured paths must all be under /run/backup-bootstrap.
 type VerifyJobRequest struct {
-	Namespace       string `json:"namespace"`
-	NamespaceUID    string `json:"namespace_uid"`
-	Image           string `json:"image"`
-	ServiceAccount  string `json:"service_account"`
-	BootstrapSecret string `json:"bootstrap_secret"`
-	Origin          string `json:"origin"`
-	BackupID        string `json:"backup_id"`
-	MaxBytes        int64  `json:"max_bytes"`
-	DeadlineSeconds int64  `json:"deadline_seconds"`
+	Namespace       string    `json:"namespace"`
+	NamespaceUID    string    `json:"namespace_uid"`
+	Image           string    `json:"image"`
+	ServiceAccount  string    `json:"service_account"`
+	BootstrapSecret string    `json:"bootstrap_secret"`
+	Origin          string    `json:"origin"`
+	BackupID        string    `json:"backup_id"`
+	MaxBytes        int64     `json:"max_bytes"`
+	DeadlineSeconds int64     `json:"deadline_seconds"`
+	DeadlineAt      time.Time `json:"deadline_at,omitempty"`
 }
 type IntegrityReport struct {
 	BackupID           string `json:"backup_id"`
@@ -76,6 +78,12 @@ func verifyJob(a Attempt) (*batchv1.Job, VerifyJobRequest, error) {
 	h := sha256.Sum256(a.Request)
 	labels := map[string]string{"backup.clawmanager.io/attempt": a.ID, "backup.clawmanager.io/task": a.TaskID}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "backup-verify-" + a.ID[4:], Namespace: r.Namespace, Labels: labels, Annotations: map[string]string{"backup.clawmanager.io/request-sha256": hex.EncodeToString(h[:])}}, Spec: batchv1.JobSpec{BackoffLimit: &zero, Completions: &one, Parallelism: &one, ActiveDeadlineSeconds: &r.DeadlineSeconds, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, ServiceAccountName: r.ServiceAccount, AutomountServiceAccountToken: &no, SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}, Containers: []corev1.Container{{Name: "verify", Image: r.Image, ImagePullPolicy: corev1.PullIfNotPresent, Command: []string{"/usr/local/bin/system-backup-artifact"}, Args: []string{"--operation", "verify", "--bootstrap", "/run/backup-bootstrap/config.json", "--origin", r.Origin, "--backup", r.BackupID, "--max-bytes", strconv.FormatInt(r.MaxBytes, 10), "--timeout", strconv.FormatInt(r.DeadlineSeconds, 10) + "s", "--report-file", "/dev/termination-log"}, TerminationMessagePath: "/dev/termination-log", TerminationMessagePolicy: corev1.TerminationMessageReadFile, SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &no, ReadOnlyRootFilesystem: &yes, Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}, Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("512Mi")}}, VolumeMounts: []corev1.VolumeMount{{Name: "bootstrap", MountPath: "/run/backup-bootstrap", ReadOnly: true}}}}, Volumes: []corev1.Volume{{Name: "bootstrap", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: r.BootstrapSecret, DefaultMode: func() *int32 { v := int32(0440); return &v }()}}}}}}}}
+	// Newly frozen attempts bind an absolute process deadline as well as the
+	// Kubernetes duration. Recreating a lost Job cannot restart its time budget.
+	// Zero remains readable only for legacy frozen requests from older versions.
+	if !r.DeadlineAt.IsZero() {
+		job.Spec.Template.Spec.Containers[0].Args = append(job.Spec.Template.Spec.Containers[0].Args, "--deadline-at", r.DeadlineAt.UTC().Format(time.RFC3339Nano))
+	}
 	return job, r, nil
 }
 func (j VerifyJobs) namespace(ctx context.Context, r VerifyJobRequest) error {
@@ -170,6 +178,14 @@ func (j VerifyJobs) Observe(ctx context.Context, a Attempt) (VerifyJobResult, er
 		}
 		if !owned {
 			continue
+		}
+		// Pod admission may change a template after Job creation. Check the
+		// actual execution, not just the desired Job or its completion status.
+		actual := job.DeepCopy()
+		actual.Spec.Template.Spec = *p.Spec.DeepCopy()
+		actual.Spec.Template.Labels = p.Labels
+		if !matchesVerifyJob(job, actual) {
+			return out, errors.New("isolation_invalid")
 		}
 		if len(p.Status.ContainerStatuses) != 1 {
 			return out, errors.New("evidence_incomplete")

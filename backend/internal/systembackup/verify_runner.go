@@ -59,6 +59,7 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 		request.BackupID = t.SourceID
 		request.MaxBytes = frozen.MaxArtifactBytes
 		request.DeadlineSeconds = int64(t.DeadlineAt.Sub(now) / time.Second)
+		request.DeadlineAt = t.DeadlineAt
 		if request.DeadlineSeconds < 1 {
 			return errors.New("deadline_exceeded")
 		}

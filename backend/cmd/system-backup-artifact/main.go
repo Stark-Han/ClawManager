@@ -141,6 +141,24 @@ func verify(ctx context.Context, path, origin, id string, max int64, out io.Writ
 	})
 }
 
+func executionDeadline(now time.Time, timeout time.Duration, absolute string) (time.Time, error) {
+	deadline := now.Add(timeout)
+	if absolute == "" {
+		return deadline, nil
+	}
+	frozen, e := time.Parse(time.RFC3339Nano, absolute)
+	if e != nil {
+		return time.Time{}, errors.New("validation_failed")
+	}
+	if !frozen.After(now) {
+		return time.Time{}, errors.New("deadline_exceeded")
+	}
+	if frozen.Before(deadline) {
+		deadline = frozen
+	}
+	return deadline, nil
+}
+
 func main() {
 	reportFile := flag.String("report-file", "", "bounded integrity result file (verify only)")
 	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
@@ -151,14 +169,20 @@ func main() {
 	id := flag.String("backup", "", "public backup identity")
 	max := flag.Int64("max-bytes", 16<<30, "maximum verified ciphertext bytes")
 	deadline := flag.Duration("timeout", 30*time.Minute, "verification deadline")
+	absoluteDeadline := flag.String("deadline-at", "", "frozen absolute task deadline (RFC3339)")
 	flag.Parse()
 	if *config == "" || *origin == "" || *id == "" || *max < 1<<20 || *max > 900<<30 || *deadline < time.Second || *deadline > 12*time.Hour {
 		fmt.Fprintln(os.Stderr, "invalid verification arguments")
 		os.Exit(2)
 	}
+	end, deadlineErr := executionDeadline(time.Now(), *deadline, *absoluteDeadline)
+	if deadlineErr != nil {
+		fmt.Fprintln(os.Stderr, "backup operation failed:", systembackup.PublicError(deadlineErr))
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, *deadline)
+	ctx, cancel := context.WithDeadline(ctx, end)
 	defer cancel()
 	var e error
 	var report bytes.Buffer
