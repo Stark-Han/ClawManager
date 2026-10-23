@@ -20,6 +20,21 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+type realCaptureFixture struct {
+	Request         CaptureJobRequest `json:"request"`
+	AttemptID       string            `json:"attempt_id"`
+	ControlDSNFile  string            `json:"control_dsn_file"`
+	KEKFile         string            `json:"kek_file"`
+	StageDirectory  string            `json:"stage_directory"`
+	Owner           string            `json:"owner"`
+	KubeServer      string            `json:"kube_server"`
+	KubeCA          string            `json:"kube_ca"`
+	ControllerToken string            `json:"controller_token"`
+	SourceUID       string            `json:"source_secret_uid"`
+	SecretHash      string            `json:"secret_sha256"`
+	GatePassword    string            `json:"gate_password"`
+}
+
 // This test runs only against an explicitly owned, disposable test fixture.
 // Credential contents never become test output or repository artifacts.
 func TestRealSecretCaptureJobBarrier(t *testing.T) {
@@ -27,20 +42,7 @@ func TestRealSecretCaptureJobBarrier(t *testing.T) {
 	if path == "" {
 		t.Skip("requires owned Kubernetes capture fixture")
 	}
-	var cfg struct {
-		Request         CaptureJobRequest `json:"request"`
-		AttemptID       string            `json:"attempt_id"`
-		ControlDSNFile  string            `json:"control_dsn_file"`
-		KEKFile         string            `json:"kek_file"`
-		StageDirectory  string            `json:"stage_directory"`
-		Owner           string            `json:"owner"`
-		KubeServer      string            `json:"kube_server"`
-		KubeCA          string            `json:"kube_ca"`
-		ControllerToken string            `json:"controller_token"`
-		SourceUID       string            `json:"source_secret_uid"`
-		SecretHash      string            `json:"secret_sha256"`
-		GatePassword    string            `json:"gate_password"`
-	}
+	var cfg realCaptureFixture
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal("fixture unavailable")
