@@ -34,13 +34,13 @@ const base = '/admin/system-backup';
 export const systemBackupService = {
   overview: async (signal?: AbortSignal): Promise<{readiness: BackupReadiness; permissions: string[]}> => (await api.get(`${base}/overview`, {signal})).data.data,
   config: async (signal?: AbortSignal): Promise<BackupConfigVersion> => (await api.get(`${base}/config`, {signal})).data.data,
-  saveConfig: async (version: number, config: BackupConfig): Promise<BackupConfigVersion> => (await api.put(`${base}/config`, {expected_version: version, config})).data.data,
+  saveConfig: async (version: number, config: BackupConfig, key: string): Promise<BackupConfigVersion> => (await api.put(`${base}/config`, {expected_version: version, config}, {headers: {'Idempotency-Key': key}})).data.data,
   list: async (signal?: AbortSignal): Promise<BackupTask[]> => (await api.get(`${base}/tasks`, {signal})).data.data.items,
   get: async (id: string, signal?: AbortSignal): Promise<BackupTask> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}`, {signal})).data.data,
   events: async (id: string, signal?: AbortSignal): Promise<BackupEvent[]> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}/events`, {signal})).data.data.items,
   verificationReport: async (id: string, signal?: AbortSignal): Promise<BackupVerificationReport> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}/verification-report`, {signal})).data.data,
   create: async (key: string, task_type: BackupTaskType, source_public_id?: string): Promise<BackupTask> => (await api.post(`${base}/tasks`, {task_type, task_purpose: 'acceptance', ...(source_public_id ? {source_public_id} : {})}, {headers: {'Idempotency-Key': key}})).data.data,
-  cancel: async (task: BackupTask): Promise<BackupTask> => (await api.post(`${base}/tasks/${encodeURIComponent(task.public_id)}/cancel`, {expected_version: task.row_version})).data.data,
+  cancel: async (task: BackupTask, key: string): Promise<BackupTask> => (await api.post(`${base}/tasks/${encodeURIComponent(task.public_id)}/cancel`, {expected_version: task.row_version}, {headers: {'Idempotency-Key': key}})).data.data,
 };
 
 export function backupErrorCode(error: unknown): string {

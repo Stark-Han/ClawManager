@@ -18,6 +18,8 @@ export default function BackupsPage() {
  const [loading,setLoading]=useState(true);const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [reload,setReload]=useState(0);
  const [config,setConfig]=useState<BackupConfigVersion>();const [showConfig,setShowConfig]=useState(false);const [notice,setNotice]=useState('');
  const requestKey=useRef<string|null>(null);
+ const mutationKey=useRef<{intent:string;key:string}|undefined>(undefined);
+ const keyFor=(intent:string)=>{if(mutationKey.current?.intent!==intent)mutationKey.current={intent,key:crypto.randomUUID()};return mutationKey.current.key;};
  const configDialog=useRef<HTMLElement|null>(null);
  useEffect(()=>{
   if(!showConfig)return;
@@ -59,8 +61,8 @@ export default function BackupsPage() {
 
  const create=async()=>{if(busy)return;setBusy(true);setError('');requestKey.current??=crypto.randomUUID();try{const t=await service.create(requestKey.current,'backup');requestKey.current=null;navigate(`/admin/backups/${t.public_id}`)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
  const openConfig=async()=>{setBusy(true);try{setConfig(await service.config());setShowConfig(true)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
- const saveConfig=async()=>{if(!config||busy)return;setBusy(true);try{const saved=await service.saveConfig(config.version,config.config);setConfig(saved);setShowConfig(false);setNotice(text.saved);setReload(x=>x+1)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
- const cancel=async()=>{if(!task||busy)return;setBusy(true);try{setTask(await service.cancel(task));setReload(x=>x+1)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
+ const saveConfig=async()=>{if(!config||busy)return;setBusy(true);try{const saved=await service.saveConfig(config.version,config.config,keyFor(JSON.stringify(['config',config])));setConfig(saved);setShowConfig(false);setNotice(text.saved);setReload(x=>x+1)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
+ const cancel=async()=>{if(!task||busy)return;setBusy(true);try{setTask(await service.cancel(task,keyFor(JSON.stringify(['cancel',task.public_id,task.row_version]))));setReload(x=>x+1)}catch(e){setError(backupErrorCode(e))}finally{setBusy(false)}};
  const date=(value:string)=>new Date(value).toLocaleString(locale);
  return <AdminLayout title={text.title}>
   <div className="space-y-6 pb-8">
@@ -77,7 +79,7 @@ export default function BackupsPage() {
    </div>}
    {id?<>
     <Link to="/admin/backups" className="inline-block text-sm text-blue-700 hover:underline">← {text.back}</Link>
-    {verification&&<section aria-label={locale==='zh'?'完整性校验报告':'Integrity verification report'} className="rounded-xl border border-green-200 bg-green-50 p-5"><h2 className="font-semibold text-green-900">{locale==='zh'?'完整性校验通过':'Integrity verification passed'}</h2><p className="mt-2 text-sm text-green-900">{locale==='zh'?`已读取、解密并校验 ${verification.parts_verified} 类备份数据。`:`Read, decrypted and verified ${verification.parts_verified} backup parts.`}</p><p className="mt-2 break-all text-xs text-green-800">{verification.backup_id}</p><p className="mt-3 text-sm text-slate-700">{locale==='zh'?'此结果证明备份内容通过完整性检查；正式恢复资格仍以完整验收结果为准。':'This result confirms artifact integrity. Accepted recovery status still requires the complete acceptance checks.'}</p></section>}
+    {verification&&<section aria-label={text.reportTitle} className="rounded-xl border border-green-200 bg-green-50 p-5"><h2 className="font-semibold text-green-900">{text.reportTitle}</h2><p className="mt-2 text-sm text-green-900">{`${text.reportParts}: ${verification.parts_verified}`}</p><p className="mt-2 break-all text-xs text-green-800">{verification.backup_id}</p><p className="mt-3 text-sm text-slate-700">{text.reportNote}</p></section>}
     {task&&<section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">{backupStatus(task.task_type,locale)} · {backupStatus(task.status,locale)}</h2>{task.can_cancel&&canOperate&&<button type="button" className="app-button-secondary" disabled={busy} onClick={cancel}>{text.cancel}</button>}</div><p className="mt-2 break-all font-mono text-xs text-slate-500">{task.public_id}</p><dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2"><div><dt className="text-slate-500">{text.created}</dt><dd className="mt-1">{date(task.created_at)}</dd></div><div><dt className="text-slate-500">{text.deadline}</dt><dd className="mt-1">{date(task.deadline_at)}</dd></div><div><dt className="text-slate-500">{text.eligibility}</dt><dd className="mt-1">{task.acceptance_eligible?text.eligible:text.ineligible}</dd></div><div><dt className="text-slate-500">{text.purpose}</dt><dd className="mt-1">{task.task_purpose==='functional_test'?text.functional:task.task_purpose}</dd></div>{task.failure_category!=='none'&&<div><dt className="text-slate-500">{text.failure}</dt><dd className="mt-1 text-red-700">{task.failure_category}</dd></div>}</dl></section>}
     <section className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="font-semibold">{text.events}</h2>{events.length===0?<p className="mt-4 text-sm text-slate-500">{text.noEvents}</p>:<ol className="mt-4 space-y-3">{events.map(e=><li key={e.id} className="border-l-2 border-slate-200 pl-4 text-sm"><time className="text-xs text-slate-400">{date(e.created_at)}</time><p className="mt-1">{e.event_type}</p><pre className="mt-1 overflow-auto whitespace-pre-wrap break-all text-xs text-slate-500">{JSON.stringify(e.details,null,2)}</pre></li>)}</ol>}</section>
    </>:<>

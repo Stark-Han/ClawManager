@@ -56,6 +56,25 @@ func (s Store) Config(ctx context.Context) (ConfigVersion, error) {
 // same lock as the comparison, so callers cannot bypass downgrade/auth checks
 // with concurrent saves. No credentials or raw provider errors enter events.
 func (s Store) SaveConfig(ctx context.Context, expected uint64, actor int, c BackupConfig, authorize func(BackupConfig, BackupConfig) error) (ConfigVersion, error) {
+	if actor < 1 {
+		return ConfigVersion{}, errors.New("permission_denied")
+	}
+	if e := c.Validate(); e != nil {
+		return ConfigVersion{}, e
+	}
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return ConfigVersion{}, e
+	}
+	defer tx.Rollback()
+	out, e := s.saveConfigTx(ctx, tx, expected, actor, c, authorize)
+	if e != nil {
+		return out, e
+	}
+	return out, tx.Commit()
+}
+
+func (s Store) saveConfigTx(ctx context.Context, tx *sql.Tx, expected uint64, actor int, c BackupConfig, authorize func(BackupConfig, BackupConfig) error) (ConfigVersion, error) {
 	out := ConfigVersion{}
 	if actor < 1 {
 		return out, errors.New("permission_denied")
@@ -63,11 +82,7 @@ func (s Store) SaveConfig(ctx context.Context, expected uint64, actor int, c Bac
 	if err := c.Validate(); err != nil {
 		return out, err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return out, err
-	}
-	defer tx.Rollback()
+	var err error
 	var version uint64
 	var identity string
 	if err = tx.QueryRowContext(ctx, "SELECT config_version,origin_installation_id FROM system_backup_installation_state WHERE singleton_id=1 FOR UPDATE").Scan(&version, &identity); err != nil {
@@ -106,9 +121,6 @@ func (s Store) SaveConfig(ctx context.Context, expected uint64, actor int, c Bac
 		return out, err
 	}
 	if err = appendEvent(ctx, tx, "", "config_saved", map[string]any{"actor_id": actor, "old_version": version, "new_version": version + 1}); err != nil {
-		return out, err
-	}
-	if err = tx.Commit(); err != nil {
 		return out, err
 	}
 	return ConfigVersion{version + 1, c}, nil
@@ -356,6 +368,17 @@ func (s Store) Cancel(ctx context.Context, id string, expected uint64, actor int
 		return Task{}, e
 	}
 	defer tx.Rollback()
+	out, e := s.cancelTx(ctx, tx, id, expected, actor)
+	if e != nil {
+		return out, e
+	}
+	return out, tx.Commit()
+}
+
+func (s Store) cancelTx(ctx context.Context, tx *sql.Tx, id string, expected uint64, actor int) (Task, error) {
+	if actor < 1 {
+		return Task{}, errors.New("permission_denied")
+	}
 	t, e := scanTask(tx.QueryRowContext(ctx, "SELECT "+taskColumns+" FROM system_backup_tasks WHERE public_id=? FOR UPDATE", id))
 	if e != nil {
 		return t, e
@@ -380,7 +403,7 @@ func (s Store) Cancel(ctx context.Context, id string, expected uint64, actor int
 	if e = appendEvent(ctx, tx, id, "cancel_requested", map[string]int{"actor_id": actor}); e != nil {
 		return t, e
 	}
-	return updated, tx.Commit()
+	return updated, nil
 }
 
 func PublicError(err error) string {

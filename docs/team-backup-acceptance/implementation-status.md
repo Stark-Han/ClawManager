@@ -77,3 +77,7 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 - artifact_verify 完成后提供受 backup.read 权限保护的安全报告 API，并在任务详情显示六 part 完整性结果。不会暴露冻结 Job 请求、Secret 引用或原始日志；报告不是 acceptance 证书。
 - attempt phase 已按 v12 使用 verify，与任务状态 running 区分；排队任务的预算来自创建时冻结配置，当前功能开关只控制新启动。
 - 本批相关后端包完整回归通过，systembackup 322.118 秒，启用真实 MySQL/MinIO/Redis/Kubernetes Job 和独立 capture/restore CLI。前端报告页面构建通过。
+
+## 配置与取消的重试一致性
+
+配置保存和任务取消现在要求 Idempotency-Key，前端在同一请求重试时保留该 key，修改请求后生成新 key。配置/状态变更、操作响应和审计事件在同一事务提交；同 key 不同内容拒绝，成功重试返回原响应。真实 MySQL 已验证八路并发配置请求只提交一次、取消只写一次事件，并在最终操作账本写入故障时回滚此前配置和审计写入。安全配置修改仍需尚未完成的近期强认证，不通过该改动绕过。

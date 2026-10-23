@@ -143,7 +143,7 @@ func (h *SystemBackupHandler) saveConfig(c *gin.Context) {
 	if !backupBody(c, &input) {
 		return
 	}
-	v, e := h.store.SaveConfig(c.Request.Context(), input.Expected, c.GetInt("userID"), input.Config, func(before, after systembackup.BackupConfig) error {
+	v, replay, e := h.store.SaveConfigIdempotent(c.Request.Context(), input.Expected, c.GetInt("userID"), c.GetHeader("Idempotency-Key"), input.Config, func(before, after systembackup.BackupConfig) error {
 		if systembackup.SecurityConfigChanged(before, after) || after.RetentionSeconds < before.RetentionSeconds || after.MinimumRecoveryPoints < before.MinimumRecoveryPoints {
 			if !h.bindings.Allows(c.GetInt("userID"), systembackup.SecurityConfigure) {
 				return errors.New("permission_denied")
@@ -156,7 +156,7 @@ func (h *SystemBackupHandler) saveConfig(c *gin.Context) {
 		backupError(c, e)
 		return
 	}
-	c.JSON(200, gin.H{"success": true, "data": v})
+	c.JSON(200, gin.H{"success": true, "data": v, "idempotent_replay": replay})
 }
 func (h *SystemBackupHandler) list(c *gin.Context) {
 	if !h.allow(c, systembackup.Read) {
@@ -226,11 +226,11 @@ func (h *SystemBackupHandler) cancel(c *gin.Context) {
 	if !backupBody(c, &input) {
 		return
 	}
-	v, e := h.store.Cancel(c.Request.Context(), c.Param("id"), input.Version, c.GetInt("userID"))
+	v, replay, e := h.store.CancelIdempotent(c.Request.Context(), c.Param("id"), input.Version, c.GetInt("userID"), c.GetHeader("Idempotency-Key"))
 	if e != nil {
 		backupError(c, e)
 		return
 	}
 	c.Header("Location", "/api/v1/admin/system-backup/tasks/"+v.ID)
-	c.JSON(202, gin.H{"success": true, "data": v})
+	c.JSON(202, gin.H{"success": true, "data": v, "idempotent_replay": replay})
 }
