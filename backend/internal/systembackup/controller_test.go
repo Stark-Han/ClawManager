@@ -69,7 +69,7 @@ func TestControllerLeaderFenceAndSafeUnstartedRecovery(t *testing.T) {
 	if _, e = s.DB.Exec("UPDATE system_backup_tasks SET deadline_at=TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)) WHERE public_id=?", expired.ID); e != nil {
 		t.Fatal(e)
 	}
-	controller := Controller{s, "leader-b", time.Second}
+	controller := Controller{Store: s, Owner: "leader-b", PollInterval: time.Second}
 	if e = controller.Tick(ctx); e != nil {
 		t.Fatal(e)
 	}

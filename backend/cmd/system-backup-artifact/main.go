@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -147,6 +148,7 @@ func verify(ctx context.Context, path, origin, id string, max int64, out io.Writ
 }
 
 func main() {
+	reportFile := flag.String("report-file", "", "bounded integrity result file (verify only)")
 	operation := flag.String("operation", "verify", "verify, capture or restore (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
@@ -165,9 +167,18 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctx, *deadline)
 	defer cancel()
 	var e error
+	var report bytes.Buffer
+	var output io.Writer = os.Stdout
+	if *reportFile != "" {
+		if *operation != "verify" {
+			fmt.Fprintln(os.Stderr, "report file requires verify operation")
+			os.Exit(2)
+		}
+		output = io.MultiWriter(os.Stdout, &report)
+	}
 	switch *operation {
 	case "verify":
-		e = verify(ctx, *config, *origin, *id, *max, os.Stdout)
+		e = verify(ctx, *config, *origin, *id, *max, output)
 	case "capture", "restore":
 		if *operationConfig == "" || *maxItems < 1 || *maxItems > 100000000 {
 			e = errors.New("validation_failed")
@@ -176,6 +187,13 @@ func main() {
 		}
 	default:
 		e = errors.New("validation_failed")
+	}
+	if e == nil && *reportFile != "" {
+		if report.Len() > 4096 {
+			e = errors.New("evidence_incomplete")
+		} else {
+			e = os.WriteFile(*reportFile, report.Bytes(), 0600)
+		}
 	}
 	if e != nil {
 		fmt.Fprintln(os.Stderr, "backup operation failed:", systembackup.PublicError(e))

@@ -92,6 +92,7 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if e = VerifyPublishedArtifact(ctx, external, recovered, wrapper, 64<<20); e != nil {
 		t.Fatal(e)
 	}
+	runRealVerifyJob(t, ctx, external, recovered, wrapper, pub)
 	target, targetName := isolatedSchemaDB(t, source.MySQL)
 	control := Store{DB: controlDB(t), InstallationID: "restore-controller"}
 	verifier, verifierDSN := selectOnlyVerifierWithDSN(t, source.MySQL, targetName)

@@ -8,7 +8,7 @@
 - `backend/internal/systembackup` 提供六类真实源的加密采集、固定版本外部发布、无源数据库的读取验证、独立数据恢复。联合测试覆盖真实 MySQL、Redis、MinIO、Kubernetes 只读账号及工作区文件。
 - 原始数据在不可变加密 artifact 中保留。恢复库内中断任务归一化为失败，已完成工作保留；原/后状态与行 hash 写入外部控制库的加密证据。Redis 放入历史命名空间；部署和 Secret 只读作历史，不执行旧资源。
 - 官方业务进程拒绝连接 `cm_restore_<32hex>` 命名的隔离数据恢复库。恢复验证账号只有 SELECT，并实际验证 DML/DDL 被拒绝。
-- `system-backup-controller` 是独立的控制协调进程：领导租约、任务租约、数据库时间、排队原因和未开始任务的取消/超时收尾。**尚未实现完整 capture/restore Job 执行和 attempt 接管，不能将此进程称为完整备份执行器。**
+- `system-backup-controller` 是独立的控制协调进程：领导租约、任务租约、数据库时间、排队原因和未开始任务的取消/超时收尾。独立 artifact_verify 现已接入 Kubernetes Job 和持久化 attempt 接管；capture/restore Job 编排仍未完成，不能将此进程称为完整备份执行器。
 - `system-backup-artifact` 提供独立的 capture / verify / restore 命令。verify 仅使用外部对象存储和 bootstrap 密钥文件；restore 仅连接灾备侧预先创建的隔离目标，不连接源 DB、源 Kubernetes 或业务 Runtime。输出完整性结果不自动授予正式恢复资格。
 
 ## 独立验证工具
@@ -61,3 +61,11 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 - 真实 MySQL 验证已覆盖写事务排空、维护拒写、只读访问、预编译语句、缺失 gate 拒绝，以及现有 TeamRepository / upper ORM 接入。恢复维护后可以继续正常写入。
 - AgentsRuntime 本地提交 `9e9a641` 修复 Hermes 未检查 maintenance、OpenClaw 同批次中途进入 maintenance 仍派发后续消息的问题。真实 Redis 回归通过；尚未构建或部署 Runtime 镜像，也未完成所有工具/子进程/presence 排空。
 - 32543 当前实际部署 ClawManager `7159197e` 镜像 `10.130.14.23:5000/clawmanager-hxc-app:team-backup-data-20261023-7159197e`。浏览器已验证入口和未就绪提示；新增 SQL 门禁代码仍属本地开发。
+
+## 独立验证 Job 与控制器接管
+
+- migration 082 为 attempt 保存完整冻结请求。Job 创建前先提交 attempt；恢复执行使用固定名称、请求 hash 和原 Job UID，创建响应丢失不产生第二个任务。旧 leader 不能提交结果。
+- 可选 `SYSTEM_BACKUP_VERIFY_RUNNER_FILE` 为控制器配置 namespace、namespace_uid、固定 digest 镜像、service_account、bootstrap_secret。控制器使用独立 in-cluster 身份。此项只接管已经通过服务端准入的 artifact_verify 任务，不放宽正式备份门禁。
+- 验证 Job 不自动挂载 Kubernetes token、无源连接配置、以非 root/只读根文件系统运行；读取挂载的灾备 bootstrap。Job 退出成功还必须存在绑定本次 backup/origin 的有限长度六 part 完整性报告；该报告永远不授予 acceptance 资格。
+- 取消/截止时间会按原 UID 删除 Job，确认删除完成后才收尾。未知或内容不匹配的同名 Job 不接管、不删除。使用真实 MySQL 已验证 leader 切换复用同一 attempt、截止时间不延长、旧 leader 拒绝、取消等待实际停止。
+- Job 的独立 namespace、只读存储权限、网络隔离和不可变 bootstrap Secret 必须由离线部署建立。正在测试服务器进行真实执行验收，不能将本节单元/数据库测试视为已完成全链路验收。

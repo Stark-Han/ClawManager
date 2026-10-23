@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// DecodeStrictJSON is shared by offline bootstrap and API contract readers.
+// It rejects duplicate/case-ambiguous keys as well as unknown typed fields.
+func DecodeStrictJSON(raw []byte, out any) error { return strictDecode(raw, out) }
+
 // Reject ambiguous objects before decoding typed fields. encoding/json normally
 // accepts duplicate keys (and case-insensitive struct matches), which is unsafe
 // for signed manifests and normalized record digests.
