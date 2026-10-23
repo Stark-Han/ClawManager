@@ -133,12 +133,26 @@ type CreateTaskRequest struct {
 }
 
 func RequestHash(v any) (string, error) {
-	b, e := json.Marshal(v)
+	b, e := canonicalJSON(v)
 	if e != nil {
 		return "", e
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:]), nil
+}
+
+// Old installations persisted encoding/json hashes. Accept them only when
+// comparing an existing idempotency result; all new requests use RFC 8785.
+func requestHashMatches(stored, canonical string, v any) bool {
+	if stored == canonical {
+		return true
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	h := sha256.Sum256(raw)
+	return stored == hex.EncodeToString(h[:])
 }
 
 func (s Store) Create(ctx context.Context, actor int, key string, r CreateTaskRequest, admit func(context.Context, *sql.Tx, ConfigVersion, CreateTaskRequest) error) (Task, bool, error) {
@@ -173,7 +187,7 @@ func (s Store) Create(ctx context.Context, actor int, key string, r CreateTaskRe
 	var existing, oldHash string
 	err = tx.QueryRowContext(ctx, "SELECT public_id,request_hash FROM system_backup_tasks WHERE origin_installation_id=? AND actor_id=? AND task_type=? AND idempotency_key=?", identity, actor, r.Type, key).Scan(&existing, &oldHash)
 	if err == nil {
-		if oldHash != hash {
+		if !requestHashMatches(oldHash, hash, r) {
 			return zero, false, errors.New("idempotency_conflict")
 		}
 		t, e := getTask(ctx, tx, existing)
@@ -412,6 +426,11 @@ func PublicError(err error) string {
 	}
 	if err == nil {
 		return "none"
+	}
+	for _, code := range FailureCategories {
+		if err.Error() == code {
+			return code
+		}
 	}
 	switch err.Error() {
 	case "validation_failed", "permission_denied", "not_found", "not_ready", "artifact_unavailable", "version_conflict", "idempotency_conflict", "state_conflict", "commit_started", "rate_limited", "conflict_active_job", "capacity_exceeded", "unsupported_runner_p1", "unsupported_profile_p1", "strong_auth_required", "strong_auth_expired", "strong_auth_invalid_issuer", "strong_auth_invalid", "strong_auth_replayed":

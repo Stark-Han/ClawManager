@@ -35,7 +35,7 @@ func idempotentOperation[T any](ctx context.Context, s Store, actor int, endpoin
 	var raw []byte
 	e = tx.QueryRowContext(ctx, "SELECT request_hash,status,response_json FROM system_backup_operations WHERE actor_id=? AND endpoint=? AND idempotency_key=? FOR UPDATE", actor, endpoint, key).Scan(&oldHash, &status, &raw)
 	if e == nil {
-		if oldHash != hash {
+		if !requestHashMatches(oldHash, hash, request) {
 			return zero, false, errors.New("idempotency_conflict")
 		}
 		if status != "succeeded" || len(raw) > 32768 || strictDecode(raw, &zero) != nil {

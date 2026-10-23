@@ -42,6 +42,14 @@ func TestEncryptedSixPartArtifactIsIndependentlyRecoverable(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	legacyBytes, e := manifestSigningBytes(manifest)
+	if e != nil {
+		t.Fatal(e)
+	}
+	legacy := SignedManifest{Payload: manifest, Signature: ArtifactSignature{Algorithm: "Ed25519", KeyVersion: "sign-v3", Value: ed25519.Sign(key, legacyBytes)}}
+	if e = VerifyManifest(legacy, pub, "sign-v3"); e != nil {
+		t.Fatal("legacy functional artifact became unreadable", e)
+	}
 	raw, e := json.Marshal(signed)
 	if e != nil {
 		t.Fatal(e)

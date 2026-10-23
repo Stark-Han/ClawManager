@@ -52,16 +52,12 @@ type PublishedArtifact struct {
 }
 
 func signObject(domain string, payload any, key ed25519.PrivateKey, version string) (ArtifactSignature, error) {
-	if len(key) != ed25519.PrivateKeySize || !refPattern.MatchString(version) {
-		return ArtifactSignature{}, errors.New("signing_key_unavailable")
-	}
-	raw, e := json.Marshal(payload)
-	if e != nil {
-		return ArtifactSignature{}, e
-	}
-	return ArtifactSignature{"Ed25519", version, ed25519.Sign(key, append([]byte(domain+"\n"), raw...))}, nil
+	return signPurpose(domain, "artifact", payload, key, version)
 }
 func verifyObject(domain string, payload any, s ArtifactSignature, key ed25519.PublicKey, version string) error {
+	if s.Protected != nil {
+		return verifyPurpose(domain, "artifact", payload, s, key, version)
+	}
 	if len(key) != ed25519.PublicKeySize || s.Algorithm != "Ed25519" || s.KeyVersion != version {
 		return errors.New("signature_invalid")
 	}
@@ -99,7 +95,7 @@ func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, 
 	}
 	defer root.Close()
 	prefix := artifactPrefix(manifest.Payload.OriginInstallationID, manifest.Payload.BackupID)
-	manifestBytes, e := json.Marshal(manifest)
+	manifestBytes, e := canonicalJSON(manifest)
 	if e != nil {
 		return out, e
 	}
@@ -159,7 +155,7 @@ func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, 
 		return out, e
 	}
 	signedIndex := SignedIndex{index, signature}
-	indexBytes, e := json.Marshal(signedIndex)
+	indexBytes, e := canonicalJSON(signedIndex)
 	if e != nil {
 		return out, e
 	}
@@ -173,7 +169,7 @@ func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, 
 		return out, e
 	}
 	signedCommit := SignedCommit{commit, signature}
-	raw, e := json.Marshal(signedCommit)
+	raw, e := canonicalJSON(signedCommit)
 	if e != nil {
 		return out, e
 	}

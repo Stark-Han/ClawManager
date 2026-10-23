@@ -107,9 +107,10 @@ type Manifest struct {
 	Parts                []ArtifactPart `json:"parts"`
 }
 type ArtifactSignature struct {
-	Algorithm  string `json:"algorithm"`
-	KeyVersion string `json:"key_version"`
-	Value      []byte `json:"value"`
+	Algorithm  string           `json:"algorithm"`
+	KeyVersion string           `json:"key_version"`
+	Value      []byte           `json:"value"`
+	Protected  *SignatureHeader `json:"protected,omitempty"`
 }
 type SignedManifest struct {
 	Payload   Manifest          `json:"payload"`
@@ -158,13 +159,22 @@ func SignManifest(m Manifest, key ed25519.PrivateKey, keyVersion string) (Signed
 	if len(key) != ed25519.PrivateKeySize || !refPattern.MatchString(keyVersion) {
 		return SignedManifest{}, errors.New("signing_key_unavailable")
 	}
-	raw, e := manifestSigningBytes(m)
-	if e != nil {
+	if e := m.Validate(); e != nil {
 		return SignedManifest{}, e
 	}
-	return SignedManifest{m, ArtifactSignature{"Ed25519", keyVersion, ed25519.Sign(key, raw)}}, nil
+	s, e := signPurpose("clawmanager:manifest:system-backup.v1", "artifact", m, key, keyVersion)
+	return SignedManifest{m, s}, e
 }
 func VerifyManifest(s SignedManifest, key ed25519.PublicKey, keyVersion string) error {
+	if e := s.Payload.Validate(); e != nil {
+		return e
+	}
+	if s.Signature.Protected != nil {
+		return verifyPurpose("clawmanager:manifest:system-backup.v1", "artifact", s.Payload, s.Signature, key, keyVersion)
+	}
+	if s.Payload.Purpose != "functional_test" {
+		return errors.New("signature_invalid")
+	}
 	if len(key) != ed25519.PublicKeySize || s.Signature.Algorithm != "Ed25519" || s.Signature.KeyVersion != keyVersion {
 		return errors.New("signature_invalid")
 	}
