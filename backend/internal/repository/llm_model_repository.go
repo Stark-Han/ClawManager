@@ -2,7 +2,6 @@ package repository
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"clawreef/internal/models"
@@ -24,91 +23,10 @@ type llmModelRepository struct {
 	sess db.Session
 }
 
-// NewLLMModelRepository creates a new model repository and ensures its table exists.
+// NewLLMModelRepository creates a new model repository (schema is owned by embedded migrations).
 func NewLLMModelRepository(sess db.Session) LLMModelRepository {
 	repo := &llmModelRepository{sess: sess}
-	repo.ensureTable()
 	return repo
-}
-
-func (r *llmModelRepository) ensureTable() {
-	const query = `
-CREATE TABLE IF NOT EXISTS llm_models (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  display_name VARCHAR(255) NOT NULL UNIQUE,
-  description TEXT NULL,
-  provider_type VARCHAR(100) NOT NULL,
-  protocol_type VARCHAR(100) NULL,
-  base_url VARCHAR(500) NOT NULL,
-  provider_model_name VARCHAR(255) NOT NULL,
-  provider_models_json TEXT NULL,
-  reasoning_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-  api_key TEXT NULL,
-  api_key_secret_ref VARCHAR(255) NULL,
-  is_secure BOOLEAN NOT NULL DEFAULT FALSE,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  input_price DECIMAL(18,8) NOT NULL DEFAULT 0,
-  output_price DECIMAL(18,8) NOT NULL DEFAULT 0,
-  currency VARCHAR(16) NOT NULL DEFAULT 'USD',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_llm_models_provider_type (provider_type),
-  INDEX idx_llm_models_is_active (is_active),
-  INDEX idx_llm_models_is_secure (is_secure)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-`
-
-	if _, err := r.sess.SQL().Exec(query); err != nil {
-		panic(fmt.Errorf("failed to ensure llm_models table: %w", err))
-	}
-
-	const alterProtocolTypeQuery = `
-ALTER TABLE llm_models
-  ADD COLUMN protocol_type VARCHAR(100) NULL AFTER provider_type;
-`
-
-	if _, err := r.sess.SQL().Exec(alterProtocolTypeQuery); err != nil {
-		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-			panic(fmt.Errorf("failed to ensure llm_models protocol_type column: %w", err))
-		}
-	}
-
-	const backfillProtocolTypeQuery = `
-UPDATE llm_models
-SET protocol_type = CASE
-  WHEN LOWER(TRIM(provider_type)) = 'local' THEN 'openai-compatible'
-  WHEN LOWER(TRIM(provider_type)) = 'openai' THEN 'openai'
-  WHEN LOWER(TRIM(provider_type)) = 'anthropic' THEN 'anthropic'
-  WHEN LOWER(TRIM(provider_type)) = 'google' THEN 'google'
-  WHEN LOWER(TRIM(provider_type)) = 'azure-openai' THEN 'azure-openai'
-  ELSE 'openai-compatible'
-END
-WHERE protocol_type IS NULL OR TRIM(protocol_type) = '';
-`
-
-	if _, err := r.sess.SQL().Exec(backfillProtocolTypeQuery); err != nil {
-		panic(fmt.Errorf("failed to ensure llm_models protocol_type column: %w", err))
-	}
-
-	const alterReasoningEnabledQuery = `
-ALTER TABLE llm_models
-  ADD COLUMN reasoning_enabled BOOLEAN NOT NULL DEFAULT FALSE AFTER provider_model_name;
-`
-	if _, err := r.sess.SQL().Exec(alterReasoningEnabledQuery); err != nil {
-		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-			panic(fmt.Errorf("failed to ensure llm_models reasoning_enabled column: %w", err))
-		}
-	}
-
-	const alterProviderModelsQuery = `
-ALTER TABLE llm_models
-  ADD COLUMN provider_models_json TEXT NULL AFTER provider_model_name;
-`
-	if _, err := r.sess.SQL().Exec(alterProviderModelsQuery); err != nil {
-		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-			panic(fmt.Errorf("failed to ensure llm_models provider_models_json column: %w", err))
-		}
-	}
 }
 
 func (r *llmModelRepository) List() ([]models.LLMModel, error) {
