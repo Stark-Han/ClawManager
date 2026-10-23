@@ -72,6 +72,7 @@ func TestOrdinaryPlacementMySQLDefaultScopeAndBirthFence(t *testing.T) {
 				later.SourceImagesJSON = ptrString(`{"tenant/pool":"` + image + `"}`)
 			case "legacy-followup":
 				later.Phase = "requested"
+				later.SourceImagesJSON = nil // Production #148: BOTH fields are NULL.
 			}
 			if err := repo.Create(ctx, &later); err != nil {
 				t.Fatal(err)
@@ -84,6 +85,10 @@ func TestOrdinaryPlacementMySQLDefaultScopeAndBirthFence(t *testing.T) {
 			if scenario == "scoped" {
 				expected.DeploymentName = runtimeUpgradeTargetDeploymentName("pool", later.ID)
 			}
+			if scenario == "legacy-followup" {
+				expected.KubernetesReady = true
+				expected.KubernetesPodUID = expected.PodUID
+			}
 			got, err := u.filterUpgradePlacement(ctx, 901, []models.RuntimePod{pod, expected})
 			if err != nil || len(got) == 0 {
 				t.Fatalf("wrong default: %+v %v", got, err)
@@ -92,6 +97,14 @@ func TestOrdinaryPlacementMySQLDefaultScopeAndBirthFence(t *testing.T) {
 				if p.ImageRef != expected.ImageRef {
 					t.Fatal("old or unrelated rollout became default")
 				}
+			}
+			if scenario == "legacy-followup" {
+				unverified := expected
+				unverified.KubernetesReady = false
+				unrelated := expected
+				unrelated.DeploymentName = "unrelated-pool"
+				if rejected, err := u.filterUpgradePlacement(ctx, 901, []models.RuntimePod{unverified, unrelated}); err != nil || len(rejected) != 0 { t.Fatalf("legacy fallback widened scope or trusted registry: %+v %v", rejected, err) }
+				if old, err := u.filterUpgradePlacement(ctx, 902, []models.RuntimePod{expected}); err == nil || len(old) != 0 { t.Fatal("legacy fallback lost original birth fence") }
 			}
 			if scenario == "scoped" {
 				old, err := u.filterUpgradePlacement(ctx, 903, []models.RuntimePod{pod, expected})
@@ -291,6 +304,13 @@ func TestOrdinaryPlacementMySQLAfterEmptyPoolSwitch(t *testing.T) {
 			if err := rollouts.Create(ctx, &reset); err != nil {
 				t.Fatal(err)
 			}
+			// The real regression: a later successful ordinary rollout stores no
+			// preflight or inventory, and changes the serving image in place.
+			legacy := models.RuntimeRollout{RuntimeType: "openclaw", TargetImageRef: "registry/openclaw:legacy-" + target, Status: "finished", Phase: "pending", StartedAt: &start, FinishedAt: &finish}
+			if err := rollouts.Create(ctx, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			image = legacy.TargetImageRef
 			path := RuntimeWorkspacePathWithRoot(root, "openclaw", 1, 901)
 			exec(`INSERT INTO instances(id,user_id,type,runtime_type,instance_mode,status,runtime_generation,workspace_path,created_at,updated_at)VALUES(901,1,'openclaw','gateway','lite','creating',1,?,?,?)`, path, now, now)
 			pod, live := ordinaryPlacementFixture()

@@ -331,6 +331,29 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 		return inventoryErr
 	}
 	allPods = annotateRuntimePods(allPods, deploymentInventory)
+	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil && rollout.SourceImagesJSON == nil {
+		if store, ok := s.rolloutRepo.(interface {
+			SaveOrdinarySourceImages(context.Context, int64, string) error
+		}); ok {
+			sources := map[string]string{}
+			for _, pod := range filterOrdinaryRuntimePods(deploymentInventory) {
+				if pod.Namespace == s.runtimeNamespace && pod.DeploymentName != "" && pod.ImageRef != "" {
+					sources[pod.Namespace+"/"+pod.DeploymentName] = pod.ImageRef
+				}
+			}
+			if len(sources) == 0 {
+				return fmt.Errorf("%w: cannot freeze ordinary rollout deployment scope", errRuntimeControlPlanePending)
+			}
+			raw, err := json.Marshal(sources)
+			if err != nil {
+				return err
+			}
+			if err := store.SaveOrdinarySourceImages(ctx, rollout.ID, string(raw)); err != nil {
+				return err
+			}
+			rollout.SourceImagesJSON = stringPtrOrNil(string(raw))
+		}
+	}
 	if rollout.RuntimeType != RuntimeTypeOpenClaw || rollout.PreflightID == nil {
 		allPods = filterOrdinaryRuntimePods(allPods)
 	}
@@ -343,6 +366,13 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 				return err
 			}
 			alreadyAtImage = reason == ""
+			if alreadyAtImage && rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil {
+				reason, err = s.emptyPoolPlacementCompletionReason(ctx, *rollout)
+				if err != nil {
+					return err
+				}
+				alreadyAtImage = reason == ""
+			}
 		}
 	}
 	if alreadyAtImage {
@@ -1898,9 +1928,13 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		return fmt.Errorf("classify schedulable %s runtime pods: %w", runtimeType, err)
 	}
 	if runtimeType == RuntimeTypeOpenClaw && s.upgrade != nil {
+		verifiedCount := len(pods)
 		pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
 		if err != nil {
 			return err
+		}
+		if verifiedCount > 0 && len(pods) == 0 {
+			return fmt.Errorf("%w: no verified Runtime matches this instance's committed upgrade placement (healthy candidates=%d)", errRuntimeControlPlanePending, verifiedCount)
 		}
 	}
 	if len(pods) == 0 {

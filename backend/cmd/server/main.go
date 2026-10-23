@@ -233,6 +233,15 @@ func main() {
 		aigateway.WithOwnerUsage(ownerStore),
 	)
 	customTeamTemplateService := teamtemplate.NewService(customTeamTemplateRepo, aiGatewayService)
+	ownerTeamAPI := northbound.NewOwnerTeamAPI(database, teamService, instanceService, userRepo, aiGatewayService, false, 0)
+	ownerTeamAPI.Settings = northboundRuntimeSettings
+	ownerTeamAPI.Audit = auditEventRepo
+	if guarded, ok := instanceService.(interface {
+		SetOwnerTeamMutationGuard(func(int, string, int) error)
+	}); ok {
+		guarded.SetOwnerTeamMutationGuard(ownerTeamAPI.GuardInstanceMutation)
+	}
+	northboundCoreService.OwnerTeams = ownerTeamAPI
 
 	// Initialize handlers
 	versionHandler := handlers.NewVersionHandler()
@@ -268,10 +277,12 @@ func main() {
 		log.Fatalf("Failed to initialize IEI system SSO: %v", err)
 	}
 	instanceHandler.SetIEISSOService(ieiSSOService)
+	ieiSSOService.SetSessionRevocationStore(repository.NewOwnerTeamRepository(database))
 	instanceHandler.SetHermesDesktopService(hermesDesktopService)
 	ieiSystemHandler := handlers.NewIEISystemHandler(cfg.IEISystem, ieiSSOService, instanceService, instanceHandler)
 	ieiSystemHandler.SetHermesDesktopService(hermesDesktopService)
 	ieiSystemHandler.SetOwnerDashboard(ownerStore)
+	ieiSystemHandler.SetOwnerTeamAPI(ownerTeamAPI)
 	if northboundCoreService != nil {
 		northboundCoreService.SetOwnerUsage(ownerStore)
 	}
@@ -486,6 +497,7 @@ func main() {
 		api.GET("/version", versionHandler.Get)
 
 		ieiSystem := api.Group("/ieisystem")
+		ieiSystemHandler.RegisterOwnerTeamRoutes(ieiSystem)
 		{
 			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
 			ieiSystem.GET("/session", ieiSystemHandler.GetSession)
@@ -688,6 +700,7 @@ func main() {
 		teams := api.Group("/teams")
 		teams.Use(middleware.Auth())
 		teams.Use(middleware.SetUserInfo(userRepo))
+		teams.Use(teamHandler.ResourceScopeGuard)
 		{
 			teams.GET("", teamHandler.ListTeams)
 			teams.POST("", teamHandler.CreateTeam)

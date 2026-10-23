@@ -104,6 +104,9 @@ func (s *RuntimeUpgradeService) filterUpgradePlacement(ctx context.Context, id i
 			}
 			return result, nil
 		}
+		if inPlace && !isEmptyOpenClawPoolReset(current) && sourceJSON == "{}" {
+			return s.legacyDefaultPlacement(ctx, current, pods)
+		}
 		err = nil
 		excluded = false
 	}
@@ -118,7 +121,6 @@ func (s *RuntimeUpgradeService) filterUpgradePlacement(ctx context.Context, id i
 func (s *RuntimeUpgradeService) defaultPlacementRollout(ctx context.Context) (*models.RuntimeRollout, error) {
 	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT id,COALESCE(source_images_json,'{}'),target_image_ref,phase,started_at,preflight_id
 	 FROM runtime_rollouts WHERE runtime_type='openclaw' AND status='finished'
-	 AND (preflight_id IS NOT NULL OR source_images_json IS NOT NULL)
 	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.recovery_mode')),'')=''
 	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.upgrade_lab_run_id')),'null')='null'
 	 ORDER BY id DESC LIMIT 1`)
@@ -134,6 +136,62 @@ func (s *RuntimeUpgradeService) defaultPlacementRollout(ctx context.Context) (*m
 	}
 	r.SourceImagesJSON = &source
 	return r, nil
+}
+
+// Older ordinary rollouts did not save source_images_json. They still replace
+// the ordinary pool's image. Recover their scope from the last committed pool,
+// when present, and intersect it with the scheduler's live verified inventory.
+// Never mutate history, trust a registration alone, or relax an instance fence.
+func (s *RuntimeUpgradeService) legacyDefaultPlacement(ctx context.Context, r *models.RuntimeRollout, pods []models.RuntimePod) ([]models.RuntimePod, error) {
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT id,source_images_json,preflight_id FROM runtime_rollouts
+	 WHERE runtime_type='openclaw' AND status='finished' AND id<? AND source_images_json IS NOT NULL
+	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.recovery_mode')),'')=''
+	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.upgrade_lab_run_id')),'null')='null'
+	 ORDER BY id DESC LIMIT 1`, r.ID)
+	if err != nil {
+		return nil, err
+	}
+	var previous int64
+	var raw string
+	var preflight *string
+	err = row.Scan(&previous, &raw, &preflight)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	var scope map[string]string
+	if err == nil {
+		var sources map[string]string
+		if err := json.Unmarshal([]byte(raw), &sources); err != nil {
+			return nil, err
+		}
+		if len(sources) == 0 {
+			return nil, fmt.Errorf("%w: prior default has empty deployment scope", errRuntimeControlPlanePending)
+		}
+		scope = make(map[string]string, len(sources))
+		for key := range sources {
+			parts := strings.SplitN(key, "/", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				return nil, fmt.Errorf("invalid prior placement scope")
+			}
+			if preflight != nil {
+				parts[1] = runtimeUpgradeTargetDeploymentName(parts[1], previous)
+			}
+			scope[parts[0]+"/"+parts[1]] = r.TargetImageRef
+		}
+	}
+	result := []models.RuntimePod{}
+	for _, pod := range pods {
+		if !pod.KubernetesReady || stringValue(pod.KubernetesPodUID) == "" || !runtimePodEligibleForOrdinaryScheduling(pod) {
+			continue
+		}
+		if scope != nil && scope[pod.Namespace+"/"+pod.DeploymentName] == "" {
+			continue
+		}
+		if runtimePodMatchesImage(pod, r.TargetImageRef) {
+			result = append(result, pod)
+		}
+	}
+	return result, nil
 }
 
 func filterPlacementTarget(pods []models.RuntimePod, rolloutID int64, sourceJSON, target string, excluded, inPlace bool) ([]models.RuntimePod, error) {

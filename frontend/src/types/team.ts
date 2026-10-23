@@ -181,6 +181,9 @@ export interface CreateTeamRequest {
 }
 
 export interface TeamDetails {
+	// Northbound filtering advances the raw cursor even through hidden events.
+	events_has_more?: boolean;
+	events_next_before_id?: number;
   team: Team;
   leader_member_id?: string;
   leader?: TeamMember;

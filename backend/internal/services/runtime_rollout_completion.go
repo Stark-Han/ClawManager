@@ -44,7 +44,7 @@ func (s *RuntimeScheduler) finishLiveRuntimeRollout(ctx context.Context, r model
 		targets = p.Targets
 	}
 	reason, err := s.runtimeRolloutCompletionReason(ctx, r, targets)
-	if err == nil && reason == "" && isEmptyOpenClawPoolReset(&r) {
+	if err == nil && reason == "" && r.RuntimeType == RuntimeTypeOpenClaw && r.PreflightID == nil {
 		reason, err = s.emptyPoolPlacementCompletionReason(ctx, r)
 	}
 	if err != nil {
@@ -79,7 +79,11 @@ func (s *RuntimeScheduler) emptyPoolPlacementCompletionReason(ctx context.Contex
 	if err != nil {
 		return "", err
 	}
-	current, err = filterPlacementTarget(current, r.ID, stringValue(r.SourceImagesJSON), r.TargetImageRef, false, true)
+	if r.SourceImagesJSON == nil && !isEmptyOpenClawPoolReset(&r) && s.upgrade != nil {
+		current, err = s.upgrade.legacyDefaultPlacement(ctx, &r, current)
+	} else {
+		current, err = filterPlacementTarget(current, r.ID, stringValue(r.SourceImagesJSON), r.TargetImageRef, false, true)
+	}
 	if err != nil {
 		return "", err
 	}

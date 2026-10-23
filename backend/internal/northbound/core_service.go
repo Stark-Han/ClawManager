@@ -32,6 +32,7 @@ const (
 )
 
 type CoreService struct {
+	OwnerTeams      *OwnerTeamAPI
 	ownerUsage      ownerUsageReader
 	repo            *repository.NorthboundRepository
 	users           repository.UserRepository
@@ -822,6 +823,28 @@ func (w *OperationWorker) processNext(ctx context.Context, batchOnly bool) {
 		return
 	}
 	if item == nil {
+		return
+	}
+	if strings.HasPrefix(item.OperationType, ownerTeamOperationPrefix) {
+		if w.service.OwnerTeams == nil {
+			return
+		}
+		var templateID *int
+		err := w.runLifecycleActionWithLease(ctx, item, func() error {
+			var err error
+			templateID, err = w.service.OwnerTeams.execute(ctx, item)
+			return err
+		})
+		var pending *services.OwnerTeamRuntimePending
+		if errors.As(err, &pending) {
+			if deferErr := w.service.repo.DeferOwnerTeamReadiness(ctx, item, pending.Error()); deferErr != nil {
+				log.Printf("Owner Team readiness observation could not be saved: %s", item.OperationID)
+			}
+			return
+		}
+		if finishErr := w.service.repo.FinishOwnerTeamOperation(ctx, item, templateID, err); finishErr != nil {
+			log.Printf("Owner Team operation completion failed: %s", item.OperationID)
+		}
 		return
 	}
 	if isLifecycleOperation(item.OperationType) {
