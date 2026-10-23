@@ -269,33 +269,10 @@ func OpenPublishedArtifact(ctx context.Context, store ImmutableObjectStore, orig
 	if e = verifyObject("clawmanager:artifact-index:v1", out.Index.Payload, out.Index.Signature, key, keyVersion); e != nil {
 		return out, e
 	}
-	index := out.Index.Payload
-	if index.Schema != "system-backup-index.v1" || index.BackupID != id || index.OriginInstallationID != origin || index.ManifestSHA256 != c.Manifest.SHA256 || len(index.Parts) != len(out.Manifest.Payload.Parts) {
-		return out, errors.New("artifact_conflict")
+	if err := ValidateArtifactIndex(out.Index.Payload, out.Manifest.Payload, c.Manifest.SHA256); err != nil {
+		return out, err
 	}
-	seen := map[string]bool{}
-	for _, part := range index.Parts {
-		if seen[part.Name] || len(part.Objects) == 0 {
-			return out, errors.New("invalid part index")
-		}
-		seen[part.Name] = true
-		expected := int64(-1)
-		for _, p := range out.Manifest.Payload.Parts {
-			if p.Name == part.Name {
-				expected = p.CiphertextBytes
-			}
-		}
-		var size int64
-		for i, o := range part.Objects {
-			if o.Key != fmt.Sprintf("%sparts/%s/%08d.bin", prefix, part.Name, i) || o.Bytes <= 0 || o.Bytes > artifactChunkBytes || o.VersionID == "" || !validHash(o.SHA256) {
-				return out, errors.New("invalid immutable chunk")
-			}
-			size += o.Bytes
-		}
-		if size != expected {
-			return out, errors.New("part index size mismatch")
-		}
-	}
+
 	return out, nil
 }
 

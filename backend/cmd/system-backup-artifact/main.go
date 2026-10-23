@@ -69,22 +69,30 @@ func decodeFile(path string, out any) error {
 	return nil
 }
 
-func withBootstrap(ctx context.Context, path string, action func(bootstrap, systembackup.ImmutableObjectStore, ed25519.PublicKey, systembackup.AESKeyWrapper) error) error {
-	var cfg bootstrap
-	if e := decodeFile(path, &cfg); e != nil {
-		return e
-	}
+type uploadBootstrap struct {
+	Endpoint               string `json:"endpoint"`
+	Bucket                 string `json:"bucket"`
+	Root                   string `json:"root"`
+	Secure                 bool   `json:"secure"`
+	CredentialsFile        string `json:"credentials_file"`
+	CAFile                 string `json:"ca_file,omitempty"`
+	VerificationKeyFile    string `json:"verification_key_file"`
+	VerificationKeyVersion string `json:"verification_key_version"`
+}
+
+func connectArtifactStore(ctx context.Context, cfg uploadBootstrap) (systembackup.ImmutableObjectStore, func(), error) {
+	var zero systembackup.ImmutableObjectStore
 	if cfg.Endpoint == "" || strings.Contains(cfg.Endpoint, "://") || cfg.Bucket == "" {
-		return errors.New("validation_failed")
+		return zero, nil, errors.New("validation_failed")
 	}
 	if !cfg.Secure {
 		host, _, e := net.SplitHostPort(cfg.Endpoint)
 		if e != nil {
-			return errors.New("validation_failed")
+			return zero, nil, errors.New("validation_failed")
 		}
 		ip := net.ParseIP(host)
 		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			return errors.New("TLS is required outside a local verification tunnel")
+			return zero, nil, errors.New("TLS is required outside a local verification tunnel")
 		}
 	}
 	var cred struct {
@@ -93,29 +101,42 @@ func withBootstrap(ctx context.Context, path string, action func(bootstrap, syst
 		SessionToken string `json:"session_token,omitempty"`
 	}
 	if e := decodeFile(cfg.CredentialsFile, &cred); e != nil {
-		return errors.New("artifact_unavailable")
+		return zero, nil, errors.New("artifact_unavailable")
 	}
 	if cred.AccessKey == "" || cred.SecretKey == "" {
-		return errors.New("artifact_unavailable")
+		return zero, nil, errors.New("artifact_unavailable")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	defer transport.CloseIdleConnections()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.CAFile != "" {
 		raw, e := readBounded(cfg.CAFile, 1<<20)
 		if e != nil {
-			return e
+			return zero, nil, e
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(raw) {
-			return errors.New("invalid trust roots")
+			return zero, nil, errors.New("invalid trust roots")
 		}
 		transport.TLSClientConfig.RootCAs = pool
 	}
 	client, e := minio.New(cfg.Endpoint, &minio.Options{Creds: credentials.NewStaticV4(cred.AccessKey, cred.SecretKey, cred.SessionToken), Secure: cfg.Secure, Transport: transport})
 	if e != nil {
-		return errors.New("artifact_unavailable")
+		return zero, nil, errors.New("artifact_unavailable")
 	}
+
+	return systembackup.ImmutableObjectStore{Client: client, Bucket: cfg.Bucket, Root: cfg.Root}, transport.CloseIdleConnections, nil
+}
+
+func withBootstrap(ctx context.Context, path string, action func(bootstrap, systembackup.ImmutableObjectStore, ed25519.PublicKey, systembackup.AESKeyWrapper) error) error {
+	var cfg bootstrap
+	if e := decodeFile(path, &cfg); e != nil {
+		return e
+	}
+	store, closeStore, e := connectArtifactStore(ctx, uploadBootstrap{Endpoint: cfg.Endpoint, Bucket: cfg.Bucket, Root: cfg.Root, Secure: cfg.Secure, CredentialsFile: cfg.CredentialsFile, CAFile: cfg.CAFile})
+	if e != nil {
+		return e
+	}
+	defer closeStore()
 	pub, e := readBounded(cfg.VerificationKeyFile, ed25519.PublicKeySize)
 	if e != nil || len(pub) != ed25519.PublicKeySize {
 		return errors.New("signing_key_unavailable")
@@ -125,7 +146,6 @@ func withBootstrap(ctx context.Context, path string, action func(bootstrap, syst
 		return errors.New("encryption_key_unavailable")
 	}
 	defer clear(key)
-	store := systembackup.ImmutableObjectStore{Client: client, Bucket: cfg.Bucket, Root: cfg.Root}
 	wrapper := systembackup.AESKeyWrapper{Reference: cfg.EncryptionReference, Key: key}
 	return action(cfg, store, ed25519.PublicKey(pub), wrapper)
 }
@@ -164,6 +184,7 @@ func main() {
 	reportFile := flag.String("report-file", "", "bounded operation result file")
 	readyFile := flag.String("ready-file", "", "capture-phase readiness file")
 	captureRequest := flag.String("capture-request", "", "frozen non-secret capture request (base64url)")
+	uploadRequest := flag.String("upload-request", "", "frozen non-secret upload request (base64url)")
 	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
@@ -205,7 +226,7 @@ func main() {
 	var report bytes.Buffer
 	var output io.Writer = os.Stdout
 	if *reportFile != "" {
-		if *operation != "verify" && *operation != "capture-phase" {
+		if *operation != "verify" && *operation != "verify-snapshot" && *operation != "capture-phase" && *operation != "upload-parts" {
 			fmt.Fprintln(os.Stderr, "report file is unsupported for this operation")
 			os.Exit(2)
 		}
@@ -214,6 +235,16 @@ func main() {
 	switch *operation {
 	case "verify":
 		e = verify(ctx, *config, *origin, *id, *max, output)
+	case "verify-snapshot":
+		e = verifySnapshot(ctx, *config, *origin, *id, systembackup.CaptureBudget{MaxBytes: *max, MaxItems: *maxItems}, output)
+	case "upload-parts":
+		var request systembackup.PartUploadRequest
+		raw, decodeErr := base64.RawURLEncoding.Strict().DecodeString(*uploadRequest)
+		if decodeErr != nil || len(raw) > 8192 || systembackup.DecodeStrictJSON(raw, &request) != nil {
+			e = errors.New("validation_failed")
+		} else {
+			e = runUploadParts(ctx, *config, *operationConfig, *origin, *id, request, *max, output)
+		}
 	case "capture-phase":
 		var request systembackup.CapturePhaseRequest
 		raw, decodeErr := base64.RawURLEncoding.Strict().DecodeString(*captureRequest)

@@ -39,7 +39,7 @@ const attemptColumns = "public_id,task_id,phase,attempt_number,controller_owner,
 // the existing object, never create a second writer after an unknown response.
 func (s Store) PrepareAttempt(ctx context.Context, l Leadership, t Task, phase string, request any) (Attempt, error) {
 	var zero Attempt
-	allowed := map[TaskType]map[string]bool{Backup: {"capture": true, "secret_capture": true, "publish": true}, Drill: {"restore": true, "normalize": true, "verify": true}, Preflight: {"preflight": true}, ArtifactVerify: {"verify": true}}
+	allowed := map[TaskType]map[string]bool{Backup: {"capture": true, "secret_capture": true, "upload": true, "publish": true, "verify": true}, Drill: {"restore": true, "normalize": true, "verify": true}, Preflight: {"preflight": true}, ArtifactVerify: {"verify": true}}
 	if !allowed[t.Type][phase] {
 		return zero, errors.New("validation_failed")
 	}

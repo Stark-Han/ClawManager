@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -185,12 +186,24 @@ func (s Store) CaptureBinding(ctx context.Context, attemptID string) (CaptureJob
 	return b, err
 }
 func (s Store) BindCaptureJob(ctx context.Context, l Leadership, t Task, a Attempt, job *batchv1.Job) error {
-	if job == nil || job.UID == "" {
-		return errors.New("validation_failed")
-	}
 	want, _, err := captureJob(a)
 	if err != nil {
 		return err
+	}
+	return s.bindFrozenBackupJob(ctx, l, t, a, job, want, []string{"preparing", "canceling"})
+}
+
+func (s Store) BindUploadJob(ctx context.Context, l Leadership, t Task, a Attempt, job *batchv1.Job) error {
+	want, _, err := uploadJob(a)
+	if err != nil {
+		return err
+	}
+	return s.bindFrozenBackupJob(ctx, l, t, a, job, want, []string{"validating", "canceling"})
+}
+
+func (s Store) bindFrozenBackupJob(ctx context.Context, l Leadership, t Task, a Attempt, job, want *batchv1.Job, states []string) error {
+	if job == nil || job.UID == "" {
+		return errors.New("validation_failed")
 	}
 	if !matchesCaptureJob(want, job) {
 		return errors.New("artifact_conflict")
@@ -200,7 +213,7 @@ func (s Store) BindCaptureJob(ctx context.Context, l Leadership, t Task, a Attem
 		return err
 	}
 	defer tx.Rollback()
-	if x.Status != "preparing" && x.Status != "canceling" || a.TaskID != x.ID {
+	if !slices.Contains(states, x.Status) || a.TaskID != x.ID {
 		return errors.New("state_conflict")
 	}
 	stored, err := scanAttempt(tx.QueryRowContext(ctx, "SELECT "+attemptColumns+" FROM system_backup_attempts WHERE public_id=? AND task_id=? FOR UPDATE", a.ID, x.ID))

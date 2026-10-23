@@ -24,16 +24,17 @@ import (
 // immutable bootstrap Secret contains config.json, key and credential files.
 // Its configured paths must all be under /run/backup-bootstrap.
 type VerifyJobRequest struct {
-	Namespace       string    `json:"namespace"`
-	NamespaceUID    string    `json:"namespace_uid"`
-	Image           string    `json:"image"`
-	ServiceAccount  string    `json:"service_account"`
-	BootstrapSecret string    `json:"bootstrap_secret"`
-	Origin          string    `json:"origin"`
-	BackupID        string    `json:"backup_id"`
-	MaxBytes        int64     `json:"max_bytes"`
-	DeadlineSeconds int64     `json:"deadline_seconds"`
-	DeadlineAt      time.Time `json:"deadline_at,omitempty"`
+	Namespace        string    `json:"namespace"`
+	NamespaceUID     string    `json:"namespace_uid"`
+	Image            string    `json:"image"`
+	ServiceAccount   string    `json:"service_account"`
+	BootstrapSecret  string    `json:"bootstrap_secret"`
+	Origin           string    `json:"origin"`
+	BackupID         string    `json:"backup_id"`
+	MaxBytes         int64     `json:"max_bytes"`
+	DeadlineSeconds  int64     `json:"deadline_seconds"`
+	DeadlineAt       time.Time `json:"deadline_at,omitempty"`
+	ValidateSnapshot bool      `json:"validate_snapshot,omitempty"`
 }
 type IntegrityReport struct {
 	BackupID           string `json:"backup_id"`
@@ -43,6 +44,7 @@ type IntegrityReport struct {
 	IntegrityVerified  bool   `json:"integrity_verified"`
 	AcceptanceEligible bool   `json:"acceptance_eligible"`
 	PartsVerified      int    `json:"parts_verified"`
+	SnapshotValidated  bool   `json:"snapshot_validated,omitempty"`
 }
 type VerifyJobResult struct {
 	State  string           `json:"state"`
@@ -83,6 +85,9 @@ func verifyJob(a Attempt) (*batchv1.Job, VerifyJobRequest, error) {
 	// Zero remains readable only for legacy frozen requests from older versions.
 	if !r.DeadlineAt.IsZero() {
 		job.Spec.Template.Spec.Containers[0].Args = append(job.Spec.Template.Spec.Containers[0].Args, "--deadline-at", r.DeadlineAt.UTC().Format(time.RFC3339Nano))
+	}
+	if r.ValidateSnapshot {
+		job.Spec.Template.Spec.Containers[0].Args[1] = "verify-snapshot"
 	}
 	return job, r, nil
 }
@@ -196,7 +201,7 @@ func (j VerifyJobs) Observe(ctx context.Context, a Attempt) (VerifyJobResult, er
 			return out, errors.New("evidence_incomplete")
 		}
 		var v IntegrityReport
-		if strictDecode([]byte(term.Message), &v) != nil || v.BackupID != r.BackupID || v.Origin != r.Origin || !v.IntegrityVerified || v.AcceptanceEligible || v.PartsVerified != len(RequiredParts) || report != nil {
+		if strictDecode([]byte(term.Message), &v) != nil || v.BackupID != r.BackupID || v.Origin != r.Origin || !v.IntegrityVerified || v.AcceptanceEligible || v.PartsVerified != len(RequiredParts) || r.ValidateSnapshot && !v.SnapshotValidated || report != nil {
 			return out, errors.New("evidence_incomplete")
 		}
 		report = &v
