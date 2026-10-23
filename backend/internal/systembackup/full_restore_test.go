@@ -130,6 +130,10 @@ func TestFullSchemaTeamRestorePreservesScopeHistoryAndInterruptedResults(t *test
 }
 
 func selectOnlyVerifier(t *testing.T, admin *sql.DB, database string) *sql.DB {
+	v, _ := selectOnlyVerifierWithDSN(t, admin, database)
+	return v
+}
+func selectOnlyVerifierWithDSN(t *testing.T, admin *sql.DB, database string) (*sql.DB, string) {
 	t.Helper()
 	user, e := RandomID("sbv_")
 	if e != nil {
@@ -166,5 +170,5 @@ func selectOnlyVerifier(t *testing.T, admin *sql.DB, database string) *sql.DB {
 			t.Fatal("verifier write privilege was not denied", e)
 		}
 	}
-	return v
+	return v, c.FormatDSN()
 }

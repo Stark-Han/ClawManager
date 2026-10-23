@@ -7,13 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"clawreef/internal/systembackup/team"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -63,17 +61,27 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	rand.Read(kek)
 	wrapper := AESKeyWrapper{SecretRef{"kubernetes", "pipeline-key", "v1", "encryption"}, kek}
 	pub, signer, _ := ed25519.GenerateKey(rand.Reader)
-	signed, e := CaptureFunctionalBundle(ctx, stage, "fixture-installation", id, source, CaptureBudget{64 << 20, 10000}, wrapper, signer, "v1")
-	if e != nil {
-		t.Fatal("six-part capture:", e)
-	}
-	published, e := PublishFunctionalArtifact(ctx, external, stage, signed, signer, "v1", 64<<20)
-	if e != nil {
-		t.Fatal(e)
-	}
-	for _, name := range RequiredParts {
-		if e = os.Remove(filepath.Join(stage, name+".enc")); e != nil {
+	var published PublishedArtifact
+	var e error
+	if exe := os.Getenv("TEST_SYSTEM_BACKUP_VERIFY_EXE"); exe != "" {
+		runCaptureCLI(t, ctx, exe, external, source, stage, "fixture-installation", id, wrapper, pub, signer)
+		published, e = OpenPublishedArtifact(ctx, external, "fixture-installation", id, pub, "v1")
+		if e != nil {
 			t.Fatal(e)
+		}
+	} else {
+		signed, e := CaptureFunctionalBundle(ctx, stage, "fixture-installation", id, source, CaptureBudget{64 << 20, 10000}, wrapper, signer, "v1")
+		if e != nil {
+			t.Fatal("six-part capture:", e)
+		}
+		published, e = PublishFunctionalArtifact(ctx, external, stage, signed, signer, "v1", 64<<20)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, name := range RequiredParts {
+			if e = os.Remove(filepath.Join(stage, name+".enc")); e != nil {
+				t.Fatal(e)
+			}
 		}
 	}
 	// From here no source adapter is supplied to any restoration function.
@@ -85,64 +93,9 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 		t.Fatal(e)
 	}
 	target, targetName := isolatedSchemaDB(t, source.MySQL)
-	var sourceName string
-	source.MySQL.QueryRow("SELECT DATABASE()").Scan(&sourceName)
 	control := Store{DB: controlDB(t), InstallationID: "restore-controller"}
-	targetHash, _ := RequestHash(targetName)
-	at := time.Now().UTC()
-	evidence := func(table SQLTable, change team.Change) error {
-		if !change.Quarantined {
-			return nil
-		}
-		_, e := control.RecordRestoreEvidence(ctx, run, id, targetHash, table, change, wrapper)
-		return e
-	}
-	if e = ConsumePublishedPart(ctx, external, recovered, "mysql", wrapper, 64<<20, func(r io.Reader) error {
-		_, e := RestoreMySQL(ctx, target, sourceName, targetName, r, func(table SQLTable, row team.Row) (team.Row, error) {
-			change, e := NormalizeDataRow(table, row, at)
-			if e != nil {
-				return nil, e
-			}
-			if e = evidence(table, change); e != nil {
-				return nil, e
-			}
-			return change.After, nil
-		})
-		return e
-	}); e != nil {
-		t.Fatal("SQL restore:", e)
-	}
-	var normalized bytes.Buffer
-	if e = ConsumePublishedPart(ctx, external, recovered, "mysql", wrapper, 64<<20, func(r io.Reader) error { _, e := NormalizeSQLSnapshot(ctx, r, &normalized, at, evidence); return e }); e != nil {
-		t.Fatal(e)
-	}
-	verifier := selectOnlyVerifier(t, source.MySQL, targetName)
-	if _, e = VerifyMySQL(ctx, verifier, bytes.NewReader(normalized.Bytes()), 100000); e != nil {
-		t.Fatal(e)
-	}
-	var status, result string
-	if e = verifier.QueryRow("SELECT status,result_json FROM team_tasks WHERE id=901").Scan(&status, &result); e != nil || status != "failed" || result != "{\"partial\":\"preserve this result\"}" {
-		t.Fatal("interrupted task data lost", status, e)
-	}
+	verifier, verifierDSN := selectOnlyVerifierWithDSN(t, source.MySQL, targetName)
 	workspaceTarget := t.TempDir()
-	if e = ConsumePublishedPart(ctx, external, recovered, "workspace", wrapper, 64<<20, func(r io.Reader) error {
-		_, e := ExtractFiles(ctx, r, workspaceTarget, FileBudget{64 << 20, 10000})
-		return e
-	}); e != nil {
-		t.Fatal(e)
-	}
-	got, e := os.ReadFile(filepath.Join(workspaceTarget, "roots", "owner_x", "partial.bin"))
-	if e != nil || !bytes.Equal(got, payload) {
-		t.Fatal("workspace artifact lost", e)
-	}
-	if e = ConsumePublishedPart(ctx, external, recovered, "redis", wrapper, 64<<20, func(r io.Reader) error {
-		return RestoreRedisHistory(ctx, redisTarget, r, RedisBudget{MaxBytes: 64 << 20, MaxItems: 10000, MaxInventoryBytes: 8 << 20}, run)
-	}); e != nil {
-		t.Fatal(e)
-	}
-	if n, e := redisTarget.command(ctx, []byte("EXISTS"), key); e != nil || n != int64(0) {
-		t.Fatal("old Redis task namespace reactivated")
-	}
 	targetBucket, _ := RandomID("cm-restore-")
 	if e = source.Objects.MakeBucket(ctx, targetBucket, minio.MakeBucketOptions{}); e != nil {
 		t.Fatal(e)
@@ -155,18 +108,34 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 		}
 		source.Objects.RemoveBucket(context.Background(), targetBucket)
 	})
-	if e = ConsumePublishedPart(ctx, external, recovered, "object_storage", wrapper, 64<<20, func(r io.Reader) error {
-		return RestoreObjects(ctx, source.Objects, r, ObjectBudget{64 << 20, 10000}, map[string]string{sourceObjects.Bucket: targetBucket})
-	}); e != nil {
-		t.Fatal(e)
+	restoreTarget := DataRestoreTarget{MySQL: target, Verifier: verifier, Database: targetName, Redis: redisTarget, Objects: source.Objects, BucketMapping: map[string]string{sourceObjects.Bucket: targetBucket}, Directory: workspaceTarget, Control: control}
+	var report DataRestoreReport
+	if exe := os.Getenv("TEST_SYSTEM_BACKUP_VERIFY_EXE"); exe != "" {
+		report = runRestoreCLI(t, ctx, exe, external, recovered, wrapper, pub, run, restoreTarget, verifierDSN)
+	} else {
+		report, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, CaptureBudget{64 << 20, 10000})
 	}
-	for _, name := range []string{"deployment_resources", "secret_bundle"} {
-		count := 0
-		if e = ConsumePublishedPart(ctx, external, recovered, name, wrapper, 64<<20, func(r io.Reader) error {
-			return ReadKubernetesHistory(ctx, r, name, ObjectBudget{64 << 20, 10000}, func(_ KubernetesSelection, _ json.RawMessage) error { count++; return nil })
-		}); e != nil || count == 0 {
-			t.Fatal("resource history lost", name, e)
-		}
+	if e != nil || report.Status != "succeeded" || report.Phase != "complete" || report.AcceptanceEligible || len(report.SQL.Tables) != 75 || len(report.HistoryParts) != 2 {
+		t.Fatal("data restore runner", report.Phase, e)
+	}
+	var status, result string
+	if e = verifier.QueryRow("SELECT status,result_json FROM team_tasks WHERE id=901").Scan(&status, &result); e != nil || status != "failed" || result != "{\"partial\":\"preserve this result\"}" {
+		t.Fatal("interrupted task data lost", status, e)
+	}
+	got, e := os.ReadFile(filepath.Join(workspaceTarget, "workspace", "roots", "owner_x", "partial.bin"))
+	if e != nil || !bytes.Equal(got, payload) {
+		t.Fatal("workspace artifact lost", e)
+	}
+	if n, e := redisTarget.command(ctx, []byte("EXISTS"), key); e != nil || n != int64(0) {
+		t.Fatal("old Redis task namespace reactivated")
+	}
+	raw, e := os.ReadFile(filepath.Join(workspaceTarget, "restore-report.json"))
+	var saved DataRestoreReport
+	if e != nil || json.Unmarshal(raw, &saved) != nil || saved.Status != "succeeded" || saved.HistoryCounts["secret_bundle"] == 0 {
+		t.Fatal("restore report missing", e)
+	}
+	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, CaptureBudget{64 << 20, 10000}); e == nil {
+		t.Fatal("restore retry overwrote owned targets")
 	}
 	if published.Manifest.Payload.Consistency != "best_effort" || published.Manifest.Payload.Purpose != "functional_test" {
 		t.Fatal("unproven strong backup claimed")

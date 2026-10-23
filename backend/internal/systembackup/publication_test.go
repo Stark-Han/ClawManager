@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -54,6 +56,37 @@ func TestPublishedArtifactRecoveryWithoutSourceOrStaging(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
+	t.Run("offline verifier executable", func(t *testing.T) {
+		exe := os.Getenv("TEST_SYSTEM_BACKUP_VERIFY_EXE")
+		if exe == "" {
+			t.Skip("offline verifier executable not configured")
+		}
+		dir := t.TempDir()
+		write := func(name string, raw []byte) string {
+			p := filepath.Join(dir, name)
+			if e := os.WriteFile(p, raw, 0600); e != nil {
+				t.Fatal(e)
+			}
+			return p
+		}
+		credentialJSON, _ := json.Marshal(map[string]string{"access_key": os.Getenv("TEST_SYSTEM_BACKUP_MINIO_USER"), "secret_key": os.Getenv("TEST_SYSTEM_BACKUP_MINIO_PASSWORD")})
+		cfg := map[string]any{"endpoint": "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_MINIO_PORT"), "bucket": store.Bucket, "root": store.Root, "secure": false, "credentials_file": write("credential.json", credentialJSON), "verification_key_file": write("verify.pub", pub), "verification_key_version": "v1", "encryption_key_file": write("wrap.key", kek), "encryption_reference": wrapper.Reference}
+		raw, _ := json.Marshal(cfg)
+		path := write("bootstrap.json", raw)
+		cmd := exec.CommandContext(ctx, exe, "--bootstrap", path, "--origin", m.OriginInstallationID, "--backup", id, "--max-bytes", "67108864")
+		output, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Fatalf("offline verify failed: %v: %s", e, output)
+		}
+		var report struct {
+			Integrity bool `json:"integrity_verified"`
+			Eligible  bool `json:"acceptance_eligible"`
+			Parts     int  `json:"parts_verified"`
+		}
+		if e = json.Unmarshal(output, &report); e != nil || !report.Integrity || report.Eligible || report.Parts != 6 {
+			t.Fatal("offline verifier report invalid", e)
+		}
+	})
 	recovered, e := OpenPublishedArtifact(ctx, store, m.OriginInstallationID, id, pub, "v1")
 	if e != nil {
 		t.Fatal(e)
