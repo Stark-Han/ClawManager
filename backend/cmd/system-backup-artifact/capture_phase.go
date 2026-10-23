@@ -23,42 +23,57 @@ type phaseCaptureConfig struct {
 
 // The capture bootstrap cannot decode artifact signing or final-write
 // credentials. Ordinary and Secret collectors receive disjoint source files.
-func runCapturePhase(ctx context.Context, bootstrapPath, operationPath, origin, id, readyFile string, request systembackup.CapturePhaseRequest, budget systembackup.CaptureBudget, out io.Writer) error {
+func runCapturePhase(ctx context.Context, bootstrapPath, operationPath, origin, id, readyFile string, request systembackup.CapturePhaseRequest, budget systembackup.CaptureBudget, out io.Writer) (resultErr error) {
+	stage := "bootstrap_config"
+	defer func() {
+		if resultErr != nil {
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]string{"event": "capture_error", "step": stage, "code": systembackup.PublicError(resultErr)})
+			resultErr = &operationStageError{stage: stage, cause: resultErr}
+		}
+	}()
 	var bootstrap phaseBootstrap
 	var c phaseCaptureConfig
 	if err := decodeFile(bootstrapPath, &bootstrap); err != nil {
 		return err
 	}
+	stage = "operation_config"
 	if err := decodeFile(operationPath, &c); err != nil {
 		return err
 	}
+	stage = "validate_request"
 	if request.Validate() != nil || request.Origin != origin || request.BackupID != id || c.AbortMarginSeconds < 1 || c.AbortMarginSeconds > 60 || readyFile != "/run/backup-status/ready" || c.Source.StageDirectory != "/run/backup-stage/data" {
 		return errors.New("validation_failed")
 	}
+	stage = "encryption_key"
 	key, err := readBounded(bootstrap.EncryptionKeyFile, 32)
 	if err != nil || len(key) != 32 {
 		return errors.New("encryption_key_unavailable")
 	}
 	defer clear(key)
 	wrapper := systembackup.AESKeyWrapper{Reference: bootstrap.EncryptionReference, Key: key}
+	stage = "gate_connection"
 	gate, err := systembackup.OpenControlDatabase(ctx, c.ControlDSNFile)
 	if err != nil {
 		return err
 	}
 	defer gate.Close()
+	stage = "source_connections"
 	source, closeSource, err := connectPhaseSources(ctx, c.Source, request.Phase)
 	if err != nil {
 		return err
 	}
 	defer closeSource()
+	stage = "validate_sources"
 	if err = source.ValidateForPhase(request.Phase); err != nil {
 		return err
 	}
+	stage = "staging_prepare"
 	if err = os.Mkdir(c.Source.StageDirectory, 0750); err != nil {
 		return errors.New("fresh encrypted staging required")
 	}
 	// Readiness is published only after credential files and connections have
 	// been prepared. No business rows, Secret contents or file data are read yet.
+	stage = "readiness_write"
 	if err = os.WriteFile(readyFile, []byte("ready\n"), 0600); err != nil {
 		return errors.New("evidence_incomplete")
 	}
@@ -66,6 +81,7 @@ func runCapturePhase(ctx context.Context, bootstrapPath, operationPath, origin, 
 	guard := systembackup.SQLCaptureGuard{Gate: systembackup.Gate{DB: gate}, Ownership: request.Gate, AbortMargin: time.Duration(c.AbortMarginSeconds) * time.Second}
 	timer := time.NewTicker(100 * time.Millisecond)
 	defer timer.Stop()
+	stage = "gate_wait"
 	for {
 		var phase, owner string
 		var generation, token uint64
@@ -86,10 +102,12 @@ func runCapturePhase(ctx context.Context, bootstrapPath, operationPath, origin, 
 		case <-timer.C:
 		}
 	}
+	stage = "capture"
 	candidate, err := systembackup.CapturePhase(ctx, c.Source.StageDirectory, request, source, budget, wrapper, guard)
 	if err != nil {
 		return err
 	}
+	stage = "report"
 	return json.NewEncoder(out).Encode(candidate)
 }
 

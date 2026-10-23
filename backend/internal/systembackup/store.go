@@ -428,6 +428,12 @@ func (s Store) cancelTx(ctx context.Context, tx *sql.Tx, id string, expected uin
 }
 
 func PublicError(err error) string {
+	if errors.Is(err, ErrFence) {
+		return "fencing_token_lost"
+	}
+	if errors.Is(err, ErrMaintenance) {
+		return "not_ready"
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "not_found"
 	}

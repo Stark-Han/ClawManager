@@ -241,6 +241,9 @@ func main() {
 		}
 	}
 	if e != nil {
+		if *reportFile != "" {
+			_ = writeOperationFailure(*reportFile, *operation, *origin, *id, e)
+		}
 		fmt.Fprintln(os.Stderr, "backup operation failed:", systembackup.PublicError(e))
 		os.Exit(1)
 	}
