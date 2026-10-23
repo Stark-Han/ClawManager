@@ -2,6 +2,8 @@
 
 本文件说明当前代码实际能力，不替代 `docs/team-backup-restore-team-integration-plan.md` 的全部交付要求。
 
+最新部署/清理结论见 [实施记录](20261023-execution.md)，逐项未通过要求见 [剩余工作](remaining-work.md)。下方带时间的小节是历史增量，不能把其中旧镜像状态作为当前部署事实。
+
 ## 已有可执行能力
 
 - 左侧“控制台”下方新增“备份”，路由 `/admin/backups`。总览、配置读取/部分保存、任务查询/详情/取消调用真实 API，权限和依赖不满足时拒绝，不返回模拟成功。
@@ -9,7 +11,7 @@
 - 原始数据在不可变加密 artifact 中保留。恢复库内中断任务归一化为失败，已完成工作保留；原/后状态与行 hash 写入外部控制库的加密证据。Redis 放入历史命名空间；部署和 Secret 只读作历史，不执行旧资源。
 - 官方业务进程拒绝连接 `cm_restore_<32hex>` 命名的隔离数据恢复库。恢复验证账号只有 SELECT，并实际验证 DML/DDL 被拒绝。
 - `system-backup-controller` 是独立的控制协调进程：领导租约、任务租约、数据库时间、排队原因和未开始任务的取消/超时收尾。独立 artifact_verify 现已接入 Kubernetes Job 和持久化 attempt 接管；capture/restore Job 编排仍未完成，不能将此进程称为完整备份执行器。
-- `system-backup-artifact` 提供独立的 capture / verify / restore 命令。verify 仅使用外部对象存储和 bootstrap 密钥文件；restore 仅连接灾备侧预先创建的隔离目标，不连接源 DB、源 Kubernetes 或业务 Runtime。输出完整性结果不自动授予正式恢复资格。
+- `system-backup-artifact` 提供独立的 capture / verify / restore / verify-restored 命令。verify 仅使用外部对象存储和 bootstrap 密钥文件；restore 仅连接灾备侧预先创建的隔离目标，不连接源 DB、源 Kubernetes 或业务 Runtime。verify-restored 使用独立只读身份核对恢复数据。输出完整性结果不自动授予正式恢复资格。
 
 ## 独立验证工具
 
@@ -50,7 +52,7 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 
 ## 当前不能宣布完成的内容
 
-完整业务 writer 接入、OpenClaw/Hermes 模型/工具/子进程停写、strong checkpoint、独立 finalizer/acceptance、外部 catalog、近期强认证/nonce、完整恢复执行器和报告、prune/GC/promotion、全部前端操作、四部署矩阵与 large-smoke 验收仍未完成。
+完整业务 writer 接入、OpenClaw/Hermes 模型/工具/子进程停写、strong checkpoint、独立 finalizer/acceptance、外部 catalog、近期强认证/nonce、完整恢复执行器和报告、prune/GC/promotion、全部前端操作及四部署矩阵仍未完成。large-smoke 的最低数据量功能测试已经通过；完整资源测量和正式发布矩阵仍未通过。
 
 因此当前功能测试产物固定为 `functional_test + best_effort`；API 创建正式备份仍受依赖门禁阻止，不能手动把健康状态勾绿来绕过。测试镜像即使部署，也只证明当前代码已上测试环境，不能等同完整 Team 备份功能已交付。
 

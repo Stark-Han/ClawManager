@@ -7,16 +7,26 @@
 - 测试环境原 App 镜像：10.130.14.23:5000/clawmanager-hxc-app:team-owner-placement-cards-20261023-v1。
 - 初始只读检查：32543 对应指定租户；App 就绪。App 工作区通过 NFS service 挂载，底层受管 PV 为 HostPath；尚未证明符合 strong capture，不冒充 CSI 快照能力。
 
-## 最新结果（2026-10-24 01:35）
+## 最新结果（2026-10-24 01:44）
 
 完整功能未交付，按全部必需条件统计为 **0/5 完整阶段通过**。六源加密发布、隔离数据恢复、独立只读核对和验证 Job 协调已通过组件/联合测试，但控制台一键备份与自动演练尚未贯通。详细逐项缺口及继续开发顺序见 [remaining-work.md](remaining-work.md)，不能把部署成功视为整体验收。
 
-- ClawManager 当前已部署代码 `995a364b13321ed676e41cd8e00610dc9d11cb89`，镜像 `10.130.14.23:5000/clawmanager-hxc-app:team-backup-jobs-20261023-995a364b`，digest `sha256:6d933e983e577fdfa4e5baf570b0b113ad5c3afefca9427c0a2a4d9e6dc5b1ae`。32543 version API 已返回此 commit，32556 auth challenge 复查返回 201。App/gateway 最终就绪状态另在收尾证据中登记。
+- ClawManager 最终业务代码及实际部署版本为 `3a64956ffe1c935507016756009f45823a927dde`，镜像 `10.130.14.23:5000/clawmanager-hxc-app:team-backup-jobs-20261023-3a64956f`，digest `sha256:7ddadfa117aee3b2c9af3839714cb7a809323c1d9f05f3d236a0003ad1e498f9`。32543 version API 已返回此 commit，App/gateway 各 1 个副本 Ready，32556 auth challenge 复查返回 201。完整构建和部署证据见 `20261024-deployment.json`。后续收尾文档提交不重建镜像，须区分仓库 HEAD 与部署业务版本。
 - `/home/hxc/clawmanager-apply.sh` 首次网关探测短暂不可达，命令退出 1；后续探测成功。保留此失败事实，不记作部署命令全程成功；共享部署脚本未修改。
-- 最新实际 Job + SQL 控制器联合测试通过 98.58 秒，覆盖实际 Pod 身份、绝对期限、换主、报告保存与 Foreground 清理，见 `20261024-final-candidate.json`。
+- `995a364b` 实际 Job + SQL 控制器联合测试通过 98.58 秒，覆盖实际 Pod 身份、绝对期限、换主、报告保存与 Foreground 清理，见 `20261024-final-candidate.json`。随后清理 UID 修复再通过 96.84 秒联合回归；本地控制器使用修复代码，未改变的 artifact CLI/Job 二进制使用 995 镜像，见 `20261024-cleanup-identity.json` 及对应 evidence.txt。
 - 容量验证通过：2 GiB 文件、10000 Skill 对象、100000 Team 事件、100000 Redis 记录；含基础样本的实际计数及资源测量边界见 `20261023-large-smoke.json`。该容量测试使用较早的 `a989ca13` 代码，不冒称测得后续优化的容量耗时。
 - AgentsRuntime 本地 `9e9a64191b3232bc9c77b9c02da4e3c532710dd9`；未构建、推送或部署 Runtime 镜像。两个仓库均为 `codex/team-personal-integration`，未推送 Git，未操作正式环境。
 - SQL/HTTP gate 与正式备份依赖尚未在租户开启；界面保持未就绪。没有伪造正式资格或手工绕过门禁。
+- 浏览器最终实际显示 `3a64956f`、Console 下方的 Backups 入口、数据保留/不续跑说明、disabled Configuration/Create backup 与 not_ready。首次刷新工具超时，重新读取后成功；页面没有正式备份或演练任务，不将页面加载当作创建链路通过。
+
+## 本轮资源收尾
+
+- 已按 owner label、UID 和 resourceVersion 删除本次 fixture namespace `cm-backup-test-20261023-1209`，删除前无验证 Job。额外 ClusterRole/Binding 已单独删除并确认不存在，见 `20261024-fixture-cleanup.json`。
+- 已核对绝对路径、owner marker 与活动进程后删除 `/home/hxc/cm-team-backup-20261023-1209`（29 个文件）。没有删除 registry 镜像、修改共享部署脚本或清理其他租户。见 `20261024-server-files-cleanup.json`。
+- 已确认身份后关闭四条本次 SSH 转发；没有输出含密码的进程命令行，见 `20261024-tunnel-cleanup.json`。
+- 本机递归删除临时目录被自动审批拒绝（仅返回 blocked by policy）。改用更窄的逐文件清理，已删除 7 个含临时口令/token 的文件。`C:/Users/hanxingchen/AppData/Local/Temp/cm-team-backup-20261023` 的无凭据构建缓存与测试日志保留；原已忽略的连接文档保留。见 `20261024-local-files-cleanup.json`。
+- 另保留早前中断测试的两个非敏感假产物，目录 `C:/Users/hanxingchen/AppData/Local/Temp/TestSixRealSourcesPublishAndDataOnlyRestore2530569940`；它们不是实际 Team 数据，也不含凭据。本机清理不宣称完全无残留。
+- 后续真实测试必须重新建立隔离 fixture 与短期身份。缺失环境变量时部分集成测试会 skip，不能把普通 go test 的绿色结果当成真实六源验收。
 
 下面是各时点历史记录，较早的镜像和未完成项不得覆盖本节或后续收尾记录。
 
