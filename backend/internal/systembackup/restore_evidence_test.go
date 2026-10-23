@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"clawreef/internal/systembackup/team"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +28,13 @@ func TestRestoreEvidenceRetainsFirstStateAndQuarantine(t *testing.T) {
 	first, e := s.RecordRestoreEvidence(ctx, run, source, target, schema, change, wrapper)
 	if e != nil {
 		t.Fatal(e)
+	}
+	// Evidence identities are a separate historical format. Upgrading API
+	// request canonicalization must not orphan the original-state journal.
+	legacyBytes, _ := json.Marshal(change.Before)
+	legacyDigest := sha256.Sum256(legacyBytes)
+	if first.SourceHash != hex.EncodeToString(legacyDigest[:]) {
+		t.Fatal("canonical request hashing changed historical evidence identity")
 	}
 	second, e := s.RecordRestoreEvidence(ctx, run, source, target, schema, change, wrapper)
 	if e != nil || first.SourceHash != second.SourceHash {

@@ -147,12 +147,19 @@ func requestHashMatches(stored, canonical string, v any) bool {
 	if stored == canonical {
 		return true
 	}
+	legacy, err := legacyJSONHash(v)
+	return err == nil && stored == legacy
+}
+
+// Existing state-evidence identities are immutable; they retain their original
+// encoding independently of the newer API/signature canonicalization scheme.
+func legacyJSONHash(v any) (string, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return false
+		return "", err
 	}
 	h := sha256.Sum256(raw)
-	return stored == hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
 }
 
 func (s Store) Create(ctx context.Context, actor int, key string, r CreateTaskRequest, admit func(context.Context, *sql.Tx, ConfigVersion, CreateTaskRequest) error) (Task, bool, error) {

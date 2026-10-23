@@ -124,7 +124,7 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	if e = VerifyPublishedArtifact(ctx, store, artifact, wrapper, budget.MaxBytes); e != nil {
 		return report, e
 	}
-	targetHash, e := RequestHash(map[string]string{"server": restoreServer, "database": actualDB, "run": runID})
+	targetHash, e := legacyJSONHash(map[string]string{"server": restoreServer, "database": actualDB, "run": runID})
 	if e != nil {
 		return report, e
 	}

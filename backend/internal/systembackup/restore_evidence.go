@@ -51,15 +51,15 @@ func (s Store) RecordRestoreEvidence(ctx context.Context, runID, sourceID, targe
 	if len(keys) == 0 {
 		return out, errors.New("missing evidence identity")
 	}
-	keyHash, e := RequestHash(keys)
+	keyHash, e := legacyJSONHash(keys)
 	if e != nil {
 		return out, e
 	}
-	beforeHash, e := RequestHash(change.Before)
+	beforeHash, e := legacyJSONHash(change.Before)
 	if e != nil {
 		return out, e
 	}
-	afterHash, e := RequestHash(change.After)
+	afterHash, e := legacyJSONHash(change.After)
 	if e != nil {
 		return out, e
 	}
