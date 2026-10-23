@@ -62,13 +62,7 @@ func decodeFile(path string, out any) error {
 		return e
 	}
 	defer clear(raw)
-	d := json.NewDecoder(strings.NewReader(string(raw)))
-	d.DisallowUnknownFields()
-	if e = d.Decode(out); e != nil {
-		return errors.New("invalid bootstrap configuration")
-	}
-	var extra any
-	if e = d.Decode(&extra); e != io.EOF {
+	if e = systembackup.DecodeStrictJSON(raw, out); e != nil {
 		return errors.New("invalid bootstrap configuration")
 	}
 	return nil

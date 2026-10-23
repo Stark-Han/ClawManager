@@ -15,7 +15,7 @@ import (
 
 func fullSchemaDB(t *testing.T) *sql.DB {
 	t.Helper()
-	d := controlDB(t)
+	d := fixtureDatabase(t)
 	var name string
 	if e := d.QueryRow("SELECT DATABASE()").Scan(&name); e != nil {
 		t.Fatal(e)

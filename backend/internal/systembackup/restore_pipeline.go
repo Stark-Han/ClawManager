@@ -38,6 +38,9 @@ type DataRestoreReport struct {
 	FinishedAt           *time.Time     `json:"finished_at,omitempty"`
 	SQL                  SQLResult      `json:"sql"`
 	FileCount            int            `json:"file_count"`
+	VerifiedFileCount    int            `json:"verified_file_count"`
+	VerifiedObjectCount  int            `json:"verified_object_count"`
+	VerifiedRedisCount   int            `json:"verified_redis_count"`
 	HistoryCounts        map[string]int `json:"history_counts"`
 	HistoryParts         []ArtifactPart `json:"history_parts"`
 	AcceptanceEligible   bool           `json:"acceptance_eligible"`
@@ -111,6 +114,9 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	if actualDB != target.Database || verifierDB != actualDB || restoreServer != verifierServer || restoreUser == verifierUser || (controlDB == actualDB && controlServer == restoreServer) {
 		return report, errors.New("restore target or credential isolation mismatch")
 	}
+	if e = RequireReadOnlyVerifier(ctx, target.Verifier, target.Database); e != nil {
+		return report, e
+	}
 	if e = ValidateSchema(ctx, target.MySQL); e != nil {
 		return report, e
 	}
@@ -181,15 +187,39 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	}); e != nil {
 		return report, e
 	}
+	report.Phase = "workspace_verification"
+	if e = consume("workspace", func(r io.Reader) error {
+		var e error
+		report.VerifiedFileCount, e = VerifyFiles(ctx, r, workspace, FileBudget{budget.MaxBytes, budget.MaxItems})
+		return e
+	}); e != nil {
+		return report, e
+	}
 	report.Phase = "redis_history"
 	if e = consume("redis", func(r io.Reader) error {
 		return RestoreRedisHistory(ctx, target.Redis, r, RedisBudget{MaxBytes: budget.MaxBytes, MaxItems: budget.MaxItems, MaxInventoryBytes: min(budget.MaxBytes/8, 64<<20)}, runID)
 	}); e != nil {
 		return report, e
 	}
+	report.Phase = "redis_verification"
+	if e = consume("redis", func(r io.Reader) error {
+		var e error
+		report.VerifiedRedisCount, e = VerifyRedisHistory(ctx, target.Redis, r, RedisBudget{MaxBytes: budget.MaxBytes, MaxItems: budget.MaxItems, MaxInventoryBytes: min(budget.MaxBytes/8, 64<<20)}, runID)
+		return e
+	}); e != nil {
+		return report, e
+	}
 	report.Phase = "objects"
 	if e = consume("object_storage", func(r io.Reader) error {
 		return RestoreObjects(ctx, target.Objects, r, ObjectBudget{budget.MaxBytes, budget.MaxItems}, target.BucketMapping)
+	}); e != nil {
+		return report, e
+	}
+	report.Phase = "object_verification"
+	if e = consume("object_storage", func(r io.Reader) error {
+		var e error
+		report.VerifiedObjectCount, e = VerifyObjects(ctx, target.Objects, r, ObjectBudget{budget.MaxBytes, budget.MaxItems}, target.BucketMapping)
+		return e
 	}); e != nil {
 		return report, e
 	}

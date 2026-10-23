@@ -1,13 +1,13 @@
 # Team 备份连续实施记录
 
-- 开始：2026-10-23 20:09:41（Asia/Shanghai）。最长五小时，最晚 2026-10-24 01:09:41 收尾。
+- 开始：2026-10-23 20:09:41（Asia/Shanghai）。用户后续延长时限至北京时间 2026-10-24 02:00；到时完成安全收尾并如实说明剩余工作。
 - 用户授权：连续实现全部计划；分批测试、commit；仅测试服务器 10.130.14.23，租户 clawmanager-hxc-peer-system，入口 32543。部署使用 /home/hxc/clawmanager-apply.sh。正式环境只读。
 - ClawManager 基线：48d00c09deabf3569fd044eaab837c6c94138111；Runtime 基线：770c469feafcc8169719075252bf9012c828bfcb，均 codex/team-personal-integration。
 - 初始未跟踪文件：最终计划。未发现其他业务未提交改动。
 - 测试环境原 App 镜像：10.130.14.23:5000/clawmanager-hxc-app:team-owner-placement-cards-20261023-v1。
 - 初始只读检查：32543 对应指定租户；App 就绪。App 工作区通过 NFS service 挂载，底层受管 PV 为 HostPath；尚未证明符合 strong capture，不冒充 CSI 快照能力。
 
-## 当前结果（持续更新，2026-10-23 22:15）
+## 当前结果（持续更新，2026-10-23 23:52）
 
 | 项目 | 状态 | 证据/限制 |
 | --- | --- | --- |
@@ -17,9 +17,9 @@
 | schema ownership | 本地完成并已提交基础迁移 | 11 个 repository 构造 DDL 移到迁移 078；隔离 MySQL 实际迁移通过。目标 schema 仅可信 embedded DDL，业务进程拒绝连接 cm_restore_ 隔离恢复库 |
 | Redis / 文件 / 对象 | 组件验收通过 | Redis DUMP 二进制/stream PEL/原 expiry 保留，只恢复到历史命名空间；文件隐藏/部分产物/hash/穿越负测；真实对象产物、metadata、空对象和目标不可覆盖验证通过。Linux 文件元数据和完整 strong checkpoint 待验 |
 | K8s/Secret 采集 | 组件验收通过 | 独立真实 GET-only SA：普通采集不能读 Secret，Secret 采集不能读 Pod，两者不能跨命名空间/修改资源。固定 UID 的历史记录仅数据保留，不 Apply 旧 Pod/Secret |
-| 控制面/前端 | 部分完成 | 配置 CAS、幂等创建、排队、双租约/fencing、未开始任务取消/过期收尾通过；左侧备份入口、总览/配置/任务详情接真实 API。完整 capture runner、attempt 接管、外部动作、全部前端页面未完成，准入仍拒绝缺少依赖 |
+| 控制面/前端 | 部分完成 | 配置 CAS、幂等创建、排队、双租约/fencing、未开始任务取消/过期收尾通过；左侧备份入口、总览/配置/任务详情接真实 API。artifact_verify Job/attempt 接管已完成真实验证；完整 capture/restore runner、外部动作和全部前端页面未完成，准入仍拒绝缺少依赖 |
 | 六源联合恢复 | 功能联合验收通过 | TestSixRealSourcesPublishAndDataOnlyRestore：真实 MySQL/Redis/MinIO/本地文件/独立 K8s GET-only 账号，外部加密发布后删除 staging，再恢复验证六类数据；运行中任务变 failed，部分结果与产物保留。未证明活跃源的 strong checkpoint，也未完成断开整个源网络的灾备矩阵 |
-| 镜像 push / 测试部署 | 未执行 | 本地 Docker daemon 未启动；测试服务器使用 containerd/nerdctl，构建路径待核对 |
+| 镜像 push / 测试部署 | 已执行，分版本记录 | 7159197e 已部署到 32543 App/gateway 并 Ready；e63971f6 已推送并用于真实验证 Job，尚未替换 App。通过现有测试镜像叠加本次编译二进制/前端构建层，非完整 Dockerfile 重建 |
 | 总体验收 T01～T13 / A01～A24 | 未通过 | 不以局部单测代替完整计划验收 |
 
 原凭据仅从已忽略的连接材料读取，不写入本文、代码、日志或镜像。维护/备份/清理只作用于已登记的测试资源；不触碰其他租户。
@@ -43,7 +43,7 @@
 - 临时连接经主机指纹固定的 SSH 转发；原服务器凭据和短期 SA token 均仅在仓库外临时文件中，结束时清理。
 - P0 恢复目标完全不启动业务进程。`cm_restore_<32hex>` 是受保留的数据库名，官方 app/gateway 的统一连接入口拒绝该名字。此防线只声明 P0 数据演练，不能据此宣称 P1 生产启动恢复已完成。
 - Runtime 停写、全部业务 writer 接入、正式 checkpoint、独立最终发布者、外部 catalog 完整扫描、strong-auth/nonce、prune/GC/promotion、四矩阵/large-smoke 和全部 UI 操作仍是未通过项。没有删除原计划这些要求，也没有把当前 functional_test 提升为正式恢复点。
-- 本地基础 commit：`4ce7c273`。之后改动需通过对应验收后再提交；未 push Git，未部署 App，正式环境未操作。
+- 已提交 ClawManager：`4ce7c273`、`507e69b4`、`7159197e`、`08071deb`、`e63971f6`。AgentsRuntime：`9e9a641`。未 push Git；App 测试部署状态见下。正式环境未操作。
 
 ## 已执行测试
 
@@ -51,3 +51,20 @@
 - 完整数据库恢复用独立 SELECT-only MySQL 账号核对所有行，并真实确认 UPDATE/DELETE/CREATE 被拒绝。
 - Linux 交叉编译测试程序在 10.130.14.23 的本次专用目录运行，文件元数据、隐藏文件、目录穿越、篡改与加密往返测试通过；没有在其他租户目录执行。
 - 前端构建通过，保留现有 Node 22.11 / Vite 版本提示；备份 strong-auth 与普通 session refresh 两个行为回归通过。新增键盘焦点处理后会再构建。
+
+## 23:52 实际增量与证据
+
+- SQL 门禁 `08071deb`：实际 upper TeamRepository + MySQL 驱动边界接入，事务排空/维护拒写/继续读取/预编译语句/读接口写入拒绝均通过。默认未启用，不能据此宣布文件、对象、Runtime 已停写。
+- Runtime `9e9a641`：先复现 Hermes 维护期间继续派发、OpenClaw 同批次维护仍派发后续消息，再最小修复；55 项 Hermes contract/真实 Redis 回归和 OpenClaw 真实 Redis 回归通过。Runtime 镜像尚未部署。
+- 验证 Job `e63971f6`：固定 digest 镜像、无自动 SA token、非 root/只读根、挂载不可变 Secret，真实读取并解密六 part；UID 接管、有限结果报告、MinIO 只读身份拒绝 DELETE 验收通过。真实网络 probe 证实备份存储可达，fixture MySQL/Redis 连接均被策略阻断。
+- 六源联合测试含实际 Kubernetes Job 首轮成功 82.26 秒；新增文件/对象/Redis 读回和 verifier 权限要求后再次通过 64.88 秒。两次均保持 acceptance_eligible=false。
+- 新读回验证已检出同大小/同时间文件篡改、额外对象和 Redis 历史篡改。数据库 verifier 除身份不同还必须实际只有精确目标库 SELECT，无角色/写权限。
+- 新发现并按回归修复：fixture 预建控制结构与应用全迁移重复执行 ALTER；fixture 共享源 Redis 记录造成只清一条恢复记录后残留；排队任务使用当前配置而不是创建时冻结配置；API/bootstrap JSON 大小写重复 key 被接受。修复和测试不放宽正式准入。
+
+### 镜像与部署证据
+
+- 实际 App/gateway：`10.130.14.23:5000/clawmanager-hxc-app:team-backup-data-20261023-7159197e`，digest `sha256:35af0ffb89b7b8cb736138e5e5b3cec6682a7e047ce9ec52a0e1e2034924fee8`；version API 返回完整 commit，两个 rollout Ready。用户已接受浏览器测试证书并登录，界面确认左侧备份入口和未就绪提示。
+- 候选/Job 镜像：`10.130.14.23:5000/clawmanager-hxc-app:team-backup-jobs-20261023-e63971f6`，digest `sha256:9016d487cca64fc2cb14db1b1aa9b174fe13950c7e67f7b876877f6916764154`；仅验证 Job 使用该版本，不能把推送和 Job 运行等同 App 已更新。
+- 新增仅本次 fixture 资源：archive TLS proxy、无 API 权限的 verifier SA、受限 job-controller SA、NetworkPolicy、namespace GET 的精确资源名 ClusterRole/Binding；均属于 `cm-backup-test-20261023-1209` / owner `cm-20261023-1209`。集群作用域的两个 RBAC 对象需要单独清理。
+
+完整五阶段目前仍没有全部验收通过的阶段。主要缺口仍是全部 writer/Runtime 排空、strong checkpoint、capture/restore 编排、独立最终发布与 catalog、MFA/nonce/完整操作账本、生命周期/清理/基线、全 UI 和四矩阵验收。不会用已通过的组件测试冲抵这些要求。

@@ -37,8 +37,12 @@ const attemptColumns = "public_id,task_id,phase,attempt_number,controller_owner,
 // PrepareAttempt commits the exact request before the first network mutation.
 // Only one attempt per phase is currently supported: retries must reconcile
 // the existing object, never create a second writer after an unknown response.
-func (s Store) PrepareAttempt(ctx context.Context, l Leadership, t Task, request any) (Attempt, error) {
+func (s Store) PrepareAttempt(ctx context.Context, l Leadership, t Task, phase string, request any) (Attempt, error) {
 	var zero Attempt
+	allowed := map[TaskType]map[string]bool{Backup: {"capture": true, "secret_capture": true, "publish": true}, Drill: {"restore": true, "normalize": true, "verify": true}, Preflight: {"preflight": true}, ArtifactVerify: {"verify": true}}
+	if !allowed[t.Type][phase] {
+		return zero, errors.New("validation_failed")
+	}
 	raw, e := json.Marshal(request)
 	if e != nil || len(raw) > 256<<10 {
 		return zero, errors.New("validation_failed")
@@ -62,7 +66,7 @@ func (s Store) PrepareAttempt(ctx context.Context, l Leadership, t Task, request
 	if actual.Version != t.Version || actual.LeaseOwner != l.Owner || actual.LeaseUntil == nil || !actual.LeaseUntil.After(now) || actual.Terminal() || actual.Status == "canceling" || !actual.DeadlineAt.After(now) {
 		return zero, ErrFence
 	}
-	a, e := scanAttempt(tx.QueryRowContext(ctx, "SELECT "+attemptColumns+" FROM system_backup_attempts WHERE task_id=? AND phase=? AND attempt_number=1 FOR UPDATE", t.ID, t.Status))
+	a, e := scanAttempt(tx.QueryRowContext(ctx, "SELECT "+attemptColumns+" FROM system_backup_attempts WHERE task_id=? AND phase=? AND attempt_number=1 FOR UPDATE", t.ID, phase))
 	if e == nil {
 		if string(a.Request) != string(raw) {
 			return zero, errors.New("artifact_conflict")
@@ -76,11 +80,11 @@ func (s Store) PrepareAttempt(ctx context.Context, l Leadership, t Task, request
 	if e != nil {
 		return zero, e
 	}
-	a = Attempt{ID: id, TaskID: t.ID, Phase: t.Status, Number: 1, Owner: l.Owner, Fence: l.Fence, Status: "running", Request: raw}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO system_backup_attempts(public_id,task_id,phase,attempt_number,controller_owner,fencing_token,status,request_json) VALUES(?,?,?,?,?,?,'running',?)", id, t.ID, t.Status, 1, l.Owner, l.Fence, raw); e != nil {
+	a = Attempt{ID: id, TaskID: t.ID, Phase: phase, Number: 1, Owner: l.Owner, Fence: l.Fence, Status: "running", Request: raw}
+	if _, e = tx.ExecContext(ctx, "INSERT INTO system_backup_attempts(public_id,task_id,phase,attempt_number,controller_owner,fencing_token,status,request_json) VALUES(?,?,?,?,?,?,'running',?)", id, t.ID, phase, 1, l.Owner, l.Fence, raw); e != nil {
 		return zero, e
 	}
-	if e = appendEvent(ctx, tx, t.ID, "attempt_prepared", map[string]string{"attempt_id": id, "phase": t.Status}); e != nil {
+	if e = appendEvent(ctx, tx, t.ID, "attempt_prepared", map[string]string{"attempt_id": id, "phase": phase}); e != nil {
 		return zero, e
 	}
 	return a, tx.Commit()

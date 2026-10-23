@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/hex"
+
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -54,7 +54,34 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	redisTarget := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT")
 	t.Cleanup(func() {
 		source.Redis.command(context.Background(), []byte("DEL"), key)
-		redisTarget.command(context.Background(), []byte("DEL"), []byte("cm:restore-history:"+run+":"+hex.EncodeToString(key)))
+		// A snapshot can contain other fixture records. Clean every historical
+		// key owned by this restore run, never another run or the source keys.
+		prefix := "cm:restore-history:" + run + ":"
+		cursor := []byte("0")
+		var owned [][]byte
+		for {
+			v, e := redisTarget.command(context.Background(), []byte("SCAN"), cursor, []byte("MATCH"), []byte(prefix+"*"), []byte("COUNT"), []byte("100"))
+			if e != nil {
+				t.Error(e)
+				break
+			}
+			page := v.([]any)
+			cursor = page[0].([]byte)
+			for _, v := range page[1].([]any) {
+				k := v.([]byte)
+				if bytes.HasPrefix(k, []byte(prefix)) {
+					owned = append(owned, k)
+				}
+			}
+			if string(cursor) == "0" {
+				break
+			}
+		}
+		for _, k := range owned {
+			if _, e := redisTarget.command(context.Background(), []byte("DEL"), k); e != nil {
+				t.Error(e)
+			}
+		}
 	})
 	id, _ := RandomID("sbk_")
 	kek := make([]byte, 32)

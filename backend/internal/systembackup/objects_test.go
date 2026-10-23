@@ -65,6 +65,15 @@ func TestRealObjectCaptureRestorePreservesPayloadMetadataAndVersions(t *testing.
 			t.Fatal("object metadata lost", stat.UserMetadata, e)
 		}
 	}
+	if count, e := VerifyObjects(ctx, client, bytes.NewReader(archive.Bytes()), budget, map[string]string{store.Bucket: target}); e != nil || count != len(sources) {
+		t.Fatal("object readback failed", count, e)
+	}
+	if _, e := client.PutObject(ctx, target, "unexpected-object", bytes.NewReader([]byte("extra")), 5, minio.PutObjectOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := VerifyObjects(ctx, client, bytes.NewReader(archive.Bytes()), budget, map[string]string{store.Bucket: target}); e == nil {
+		t.Fatal("unexpected object accepted")
+	}
 	if e := RestoreObjects(ctx, client, bytes.NewReader(archive.Bytes()), budget, map[string]string{store.Bucket: target}); e == nil {
 		t.Fatal("populated target overwritten")
 	}

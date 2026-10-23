@@ -87,6 +87,15 @@ func TestRedisHistoryPreservesBinaryStreamsAndDoesNotReplay(t *testing.T) {
 	if e != nil || pending.([]any)[0] != int64(1) {
 		t.Fatal("lost pending delivery history", e)
 	}
+	if count, e := VerifyRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), budget, run); e != nil || count != 3 {
+		t.Fatal("Redis history readback failed", count, e)
+	}
+	if _, e := target.command(ctx, []byte("SET"), []byte("cm:restore-history:"+run+":"+hex.EncodeToString(sourceKeys[0])), []byte("tampered")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := VerifyRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), budget, run); e == nil {
+		t.Fatal("Redis history corruption accepted")
+	}
 	if e = ReadRedisSnapshot(bytes.NewReader(archive.Bytes()[:archive.Len()-10]), budget, nil); e == nil {
 		t.Fatal("truncation accepted")
 	}

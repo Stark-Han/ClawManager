@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -28,7 +27,20 @@ func (h *SystemBackupHandler) Register(r *gin.RouterGroup) {
 	r.POST("/tasks", h.create)
 	r.GET("/tasks/:id", h.detail)
 	r.GET("/tasks/:id/events", h.events)
+	r.GET("/tasks/:id/verification-report", h.verificationReport)
 	r.POST("/tasks/:id/cancel", h.cancel)
+}
+
+func (h *SystemBackupHandler) verificationReport(c *gin.Context) {
+	if !h.allow(c, systembackup.Read) {
+		return
+	}
+	v, e := h.store.VerificationReport(c.Request.Context(), c.Param("id"))
+	if e != nil {
+		backupError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": v})
 }
 func backupError(c *gin.Context, err error) {
 	code := systembackup.PublicError(err)
@@ -77,13 +89,10 @@ func (h *SystemBackupHandler) allow(c *gin.Context, p systembackup.Permission) b
 }
 func backupBody(c *gin.Context, v any) bool {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<10)
-	d := json.NewDecoder(c.Request.Body)
-	d.DisallowUnknownFields()
-	e := d.Decode(v)
+	raw, e := io.ReadAll(c.Request.Body)
 	if e == nil {
-		var extra any
-		e = d.Decode(&extra)
-		if e == io.EOF {
+		e = systembackup.DecodeStrictJSON(raw, v)
+		if e == nil {
 			return true
 		}
 	}

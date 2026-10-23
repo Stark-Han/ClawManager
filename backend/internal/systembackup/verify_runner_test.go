@@ -93,15 +93,24 @@ func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T)
 	if e != nil {
 		t.Fatal(e)
 	}
+	changed := testConfig()
+	changed.MaxArtifactBytes = 8 << 30
+	if _, e = s.SaveConfig(ctx, 1, 1, changed, permitConfig); e != nil {
+		t.Fatal(e)
+	}
 	jobs := &observedJobs{result: VerifyJobResult{State: "running", JobUID: "uid"}}
 	runner := &VerifyTaskRunner{Jobs: jobs, Template: verifyFixtureRequest()}
 	c := Controller{Store: s, Owner: "first-controller", PollInterval: time.Second, Verifier: runner}
 	if e = c.Tick(ctx); e != nil {
 		t.Fatal(e)
 	}
-	a, e := s.GetAttempt(ctx, task.ID, "running")
+	a, e := s.GetAttempt(ctx, task.ID, "verify")
 	if e != nil {
 		t.Fatal(e)
+	}
+	var frozen VerifyJobRequest
+	if json.Unmarshal(a.Request, &frozen) != nil || frozen.MaxBytes != testConfig().MaxArtifactBytes {
+		t.Fatal("queued task used changed configuration")
 	}
 	if len(jobs.ids) != 1 || jobs.ids[0] != a.ID {
 		t.Fatal("missing frozen intent")
@@ -128,6 +137,10 @@ func TestDurableVerificationControllerAdoptsAttemptAfterLeaderLoss(t *testing.T)
 	}
 	if len(jobs.ids) != 2 || jobs.ids[0] != jobs.ids[1] {
 		t.Fatal("takeover launched a second attempt")
+	}
+	report, e := s.VerificationReport(ctx, task.ID)
+	if e != nil || report.BackupID != task.SourceID || !report.IntegrityVerified || report.AcceptanceEligible {
+		t.Fatal("safe report unavailable", report, e)
 	}
 	if e = s.FinishAttempt(ctx, first, oldTask, a, "failed", map[string]string{"reason": "stale"}); !errors.Is(e, ErrFence) {
 		t.Fatal("stale leader changed result", e)

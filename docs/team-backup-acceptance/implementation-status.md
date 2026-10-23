@@ -69,3 +69,11 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 - 验证 Job 不自动挂载 Kubernetes token、无源连接配置、以非 root/只读根文件系统运行；读取挂载的灾备 bootstrap。Job 退出成功还必须存在绑定本次 backup/origin 的有限长度六 part 完整性报告；该报告永远不授予 acceptance 资格。
 - 取消/截止时间会按原 UID 删除 Job，确认删除完成后才收尾。未知或内容不匹配的同名 Job 不接管、不删除。使用真实 MySQL 已验证 leader 切换复用同一 attempt、截止时间不延长、旧 leader 拒绝、取消等待实际停止。
 - Job 的独立 namespace、只读存储权限、网络隔离和不可变 bootstrap Secret 必须由离线部署建立。正在测试服务器进行真实执行验收，不能将本节单元/数据库测试视为已完成全链路验收。
+
+## 2026-10-24 00:00 增量：恢复读回与报告
+
+- 数据恢复在写入后重新读取文件、对象和 Redis 历史，对照已认证的原始 part 核对内容、权限/归属/mtime、对象 metadata/额外版本、Redis DUMP/类型/历史无过期策略；报告区分写入数量与读回通过数量。
+- 独立 SQL verifier 必须确实只有精确目标库 SELECT 和 USAGE，不接受角色、额外数据库或写授权；缺少该条件在导入数据前拒绝。
+- artifact_verify 完成后提供受 backup.read 权限保护的安全报告 API，并在任务详情显示六 part 完整性结果。不会暴露冻结 Job 请求、Secret 引用或原始日志；报告不是 acceptance 证书。
+- attempt phase 已按 v12 使用 verify，与任务状态 running 区分；排队任务的预算来自创建时冻结配置，当前功能开关只控制新启动。
+- 本批相关后端包完整回归通过，systembackup 322.118 秒，启用真实 MySQL/MinIO/Redis/Kubernetes Job 和独立 capture/restore CLI。前端报告页面构建通过。

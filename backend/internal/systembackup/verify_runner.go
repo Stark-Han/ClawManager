@@ -3,6 +3,7 @@ package systembackup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -35,7 +36,7 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 		return e
 	}
 	expired := !t.DeadlineAt.After(now)
-	a, e := s.GetAttempt(ctx, t.ID, "running")
+	a, e := s.GetAttempt(ctx, t.ID, "verify")
 	if errors.Is(e, sql.ErrNoRows) {
 		if t.Status == "canceling" || expired {
 			next, reason := "failed", "deadline_exceeded"
@@ -46,9 +47,17 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 			return e
 		}
 		request := r.Template
+		var frozen BackupConfig
+		var raw string
+		if e = s.DB.QueryRowContext(ctx, "SELECT config_snapshot FROM system_backup_tasks WHERE public_id=? AND origin_installation_id=? AND config_version=?", t.ID, s.InstallationID, t.ConfigVersion).Scan(&raw); e != nil {
+			return e
+		}
+		if json.Unmarshal([]byte(raw), &frozen) != nil || frozen.Validate() != nil {
+			return errors.New("validation_failed")
+		}
 		request.Origin = s.InstallationID
 		request.BackupID = t.SourceID
-		request.MaxBytes = c.Config.MaxArtifactBytes
+		request.MaxBytes = frozen.MaxArtifactBytes
 		request.DeadlineSeconds = int64(t.DeadlineAt.Sub(now) / time.Second)
 		if request.DeadlineSeconds < 1 {
 			return errors.New("deadline_exceeded")
@@ -56,7 +65,7 @@ func (r VerifyTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Tas
 		if e = request.Validate(); e != nil {
 			return e
 		}
-		a, e = s.PrepareAttempt(ctx, l, t, request)
+		a, e = s.PrepareAttempt(ctx, l, t, "verify", request)
 	}
 	if e != nil {
 		return e

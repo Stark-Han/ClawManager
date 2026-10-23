@@ -29,4 +29,10 @@ func TestBootstrapFilesAreBoundedAndDoNotExposeContents(t *testing.T) {
 	if e := decodeFile(p, &cfg); e == nil {
 		t.Fatal("trailing configuration accepted")
 	}
+	if e := os.WriteFile(p, []byte(`{"secure":true,"SECURE":false}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := decodeFile(p, &cfg); e == nil {
+		t.Fatal("ambiguous bootstrap configuration accepted")
+	}
 }

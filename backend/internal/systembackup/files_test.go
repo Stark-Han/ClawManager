@@ -50,6 +50,23 @@ func TestFilesPreserveHiddenPartialArtifacts(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("file inventory differs\n%+v\n%+v", before, after)
 	}
+	if count, e := VerifyFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, budget); e != nil || count != len(before) {
+		t.Fatal("restored readback failed", count, e)
+	}
+	file := filepath.Join(target, "roots/shared/partial.bin")
+	info, e := os.Stat(file)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(file, []byte{9, 9, 9, 9}, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Chtimes(file, info.ModTime(), info.ModTime()); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = VerifyFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, budget); e == nil {
+		t.Fatal("same-size same-time file corruption accepted")
+	}
 	if _, err = ExtractFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, budget); err == nil {
 		t.Fatal("overwrote existing files")
 	}

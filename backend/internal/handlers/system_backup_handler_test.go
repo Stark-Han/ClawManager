@@ -10,6 +10,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestBackupBodyRejectsAmbiguousDuplicateKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, body := range []string{`{"task_type":"backup","task_type":"drill"}`, `{"task_type":"backup","TASK_TYPE":"drill"}`} {
+		r := gin.New()
+		r.POST("/", func(c *gin.Context) {
+			var v systembackup.CreateTaskRequest
+			if backupBody(c, &v) {
+				c.Status(204)
+			}
+		})
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		if w.Code != 400 {
+			t.Fatalf("ambiguous request accepted: %d", w.Code)
+		}
+	}
+}
+
 func TestBackupPermissionChecksPrecedeDatabaseAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {

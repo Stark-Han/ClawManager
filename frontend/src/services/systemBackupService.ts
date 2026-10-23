@@ -26,6 +26,10 @@ export interface BackupConfig {
 export interface SecretReference {provider: string; name: string; version: string; purpose: string}
 export interface BackupConfigVersion {version: number; config: BackupConfig}
 export interface BackupEvent {id: number; event_type: string; details: Record<string, unknown>; created_at: string}
+export interface BackupVerificationReport {
+  backup_id: string; origin_installation_id: string; purpose: string; consistency: string;
+  integrity_verified: boolean; acceptance_eligible: boolean; parts_verified: number;
+}
 const base = '/admin/system-backup';
 export const systemBackupService = {
   overview: async (signal?: AbortSignal): Promise<{readiness: BackupReadiness; permissions: string[]}> => (await api.get(`${base}/overview`, {signal})).data.data,
@@ -34,6 +38,7 @@ export const systemBackupService = {
   list: async (signal?: AbortSignal): Promise<BackupTask[]> => (await api.get(`${base}/tasks`, {signal})).data.data.items,
   get: async (id: string, signal?: AbortSignal): Promise<BackupTask> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}`, {signal})).data.data,
   events: async (id: string, signal?: AbortSignal): Promise<BackupEvent[]> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}/events`, {signal})).data.data.items,
+  verificationReport: async (id: string, signal?: AbortSignal): Promise<BackupVerificationReport> => (await api.get(`${base}/tasks/${encodeURIComponent(id)}/verification-report`, {signal})).data.data,
   create: async (key: string, task_type: BackupTaskType, source_public_id?: string): Promise<BackupTask> => (await api.post(`${base}/tasks`, {task_type, task_purpose: 'acceptance', ...(source_public_id ? {source_public_id} : {})}, {headers: {'Idempotency-Key': key}})).data.data,
   cancel: async (task: BackupTask): Promise<BackupTask> => (await api.post(`${base}/tasks/${encodeURIComponent(task.public_id)}/cancel`, {expected_version: task.row_version})).data.data,
 };
