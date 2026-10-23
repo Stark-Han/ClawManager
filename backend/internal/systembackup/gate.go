@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var ErrMaintenance = errors.New("backup maintenance in progress")
@@ -124,7 +126,15 @@ func (g Gate) Begin(ctx context.Context, scope, owner, registryHash string, acqu
 	defer tx.Rollback()
 	var phase string
 	var generation, token uint64
-	if err = tx.QueryRowContext(ctx, "SELECT phase,generation,fencing_token FROM system_backup_gate WHERE scope=? FOR UPDATE", scope).Scan(&phase, &generation, &token); err != nil {
+	// Never queue an exclusive lock behind the complete-request shared lock.
+	// Its admitted handler can still need another SQL transaction on this row;
+	// queuing FOR UPDATE would block that SQL and prevent the handler draining.
+	// The controller retries a busy gate within its absolute acquisition budget.
+	if err = tx.QueryRowContext(ctx, "SELECT phase,generation,fencing_token FROM system_backup_gate WHERE scope=? FOR UPDATE NOWAIT", scope).Scan(&phase, &generation, &token); err != nil {
+		var busy *mysql.MySQLError
+		if errors.As(err, &busy) && busy.Number == 3572 {
+			return GateOwnership{}, ErrMaintenance
+		}
 		return GateOwnership{}, err
 	}
 	if phase != "idle" {

@@ -13,8 +13,60 @@ import (
 	"clawreef/internal/config"
 	appdb "clawreef/internal/db"
 	"clawreef/internal/repository"
+	"github.com/go-sql-driver/mysql"
 	upper "github.com/upper/db/v4"
 )
+
+func TestGateAcquisitionDoesNotQueueAheadOfAnAdmittedRequestsSQL(t *testing.T) {
+	ctx := context.Background()
+	raw := controlDB(t)
+	g := Gate{raw}
+	if err := g.EnsureScope(ctx, "nested-request"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("CREATE TABLE fixture_writes(id INT PRIMARY KEY) ENGINE=InnoDB"); err != nil {
+		t.Fatal(err)
+	}
+	var database string
+	if err := raw.QueryRow("SELECT DATABASE()").Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mysql.Config{User: "root", Net: "tcp", Addr: "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_MYSQL_PORT"), DBName: database, AllowNativePasswords: true, ParseTime: true}
+	connector, err := mysql.NewConnector(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := backupgate.Open(connector, "nested-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	release, err := backupgate.HoldRequest(ctx, raw, "nested-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	acquire, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := g.Begin(acquire, "nested-request", "capture", RegistryHash(), time.Second, 5*time.Second)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrMaintenance) {
+			t.Fatal("busy gate must retry without queuing", err)
+		}
+	case <-time.After(75 * time.Millisecond):
+	}
+	write, stop := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer stop()
+	if _, err = app.ExecContext(write, "INSERT INTO fixture_writes VALUES(1)"); err != nil {
+		t.Fatal("an already admitted request deadlocked behind gate acquisition", err)
+	}
+	release()
+}
 
 func TestRequestBoundaryDrainsExternalWritesDespiteClientCancellation(t *testing.T) {
 	ctx := context.Background()
