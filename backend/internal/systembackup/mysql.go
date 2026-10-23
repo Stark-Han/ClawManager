@@ -19,10 +19,11 @@ import (
 const maxRowBytes = 64 << 20
 
 type SQLColumn struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Nullable string `json:"nullable"`
-	Extra    string `json:"extra"`
+	Name                 string `json:"name"`
+	Type                 string `json:"type"`
+	Nullable             string `json:"nullable"`
+	Extra                string `json:"extra"`
+	GenerationExpression string `json:"generation_expression,omitempty"`
 }
 type SQLTable struct {
 	Name       string      `json:"name"`
@@ -74,17 +75,17 @@ func ReadTableSchema(ctx context.Context, q SQLQueryer, name string) (SQLTable, 
 	if _, err := QuoteIdentifier(name); err != nil {
 		return t, err
 	}
-	rows, err := q.QueryContext(ctx, "SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", name)
+	rows, err := q.QueryContext(ctx, "SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,EXTRA,COALESCE(GENERATION_EXPRESSION,'') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", name)
 	if err != nil {
 		return t, err
 	}
 	for rows.Next() {
 		var c SQLColumn
-		if err = rows.Scan(&c.Name, &c.Type, &c.Nullable, &c.Extra); err != nil {
+		if err = rows.Scan(&c.Name, &c.Type, &c.Nullable, &c.Extra, &c.GenerationExpression); err != nil {
 			rows.Close()
 			return t, err
 		}
-		if strings.Contains(c.Extra, "GENERATED") && !strings.Contains(c.Extra, "DEFAULT_GENERATED") {
+		if c.GenerationExpression != "" && !((name == "instances" && c.Name == "owner_normalized") || (name == "users" && c.Name == "local_username_key")) {
 			rows.Close()
 			return t, fmt.Errorf("generated column requires explicit policy: %s", name)
 		}
@@ -228,7 +229,7 @@ func ReadSQLSnapshot(r io.Reader, onTable func(SQLTable) error, onRow func(SQLTa
 		}
 		line := scanner.Bytes()
 		var record SQLRecord
-		if err := json.Unmarshal(line, &record); err != nil {
+		if err := strictDecode(line, &record); err != nil {
 			return result, errors.New("invalid SQL snapshot record")
 		}
 		if !started {

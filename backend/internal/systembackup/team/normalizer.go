@@ -70,7 +70,7 @@ func Normalize(table string, row Row, now time.Time) (Change, error) {
 		terminal = []string{"delivered", "failed"}
 		r.Quarantined = true
 	case "northbound_operations":
-		active = []string{"queued", "processing"}
+		active = []string{"queued", "processing", "batch_pending"}
 		terminal = []string{"succeeded", "failed", "canceled"}
 		r.Quarantined = true
 	case "owner_team_provision_steps":
@@ -124,6 +124,13 @@ func Normalize(table string, row Row, now time.Time) (Change, error) {
 		}
 		if _, ok := row["availability"]; ok {
 			r.After["availability"] = Value("offline")
+		}
+	}
+	if table == "teams" {
+		for _, key := range []string{"redis_url_secret_name", "redis_url_secret_key", "team_token_secret_name", "team_token_secret_key"} {
+			if _, ok := row[key]; ok {
+				r.After[key] = Null()
+			}
 		}
 	}
 	return r, nil

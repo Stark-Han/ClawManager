@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"log"
+	"regexp"
 
 	"clawreef/internal/config"
 	"github.com/upper/db/v4"
@@ -43,6 +44,12 @@ func Connect(cfg config.DatabaseConfig) (db.Session, error) {
 }
 
 func connect(cfg config.DatabaseConfig) (db.Session, error) {
+	// P0 restored databases are data-only drill targets. Every official business
+	// process uses this connection path; none may start consumers, retry Owner
+	// operations, reconcile upgrades, seed data or migrate a restored copy.
+	if regexp.MustCompile(`^cm_restore_[a-f0-9]{32}$`).MatchString(cfg.Database) {
+		return nil, fmt.Errorf("isolated restore databases cannot run business services")
+	}
 	hostPort := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	settings := mysql.ConnectionURL{
 		Host:     hostPort,

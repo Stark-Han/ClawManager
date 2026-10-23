@@ -42,14 +42,16 @@ func controlDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	ddl, err := os.ReadFile("../db/migrations/079_add_system_backup_control.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range strings.Split(string(ddl), ";") {
-		if strings.TrimSpace(statement) != "" {
-			if _, err = db.Exec(statement); err != nil {
-				t.Fatal(err)
+	for _, file := range []string{"079_add_system_backup_control.sql", "080_add_backup_dependency_health.sql", "081_add_backup_controller_coordination.sql"} {
+		ddl, err := os.ReadFile("../db/migrations/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range strings.Split(string(ddl), ";") {
+			if strings.TrimSpace(statement) != "" {
+				if _, err = db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}

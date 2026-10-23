@@ -68,14 +68,14 @@ func TestMySQLCaptureRestorePreservesBytesAndInterruptState(t *testing.T) {
 		return d
 	}
 	source, target := open(sourceName), open(targetName)
-	ddl := "CREATE TABLE team_tasks (id BIGINT PRIMARY KEY,status VARCHAR(30) NOT NULL,workflow_state VARCHAR(40) NOT NULL,ledger_version BIGINT NOT NULL,result_json LONGBLOB,error_message TEXT NULL,finished_at DATETIME(6) NULL) ENGINE=InnoDB"
+	ddl := "CREATE TABLE team_tasks (id BIGINT PRIMARY KEY,status VARCHAR(30) NOT NULL,workflow_state VARCHAR(40) NOT NULL,ledger_version BIGINT NOT NULL,result_json LONGBLOB,error_message TEXT NULL,finished_at DATETIME(6) NULL,empty_text VARCHAR(10) NOT NULL) ENGINE=InnoDB"
 	for _, d := range []*sql.DB{source, target} {
 		if _, err = d.ExecContext(ctx, ddl); err != nil {
 			t.Fatal(err)
 		}
 	}
 	payload := []byte{0, 255, 128, 10, 13}
-	if _, err = source.ExecContext(ctx, "INSERT INTO team_tasks VALUES (?,?,?,?,?,?,NULL)", 7, "running", "executing", int64(9007199254740993), payload, "keep diagnostic"); err != nil {
+	if _, err = source.ExecContext(ctx, "INSERT INTO team_tasks VALUES (?,?,?,?,?,?,NULL,'')", 7, "running", "executing", int64(9007199254740993), payload, "keep diagnostic"); err != nil {
 		t.Fatal(err)
 	}
 	var captured bytes.Buffer

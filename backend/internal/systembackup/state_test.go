@@ -50,3 +50,12 @@ func TestEligibilityRequiresEveryIndependentFact(t *testing.T) {
 		t.Fatal("cleanup ignored")
 	}
 }
+
+func TestFailureCategoryIsClosedAndCancellationIsNotFailure(t *testing.T) {
+	task := Task{Type: Backup, Status: "preparing", CanCancel: true}
+	for _, category := range []string{"made_up", "state_conflict", "canceled_by_actor", "canceled_by_shutdown"} {
+		if _, e := task.Transition("failed", category, time.Now()); e == nil {
+			t.Errorf("invalid failure category accepted: %s", category)
+		}
+	}
+}

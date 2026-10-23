@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"clawreef/internal/services"
 	"clawreef/internal/services/k8s"
 	"clawreef/internal/services/leader"
+	"clawreef/internal/systembackup"
 	"clawreef/internal/teamtemplate"
 
 	"github.com/gin-gonic/gin"
@@ -826,6 +828,18 @@ func main() {
 			adminSystemSettings.DELETE("/images/:instanceType", systemSettingsHandler.DeleteSystemImageSetting)
 			adminSystemSettings.GET("/cluster-resources", clusterResourceHandler.GetOverview)
 		}
+
+		backupBindings, backupBindingErr := systembackup.ParseRoleBindings(os.Getenv("SYSTEM_BACKUP_ROLE_BINDINGS"))
+		if backupBindingErr != nil {
+			log.Println("System backup role bootstrap is invalid; access disabled")
+			backupBindings = nil
+		}
+		backupSQL, _ := database.Driver().(*sql.DB)
+		backupStore := systembackup.Store{DB: backupSQL, InstallationID: strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_INSTALLATION_ID"))}
+		backupHandler := handlers.NewSystemBackupHandler(backupStore, backupBindings)
+		backupAdmin := api.Group("/admin/system-backup")
+		backupAdmin.Use(middleware.Auth(), middleware.SetUserInfo(userRepo), middleware.NewAdminAuth(userRepo))
+		backupHandler.Register(backupAdmin)
 
 		northboundSettings := api.Group("/admin/northbound")
 		northboundSettings.Use(middleware.Auth())

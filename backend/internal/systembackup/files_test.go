@@ -10,6 +10,22 @@ import (
 	"testing"
 )
 
+func TestFileArchiveRejectsTrailingPayload(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "result.txt"), []byte("partial result"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	budget := FileBudget{MaxBytes: 1 << 20, MaxEntries: 100}
+	if _, err := CaptureFiles(context.Background(), &b, []FileRoot{{ID: "team", Path: source}}, budget); err != nil {
+		t.Fatal(err)
+	}
+	b.WriteString("hidden trailing data")
+	if _, err := ExtractFiles(context.Background(), &b, t.TempDir(), budget); err == nil {
+		t.Fatal("trailing payload accepted")
+	}
+}
+
 func TestFilesPreserveHiddenPartialArtifacts(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()

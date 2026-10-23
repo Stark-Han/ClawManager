@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type FileRoot struct {
@@ -21,12 +22,15 @@ type FileRoot struct {
 	Path string `json:"-"`
 }
 type FileRecord struct {
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	Mode   int64  `json:"mode"`
-	Type   byte   `json:"type"`
-	Link   string `json:"link,omitempty"`
-	SHA256 string `json:"sha256,omitempty"`
+	Path       string    `json:"path"`
+	Size       int64     `json:"size"`
+	Mode       int64     `json:"mode"`
+	Type       byte      `json:"type"`
+	Link       string    `json:"link,omitempty"`
+	SHA256     string    `json:"sha256,omitempty"`
+	UID        int       `json:"uid"`
+	GID        int       `json:"gid"`
+	ModifiedAt time.Time `json:"modified_at"`
 }
 type FileBudget struct {
 	MaxBytes   int64
@@ -134,6 +138,7 @@ func CaptureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 				return err
 			}
 			header.Name = name
+			header.Format = tar.FormatPAX
 			header.Uname = ""
 			header.Gname = ""
 			if header.Size > budget.MaxBytes-total {
@@ -142,7 +147,7 @@ func CaptureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 			if err = tw.WriteHeader(header); err != nil {
 				return err
 			}
-			record := FileRecord{Path: name, Size: header.Size, Mode: header.Mode, Type: header.Typeflag, Link: link}
+			record := FileRecord{Path: name, Size: header.Size, Mode: header.Mode, Type: header.Typeflag, Link: link, UID: header.Uid, GID: header.Gid, ModifiedAt: header.ModTime.UTC()}
 			if info.Mode().IsRegular() {
 				f, err := root.Open(rel)
 				if err != nil {
@@ -244,7 +249,10 @@ func ExtractFiles(ctx context.Context, r io.Reader, target string, budget FileBu
 		if len(records) >= budget.MaxEntries || h.Size < 0 || h.Size > budget.MaxBytes-total {
 			return nil, errors.New("file restore budget exceeded")
 		}
-		record := FileRecord{Path: h.Name, Size: h.Size, Mode: h.Mode, Type: h.Typeflag, Link: h.Linkname}
+		record := FileRecord{Path: h.Name, Size: h.Size, Mode: h.Mode, Type: h.Typeflag, Link: h.Linkname, UID: h.Uid, GID: h.Gid, ModifiedAt: h.ModTime.UTC()}
+		if h.Uid < 0 || h.Gid < 0 {
+			return nil, errors.New("invalid file owner")
+		}
 		if h.Mode & ^int64(0777) != 0 {
 			return nil, errors.New("privileged file mode is not permitted")
 		}
@@ -295,6 +303,12 @@ func ExtractFiles(ctx context.Context, r io.Reader, target string, budget FileBu
 		}
 		records = append(records, record)
 	}
+	// Our archive format has exactly the authenticated tar EOF, with no second
+	// archive or ignored trailing payload after it.
+	var extra [1]byte
+	if n, e := io.ReadFull(contextReader{ctx, r}, extra[:]); n != 0 || e != io.EOF {
+		return nil, errors.New("trailing file archive payload")
+	}
 	for _, link := range links {
 		if err = root.Symlink(filepath.FromSlash(link.Link), filepath.FromSlash(link.Path)); err != nil {
 			return nil, err
@@ -302,6 +316,14 @@ func ExtractFiles(ctx context.Context, r io.Reader, target string, budget FileBu
 	}
 	// Apply directory permissions only after children are populated.
 	for i := len(records) - 1; i >= 0; i-- {
+		if err = restoreFileOwner(root, records[i]); err != nil {
+			return nil, err
+		}
+		if records[i].Type != tar.TypeSymlink {
+			if err = root.Chtimes(records[i].Path, records[i].ModifiedAt, records[i].ModifiedAt); err != nil {
+				return nil, err
+			}
+		}
 		if records[i].Type == tar.TypeDir {
 			if err = root.Chmod(records[i].Path, fs.FileMode(records[i].Mode)); err != nil {
 				return nil, err

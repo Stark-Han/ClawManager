@@ -194,13 +194,14 @@ func (s Store) Create(ctx context.Context, actor int, key string, r CreateTaskRe
 	if pending >= 100 {
 		return zero, false, errors.New("rate_limited")
 	}
+	pendingReason := ""
 	if r.Type == Backup {
 		var active int
 		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM system_backup_tasks WHERE task_type='backup' AND status NOT IN ('failed','succeeded','canceled')").Scan(&active); err != nil {
 			return zero, false, err
 		}
 		if active != 0 {
-			return zero, false, errors.New("conflict_active_job")
+			pendingReason = "global_capture_queue"
 		}
 	}
 	prefix := map[TaskType]string{Backup: "sbk_", Drill: "sdr_", Preflight: "spf_", ArtifactVerify: "sav_"}[r.Type]
@@ -216,7 +217,7 @@ func (s Store) Create(ctx context.Context, actor int, key string, r CreateTaskRe
 	if r.Type == ArtifactVerify {
 		deadline = 7200
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO system_backup_tasks(public_id,origin_installation_id,task_type,purpose,config_version,config_snapshot,request_json,actor_id,idempotency_key,request_hash,source_public_id,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)))`, id, identity, r.Type, r.Purpose, version, raw, request, actor, key, hash, r.SourceID, deadline)
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_backup_tasks(public_id,origin_installation_id,task_type,purpose,config_version,config_snapshot,request_json,actor_id,idempotency_key,request_hash,source_public_id,pending_reason,deadline_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)))`, id, identity, r.Type, r.Purpose, version, raw, request, actor, key, hash, r.SourceID, pendingReason, deadline)
 	if err != nil {
 		return zero, false, err
 	}
@@ -309,7 +310,7 @@ func (s Store) Claim(ctx context.Context, id, owner string, version uint64, ttl 
 	if !refPattern.MatchString(owner) || ttl < 15*time.Second || ttl > 300*time.Second {
 		return Task{}, errors.New("validation_failed")
 	}
-	res, e := s.DB.ExecContext(ctx, `UPDATE system_backup_tasks SET lease_owner=?,lease_until=TIMESTAMPADD(MICROSECOND,?,UTC_TIMESTAMP(6)),started_at=COALESCE(started_at,UTC_TIMESTAMP(6)),row_version=row_version+1 WHERE public_id=? AND row_version=? AND status NOT IN ('succeeded','failed','canceled') AND (lease_owner IS NULL OR lease_owner=? OR lease_until<=UTC_TIMESTAMP(6))`, owner, ttl.Microseconds(), id, version, owner)
+	res, e := s.DB.ExecContext(ctx, `UPDATE system_backup_tasks SET lease_owner=?,lease_until=TIMESTAMPADD(MICROSECOND,?,UTC_TIMESTAMP(6)),row_version=row_version+1 WHERE public_id=? AND row_version=? AND status NOT IN ('succeeded','failed','canceled') AND (lease_owner IS NULL OR lease_owner=? OR lease_until<=UTC_TIMESTAMP(6))`, owner, ttl.Microseconds(), id, version, owner)
 	if e != nil {
 		return Task{}, e
 	}
@@ -333,7 +334,7 @@ func (s Store) Advance(ctx context.Context, t Task, owner, next, failure string)
 	if e != nil {
 		return Task{}, e
 	}
-	res, e := tx.ExecContext(ctx, `UPDATE system_backup_tasks SET status=?,row_version=?,failure_category=?,can_cancel=?,finished_at=?,attention_reason=?,pending_reason=?,acceptance_eligible=? WHERE public_id=? AND row_version=? AND lease_owner=? AND lease_until>UTC_TIMESTAMP(6)`, updated.Status, updated.Version, updated.Failure, updated.CanCancel, updated.FinishedAt, updated.AttentionReason, updated.PendingReason, updated.Eligible, t.ID, t.Version, owner)
+	res, e := tx.ExecContext(ctx, `UPDATE system_backup_tasks SET status=?,row_version=?,failure_category=?,can_cancel=?,finished_at=?,attention_reason=?,pending_reason=?,acceptance_eligible=?,started_at=? WHERE public_id=? AND row_version=? AND lease_owner=? AND lease_until>UTC_TIMESTAMP(6)`, updated.Status, updated.Version, updated.Failure, updated.CanCancel, updated.FinishedAt, updated.AttentionReason, updated.PendingReason, updated.Eligible, updated.StartedAt, t.ID, t.Version, owner)
 	if e != nil {
 		return Task{}, e
 	}
@@ -390,7 +391,7 @@ func PublicError(err error) string {
 		return "none"
 	}
 	switch err.Error() {
-	case "validation_failed", "permission_denied", "not_found", "not_ready", "version_conflict", "idempotency_conflict", "state_conflict", "commit_started", "rate_limited", "conflict_active_job", "capacity_exceeded", "unsupported_runner_p1", "unsupported_profile_p1", "strong_auth_required":
+	case "validation_failed", "permission_denied", "not_found", "not_ready", "artifact_unavailable", "version_conflict", "idempotency_conflict", "state_conflict", "commit_started", "rate_limited", "conflict_active_job", "capacity_exceeded", "unsupported_runner_p1", "unsupported_profile_p1", "strong_auth_required":
 		return err.Error()
 	}
 	return "internal_error"

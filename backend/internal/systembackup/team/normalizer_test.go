@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+func TestBatchPendingOperationCannotRemainRunnable(t *testing.T) {
+	row := Row{"operation_id": Value("operation-1"), "status": Value("batch_pending"), "request_payload": Value(`{"instance_id":7}`), "idempotency_key": Value("original-key")}
+	change, err := Normalize("northbound_operations", row, time.Now().UTC())
+	if err != nil || string(change.After["status"].Data) != "failed" || !change.Quarantined {
+		t.Fatal(change, err)
+	}
+	if string(change.After["request_payload"].Data) != string(row["request_payload"].Data) || string(change.After["idempotency_key"].Data) != "original-key" {
+		t.Fatal("lost operation evidence")
+	}
+}
+
 func TestTaskRestorePreservesOriginalAndPartialResult(t *testing.T) {
 	original := Row{"id": Value("9"), "status": Value("running"), "workflow_state": Value("executing"), "ledger_version": Value("9007199254740993"), "result_json": Value(`{"partial":"产物"}`), "error_message": Value("original diagnostic"), "finished_at": Null()}
 	copy := Clone(original)

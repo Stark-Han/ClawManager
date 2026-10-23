@@ -98,8 +98,8 @@ func TestStoreConcurrentIdempotencyClaimAndCancel(t *testing.T) {
 	if _, _, e := s.Create(ctx, 1, "request-0001", CreateTaskRequest{Type: Backup, Purpose: "functional_test"}, permitTask); PublicError(e) != "idempotency_conflict" {
 		t.Fatal(e)
 	}
-	if _, _, e := s.Create(ctx, 1, "request-0002", CreateTaskRequest{Type: Backup, Purpose: "acceptance"}, permitTask); PublicError(e) != "conflict_active_job" {
-		t.Fatal(e)
+	if queued, _, e := s.Create(ctx, 1, "request-0002", CreateTaskRequest{Type: Backup, Purpose: "acceptance"}, permitTask); e != nil || queued.Status != "pending" || queued.PendingReason != "global_capture_queue" {
+		t.Fatal("concurrent backups must queue", queued, e)
 	}
 	claimed, e := s.Claim(ctx, task.ID, "controller-a", task.Version, 30*time.Second)
 	if e != nil {

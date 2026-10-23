@@ -53,6 +53,9 @@ func (t Task) Terminal() bool {
 // Transition validates a task edge before the repository executes a row-version
 // CAS. An externally registered backup cannot be changed into failed/canceled.
 func (t Task) Transition(next, failure string, now time.Time) (Task, error) {
+	if !slices.Contains(FailureCategories, failure) || (next == "failed" && (failure == "none" || failure == "canceled_by_actor" || failure == "canceled_by_shutdown")) {
+		return t, errors.New("invalid failure category")
+	}
 	if t.Terminal() {
 		return t, errors.New("state_conflict")
 	}
@@ -96,6 +99,9 @@ func (t Task) Transition(next, failure string, now time.Time) (Task, error) {
 		return t, errors.New("invalid failure category for active state")
 	}
 	t.Status = next
+	if t.StartedAt == nil && next != "pending" && next != "canceling" && !t.Terminal() {
+		t.StartedAt = &now
+	}
 	t.Failure = failure
 	t.Version++
 	if t.Terminal() {

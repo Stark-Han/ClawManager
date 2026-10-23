@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// A nil []byte argument is SQL NULL in the MySQL driver. JSON legitimately
+// omits an empty byte slice; the explicit Cell.IsNull flag is authoritative.
+func nonNullSQLBytes(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
+}
+
 // Scan into any instead of []byte: parseTime connections otherwise silently
 // serialize DATETIME values as RFC3339, which is not the captured SQL value.
 func sqlCell(v any, column SQLColumn) (team.Cell, error) {

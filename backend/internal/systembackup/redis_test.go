@@ -1,0 +1,93 @@
+package systembackup
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/hex"
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestRESPRejectsUnboundedMalformedAndNestedReplies(t *testing.T) {
+	for _, raw := range []string{"$99999999999\r\n", "*9999999999\r\n", "$-2\r\n", "$3\r\nabcXX", "*1\r\n*1\r\n" + strings.Repeat("*1\r\n", 20), "-NOAUTH password-secret\r\n"} {
+		budget := int64(1024)
+		_, e := readRedisReply(bufio.NewReader(strings.NewReader(raw)), &budget, 0)
+		if e == nil || strings.Contains(e.Error(), "password-secret") {
+			t.Fatal("unbounded or leaking reply", e)
+		}
+	}
+}
+func redisFixture(t *testing.T, variable string) *RedisClient {
+	t.Helper()
+	port := os.Getenv(variable)
+	if port == "" {
+		t.Skip("requires disposable Redis fixtures")
+	}
+	c, e := ConnectRedis(context.Background(), RedisOptions{Address: "127.0.0.1:" + port, Password: os.Getenv("TEST_SYSTEM_BACKUP_REDIS_PASSWORD"), MaxReplyBytes: 8 << 20})
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+func TestRedisHistoryPreservesBinaryStreamsAndDoesNotReplay(t *testing.T) {
+	source := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_PORT")
+	target := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT")
+	ctx := context.Background()
+	for _, c := range []*RedisClient{source, target} {
+		n, e := c.command(ctx, []byte("DBSIZE"))
+		if e != nil || n != int64(0) {
+			t.Fatal("fixture must be empty", n, e)
+		}
+	}
+	prefix, _ := RandomID("test_")
+	sourceKeys := [][]byte{[]byte(prefix + ":binary"), []byte(prefix + ":stream"), []byte(prefix + ":expiring")}
+	run, _ := RandomID("sdr_")
+	t.Cleanup(func() {
+		for _, key := range sourceKeys {
+			_, _ = source.command(ctx, []byte("DEL"), key)
+			_, _ = target.command(ctx, []byte("DEL"), []byte("cm:restore-history:"+run+":"+hex.EncodeToString(key)))
+		}
+	})
+	commands := [][][]byte{{[]byte("SET"), sourceKeys[0], {0, 255, 128, 10}}, {[]byte("XADD"), sourceKeys[1], []byte("*"), []byte("task"), []byte(`{"status":"running","partial":"retained"}`)}, {[]byte("XGROUP"), []byte("CREATE"), sourceKeys[1], []byte("workers"), []byte("0")}, {[]byte("XREADGROUP"), []byte("GROUP"), []byte("workers"), []byte("old-consumer"), []byte("STREAMS"), sourceKeys[1], []byte(">")}, {[]byte("SET"), sourceKeys[2], []byte("original-session-history"), []byte("PX"), []byte("60000")}}
+	for _, cmd := range commands {
+		if _, e := source.command(ctx, cmd...); e != nil {
+			t.Fatal(e)
+		}
+	}
+	budget := RedisBudget{MaxItems: 100, MaxBytes: 8 << 20, MaxInventoryBytes: 1 << 20}
+	var archive bytes.Buffer
+	if e := CaptureRedisLogical(ctx, source, &archive, budget); e != nil {
+		t.Fatal(e)
+	}
+	var records []RedisRecord
+	if e := ReadRedisSnapshot(bytes.NewReader(archive.Bytes()), budget, func(r RedisRecord) error { records = append(records, r); return nil }); e != nil || len(records) != 3 {
+		t.Fatal(len(records), e)
+	}
+	if e := RestoreRedisHistory(ctx, source, bytes.NewReader(archive.Bytes()), budget, run); e == nil {
+		t.Fatal("restored into source")
+	}
+	if e := RestoreRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), budget, run); e != nil {
+		t.Fatal(e)
+	}
+	for _, r := range records {
+		key := []byte("cm:restore-history:" + run + ":" + hex.EncodeToString(r.Key))
+		actual, e := target.command(ctx, []byte("DUMP"), key)
+		if e != nil || !bytes.Equal(actual.([]byte), r.Dump) {
+			t.Fatal("Redis history loss", e)
+		}
+		exists, e := target.command(ctx, []byte("EXISTS"), r.Key)
+		if e != nil || exists != int64(0) {
+			t.Fatal("reactivated source key", e)
+		}
+	}
+	pending, e := target.command(ctx, []byte("XPENDING"), []byte("cm:restore-history:"+run+":"+hex.EncodeToString(sourceKeys[1])), []byte("workers"))
+	if e != nil || pending.([]any)[0] != int64(1) {
+		t.Fatal("lost pending delivery history", e)
+	}
+	if e = ReadRedisSnapshot(bytes.NewReader(archive.Bytes()[:archive.Len()-10]), budget, nil); e == nil {
+		t.Fatal("truncation accepted")
+	}
+}

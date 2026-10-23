@@ -75,7 +75,7 @@ func VerifyMySQL(ctx context.Context, db *sql.DB, expected io.Reader, maxRows in
 				return e
 			}
 			predicates = append(predicates, q+"=?")
-			args = append(args, c.Data)
+			args = append(args, nonNullSQLBytes(c.Data))
 		}
 		if len(predicates) == 0 {
 			return errors.New("missing primary key")

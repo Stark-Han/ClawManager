@@ -88,6 +88,9 @@ func RestoreMySQL(ctx context.Context, db *sql.DB, sourceDatabase, targetDatabas
 		}
 		var columns, values []string
 		for _, c := range table.Columns {
+			if c.GenerationExpression != "" {
+				continue
+			}
 			q, e := QuoteIdentifier(c.Name)
 			if e != nil {
 				return e
@@ -108,14 +111,19 @@ func RestoreMySQL(ctx context.Context, db *sql.DB, sourceDatabase, targetDatabas
 		if len(row) != len(table.Columns) {
 			return errors.New("normalizer changed row shape")
 		}
-		values := make([]any, len(table.Columns))
-		for i, c := range table.Columns {
+		values := make([]any, 0, len(table.Columns))
+		for _, c := range table.Columns {
 			v, ok := row[c.Name]
 			if !ok {
 				return errors.New("normalizer lost a column")
 			}
+			if c.GenerationExpression != "" {
+				continue
+			}
 			if !v.IsNull {
-				values[i] = v.Data
+				values = append(values, nonNullSQLBytes(v.Data))
+			} else {
+				values = append(values, nil)
 			}
 		}
 		_, e := insert.ExecContext(ctx, values...)
