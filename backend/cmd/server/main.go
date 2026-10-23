@@ -835,6 +835,21 @@ func main() {
 			backupBindings = nil
 		}
 		backupSQL, _ := database.Driver().(*sql.DB)
+		if controlFile := strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_CONTROL_DSN_FILE")); controlFile != "" {
+			controlContext, controlCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			controlSQL, controlErr := systembackup.OpenControlDatabase(controlContext, controlFile)
+			controlCancel()
+			if controlErr != nil {
+				log.Println("System backup control database unavailable; access disabled")
+				backupSQL = nil
+			} else {
+				backupSQL = controlSQL
+				defer controlSQL.Close()
+			}
+		} else if db.SQLGateScope() != "" {
+			log.Println("System backup SQL gate requires a separate control credential; backup access disabled")
+			backupSQL = nil
+		}
 		backupStore := systembackup.Store{DB: backupSQL, InstallationID: strings.TrimSpace(os.Getenv("SYSTEM_BACKUP_INSTALLATION_ID"))}
 		backupHandler := handlers.NewSystemBackupHandler(backupStore, backupBindings)
 		backupAdmin := api.Group("/admin/system-backup")

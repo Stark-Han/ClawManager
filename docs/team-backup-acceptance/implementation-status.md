@@ -53,3 +53,11 @@ API 的安装标识使用相同 `SYSTEM_BACKUP_INSTALLATION_ID`。`SYSTEM_BACKUP
 完整业务 writer 接入、OpenClaw/Hermes 模型/工具/子进程停写、strong checkpoint、独立 finalizer/acceptance、外部 catalog、近期强认证/nonce、完整恢复执行器和报告、prune/GC/promotion、全部前端操作、四部署矩阵与 large-smoke 验收仍未完成。
 
 因此当前功能测试产物固定为 `functional_test + best_effort`；API 创建正式备份仍受依赖门禁阻止，不能手动把健康状态勾绿来绕过。测试镜像即使部署，也只证明当前代码已上测试环境，不能等同完整 Team 备份功能已交付。
+
+## 2026-10-23 23:15 增量：业务 SQL 门禁
+
+- 可选 `SYSTEM_BACKUP_SQL_GATE_SCOPE` 将官方业务连接池接入数据库行锁门禁，涵盖 upper repository、后台 SQL、预编译语句和显式事务。现有写事务结束后才能进入停写；维护中读取继续，新的写入失败。Query 接口使用真实只读事务，不能通过换用 Query 绕过。
+- 启用前需离线完成全部 migration、建立 scope，并通过 `SYSTEM_BACKUP_CONTROL_DSN_FILE` 提供独立控制连接。启用后应用拒绝自行迁移或执行 DDL/事务控制 SQL。该开关尚未在 32543 启用；它不证明 Redis、文件、对象或 Runtime 已停写，也不覆盖另行创建的裸连接池。
+- 真实 MySQL 验证已覆盖写事务排空、维护拒写、只读访问、预编译语句、缺失 gate 拒绝，以及现有 TeamRepository / upper ORM 接入。恢复维护后可以继续正常写入。
+- AgentsRuntime 本地提交 `9e9a641` 修复 Hermes 未检查 maintenance、OpenClaw 同批次中途进入 maintenance 仍派发后续消息的问题。真实 Redis 回归通过；尚未构建或部署 Runtime 镜像，也未完成所有工具/子进程/presence 排空。
+- 32543 当前实际部署 ClawManager `7159197e` 镜像 `10.130.14.23:5000/clawmanager-hxc-app:team-backup-data-20261023-7159197e`。浏览器已验证入口和未就绪提示；新增 SQL 门禁代码仍属本地开发。
