@@ -190,7 +190,7 @@ func (g Gate) Hold(ctx context.Context, ownership GateOwnership) (GateOwnership,
 	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,fencing_token,UTC_TIMESTAMP(6)<acquire_deadline AND UTC_TIMESTAMP(6)<hold_deadline FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &token, &timely); err != nil {
 		return ownership, err
 	}
-	if phase != "acquiring" || owner != ownership.Owner || generation != ownership.Generation || !timely {
+	if phase != "acquiring" || owner != ownership.Owner || generation != ownership.Generation || token != ownership.Token || !timely {
 		return ownership, ErrFence
 	}
 	var active int
@@ -212,7 +212,7 @@ func (g Gate) Hold(ctx context.Context, ownership GateOwnership) (GateOwnership,
 }
 
 func (g Gate) BeginRelease(ctx context.Context, ownership GateOwnership) error {
-	r, err := g.DB.ExecContext(ctx, "UPDATE system_backup_gate SET phase='releasing',updated_at=UTC_TIMESTAMP(6) WHERE scope=? AND owner=? AND generation=? AND phase IN ('acquiring','held','releasing')", ownership.Scope, ownership.Owner, ownership.Generation)
+	r, err := g.DB.ExecContext(ctx, "UPDATE system_backup_gate SET phase='releasing',updated_at=UTC_TIMESTAMP(6) WHERE scope=? AND owner=? AND generation=? AND fencing_token=? AND phase IN ('acquiring','held','releasing')", ownership.Scope, ownership.Owner, ownership.Generation, ownership.Token)
 	return requireRow(r, err)
 }
 func (g Gate) FinishRelease(ctx context.Context, ownership GateOwnership) error {
@@ -226,11 +226,11 @@ func (g Gate) FinishRelease(ctx context.Context, ownership GateOwnership) error 
 		return err
 	}
 	var phase, owner string
-	var generation uint64
-	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation); err != nil {
+	var generation, token uint64
+	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,fencing_token FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &token); err != nil {
 		return err
 	}
-	if phase != "releasing" || owner != ownership.Owner || generation != ownership.Generation {
+	if phase != "releasing" || owner != ownership.Owner || generation != ownership.Generation || token != ownership.Token {
 		return ErrFence
 	}
 	var active int
@@ -300,12 +300,12 @@ func (g Gate) AckPaused(ctx context.Context, ownership GateOwnership, id, checkp
 	}
 	defer tx.Rollback()
 	var phase, owner string
-	var generation uint64
+	var generation, token uint64
 	var timely bool
-	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,UTC_TIMESTAMP(6)<acquire_deadline FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &timely); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,fencing_token,UTC_TIMESTAMP(6)<acquire_deadline FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &token, &timely); err != nil {
 		return err
 	}
-	if phase != "acquiring" || owner != ownership.Owner || generation != ownership.Generation || !timely {
+	if phase != "acquiring" || owner != ownership.Owner || generation != ownership.Generation || token != ownership.Token || !timely {
 		return ErrFence
 	}
 	r, err := tx.ExecContext(ctx, "UPDATE system_backup_participants SET state='paused',checkpoint_hash=?,updated_at=UTC_TIMESTAMP(6) WHERE scope=? AND participant_id=? AND generation=? AND state IN ('pausing','paused') AND resume_result='none'", checkpointHash, ownership.Scope, id, generation)
@@ -326,12 +326,12 @@ func (g Gate) AckResumed(ctx context.Context, ownership GateOwnership, id string
 	}
 	defer tx.Rollback()
 	var phase, owner string
-	var generation uint64
+	var generation, token uint64
 	var expired bool
-	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,COALESCE(UTC_TIMESTAMP(6)>=hold_deadline,0) FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &expired); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation,fencing_token,COALESCE(UTC_TIMESTAMP(6)>=hold_deadline,0) FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation, &token, &expired); err != nil {
 		return err
 	}
-	if owner != ownership.Owner || generation != ownership.Generation || (!forced && phase != "releasing") || (forced && !expired) {
+	if owner != ownership.Owner || generation != ownership.Generation || token != ownership.Token || (!forced && phase != "releasing") || (forced && !expired) {
 		return ErrFence
 	}
 	r, err := tx.ExecContext(ctx, "UPDATE system_backup_participants SET state='running',resume_result=?,updated_at=UTC_TIMESTAMP(6) WHERE scope=? AND participant_id=? AND generation=?", result, ownership.Scope, id, generation)

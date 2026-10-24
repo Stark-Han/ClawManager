@@ -350,6 +350,9 @@ func (r CaptureTaskRunner) resume(ctx context.Context, s Store, l Leadership, t 
 	if g.Owner != t.ID || g.Generation != own.Generation {
 		return false, errors.New("coordination_invalid")
 	}
+	// The frozen plan describes the token after Hold. An abort while still
+	// acquiring must release the current token, before that increment exists.
+	own.Token = g.Token
 	if g.Phase != "releasing" {
 		if err = s.withCaptureFence(ctx, l, t, func() error { return (Gate{s.DB}).BeginRelease(ctx, own) }); err != nil {
 			return false, err
