@@ -1,11 +1,14 @@
 package systembackup
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -199,5 +202,117 @@ func TestTeamDataFileAliasesPreserveSharedLinksWithoutWideningNormalCapture(t *t
 	got, e := os.ReadFile(filepath.Join(target, "roots", "instance", "team", "partial.bin"))
 	if e != nil || string(got) != "partial artifact" {
 		t.Fatal("shared artifact link lost", e)
+	}
+}
+
+func TestTeamDataPreservesImageDependencyLinkAsInertMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Runtime image symlinks are tested in the owned Linux fixture")
+	}
+	root, target := t.TempDir(), t.TempDir()
+	dir := filepath.Join(root, "home", ".openclaw", "npm", "node_modules", "@example")
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	original := "/defaults/.openclaw/npm/projects/package/node_modules/@example/plugin"
+	link := filepath.Join(dir, "plugin")
+	if e := os.Symlink(original, link); e != nil {
+		t.Skip("symlinks unavailable")
+	}
+	if e := os.Symlink("/usr/local/lib/node_modules/openclaw", filepath.Join(dir, "..", "openclaw")); e != nil {
+		t.Fatal(e)
+	}
+	skills := filepath.Join(root, "home", ".openclaw", "plugin-skills")
+	if e := os.MkdirAll(skills, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Symlink("/usr/local/lib/node_modules/openclaw/dist/extensions/browser/skills/browser-automation", filepath.Join(skills, "browser-automation")); e != nil {
+		t.Fatal(e)
+	}
+	payload := []byte("partial task artifact\x00\xff")
+	if e := os.WriteFile(filepath.Join(root, "result.bin"), payload, 0600); e != nil {
+		t.Fatal(e)
+	}
+	var archive bytes.Buffer
+	roots := []FileRoot{{ID: "instance_543", Path: root}}
+	budget := FileBudget{1 << 20, 100}
+	if _, e := captureFilesWithPolicy(context.Background(), &archive, roots, budget, nil, true); e != nil {
+		t.Fatal("image dependency link blocked Team data", e)
+	}
+	if _, e := ExtractFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, budget); e != nil {
+		t.Fatal(e)
+	}
+	restored := filepath.Join(target, "roots", "instance_543", "home", ".openclaw", "npm", "node_modules", "@example", "plugin")
+	info, e := os.Lstat(restored)
+	if e != nil || !info.Mode().IsRegular() {
+		t.Fatal("external image link became active", e)
+	}
+	raw, e := os.ReadFile(restored)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var descriptor map[string]any
+	if json.Unmarshal(raw, &descriptor) != nil || descriptor["original_link"] != original {
+		t.Fatal("original link metadata lost")
+	}
+	got, e := os.ReadFile(filepath.Join(target, "roots", "instance_543", "result.bin"))
+	if e != nil || !bytes.Equal(got, payload) {
+		t.Fatal("task artifact changed", e)
+	}
+	if _, e = VerifyFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, budget); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = CaptureFiles(context.Background(), &bytes.Buffer{}, roots, budget); e == nil {
+		t.Fatal("normal capture accepted external dependency link")
+	}
+	if e = os.Symlink("/etc/passwd", filepath.Join(root, "task-artifact-link")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = captureFilesWithPolicy(context.Background(), &bytes.Buffer{}, roots, budget, nil, true); e == nil {
+		t.Fatal("unrelated external task link was silently omitted")
+	}
+}
+
+func TestTeamBackupPreservesSharedDirectoryGroupInheritance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX setgid directory tested in owned Linux fixture")
+	}
+	source, target := t.TempDir(), t.TempDir()
+	shared := filepath.Join(source, "shared")
+	if e := os.Mkdir(shared, 0775); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chmod(shared, os.ModeSetgid|0775); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(shared, "partial.txt"), []byte("saved result"), 0664); e != nil {
+		t.Fatal(e)
+	}
+	var archive bytes.Buffer
+	b := FileBudget{1 << 20, 100}
+	if _, e := CaptureFiles(context.Background(), &archive, []FileRoot{{ID: "team_shared", Path: source}}, b); e != nil {
+		t.Fatal(e)
+	}
+	if e := ValidateFileSnapshot(context.Background(), bytes.NewReader(archive.Bytes()), b); e != nil {
+		t.Fatal("normal Team shared directory rejected", e)
+	}
+	if _, e := ExtractFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, b); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := VerifyFiles(context.Background(), bytes.NewReader(archive.Bytes()), target, b); e != nil {
+		t.Fatal("shared directory mode or data changed", e)
+	}
+	for _, mode := range []int64{04755, 02755} {
+		var unsafe bytes.Buffer
+		tw := tar.NewWriter(&unsafe)
+		if e := tw.WriteHeader(&tar.Header{Name: "roots/team_shared/privileged-program", Typeflag: tar.TypeReg, Mode: mode}); e != nil {
+			t.Fatal(e)
+		}
+		if e := tw.Close(); e != nil {
+			t.Fatal(e)
+		}
+		if e := ValidateFileSnapshot(context.Background(), bytes.NewReader(unsafe.Bytes()), b); e == nil {
+			t.Fatal("privileged file mode accepted", mode)
+		}
 	}
 }

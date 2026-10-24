@@ -6,7 +6,7 @@ export interface TeamDataReport {
  backup_id:string;purpose:string;consistency:string;storage:string;
  capture_started_at:string;capture_finished_at:string;integrity_verified:boolean;
  parts?:Array<{name:string;bytes:number;sha256:string}>;
- write_credential_revoked?:boolean;source_untouched:boolean;
+ write_credential_revoked?:boolean;source_untouched:boolean;runtime_dependency_links?:number;
  restore?:{run_id:string;status:string;phase:string;failure?:string;team:TeamDataSummary;file_count:number;verified_file_count:number;verified_object_count:number;verified_redis_count:number};
  verification?:{integrity_verified:boolean;team:TeamDataSummary;file_count:number;object_count:number;redis_count:number;history_parts_verified:number};
 }

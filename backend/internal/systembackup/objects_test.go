@@ -8,6 +8,47 @@ import (
 	"testing"
 )
 
+func TestTeamDataObjectsCaptureUnversionedSourceWithoutChangingBucket(t *testing.T) {
+	store := testObjectStore(t)
+	c := store.Client
+	ctx := context.Background()
+	source, _ := RandomID("teamdata-")
+	target, _ := RandomID("cm-restore-")
+	for _, bucket := range []string{source, target} {
+		if e := c.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(func() {
+			for o := range c.ListObjects(context.Background(), bucket, minio.ListObjectsOptions{Recursive: true}) {
+				_ = c.RemoveObject(context.Background(), bucket, o.Key, minio.RemoveObjectOptions{})
+			}
+			_ = c.RemoveBucket(context.Background(), bucket)
+		})
+	}
+	payload := []byte("partial artifact\x00\xff")
+	if _, e := c.PutObject(ctx, source, "team/partial.bin", bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{ContentType: "application/octet-stream"}); e != nil {
+		t.Fatal(e)
+	}
+	var archive bytes.Buffer
+	b := ObjectBudget{1 << 20, 100}
+	if e := CaptureTeamDataObjects(ctx, c, &archive, []string{source}, b); e != nil {
+		t.Fatal("online Team capture rejected ordinary source bucket", e)
+	}
+	if e := RestoreObjects(ctx, c, bytes.NewReader(archive.Bytes()), b, map[string]string{source: target}); e != nil {
+		t.Fatal(e)
+	}
+	if count, e := VerifyObjects(ctx, c, bytes.NewReader(archive.Bytes()), b, map[string]string{source: target}); e != nil || count != 1 {
+		t.Fatal("unversioned artifact not preserved", count, e)
+	}
+	v, e := c.GetBucketVersioning(ctx, source)
+	if e != nil || v.Status != "" {
+		t.Fatal("source bucket changed", e, v.Status)
+	}
+	if e := CaptureObjects(ctx, c, io.Discard, []string{source}, b); e == nil {
+		t.Fatal("full-system version requirement was widened")
+	}
+}
+
 func TestRealObjectCaptureRestorePreservesPayloadMetadataAndVersions(t *testing.T) {
 	store := testObjectStore(t)
 	ctx := context.Background()

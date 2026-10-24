@@ -176,6 +176,10 @@ func teamDataFailure(err error) string {
 	switch err.Error() {
 	case "unsupported_schema":
 		return "schema_changed"
+	case "source object changed":
+		return "source_object_changed"
+	case "source object versioning required", "source object version unavailable", "source object identity unavailable":
+		return "source_object_identity_unavailable"
 	case "file changed during capture", "file identity changed during capture":
 		return "source_file_changed"
 	case "symlink escapes managed file roots":

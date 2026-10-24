@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -84,8 +85,8 @@ func ValidateFileSnapshot(ctx context.Context, r io.Reader, b FileBudget) error 
 		if err != nil {
 			return err
 		}
-		if !safeArchiveName(h.Name) || len(seen) >= b.MaxEntries || h.Size < 0 || h.Size > b.MaxBytes-total || h.Uid < 0 || h.Gid < 0 || h.Mode & ^int64(0777) != 0 {
-			return errors.New("validation_failed")
+		if !safeArchiveName(h.Name) || len(seen) >= b.MaxEntries || h.Size < 0 || h.Size > b.MaxBytes-total || h.Uid < 0 || h.Gid < 0 || !validArchiveFileMode(h.Typeflag, h.Mode) {
+			return fmt.Errorf("file snapshot metadata invalid: %s mode=%o uid=%d gid=%d size=%d entries=%d total=%d", h.Name, h.Mode, h.Uid, h.Gid, h.Size, len(seen), total)
 		}
 		if _, ok := seen[h.Name]; ok {
 			return errors.New("validation_failed")

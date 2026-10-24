@@ -78,6 +78,7 @@ type TeamDataReport struct {
 	Verification           *RestoredDataVerification `json:"verification,omitempty"`
 	WriteCredentialRevoked bool                      `json:"write_credential_revoked,omitempty"`
 	SourceUnaffected       bool                      `json:"source_untouched"`
+	RuntimeDependencyLinks int                       `json:"runtime_dependency_links,omitempty"`
 }
 type TeamDataPart struct {
 	Name   string `json:"name"`
@@ -485,6 +486,7 @@ func (s *TeamDataService) backup(ctx context.Context, j TeamDataJob) (report Tea
 		return report, e
 	}
 	defer source.Redis.Close()
+	source.MetadataOnlyFiles = func(n int) { report.RuntimeDependencyLinks = n }
 	manifest, e := CaptureFunctionalBundle(ctx, stage, s.cfg.InstallationID, j.ID, source, CaptureBudget{s.cfg.MaxBytes, s.cfg.MaxItems}, s.wrapper, s.signer, s.cfg.KeyVersion)
 	if e != nil {
 		return report, e

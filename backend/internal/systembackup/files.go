@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,19 +23,35 @@ type FileRoot struct {
 	Path string `json:"-"`
 }
 type FileRecord struct {
-	Path       string    `json:"path"`
-	Size       int64     `json:"size"`
-	Mode       int64     `json:"mode"`
-	Type       byte      `json:"type"`
-	Link       string    `json:"link,omitempty"`
-	SHA256     string    `json:"sha256,omitempty"`
-	UID        int       `json:"uid"`
-	GID        int       `json:"gid"`
-	ModifiedAt time.Time `json:"modified_at"`
+	MetadataOnly bool      `json:"metadata_only,omitempty"`
+	Path         string    `json:"path"`
+	Size         int64     `json:"size"`
+	Mode         int64     `json:"mode"`
+	Type         byte      `json:"type"`
+	Link         string    `json:"link,omitempty"`
+	SHA256       string    `json:"sha256,omitempty"`
+	UID          int       `json:"uid"`
+	GID          int       `json:"gid"`
+	ModifiedAt   time.Time `json:"modified_at"`
 }
 type FileBudget struct {
 	MaxBytes   int64
 	MaxEntries int
+}
+
+func validArchiveFileMode(kind byte, mode int64) bool {
+	allowed := int64(0777)
+	if kind == tar.TypeDir {
+		allowed |= 02000
+	} // Group inheritance is normal for Team shared directories.
+	return mode >= 0 && mode & ^allowed == 0
+}
+func restoredArchiveMode(kind byte, mode int64) fs.FileMode {
+	out := fs.FileMode(mode & 0777)
+	if kind == tar.TypeDir && mode&02000 != 0 {
+		out |= fs.ModeSetgid
+	}
+	return out
 }
 
 func (b FileBudget) validate() error {
@@ -52,6 +69,18 @@ func CaptureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 }
 
 func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget FileBudget, aliases map[string]string) ([]FileRecord, error) {
+	return captureFilesWithPolicy(ctx, w, roots, budget, aliases, false)
+}
+
+func runtimeImageDependencyLink(rootID, relative, target string) bool {
+	relative = filepath.ToSlash(relative)
+	if !strings.HasPrefix(rootID, "instance_") || (!strings.HasPrefix(relative, "home/.openclaw/npm/") && !strings.HasPrefix(relative, "home/.openclaw/plugin-skills/")) {
+		return false
+	}
+	target = path.Clean(filepath.ToSlash(target))
+	return strings.HasPrefix(target, "/defaults/.openclaw/npm/projects/") || target == "/usr/local/lib/node_modules/openclaw" || strings.HasPrefix(target, "/usr/local/lib/node_modules/openclaw/")
+}
+func captureFilesWithPolicy(ctx context.Context, w io.Writer, roots []FileRoot, budget FileBudget, aliases map[string]string, imageDependencyMetadata bool) ([]FileRecord, error) {
 	normalizedAliases := map[string]string{}
 	for logical, physical := range aliases {
 		if canonical, e := filepath.EvalSymlinks(physical); e == nil {
@@ -116,6 +145,7 @@ func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 				return errors.New("invalid archive path")
 			}
 			link := ""
+			var linkDescriptor []byte
 			if info.Mode()&os.ModeSymlink != 0 {
 				original, err := root.Readlink(rel)
 				if err != nil {
@@ -150,13 +180,20 @@ func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 					}
 				}
 				if mapped == "" {
-					return errors.New("symlink escapes managed file roots")
+					if !imageDependencyMetadata || !runtimeImageDependencyLink(source.ID, rel, original) {
+						return errors.New("symlink escapes managed file roots")
+					}
+					linkDescriptor, err = json.Marshal(map[string]any{"schema": "clawmanager.image-dependency-link.v1", "original_link": original, "original_mode": uint32(info.Mode()), "modified_at": info.ModTime().UTC()})
+					if err != nil {
+						return err
+					}
+				} else {
+					link, err = filepath.Rel(filepath.FromSlash(path.Dir(name)), filepath.FromSlash(mapped))
+					if err != nil {
+						return err
+					}
+					link = filepath.ToSlash(link)
 				}
-				link, err = filepath.Rel(filepath.FromSlash(path.Dir(name)), filepath.FromSlash(mapped))
-				if err != nil {
-					return err
-				}
-				link = filepath.ToSlash(link)
 			} else if !info.IsDir() && !info.Mode().IsRegular() {
 				return errors.New("special file requires explicit capture policy")
 			}
@@ -168,6 +205,14 @@ func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 			header.Format = tar.FormatPAX
 			header.Uname = ""
 			header.Gname = ""
+			if linkDescriptor != nil {
+				// The image is not mounted in this data-only target. Preserve the link
+				// description as inert bytes, never follow or activate an external path.
+				header.Typeflag = tar.TypeReg
+				header.Linkname = ""
+				header.Size = int64(len(linkDescriptor))
+				header.Mode = 0600
+			}
 			if header.Size > budget.MaxBytes-total {
 				return errors.New("file byte budget exceeded")
 			}
@@ -175,7 +220,15 @@ func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 				return err
 			}
 			record := FileRecord{Path: name, Size: header.Size, Mode: header.Mode, Type: header.Typeflag, Link: link, UID: header.Uid, GID: header.Gid, ModifiedAt: header.ModTime.UTC()}
-			if info.Mode().IsRegular() {
+			if linkDescriptor != nil {
+				if e := writeFull(tw, linkDescriptor); e != nil {
+					return e
+				}
+				sum := sha256.Sum256(linkDescriptor)
+				record.SHA256 = hex.EncodeToString(sum[:])
+				record.MetadataOnly = true
+				total += int64(len(linkDescriptor))
+			} else if info.Mode().IsRegular() {
 				f, err := root.Open(rel)
 				if err != nil {
 					return err
@@ -280,7 +333,7 @@ func ExtractFiles(ctx context.Context, r io.Reader, target string, budget FileBu
 		if h.Uid < 0 || h.Gid < 0 {
 			return nil, errors.New("invalid file owner")
 		}
-		if h.Mode & ^int64(0777) != 0 {
+		if !validArchiveFileMode(h.Typeflag, h.Mode) {
 			return nil, errors.New("privileged file mode is not permitted")
 		}
 		if e = root.MkdirAll(path.Dir(h.Name), 0700); e != nil {
@@ -352,7 +405,7 @@ func ExtractFiles(ctx context.Context, r io.Reader, target string, budget FileBu
 			}
 		}
 		if records[i].Type == tar.TypeDir {
-			if err = root.Chmod(records[i].Path, fs.FileMode(records[i].Mode)); err != nil {
+			if err = root.Chmod(records[i].Path, restoredArchiveMode(records[i].Type, records[i].Mode)); err != nil {
 				return nil, err
 			}
 		}

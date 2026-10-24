@@ -26,6 +26,7 @@ type CaptureSources struct {
 	TeamDataOnly            bool
 	Progress                func(string)
 	FileAliases             map[string]string
+	MetadataOnlyFiles       func(int)
 }
 type CaptureBudget struct {
 	MaxBytes int64
@@ -129,10 +130,22 @@ func captureAdapters(source CaptureSources, b CaptureBudget, tables []string) []
 			return CaptureRedisLogical(ctx, source.Redis, w, RedisBudget{MaxBytes: b.MaxBytes, MaxItems: b.MaxItems, MaxInventoryBytes: min(b.MaxBytes/8, 64<<20)})
 		}},
 		{"object_storage", func(ctx context.Context, w io.Writer) error {
+			if source.TeamDataOnly {
+				return CaptureTeamDataObjects(ctx, source.Objects, w, source.ObjectBuckets, objectBudget)
+			}
 			return CaptureObjects(ctx, source.Objects, w, source.ObjectBuckets, objectBudget)
 		}},
 		{"workspace", func(ctx context.Context, w io.Writer) error {
-			_, e := captureFiles(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems}, source.FileAliases)
+			records, e := captureFilesWithPolicy(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems}, source.FileAliases, source.TeamDataOnly)
+			if e == nil && source.MetadataOnlyFiles != nil {
+				count := 0
+				for _, r := range records {
+					if r.MetadataOnly {
+						count++
+					}
+				}
+				source.MetadataOnlyFiles(count)
+			}
 			return e
 		}},
 		{"deployment_resources", func(ctx context.Context, w io.Writer) error {

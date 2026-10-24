@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -104,6 +105,16 @@ type ObjectRecord struct {
 // version. LIST alone does not prove a cross-provider checkpoint: the caller
 // must hold the installation write gate for an acceptance capture.
 func CaptureObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets []string, b ObjectBudget) error {
+	return captureObjects(ctx, c, w, buckets, b, false)
+}
+
+// An online data copy may read a non-versioned source using If-Match and a
+// second metadata observation. The saved bytes have their own SHA-256 seal;
+// etag: identities are explicitly observations, not immutable provider versions.
+func CaptureTeamDataObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets []string, b ObjectBudget) error {
+	return captureObjects(ctx, c, w, buckets, b, true)
+}
+func captureObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets []string, b ObjectBudget, teamData bool) error {
 	if c == nil || b.MaxBytes <= 0 || b.MaxItems <= 0 || len(buckets) == 0 {
 		return errors.New("invalid object capture configuration")
 	}
@@ -114,7 +125,7 @@ func CaptureObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets [
 			return errors.New("invalid object bucket inventory")
 		}
 		v, e := c.GetBucketVersioning(ctx, bucket)
-		if e != nil || v.Status != "Enabled" {
+		if e != nil || (!teamData && v.Status != "Enabled") {
 			return errors.New("source object versioning required")
 		}
 	}
@@ -156,14 +167,27 @@ func CaptureObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets [
 			// ListObjectsV2 omits version IDs on some providers. Stat fixes the selected
 			// immutable version before any data is read; gate prevents inventory drift.
 			stat, e := c.StatObject(ctx, bucket, item.Key, minio.StatObjectOptions{})
-			if e != nil || stat.VersionID == "" || stat.VersionID == "null" || stat.Size < 0 {
+			if e != nil || stat.Size < 0 {
 				return errors.New("source object version unavailable")
 			}
-			meta := ObjectMetadata{bucket, item.Key, stat.VersionID, stat.Size, stat.ContentType, stat.UserMetadata, stat.LastModified}
+			version := stat.VersionID
+			options := minio.GetObjectOptions{VersionID: version}
+			observed := version == "" || version == "null"
+			if observed {
+				if !teamData || stat.ETag == "" {
+					return errors.New("source object version unavailable")
+				}
+				version = "etag:" + stat.ETag
+				options.VersionID = ""
+				if e = options.SetMatchETag(stat.ETag); e != nil {
+					return errors.New("source object identity unavailable")
+				}
+			}
+			meta := ObjectMetadata{bucket, item.Key, version, stat.Size, stat.ContentType, stat.UserMetadata, stat.LastModified}
 			if e = emit(ObjectRecord{Kind: "object", Metadata: &meta}, false); e != nil {
 				return e
 			}
-			object, e := c.GetObject(ctx, bucket, item.Key, minio.GetObjectOptions{VersionID: stat.VersionID})
+			object, e := c.GetObject(ctx, bucket, item.Key, options)
 			if e != nil {
 				return errors.New("source object unavailable")
 			}
@@ -193,6 +217,12 @@ func CaptureObjects(ctx context.Context, c *minio.Client, w io.Writer, buckets [
 			}
 			if size != stat.Size {
 				return errors.New("source object truncated")
+			}
+			if observed {
+				after, e := c.StatObject(ctx, bucket, item.Key, minio.StatObjectOptions{})
+				if e != nil || after.ETag != stat.ETag || after.Size != stat.Size || !after.LastModified.Equal(stat.LastModified) || after.ContentType != stat.ContentType || !reflect.DeepEqual(after.UserMetadata, stat.UserMetadata) {
+					return errors.New("source object changed")
+				}
 			}
 			if e = emit(ObjectRecord{Kind: "end_object", Count: size, SHA256: hex.EncodeToString(hash.Sum(nil))}, false); e != nil {
 				return e
