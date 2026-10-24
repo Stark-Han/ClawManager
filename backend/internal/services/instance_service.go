@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"clawreef/internal/backupgate"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
@@ -3061,6 +3062,11 @@ func (s *instanceService) ValidateDelete(instanceID int) error {
 
 func (s *instanceService) completeDeletion(userID, instanceID int) {
 	ctx := context.Background()
+	release, gateErr := backupgate.HoldWorkUnit(ctx, "instance.delete")
+	if gateErr != nil {
+		return
+	}
+	defer release()
 
 	fmt.Printf("Starting background deletion of instance %d (user %d)\n", instanceID, userID)
 

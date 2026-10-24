@@ -2,6 +2,7 @@ package systembackup
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -112,6 +113,101 @@ func TestRequestBoundaryDrainsExternalWritesDespiteClientCancellation(t *testing
 	if e = backupgate.RequireSameDatabase(ctx, raw, fixtureDatabase(t)); e == nil {
 		t.Fatal("different physical gate database accepted")
 	}
+}
+
+func TestDisconnectedBoundaryConnectionDoesNotProveExternalWriterStopped(t *testing.T) {
+	ctx := context.Background()
+	admin := controlDB(t)
+	g := Gate{admin}
+	if err := g.EnsureScope(ctx, "lost-boundary"); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := admin.QueryRow("SELECT DATABASE()").Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mysql.Config{User: "root", Net: "tcp", Addr: "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_MYSQL_PORT"), DBName: name, AllowNativePasswords: true, ParseTime: true}
+	writer, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	var connection uint64
+	if err = writer.QueryRow("SELECT CONNECTION_ID()").Scan(&connection); err != nil {
+		t.Fatal(err)
+	}
+	release, err := backupgate.HoldRequest(ctx, writer, "lost-boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err = admin.Exec("KILL CONNECTION " + strconv.FormatUint(connection, 10)); err != nil {
+		t.Fatal(err)
+	}
+	own, err := g.Begin(ctx, "lost-boundary", "backup", RegistryHash(), 5*time.Second, 30*time.Second)
+	if err != nil {
+		t.Fatal("dead connection retained its physical lock", err)
+	}
+	if _, err = g.Hold(ctx, own); !errors.Is(err, ErrMaintenance) {
+		t.Fatal("SQL disconnection falsely certified an unfinished file writer", err)
+	}
+	release()
+	own, err = g.Hold(ctx, own)
+	if err != nil {
+		t.Fatal("completed writer did not release its durable blocker", err)
+	}
+	if err = g.BeginRelease(ctx, own); err != nil {
+		t.Fatal(err)
+	}
+	if err = g.FinishRelease(ctx, own); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquisitionClosesNewRequestAdmissionWhileExistingWriterDrains(t *testing.T) {
+	ctx := context.Background()
+	raw := controlDB(t)
+	g := Gate{raw}
+	if err := g.EnsureScope(ctx, "close-admission"); err != nil {
+		t.Fatal(err)
+	}
+	release, err := backupgate.HoldRequest(ctx, raw, "close-admission")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err = g.Begin(ctx, "close-admission", "backup", RegistryHash(), 5*time.Second, 30*time.Second); !errors.Is(err, ErrMaintenance) {
+		t.Fatal("existing writer was not drained", err)
+	}
+	newRelease, err := backupgate.HoldRequest(ctx, raw, "close-admission")
+	if err == nil {
+		newRelease()
+		t.Fatal("new requests can starve backup acquisition indefinitely")
+	}
+	if !errors.Is(err, backupgate.ErrMaintenance) {
+		t.Fatal(err)
+	}
+	release()
+	own, err := g.Begin(ctx, "close-admission", "backup", RegistryHash(), 5*time.Second, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err = g.Hold(ctx, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = g.BeginRelease(ctx, own); err != nil {
+		t.Fatal(err)
+	}
+	if err = g.FinishRelease(ctx, own); err != nil {
+		t.Fatal(err)
+	}
+	newRelease, err = backupgate.HoldRequest(ctx, raw, "close-admission")
+	if err != nil {
+		t.Fatal("normal admission was not restored", err)
+	}
+	newRelease()
 }
 
 func TestApplicationSQLGateCoversUpperRepositories(t *testing.T) {

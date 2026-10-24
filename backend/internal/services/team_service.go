@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"clawreef/internal/backupgate"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"clawreef/internal/services/k8s"
@@ -452,6 +453,11 @@ func (s *teamService) consumerScanLoop(ctx context.Context) {
 }
 
 func (s *teamService) resumePendingTeamDeletions() {
+	release, gateErr := backupgate.HoldWorkUnit(context.Background(), "team.pending_deletions")
+	if gateErr != nil {
+		return
+	}
+	defer release()
 	repo, ok := s.repo.(repository.PendingTeamDeletionRepository)
 	if !ok {
 		return
@@ -3750,14 +3756,29 @@ func (s *teamService) consumeTeamEvents(ctx context.Context, teamID int) {
 			continue
 		}
 		for _, message := range messages {
-			if err := s.projectTeamEvent(team, bus, message); err != nil {
-				fmt.Printf("Warning: failed to project Team %d event %s: %v\n", teamID, message.ID, err)
+			if !s.projectConsumedTeamEvent(ctx, team, bus, message) {
+				break
 			}
-			team.RedisEventsLastID = message.ID
-			team.UpdatedAt = time.Now().UTC()
-			_ = s.repo.UpdateTeam(team)
 		}
+
 	}
+}
+
+// Returning false leaves the persisted and in-memory cursor unchanged, so a
+// message delivered during backup maintenance is read again after resume.
+func (s *teamService) projectConsumedTeamEvent(ctx context.Context, team *models.Team, bus *redisBus, message redisStreamMessage) bool {
+	release, gateErr := backupgate.HoldWorkUnit(ctx, "team.event_projection")
+	if gateErr != nil {
+		return false
+	}
+	defer release()
+	if err := s.projectTeamEvent(team, bus, message); err != nil {
+		fmt.Printf("Warning: failed to project Team %d event %s: %v\n", team.ID, message.ID, err)
+	}
+	team.RedisEventsLastID = message.ID
+	team.UpdatedAt = time.Now().UTC()
+	_ = s.repo.UpdateTeam(team)
+	return true
 }
 
 func (s *teamService) ensureStaleTaskMonitor(ctx context.Context) {
@@ -3784,19 +3805,28 @@ func (s *teamService) monitorStaleTasks(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.sweepTeamEventOutbox(); err != nil {
-				fmt.Printf("Warning: failed to deliver Team event outbox: %v\n", err)
-			}
-			if err := s.sweepTeamControlPlaneConsistency(); err != nil {
-				fmt.Printf("Warning: failed to reconcile Team control-plane projections: %v\n", err)
-			}
-			if err := s.sweepStaleTasks(); err != nil {
-				fmt.Printf("Warning: failed to sweep stale Team tasks: %v\n", err)
-			}
-			if err := s.sweepAssignmentStatusChecks(); err != nil {
-				fmt.Printf("Warning: failed to sweep Team assignment status checks: %v\n", err)
-			}
+			s.runTeamMaintenanceSweep(ctx)
 		}
+	}
+}
+
+func (s *teamService) runTeamMaintenanceSweep(ctx context.Context) {
+	release, gateErr := backupgate.HoldWorkUnit(ctx, "team.maintenance_sweep")
+	if gateErr != nil {
+		return
+	}
+	defer release()
+	if err := s.sweepTeamEventOutbox(); err != nil {
+		fmt.Printf("Warning: failed to deliver Team event outbox: %v\n", err)
+	}
+	if err := s.sweepTeamControlPlaneConsistency(); err != nil {
+		fmt.Printf("Warning: failed to reconcile Team control-plane projections: %v\n", err)
+	}
+	if err := s.sweepStaleTasks(); err != nil {
+		fmt.Printf("Warning: failed to sweep stale Team tasks: %v\n", err)
+	}
+	if err := s.sweepAssignmentStatusChecks(); err != nil {
+		fmt.Printf("Warning: failed to sweep Team assignment status checks: %v\n", err)
 	}
 }
 

@@ -436,6 +436,9 @@ func (r CaptureTaskRunner) abort(ctx context.Context, s Store, l Leadership, t T
 		}
 	}
 	if hasPlan {
+		if err := s.withCaptureFence(ctx, l, t, func() error { return (Gate{s.DB}).CancelAdmission(ctx, p.Request.Ordinary.Gate.Scope, t.ID) }); err != nil {
+			return err
+		}
 		g, err := s.captureGate(ctx, p.Request.Ordinary.Gate.Scope)
 		if err != nil {
 			return err

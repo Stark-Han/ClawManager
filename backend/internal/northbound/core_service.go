@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"clawreef/internal/backupgate"
 	"clawreef/internal/config"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
@@ -803,6 +804,11 @@ func (w *OperationWorker) batchLoop(ctx context.Context) {
 }
 
 func (w *OperationWorker) processNext(ctx context.Context, batchOnly bool) {
+	release, gateErr := backupgate.HoldWorkUnit(ctx, "northbound.operation")
+	if gateErr != nil {
+		return
+	}
+	defer release()
 	claimID, err := randomToken(w.owner+"_", 8)
 	if err != nil {
 		return

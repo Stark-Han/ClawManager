@@ -54,12 +54,18 @@ func TestRealManagedSecretCaptureCreatesAndRemovesItsStage(t *testing.T) {
 		t.Fatal("fixture control database unavailable")
 	}
 	defer database.Close()
-	ddl, err := os.ReadFile(filepath.Join(filepath.Dir(fixturePath), "087_add_backup_stage_resources.sql"))
-	if err != nil {
-		t.Fatal("stage migration unavailable")
-	}
-	if _, err = database.ExecContext(ctx, string(ddl)); err != nil {
-		t.Fatal("stage migration failed", err)
+	for _, file := range []string{"087_add_backup_stage_resources.sql", "089_add_backup_gate_admission.sql"} {
+		ddl, e := os.ReadFile(filepath.Join(filepath.Dir(fixturePath), file))
+		if e != nil {
+			t.Fatal("stage migration unavailable")
+		}
+		for _, statement := range strings.Split(string(ddl), ";") {
+			if strings.TrimSpace(statement) != "" {
+				if _, e = database.ExecContext(ctx, statement); e != nil {
+					t.Fatal("stage migration failed", e)
+				}
+			}
+		}
 	}
 	s := Store{DB: database, InstallationID: "managed-stage-fixture"}
 	if err = s.Bootstrap(ctx); err != nil {

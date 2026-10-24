@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"clawreef/internal/backupgate"
 	"clawreef/internal/heartbeat"
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
@@ -1372,6 +1373,11 @@ func runtimePodsAlreadyAtImage(pods []models.RuntimePod, runtimeType, targetImag
 }
 
 func (s *RuntimeScheduler) reconcileIfLeader(ctx context.Context) {
+	release, gateErr := backupgate.HoldWorkUnit(ctx, "runtime.scheduler")
+	if gateErr != nil {
+		return
+	}
+	defer release()
 	if s.leader != nil && !s.leader.IsLeader(ctx) {
 		return
 	}

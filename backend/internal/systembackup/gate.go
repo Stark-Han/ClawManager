@@ -38,7 +38,17 @@ func (g Gate) EnsureScope(ctx context.Context, scope string) error {
 	if scope == "" || len(scope) > 128 {
 		return errors.New("invalid maintenance scope")
 	}
-	_, err := g.DB.ExecContext(ctx, "INSERT INTO system_backup_gate(scope) VALUES (?) ON DUPLICATE KEY UPDATE scope=VALUES(scope)", scope)
+	var exists int
+	err := g.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM system_backup_gate WHERE scope=?", scope).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists == 0 {
+		if _, err = g.DB.ExecContext(ctx, "INSERT IGNORE INTO system_backup_gate(scope) VALUES(?)", scope); err != nil {
+			return err
+		}
+	}
+	_, err = g.DB.ExecContext(ctx, "INSERT IGNORE INTO system_backup_gate_admissions(scope) VALUES(?)", scope)
 	return err
 }
 
@@ -120,6 +130,9 @@ func (g Gate) WriteWithLease(ctx context.Context, lease MutationLease, write fun
 func (g Gate) Begin(ctx context.Context, scope, owner, registryHash string, acquire, hold time.Duration) (GateOwnership, error) {
 	if owner == "" || len(owner) > 128 || len(registryHash) != 64 || acquire <= 0 || acquire > 10*time.Minute || hold <= 0 || hold > time.Hour {
 		return GateOwnership{}, errors.New("invalid gate acquisition")
+	}
+	if err := g.closeAdmission(ctx, scope, owner, acquire); err != nil {
+		return GateOwnership{}, err
 	}
 	tx, err := g.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -208,6 +221,10 @@ func (g Gate) FinishRelease(ctx context.Context, ownership GateOwnership) error 
 		return err
 	}
 	defer tx.Rollback()
+	var admissionScope string
+	if err = tx.QueryRowContext(ctx, "SELECT scope FROM system_backup_gate_admissions WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&admissionScope); err != nil {
+		return err
+	}
 	var phase, owner string
 	var generation uint64
 	if err = tx.QueryRowContext(ctx, "SELECT phase,COALESCE(owner,''),generation FROM system_backup_gate WHERE scope=? FOR UPDATE", ownership.Scope).Scan(&phase, &owner, &generation); err != nil {
@@ -228,6 +245,9 @@ func (g Gate) FinishRelease(ctx context.Context, ownership GateOwnership) error 
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE system_backup_gate SET phase='idle',owner=NULL,acquire_deadline=NULL,hold_deadline=NULL,updated_at=UTC_TIMESTAMP(6) WHERE scope=?", ownership.Scope)
 	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE system_backup_gate_admissions SET owner=NULL,close_until=NULL,updated_at=UTC_TIMESTAMP(6) WHERE scope=? AND owner=?", ownership.Scope, ownership.Owner); err != nil {
 		return err
 	}
 	return tx.Commit()

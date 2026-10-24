@@ -431,6 +431,13 @@ func main() {
 		// Do not consume the business SQL pool while a handler is awaiting I/O.
 		backupHTTPPool.SetMaxOpenConns(64)
 		defer backupHTTPPool.Close()
+		restoreBoundary := backupgate.ConfigureWorkBoundary(func(ctx context.Context) (func(), error) {
+			return backupgate.HoldRequest(ctx, backupHTTPPool, db.SQLGateScope())
+		})
+		defer restoreBoundary()
+		if northboundCoreServer != nil {
+			northboundCoreServer.Handler = backupgate.HTTPBoundary(northboundCoreServer.Handler, "northbound.core_http")
+		}
 	}
 	defer leaderCancel()
 	go ownerStore.RunBuffered(leaderCtx)

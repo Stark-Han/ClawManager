@@ -157,7 +157,7 @@ func (s Store) PrepareCapturePlan(ctx context.Context, l Leadership, t Task, r C
 	}
 	var phase string
 	var generation, token uint64
-	if err = tx.QueryRowContext(ctx, "SELECT phase,generation,fencing_token FROM system_backup_gate WHERE scope=? FOR UPDATE NOWAIT", r.Ordinary.Gate.Scope).Scan(&phase, &generation, &token); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT phase,generation,fencing_token FROM system_backup_gate WHERE scope=? FOR SHARE NOWAIT", r.Ordinary.Gate.Scope).Scan(&phase, &generation, &token); err != nil {
 		var busy *mysql.MySQLError
 		if errors.As(err, &busy) && busy.Number == 3572 {
 			return zero, ErrMaintenance

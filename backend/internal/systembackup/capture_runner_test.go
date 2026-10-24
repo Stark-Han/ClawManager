@@ -1,6 +1,7 @@
 package systembackup
 
 import (
+	"clawreef/internal/backupgate"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -180,4 +181,63 @@ func TestCaptureControllerAdoptsBothJobsAndPublishesOnlyAfterSourceResume(t *tes
 			t.Fatal("missing original capture Job identity")
 		}
 	}
+}
+
+func TestCanceledCaptureReopensAdmissionBeforeTheDrainDeadline(t *testing.T) {
+	ctx := context.Background()
+	s := Store{controlDB(t), "cancel-admission"}
+	if err := s.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveConfig(ctx, 0, 1, testConfig(), permitConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHealth(ctx, 1, "writer_registry", "healthy", "none", strings.Repeat("a", 64), 300); err != nil {
+		t.Fatal(err)
+	}
+	g := Gate{s.DB}
+	if err := g.EnsureScope(ctx, "installation"); err != nil {
+		t.Fatal(err)
+	}
+	release, err := backupgate.HoldRequest(ctx, s.DB, "installation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	task, _, err := s.Create(ctx, 1, "cancel-admission-0001", CreateTaskRequest{Type: Backup, Purpose: "functional_test"}, permitTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := &fixtureCaptureJobs{s: s, jobs: map[string]*batchv1.Job{}}
+	c := Controller{Store: s, Owner: "cancel-controller", Capturer: &CaptureTaskRunner{Jobs: jobs, Resources: &fixtureCaptureResources{scope: "installation"}, Publisher: &fixtureCapturePublisher{}}}
+	for i := 0; i < 5; i++ {
+		if err = c.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err := s.Get(ctx, task.ID)
+	if err != nil || actual.Status != "acquiring_gate" {
+		t.Fatal(actual, err)
+	}
+	if r, e := backupgate.HoldRequest(ctx, s.DB, "installation"); e == nil {
+		r()
+		t.Fatal("drain did not close admission")
+	}
+	if _, err = s.Cancel(ctx, task.ID, actual.Version, 1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err = c.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err = s.Get(ctx, task.ID)
+	if err != nil || actual.Status != "canceled" {
+		t.Fatal(actual, err)
+	}
+	r, err := backupgate.HoldRequest(ctx, s.DB, "installation")
+	if err != nil {
+		t.Fatal("cancellation left the source blocked", err)
+	}
+	r()
 }
