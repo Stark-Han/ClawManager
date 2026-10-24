@@ -48,6 +48,21 @@ func (b FileBudget) validate() error {
 // server inventory, never request-provided paths. Cross-root symlinks become
 // relative links inside the restored archive's roots directory.
 func CaptureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget FileBudget) ([]FileRecord, error) {
+	return captureFiles(ctx, w, roots, budget, nil)
+}
+
+func captureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget FileBudget, aliases map[string]string) ([]FileRecord, error) {
+	normalizedAliases := map[string]string{}
+	for logical, physical := range aliases {
+		if canonical, e := filepath.EvalSymlinks(physical); e == nil {
+			physical = canonical
+		}
+		normalizedAliases[filepath.Clean(logical)] = physical
+		if canonical, e := filepath.EvalSymlinks(logical); e == nil {
+			normalizedAliases[canonical] = physical
+		}
+	}
+	aliases = normalizedAliases
 	if err := budget.validate(); err != nil {
 		return nil, err
 	}
@@ -111,6 +126,18 @@ func CaptureFiles(ctx context.Context, w io.Writer, roots []FileRoot, budget Fil
 					target = filepath.Join(source.Path, filepath.FromSlash(path.Dir(rel)), target)
 				}
 				target = filepath.Clean(target)
+				if filepath.IsAbs(original) {
+					for logical, physical := range aliases {
+						if within(logical, target) {
+							rel, e := filepath.Rel(logical, target)
+							if e != nil {
+								return e
+							}
+							target = filepath.Join(physical, rel)
+							break
+						}
+					}
+				}
 				mapped := ""
 				for _, candidate := range roots {
 					if within(candidate.Path, target) {

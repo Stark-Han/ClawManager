@@ -120,6 +120,29 @@ func ReadTableSchema(ctx context.Context, q SQLQueryer, name string) (SQLTable, 
 // ExportMySQL streams a single read-only transaction. This is only the MySQL
 // checkpoint; the orchestrator must separately prove the cross-source barrier.
 func ExportMySQL(ctx context.Context, db *sql.DB, w io.Writer, tables []string) (SQLResult, error) {
+	return exportMySQL(ctx, db, w, tables, false)
+}
+
+// ExportTeamDataMySQL retains the complete schema and Team/instance data while
+// excluding the unrelated global AI gateway chat, metering and risk logs.
+// Empty table records keep the existing isolated restore format and FK schema.
+func ExportTeamDataMySQL(ctx context.Context, db *sql.DB, w io.Writer, tables []string) (SQLResult, error) {
+	return exportMySQL(ctx, db, w, tables, true)
+}
+
+func teamDataOmitsRows(table string) bool {
+	switch table {
+	case "model_invocations", "audit_events", "cost_records", "risk_hits", "chat_sessions", "chat_messages":
+		return true
+	}
+	return false
+}
+
+func teamDataExcludedTables() []string {
+	return []string{"audit_events", "chat_messages", "chat_sessions", "cost_records", "model_invocations", "risk_hits"}
+}
+
+func exportMySQL(ctx context.Context, db *sql.DB, w io.Writer, tables []string, teamData bool) (SQLResult, error) {
 	result := SQLResult{Tables: map[string]int64{}, Hashes: map[string]string{}}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -153,7 +176,11 @@ func ExportMySQL(ctx context.Context, db *sql.DB, w io.Writer, tables []string) 
 			}
 			order = append(order, q)
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT * FROM "+quoted+" ORDER BY "+strings.Join(order, ","))
+		where := ""
+		if teamData && teamDataOmitsRows(name) {
+			where = " WHERE 1=0"
+		}
+		rows, e := tx.QueryContext(ctx, "SELECT * FROM "+quoted+where+" ORDER BY "+strings.Join(order, ","))
 		if e != nil {
 			return result, e
 		}

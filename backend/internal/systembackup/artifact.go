@@ -105,6 +105,7 @@ type Manifest struct {
 	CapturedAt           time.Time      `json:"captured_at"`
 	Consistency          string         `json:"consistency"`
 	Parts                []ArtifactPart `json:"parts"`
+	ExcludedSQLTables    []string       `json:"excluded_sql_tables,omitempty"`
 }
 type ArtifactSignature struct {
 	Algorithm  string           `json:"algorithm"`
@@ -129,11 +130,17 @@ func validHash(s string) bool {
 }
 
 func (m Manifest) Validate() error {
-	if m.Schema != "system-backup.v1" || m.Contract != ContractVersion || !refPattern.MatchString(m.OriginInstallationID) || !validHash(m.RegistryHash) || m.CapturedAt.IsZero() || (m.Purpose != "acceptance" && m.Purpose != "functional_test") || (m.Consistency != "strong" && m.Consistency != "best_effort") {
+	if m.Schema != "system-backup.v1" || m.Contract != ContractVersion || !refPattern.MatchString(m.OriginInstallationID) || !validHash(m.RegistryHash) || m.CapturedAt.IsZero() || (m.Purpose != "acceptance" && m.Purpose != "functional_test" && m.Purpose != "team_data") || (m.Consistency != "strong" && m.Consistency != "best_effort") {
 		return errors.New("invalid manifest identity")
 	}
 	if m.Purpose == "acceptance" && m.Consistency != "strong" {
 		return errors.New("acceptance requires strong consistency")
+	}
+	if m.Purpose == "team_data" && m.Consistency != "best_effort" {
+		return errors.New("online Team data must declare its capture consistency")
+	}
+	if m.Purpose == "team_data" && !slices.Equal(m.ExcludedSQLTables, teamDataExcludedTables()) {
+		return errors.New("Team data scope declaration missing")
 	}
 	if len(m.Parts) != len(RequiredParts) {
 		return errors.New("required part missing")

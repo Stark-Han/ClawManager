@@ -894,6 +894,20 @@ func main() {
 		backupAdmin := api.Group("/admin/system-backup")
 		backupAdmin.Use(middleware.Auth(), middleware.SetUserInfo(userRepo), middleware.NewAdminAuth(userRepo))
 		backupHandler.Register(backupAdmin)
+		var teamDataBackup *systembackup.TeamDataService
+		if path := strings.TrimSpace(os.Getenv("SYSTEM_TEAM_DATA_BACKUP_CONFIG")); path != "" {
+			setupCtx, setupCancel := context.WithTimeout(leaderCtx, 20*time.Second)
+			sourceSQL, _ := database.Driver().(*sql.DB)
+			teamDataBackup, err = systembackup.NewTeamDataService(setupCtx, sourceSQL, path)
+			setupCancel()
+			if err != nil {
+				log.Printf("Team data backup unavailable: %s", systembackup.PublicError(err))
+			} else {
+				defer teamDataBackup.Close()
+				go teamDataBackup.Run(leaderCtx)
+			}
+		}
+		handlers.NewTeamDataBackupHandler(teamDataBackup).Register(backupAdmin)
 
 		northboundSettings := api.Group("/admin/northbound")
 		northboundSettings.Use(middleware.Auth())

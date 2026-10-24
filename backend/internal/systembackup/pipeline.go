@@ -23,6 +23,9 @@ type CaptureSources struct {
 	SecretClient            dynamic.Interface
 	Namespace, NamespaceUID string
 	Deployments, Secrets    []KubernetesSelection
+	TeamDataOnly            bool
+	Progress                func(string)
+	FileAliases             map[string]string
 }
 type CaptureBudget struct {
 	MaxBytes int64
@@ -50,9 +53,16 @@ func CaptureFunctionalBundle(ctx context.Context, stage, origin, id string, sour
 		return zero, e
 	}
 	m := Manifest{Schema: "system-backup.v1", Contract: ContractVersion, BackupID: id, OriginInstallationID: origin, Purpose: "functional_test", RegistryHash: RegistryHash(), CapturedAt: time.Now().UTC(), Consistency: "best_effort"}
+	if source.TeamDataOnly {
+		m.Purpose = "team_data"
+		m.ExcludedSQLTables = teamDataExcludedTables()
+	}
 	adapters := captureAdapters(source, b, tables)
 	remaining := b.MaxBytes
 	for _, adapter := range adapters {
+		if source.Progress != nil {
+			source.Progress(adapter.name)
+		}
 		if remaining < 1 {
 			return zero, errors.New("capacity_exceeded")
 		}
@@ -101,6 +111,10 @@ func captureAdapters(source CaptureSources, b CaptureBudget, tables []string) []
 	objectBudget := ObjectBudget{b.MaxBytes, b.MaxItems}
 	return []captureAdapter{
 		{"mysql", func(ctx context.Context, w io.Writer) error {
+			if source.TeamDataOnly {
+				_, e := ExportTeamDataMySQL(ctx, source.MySQL, w, tables)
+				return e
+			}
 			_, e := ExportMySQL(ctx, source.MySQL, w, tables)
 			return e
 		}},
@@ -111,7 +125,7 @@ func captureAdapters(source CaptureSources, b CaptureBudget, tables []string) []
 			return CaptureObjects(ctx, source.Objects, w, source.ObjectBuckets, objectBudget)
 		}},
 		{"workspace", func(ctx context.Context, w io.Writer) error {
-			_, e := CaptureFiles(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems})
+			_, e := captureFiles(ctx, w, source.Workspace, FileBudget{b.MaxBytes, b.MaxItems}, source.FileAliases)
 			return e
 		}},
 		{"deployment_resources", func(ctx context.Context, w io.Writer) error {

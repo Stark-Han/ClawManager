@@ -37,7 +37,7 @@ var businessTables = map[string][]string{
 var controlTables = []string{"schema_migrations", "system_backup_installation_state", "system_backup_controller_leases", "system_backup_attempts", "system_backup_capture_plans", "system_backup_capture_jobs", "system_backup_capture_aborts", "system_backup_job_sends", "system_backup_stage_resources", "system_backup_dependency_health", "system_backup_config_versions", "system_backup_tasks", "system_backup_events", "system_backup_gate", "system_backup_gate_admissions", "system_backup_mutation_leases", "system_backup_participants", "system_backup_restore_evidence", "system_backup_restore_jobs", "system_backup_quarantine", "system_backup_artifacts", "system_backup_resources", "system_backup_external_actions", "system_backup_operations", "system_backup_strong_auth_nonces", "system_backup_catalog_records", "system_backup_promotions"}
 
 func Registry() []ObjectPolicy {
-	var out []ObjectPolicy
+	out := []ObjectPolicy{{"system_team_data_backup_jobs", "system_backup", "internal", "metadata_only", "reference_only"}}
 	for category, names := range businessTables {
 		for _, name := range names {
 			// All raw database payloads are encrypted. Public reports use separate

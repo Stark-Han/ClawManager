@@ -75,7 +75,7 @@ func artifactPrefix(origin, id string) string { return origin + "/" + id + "/" }
 // eligibility additionally requires capture/verifier/cleanup/provider proofs.
 func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, stage string, manifest SignedManifest, key ed25519.PrivateKey, keyVersion string, maxBytes int64) (PublishedArtifact, error) {
 	var out PublishedArtifact
-	if manifest.Payload.Purpose != "functional_test" {
+	if manifest.Payload.Purpose != "functional_test" && manifest.Payload.Purpose != "team_data" {
 		return out, errors.New("acceptance publication requires the independent finalizer")
 	}
 	if len(key) != ed25519.PrivateKeySize {

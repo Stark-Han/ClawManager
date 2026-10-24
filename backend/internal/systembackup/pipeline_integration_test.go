@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic/fake"
 )
 
 func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
@@ -27,7 +29,14 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	source := realKubernetesCaptureSources(t)
+	var source CaptureSources
+	teamData := os.Getenv("TEST_SYSTEM_TEAM_DATA_MODE") == "1"
+	if teamData {
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme())
+		source = CaptureSources{Namespace: "team-data-fixture", NamespaceUID: "fixture-namespace", DeploymentClient: client, SecretClient: client, TeamDataOnly: true}
+	} else {
+		source = realKubernetesCaptureSources(t)
+	}
 	source.MySQL = fullSchemaDB(t)
 	source.Redis = redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_PORT")
 	sourceObjects := testObjectStore(t)
@@ -196,14 +205,23 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	}
 	raw, e := os.ReadFile(filepath.Join(workspaceTarget, "restore-report.json"))
 	var saved DataRestoreReport
-	if e != nil || json.Unmarshal(raw, &saved) != nil || saved.Status != "succeeded" || saved.HistoryCounts["secret_bundle"] == 0 {
+	if e != nil || json.Unmarshal(raw, &saved) != nil || saved.Status != "succeeded" || !teamData && saved.HistoryCounts["secret_bundle"] == 0 {
 		t.Fatal("restore report missing", e)
 	}
 	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, budget); e == nil {
 		t.Fatal("restore retry overwrote owned targets")
 	}
 	verifyRestoredWithReadOnlyAccounts(t, ctx, external, recovered, wrapper, pub, report, restoreTarget, verifierDSN, budget)
-	if published.Manifest.Payload.Consistency != "best_effort" || published.Manifest.Payload.Purpose != "functional_test" {
+	expectedPurpose := "functional_test"
+	if teamData {
+		expectedPurpose = "team_data"
+	}
+	if published.Manifest.Payload.Consistency != "best_effort" || published.Manifest.Payload.Purpose != expectedPurpose {
 		t.Fatal("unproven strong backup claimed")
 	}
+}
+
+func TestTeamDataSourcesPublishAndDataOnlyRestore(t *testing.T) {
+	t.Setenv("TEST_SYSTEM_TEAM_DATA_MODE", "1")
+	TestSixRealSourcesPublishAndDataOnlyRestore(t)
 }

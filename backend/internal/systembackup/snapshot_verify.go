@@ -22,7 +22,24 @@ func ValidatePublishedSnapshot(ctx context.Context, store ImmutableObjectStore, 
 			return errors.New("capacity_exceeded")
 		}
 		total += p.CiphertextBytes
-		if err := ConsumePublishedPart(ctx, store, artifact, p.Name, wrapper, b.MaxBytes, func(r io.Reader) error { return ValidateSnapshotPart(ctx, p.Name, r, b) }); err != nil {
+		if err := ConsumePublishedPart(ctx, store, artifact, p.Name, wrapper, b.MaxBytes, func(r io.Reader) error {
+			if p.Name == "mysql" && artifact.Manifest.Payload.Purpose == "team_data" {
+				result, e := ReadSQLSnapshot(r, nil, nil)
+				if e != nil {
+					return e
+				}
+				if e = requireBusinessSQLInventory(result); e != nil {
+					return e
+				}
+				for _, name := range artifact.Manifest.Payload.ExcludedSQLTables {
+					if result.Tables[name] != 0 {
+						return errors.New("Team data scope differs from SQL archive")
+					}
+				}
+				return nil
+			}
+			return ValidateSnapshotPart(ctx, p.Name, r, b)
+		}); err != nil {
 			return err
 		}
 	}

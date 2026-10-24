@@ -28,7 +28,7 @@ type CaptureStageDirectories struct {
 // The returned index is unsigned and cannot make a backup recoverable by itself.
 func UploadCapturedParts(ctx context.Context, store PartUploadStore, dirs CaptureStageDirectories, manifest SignedManifest, publicKey ed25519.PublicKey, keyVersion string, maxBytes int64) (ArtifactIndex, error) {
 	var zero ArtifactIndex
-	if store == nil || dirs.Ordinary == "" || dirs.Secrets == "" || dirs.Ordinary == dirs.Secrets && manifest.Payload.Purpose != "functional_test" || maxBytes < 1<<20 || maxBytes > 900<<30 {
+	if store == nil || dirs.Ordinary == "" || dirs.Secrets == "" || dirs.Ordinary == dirs.Secrets && manifest.Payload.Purpose != "functional_test" && manifest.Payload.Purpose != "team_data" || maxBytes < 1<<20 || maxBytes > 900<<30 {
 		return zero, errors.New("validation_failed")
 	}
 	if err := VerifyManifest(manifest, publicKey, keyVersion); err != nil {

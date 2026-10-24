@@ -24,7 +24,7 @@ import AdminSecurityScannerConfigPage from '../pages/admin/security/AdminSecurit
 import RiskRulesPage from '../pages/admin/RiskRulesPage';
 import ModelManagementPage from '../pages/admin/ModelManagementPage';
 import SystemSettingsPage from '../pages/admin/SystemSettingsPage';
-import BackupsPage from '../pages/admin/backups/BackupsPage';
+import BackupsPage from '../pages/admin/backups/TeamDataBackupsPage';
 import NorthboundSettingsPage from '../pages/admin/NorthboundSettingsPage';
 import RuntimePodsPage from '../pages/admin/RuntimePodsPage';
 import UserSettingsPage from '../pages/settings/UserSettingsPage';
