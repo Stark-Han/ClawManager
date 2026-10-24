@@ -181,6 +181,19 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if artifact.Manifest.Payload.Purpose != "team_data" {
 		return report, errors.New("artifact_conflict")
 	}
+	if err = s.catalog().Import(ctx, artifact, 0, false); err != nil {
+		return report, err
+	}
+	if err = s.catalog().Acquire(ctx, j.SourceID, j.ID, "job:"+j.ID); err != nil {
+		return report, err
+	}
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if e := s.catalog().Release(c, j.SourceID, j.ID, "job:"+j.ID); err == nil && e != nil {
+			err = e
+		}
+	}()
 	if err = VerifyPublishedArtifact(ctx, s.store, artifact, s.wrapper, s.cfg.MaxBytes); err != nil {
 		return report, err
 	}
@@ -277,6 +290,11 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	}
 	report.Verification = &verified
 	report.IntegrityVerified = verified.IntegrityVerified
+	if verified.IntegrityVerified {
+		if e = s.catalog().Import(ctx, artifact, 0, true); e != nil {
+			return report, e
+		}
+	}
 	return report, nil
 }
 

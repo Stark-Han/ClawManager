@@ -16,8 +16,13 @@ export interface TeamDataJob {
  created_at:string;started_at?:string;finished_at?:string;report?:TeamDataReport;
 }
 export interface TeamDataOverview {configured:boolean;storage?:string;consistency?:string;max_bytes?:number;current_teams?:number;historical_deleted_teams?:number}
+export interface TeamDataArtifact {backup_id:string;commit_sha256:string;captured_at:string;bytes:number;protected:boolean;health:string;verified_at?:string;leases:Record<string,string>;deleting:boolean;deleted:boolean;deleted_versions:number}
+export interface TeamDataDiscovery {items:Array<{backup_id:string;state:string;error_code?:string;commit_sha256?:string;captured_at?:string;bytes:number}>;next_cursor:string;partial:boolean;authoritative_snapshot:boolean}
 const base='/admin/system-backup/team-data';
 export const teamDataBackupService={
+	artifacts:async():Promise<TeamDataArtifact[]> => (await api.get(`${base}/artifacts`)).data.data.items,
+	discover:async(cursor=''):Promise<TeamDataDiscovery> => (await api.get(`${base}/discover`,{params:{cursor}})).data.data,
+	importArtifact:async(id:string):Promise<void> => {await api.post(`${base}/artifacts/${encodeURIComponent(id)}/import`,{})},
  overview:async(signal?:AbortSignal):Promise<TeamDataOverview>=>(await api.get(`${base}/overview`,{signal})).data.data,
  list:async(signal?:AbortSignal):Promise<TeamDataJob[]>=>(await api.get(`${base}/jobs`,{signal})).data.data.items,
  get:async(id:string,signal?:AbortSignal):Promise<TeamDataJob>=>(await api.get(`${base}/jobs/${encodeURIComponent(id)}`,{signal})).data.data,

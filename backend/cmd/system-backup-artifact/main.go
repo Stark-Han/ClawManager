@@ -186,6 +186,8 @@ func main() {
 	captureRequest := flag.String("capture-request", "", "frozen non-secret capture request (base64url)")
 	uploadRequest := flag.String("upload-request", "", "frozen non-secret upload request (base64url)")
 	dataRequest := flag.String("data-request", "", "frozen isolated data execution identity (base64url)")
+	cursor := flag.String("cursor", "", "bounded Team data discovery cursor")
+	pageSize := flag.Int("page-size", 20, "Team data discovery page size (1..100)")
 	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
@@ -210,7 +212,7 @@ func main() {
 		}
 		return
 	}
-	if *config == "" || *origin == "" || *id == "" || *max < 1<<20 || *max > 900<<30 || *deadline < time.Second || *deadline > 12*time.Hour {
+	if *config == "" || *origin == "" || (*id == "" && *operation != "team-data-discover") || *max < 1<<20 || *max > 900<<30 || *deadline < time.Second || *deadline > 12*time.Hour {
 		fmt.Fprintln(os.Stderr, "invalid verification arguments")
 		os.Exit(2)
 	}
@@ -234,6 +236,10 @@ func main() {
 		output = io.MultiWriter(os.Stdout, &report)
 	}
 	switch *operation {
+	case "team-data-discover":
+		e = discoverTeamData(ctx, *config, *origin, *cursor, *pageSize, output)
+	case "team-data-recover", "team-data-cleanup":
+		e = recoverTeamData(ctx, *operation, *config, *operationConfig, *origin, *id, output)
 	case "verify":
 		e = verify(ctx, *config, *origin, *id, *max, output)
 	case "verify-snapshot":

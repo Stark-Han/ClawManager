@@ -21,6 +21,41 @@ func (h *TeamDataBackupHandler) Register(r *gin.RouterGroup) {
 	r.POST("/team-data/jobs", h.create)
 	r.GET("/team-data/jobs/:id", h.detail)
 	r.POST("/team-data/jobs/:id/cancel", h.cancel)
+	r.GET("/team-data/discover", h.discover)
+	r.GET("/team-data/artifacts", h.artifacts)
+	r.POST("/team-data/artifacts/:id/import", h.importArtifact)
+}
+func (h *TeamDataBackupHandler) discover(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	data, e := h.service.Discover(c.Request.Context(), c.Query("cursor"), 20)
+	if e != nil {
+		backupError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": data})
+}
+func (h *TeamDataBackupHandler) artifacts(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	data, e := h.service.Catalog(c.Request.Context())
+	if e != nil {
+		backupError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"items": data}})
+}
+func (h *TeamDataBackupHandler) importArtifact(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	if e := h.service.Import(c.Request.Context(), c.Param("id"), c.GetInt("userID")); e != nil {
+		backupError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"imported": true}})
 }
 func (h *TeamDataBackupHandler) available(c *gin.Context) bool {
 	c.Header("Cache-Control", "no-store")

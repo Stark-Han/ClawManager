@@ -87,6 +87,7 @@ type TeamDataPart struct {
 }
 
 type TeamDataService struct {
+	recoveryOnly    bool
 	db              *sql.DB
 	admin           *sql.DB
 	adminConfig     *mysql.Config
@@ -116,6 +117,15 @@ func readTeamDataFile(path string, max int64) ([]byte, error) {
 }
 
 func NewTeamDataService(ctx context.Context, db *sql.DB, path string) (*TeamDataService, error) {
+	return newTeamDataService(ctx, db, path, false)
+}
+
+// NewTeamDataRecoveryService uses a recovery-side control DB and namespace.
+// It never queries source inventory, mounts source workspaces or starts workers.
+func NewTeamDataRecoveryService(ctx context.Context, db *sql.DB, path string) (*TeamDataService, error) {
+	return newTeamDataService(ctx, db, path, true)
+}
+func newTeamDataService(ctx context.Context, db *sql.DB, path string, recovery bool) (*TeamDataService, error) {
 	if db == nil {
 		return nil, errors.New("not_ready")
 	}
@@ -244,6 +254,7 @@ func NewTeamDataService(ctx context.Context, db *sql.DB, path string) (*TeamData
 		return nil, errors.New("not_ready")
 	}
 	s := &TeamDataService{db: db, admin: admin, adminConfig: adminConfig, cfg: c, configHash: configHash, owner: owner, objects: objects, verifierObjects: readerObjects, store: ImmutableObjectStore{Client: objects, Bucket: c.BackupBucket, Root: "team-data"}, wrapper: AESKeyWrapper{Reference: SecretRef{Provider: "kubernetes", Name: "team-data-backup-bootstrap", Version: c.KeyVersion, Purpose: "encryption"}, Key: key}, signer: ed25519.PrivateKey(signer), kube: kube}
+	s.recoveryOnly = recovery
 	// Bucket provisioning is explicit to this configured, separate target.
 	exists, e := objects.BucketExists(ctx, c.BackupBucket)
 	if e != nil {
@@ -323,6 +334,9 @@ func (s *TeamDataService) List(ctx context.Context) ([]TeamDataJob, error) {
 }
 
 func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation, source string) (TeamDataJob, error) {
+	if s.recoveryOnly && operation == "backup" {
+		return TeamDataJob{}, errors.New("recovery_only")
+	}
 	if actor < 1 || !idemPattern.MatchString(key) || (operation != "backup" && operation != "restore" && operation != "cleanup") || (operation == "backup" && source != "") || (operation == "restore" && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sbk_"))) || (operation == "cleanup" && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sdr_"))) {
 		return TeamDataJob{}, errors.New("validation_failed")
 	}
@@ -347,7 +361,11 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 	if operation == "restore" {
 		j, e := s.Get(ctx, source)
 		if e != nil || j.Status != "succeeded" || j.Operation != "backup" || j.ConfigHash != s.configHash {
-			return TeamDataJob{}, errors.New("artifact_unavailable")
+			state, _, catalogErr := s.catalog().Load(ctx)
+			a, ok := state.Artifacts[source]
+			if catalogErr != nil || !ok || a.Deleted || a.Deleting {
+				return TeamDataJob{}, errors.New("artifact_unavailable")
+			}
 		}
 	}
 	if operation == "cleanup" {
@@ -509,5 +527,8 @@ func (s *TeamDataService) backup(ctx context.Context, j TeamDataJob) (report Tea
 		report.Parts = append(report.Parts, TeamDataPart{Name: p.Name, Bytes: p.CiphertextBytes, SHA256: p.CiphertextSHA256})
 	}
 	report.IntegrityVerified = true
+	if e = s.catalog().Import(ctx, artifact, 0, true); e != nil {
+		return report, e
+	}
 	return report, nil
 }
