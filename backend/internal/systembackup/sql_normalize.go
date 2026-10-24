@@ -115,7 +115,7 @@ func NormalizeDataRow(table SQLTable, row team.Row, now time.Time) (team.Change,
 	case "instance_commands":
 		err = stopState("status", "failed", []string{"pending", "dispatched", "running", "accepted", "batch_pending"}, []string{"succeeded", "failed", "cancelled", "canceled", "timeout", "timed_out", "expired"})
 	case "runtime_rollouts":
-		err = stopState("status", "error", []string{"pending", "running", "preflight_blocked"}, []string{"finished", "error", "cancelled", "canceled"})
+		err = stopState("status", "error", []string{"pending", "running", "preflight_passed", "preflight_blocked"}, []string{"finished", "error", "cancelled", "canceled"})
 		set("auto_rollback", "0")
 		erase("operation_token", "operation_deadline_at")
 	case "runtime_upgrade_items":

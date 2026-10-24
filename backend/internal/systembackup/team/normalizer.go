@@ -62,8 +62,8 @@ func Normalize(table string, row Row, now time.Time) (Change, error) {
 		active = []string{"pending", "dispatched", "running", "waiting", "blocked", "awaiting_review", "planned"}
 		terminal = []string{"succeeded", "failed", "cancelled", "skipped", "superseded"}
 	case "team_workflow_phases":
-		active = []string{"planned", "active", "awaiting_results", "awaiting_leader_decision"}
-		terminal = []string{"completed", "cancelled", "superseded"}
+		active = []string{"pending", "planned", "active", "awaiting_results", "awaiting_leader_decision"}
+		terminal = []string{"done", "completed", "cancelled", "superseded"}
 		next = "cancelled"
 	case "team_event_outbox":
 		active = []string{"pending"}

@@ -17,6 +17,21 @@ func TestBatchPendingOperationCannotRemainRunnable(t *testing.T) {
 	}
 }
 
+func TestLegacyWorkflowPhaseStatesRetainCompletedData(t *testing.T) {
+	for _, tc := range []struct{ before, after string }{{"pending", "cancelled"}, {"done", "done"}} {
+		row := Row{"id": Value("7"), "status": Value(tc.before), "result_json": Value(`{"partial":"saved artifact"}`)}
+		original := Clone(row)
+		change, e := Normalize("team_workflow_phases", row, time.Now().UTC())
+		if e != nil {
+			t.Errorf("historical phase %s rejected: %v", tc.before, e)
+			continue
+		}
+		if string(change.After["status"].Data) != tc.after || !reflect.DeepEqual(change.Before, original) || !reflect.DeepEqual(row, original) || !reflect.DeepEqual(change.After["result_json"], row["result_json"]) {
+			t.Error("phase data or completed state changed", tc.before)
+		}
+	}
+}
+
 func TestTaskRestorePreservesOriginalAndPartialResult(t *testing.T) {
 	original := Row{"id": Value("9"), "status": Value("running"), "workflow_state": Value("executing"), "ledger_version": Value("9007199254740993"), "result_json": Value(`{"partial":"产物"}`), "error_message": Value("original diagnostic"), "finished_at": Null()}
 	copy := Clone(original)
