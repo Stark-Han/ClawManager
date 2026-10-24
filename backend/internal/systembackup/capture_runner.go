@@ -180,17 +180,10 @@ func (r CaptureTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Ta
 			if a.Status == "failed" || a.Status == "abandoned" {
 				return s.requestCaptureAbort(ctx, l, t, "runner_failed")
 			}
-			binding, e := s.CaptureBinding(ctx, a.ID)
-			if errors.Is(e, sql.ErrNoRows) {
-				job, createErr := r.Jobs.Ensure(ctx, a, "", true)
-				if createErr != nil {
-					return createErr
-				}
-				if e = s.BindCaptureJob(ctx, l, t, a, job); e != nil {
-					return e
-				}
-				binding, e = s.CaptureBinding(ctx, a.ID)
-			}
+			binding, e := s.ensureBackupExecution(ctx, l, t, a,
+				func(step context.Context) (*batchv1.Job, error) { return r.Jobs.Ensure(step, a, "", true) },
+				func(step context.Context) (*batchv1.Job, error) { return r.Jobs.Existing(step, a) },
+				func(step context.Context, job *batchv1.Job) error { return s.BindCaptureJob(step, l, t, a, job) })
 			if e != nil {
 				return e
 			}
@@ -399,6 +392,13 @@ func (r CaptureTaskRunner) abort(ctx context.Context, s Store, l Leadership, t T
 		}
 		b, err := s.CaptureBinding(ctx, a.ID)
 		if errors.Is(err, sql.ErrNoRows) {
+			sent, e := s.backupJobWasSent(ctx, a)
+			if e != nil {
+				return e
+			}
+			if !sent {
+				continue
+			}
 			job, e := r.Jobs.Existing(ctx, a)
 			if apierrors.IsNotFound(e) {
 				stopped = false

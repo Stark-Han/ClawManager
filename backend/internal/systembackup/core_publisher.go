@@ -121,14 +121,10 @@ func (r CorePublisher) Tick(ctx context.Context, s Store, l Leadership, t Task, 
 			return s.requestCaptureAbort(ctx, l, t, "runner_failed")
 		}
 		if a.Status == "running" {
-			binding, e := s.CaptureBinding(ctx, a.ID)
-			if errors.Is(e, sql.ErrNoRows) {
-				job, e := r.Uploads.Ensure(ctx, a, "", true)
-				if e != nil {
-					return e
-				}
-				return s.BindUploadJob(ctx, l, t, a, job)
-			}
+			binding, e := s.ensureBackupExecution(ctx, l, t, a,
+				func(step context.Context) (*batchv1.Job, error) { return r.Uploads.Ensure(step, a, "", true) },
+				func(step context.Context) (*batchv1.Job, error) { return r.Uploads.Existing(step, a) },
+				func(step context.Context, job *batchv1.Job) error { return s.BindUploadJob(step, l, t, a, job) })
 			if e != nil {
 				return e
 			}
@@ -283,14 +279,14 @@ func (r CorePublisher) Tick(ctx context.Context, s Store, l Leadership, t Task, 
 		if !now.Before(t.DeadlineAt) {
 			return r.failAfterCleanup(ctx, s, l, t, core, stages, "deadline_exceeded")
 		}
-		binding, e := s.CaptureBinding(ctx, verified.ID)
-		if errors.Is(e, sql.ErrNoRows) {
-			job, e := r.Verifier.EnsureBound(ctx, verified, "", true)
-			if e != nil {
-				return e
-			}
-			return s.BindBackupVerifyJob(ctx, l, t, verified, job)
-		}
+		binding, e := s.ensureBackupExecution(ctx, l, t, verified,
+			func(step context.Context) (*batchv1.Job, error) {
+				return r.Verifier.EnsureBound(step, verified, "", true)
+			},
+			func(step context.Context) (*batchv1.Job, error) { return r.Verifier.Existing(step, verified) },
+			func(step context.Context, job *batchv1.Job) error {
+				return s.BindBackupVerifyJob(step, l, t, verified, job)
+			})
 		if e != nil {
 			return e
 		}
@@ -348,6 +344,13 @@ func (r CorePublisher) stopAllJobs(ctx context.Context, s Store, l Leadership, t
 		}
 		binding, err := s.CaptureBinding(ctx, a.ID)
 		if errors.Is(err, sql.ErrNoRows) {
+			sent, e := s.backupJobWasSent(ctx, a)
+			if e != nil {
+				return false, e
+			}
+			if !sent {
+				continue
+			}
 			var job *batchv1.Job
 			switch phase {
 			case "capture", "secret_capture":
