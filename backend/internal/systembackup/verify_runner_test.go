@@ -137,6 +137,26 @@ func TestVerificationCleanupRejectsReplacedJobUID(t *testing.T) {
 	}
 }
 
+func TestVerificationCleanupWaitsForOriginalPodsAfterJobDisappears(t *testing.T) {
+	ctx := context.Background()
+	r := verifyFixtureRequest()
+	raw, _ := json.Marshal(r)
+	a := Attempt{ID: "sat_" + strings.Repeat("b", 32), TaskID: "sav_" + strings.Repeat("c", 32), Phase: "verify", Status: "succeeded", Request: raw}
+	a.Result, _ = json.Marshal(VerifyJobResult{State: "succeeded", JobUID: "original-verify"})
+	yes := true
+	client := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.Namespace, UID: types.UID(r.NamespaceUID)}}, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "remaining-verifier", Namespace: r.Namespace, Labels: map[string]string{"backup.clawmanager.io/attempt": a.ID}, OwnerReferences: []metav1.OwnerReference{{Kind: "Job", Name: "backup-verify-" + a.ID[4:], UID: "original-verify", Controller: &yes}}}})
+	jobs := VerifyJobs{Client: client}
+	if done, err := jobs.Stop(ctx, a); err != nil || done {
+		t.Fatal("Job absence was mistaken for stopped Pods", done, err)
+	}
+	if err := client.CoreV1().Pods(r.Namespace).Delete(ctx, "remaining-verifier", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := jobs.Stop(ctx, a); err != nil || !done {
+		t.Fatal("completed owned cleanup did not converge", done, err)
+	}
+}
+
 func TestVerificationSuccessWaitsForOwnedRunnerCleanup(t *testing.T) {
 	ctx := context.Background()
 	s := Store{DB: controlDB(t), InstallationID: "verify-installation"}

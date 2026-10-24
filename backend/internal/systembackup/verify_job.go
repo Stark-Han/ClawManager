@@ -226,6 +226,30 @@ func (j VerifyJobs) Stop(ctx context.Context, a Attempt) (bool, error) {
 	}
 	g, e := j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, w.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(e) {
+		var uid types.UID
+		if a.Status == "succeeded" || a.Status == "failed" {
+			var result VerifyJobResult
+			if strictDecode(a.Result, &result) != nil || result.State != a.Status || result.JobUID == "" {
+				return false, errors.New("cleanup_unsafe_target")
+			}
+			uid = types.UID(result.JobUID)
+		}
+		pods, err := j.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "backup.clawmanager.io/attempt=" + a.ID})
+		if err != nil {
+			return false, err
+		}
+		for _, pod := range pods.Items {
+			if uid != "" && ownedByJob(pod, uid) {
+				return false, nil
+			}
+			if uid == "" {
+				for _, owner := range pod.OwnerReferences {
+					if owner.Kind == "Job" && owner.Name == w.Name && owner.Controller != nil && *owner.Controller {
+						return false, nil
+					}
+				}
+			}
+		}
 		return true, nil
 	}
 	if e != nil {
