@@ -194,6 +194,12 @@ func teamDataFailure(err error) string {
 		return "restore_redis_not_ready"
 	case "restore Redis pod failed":
 		return "restore_redis_failed"
+	case "restore Redis service unavailable", "Redis unavailable":
+		return "restore_redis_connection_unavailable"
+	case "Redis authentication failed":
+		return "restore_redis_authentication_failed"
+	case "Redis database unavailable":
+		return "restore_redis_database_unavailable"
 	case "configuration_changed":
 		return "configuration_changed"
 	}

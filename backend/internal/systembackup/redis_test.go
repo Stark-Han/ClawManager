@@ -5,11 +5,68 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestTeamDataRedisConnectionWaitsForNewService(t *testing.T) {
+	reserved, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	address := reserved.Addr().String()
+	reserved.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+		listener, e := net.Listen("tcp", address)
+		if e != nil {
+			done <- e
+			return
+		}
+		defer listener.Close()
+		go func() { <-ctx.Done(); listener.Close() }()
+		conn, e := listener.Accept()
+		if e != nil {
+			done <- e
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+		reader := bufio.NewReader(conn)
+		for i := 0; i < 2; i++ {
+			budget := int64(4096)
+			if _, e = readRedisReply(reader, &budget, 0); e != nil {
+				done <- e
+				return
+			}
+			if _, e = fmt.Fprint(conn, "+OK\r\n"); e != nil {
+				done <- e
+				return
+			}
+		}
+		done <- nil
+	}()
+	client, e := connectTeamRedis(ctx, teamDataRedis{address: address, writer: "fixture-password"}, "writer")
+	if e != nil {
+		t.Fatal("new isolated service was not given time to become reachable", e)
+	}
+	defer client.Close()
+	if e = <-done; e != nil {
+		t.Fatal(e)
+	}
+}
 
 func TestRESPRejectsUnboundedMalformedAndNestedReplies(t *testing.T) {
 	for _, raw := range []string{"$99999999999\r\n", "*9999999999\r\n", "$-2\r\n", "$3\r\nabcXX", "*1\r\n*1\r\n" + strings.Repeat("*1\r\n", 20), "-NOAUTH password-secret\r\n"} {

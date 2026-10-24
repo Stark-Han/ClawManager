@@ -146,7 +146,24 @@ func connectTeamRedis(ctx context.Context, r teamDataRedis, user string) (*Redis
 	} else if user == "reader" {
 		password = r.reader
 	}
-	return ConnectRedis(ctx, RedisOptions{Address: r.address, Username: user, Password: password, MaxReplyBytes: 64 << 20})
+	// Pod readiness can precede Service endpoints and DNS propagation. This is
+	// only for the newly provisioned copy; source capture is never retried here.
+	ready, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		client, e := ConnectRedis(ready, RedisOptions{Address: r.address, Username: user, Password: password, MaxReplyBytes: 64 << 20})
+		if e == nil {
+			return client, nil
+		}
+		if e.Error() != "Redis unavailable" {
+			return nil, e
+		}
+		select {
+		case <-ready.Done():
+			return nil, errors.New("restore Redis service unavailable")
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 func (s *TeamDataService) deleteTeamRedis(ctx context.Context, id string) error {
