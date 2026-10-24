@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,12 +49,6 @@ func TestTeamDataFailedRestoreRevokesBothWriters(t *testing.T) {
 	m := Manifest{Schema: "system-backup.v1", Contract: ContractVersion, BackupID: id, OriginInstallationID: origin, Purpose: "team_data", RegistryHash: RegistryHash(), CapturedAt: time.Now().UTC(), Consistency: "best_effort", ExcludedSQLTables: teamDataExcludedTables()}
 	for _, adapter := range captureAdapters(source, CaptureBudget{16 << 20, 10000}, tables) {
 		capture := adapter.capture
-		if adapter.name == "workspace" {
-			capture = func(_ context.Context, w io.Writer) error {
-				_, e := io.WriteString(w, "injected invalid workspace archive")
-				return e
-			}
-		}
 		part, e := CapturePart(ctx, stage, origin, id, adapter.name, 16<<20, wrap, capture)
 		if e != nil {
 			t.Fatal(e)
@@ -87,6 +80,37 @@ func TestTeamDataFailedRestoreRevokesBothWriters(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Cleanup(s.Close)
+	// The archive is valid and passes content preflight. Fail only after real
+	// restore writing has started, while SQL/Redis writers already exist.
+	// Reserving a file where the workspace directory must be created models a
+	// target filesystem error, without introducing a production fault hook.
+	injected := make(chan error, 1)
+	poisonCtx, stopPoison := context.WithCancel(ctx)
+	defer stopPoison()
+	go func() {
+		for poisonCtx.Err() == nil {
+			entries, _ := os.ReadDir(cfg.RestoreRoot)
+			for _, entry := range entries {
+				if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "sdr_") {
+					continue
+				}
+				copyDir := filepath.Join(cfg.RestoreRoot, entry.Name())
+				if _, e := os.Stat(filepath.Join(copyDir, ".restore-owner")); e == nil {
+					f, e := os.OpenFile(filepath.Join(copyDir, "workspace"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+					if e == nil {
+						e = f.Close()
+					}
+					injected <- e
+					return
+				}
+			}
+			select {
+			case <-poisonCtx.Done():
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		injected <- poisonCtx.Err()
+	}()
 	job, e := s.Recover(ctx, origin, id, artifact.CommitReference.SHA256)
 	if job.ID != "" {
 		t.Cleanup(func() {
@@ -102,6 +126,14 @@ func TestTeamDataFailedRestoreRevokesBothWriters(t *testing.T) {
 	}
 	if e == nil || job.Status != "failed" {
 		t.Fatal("injected workspace failure was not reported", e, job.Status)
+	}
+	select {
+	case e := <-injected:
+		if e != nil {
+			t.Fatal("write-stage injection failed", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("write stage never reached")
 	}
 	var report TeamDataReport
 	if json.Unmarshal(job.Report, &report) != nil || report.Restore == nil || report.Restore.Phase != "workspace" {
@@ -167,5 +199,5 @@ func TestTeamDataFailedRestoreRevokesBothWriters(t *testing.T) {
 	if e = disabled.CleanupRecovery(ctx, job.ID); e != nil {
 		t.Fatal("disabled owned-copy cleanup failed", e)
 	}
-	t.Log("injected workspace failure: failed status retained, original backup preserved, actual SQL/Redis writer identities checked")
+	t.Log("valid snapshot passed preflight; target filesystem write failure: failed status retained, original backup preserved, actual SQL/Redis writer identities checked")
 }

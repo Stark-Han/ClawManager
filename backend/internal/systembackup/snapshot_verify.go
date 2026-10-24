@@ -14,6 +14,10 @@ import (
 // decryption. It writes no restored data and needs no source-side connection.
 // Successful ciphertext authentication alone cannot prove a usable snapshot.
 func ValidatePublishedSnapshot(ctx context.Context, store ImmutableObjectStore, artifact PublishedArtifact, wrapper DataKeyWrapper, b CaptureBudget) error {
+	return validatePublishedSnapshot(ctx, store, artifact, wrapper, b, nil)
+}
+
+func validatePublishedSnapshot(ctx context.Context, store ImmutableObjectStore, artifact PublishedArtifact, wrapper DataKeyWrapper, b CaptureBudget, workspaceEntry func(*tar.Header) error) error {
 	if b.MaxBytes < 1<<20 || b.MaxItems < 1 || artifact.Manifest.Payload.Validate() != nil {
 		return errors.New("validation_failed")
 	}
@@ -25,7 +29,7 @@ func ValidatePublishedSnapshot(ctx context.Context, store ImmutableObjectStore, 
 		total += p.CiphertextBytes
 		if err := ConsumePublishedPart(ctx, store, artifact, p.Name, wrapper, b.MaxBytes, func(r io.Reader) error {
 			if p.Name == "mysql" && artifact.Manifest.Payload.Purpose == "team_data" {
-				result, e := ReadSQLSnapshot(r, nil, nil)
+				result, e := validateTeamDataSQLSnapshot(r, b)
 				if e != nil {
 					return e
 				}
@@ -38,6 +42,9 @@ func ValidatePublishedSnapshot(ctx context.Context, store ImmutableObjectStore, 
 					}
 				}
 				return nil
+			}
+			if p.Name == "workspace" && workspaceEntry != nil {
+				return validateFileSnapshot(ctx, r, FileBudget{MaxBytes: b.MaxBytes, MaxEntries: b.MaxItems}, workspaceEntry)
 			}
 			return ValidateSnapshotPart(ctx, p.Name, r, b)
 		}); err != nil {
@@ -70,6 +77,10 @@ func ValidateSnapshotPart(ctx context.Context, name string, r io.Reader, b Captu
 // ValidateFileSnapshot applies the restore archive rules without extracting
 // plaintext. In particular, links can never turn a parent into a write escape.
 func ValidateFileSnapshot(ctx context.Context, r io.Reader, b FileBudget) error {
+	return validateFileSnapshot(ctx, r, b, nil)
+}
+
+func validateFileSnapshot(ctx context.Context, r io.Reader, b FileBudget, entry func(*tar.Header) error) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -121,6 +132,11 @@ func ValidateFileSnapshot(ctx context.Context, r io.Reader, b FileBudget) error 
 			total += n
 		default:
 			return errors.New("validation_failed")
+		}
+		if entry != nil {
+			if err = entry(h); err != nil {
+				return err
+			}
 		}
 	}
 	var extra [1]byte

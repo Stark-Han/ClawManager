@@ -188,7 +188,7 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 			err = e
 		}
 	}()
-	if err = VerifyPublishedArtifact(ctx, s.store, artifact, s.wrapper, s.cfg.MaxBytes); err != nil {
+	if err = s.preflightRestore(ctx, artifact); err != nil {
 		return report, err
 	}
 	if err = s.phase(ctx, j, "provisioning_copy"); err != nil {

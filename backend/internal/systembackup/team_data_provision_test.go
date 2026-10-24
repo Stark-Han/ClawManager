@@ -200,6 +200,40 @@ func TestTeamDataProvisionProcessInterruption(t *testing.T) {
 	}
 }
 
+func TestTeamDataUnknownCreationRequiresControlledResolution(t *testing.T) {
+	for _, field := range []string{"state", "server"} {
+		t.Run(field, func(t *testing.T) {
+			s, j := teamDataProvisionFixture(t)
+			ctx := context.Background()
+			d, e := s.prepareRestoreDatabase(ctx, j, func(context.Context, *sql.DB) error { return nil })
+			if e != nil {
+				t.Fatal(e)
+			}
+			d.Close()
+			value := "intent"
+			if field == "server" {
+				value = "different-server"
+			}
+			if _, e = s.db.Exec("UPDATE system_team_data_backup_jobs SET provisioning_json=JSON_SET(provisioning_json,?,?) WHERE public_id=?", "$.database."+field, value, j.ID); e != nil {
+				t.Fatal(e)
+			}
+			finishFailedProvision(t, s, j)
+			if e = s.cleanup(ctx, j.ID); e == nil || e.Error() != "restore_ownership_unproven" {
+				t.Fatal("unknown result deleted", e)
+			}
+			// This fixture's parent has independent creation proof. Model an
+			// operator removing that exact resource after review, never relabeling
+			// an intent as a successful receipt to bypass the product's guard.
+			if _, e = s.admin.Exec("DROP DATABASE `" + teamDataDatabase(j.ID) + "`"); e != nil {
+				t.Fatal(e)
+			}
+			if e = s.cleanup(ctx, j.ID); e != nil {
+				t.Fatal("cleanup after controlled resolution", e)
+			}
+		})
+	}
+}
+
 func TestTeamDataSchemaAlignmentFailureCanBeCleaned(t *testing.T) {
 	s, j := teamDataProvisionFixture(t)
 	ctx := context.Background()

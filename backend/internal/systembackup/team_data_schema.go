@@ -7,7 +7,36 @@ import (
 	"io"
 	"reflect"
 	"strings"
+
+	"clawreef/internal/systembackup/team"
 )
+
+// Validate the same trusted schema used for alignment, without provisioning a
+// target database or accepting any source-provided DDL.
+func validateTeamDataSQLSnapshot(r io.Reader, b CaptureBudget) (SQLResult, error) {
+	expected, e := BuiltinSchema()
+	if e != nil {
+		return SQLResult{}, e
+	}
+	tables := map[string]SQLTable{}
+	for _, t := range expected {
+		tables[t.Name] = t
+	}
+	rows := 0
+	return ReadSQLSnapshot(r, func(t SQLTable) error {
+		base, ok := tables[t.Name]
+		if !ok {
+			return errors.New("unsupported_schema")
+		}
+		return validateTeamDataTable(t, base)
+	}, func(SQLTable, team.Row) error {
+		rows++
+		if rows > b.MaxItems {
+			return errors.New("capacity_exceeded")
+		}
+		return nil
+	})
+}
 
 // Older test installations contain runtime/Workbuddy columns from previous
 // releases. Preserve their data without accepting arbitrary source DDL.
