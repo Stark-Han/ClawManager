@@ -103,3 +103,23 @@ func RestoredVerificationReceipt(b DataOperationBinding, intent RestoreVerificat
 	}
 	return dataReceipt(b, r.SQL, intent.NormalizedAt, r.FileCount, r.ObjectCount, r.RedisCount, intent.HistoryParts)
 }
+
+func (r DataOperationReceipt) validateBinding(b DataOperationBinding) error {
+	if b.Validate() != nil || r.Schema != "system-backup-data-operation.v1" || r.DataOperationBinding != b || r.Status != "succeeded" || !r.IntegrityVerified || r.AcceptanceEligible || r.NormalizedAt.IsZero() || r.SQLTables != businessTableCount() || r.SQLRows < 0 || !validHash(r.SQLSHA256) || r.FileCount < 0 || r.ObjectCount < 0 || r.RedisCount < 0 || len(r.HistoryParts) != 2 {
+		return errors.New("evidence_incomplete")
+	}
+	seen := map[string]bool{}
+	for _, h := range r.HistoryParts {
+		if (h.Name != "deployment_resources" && h.Name != "secret_bundle") || seen[h.Name] || h.CiphertextBytes <= 0 || h.PlaintextBytes <= 0 || !validHash(h.CiphertextSHA256) || !validHash(h.PlaintextSHA256) || h.Key.Reference.Validate("encryption") != nil || len(h.Key.Nonce) != 12 || len(h.Key.Ciphertext) != 48 {
+			return errors.New("evidence_incomplete")
+		}
+		seen[h.Name] = true
+	}
+	if b.Operation == "verify-restored" {
+		hash, e := RequestHash(RestoreVerificationIntent{RunID: b.RunID, NormalizedAt: r.NormalizedAt, HistoryParts: r.HistoryParts})
+		if e != nil || hash != b.IntentSHA256 {
+			return errors.New("evidence_incomplete")
+		}
+	}
+	return nil
+}
