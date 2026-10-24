@@ -200,22 +200,40 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if err = s.phase(ctx, j, "provisioning_copy"); err != nil {
 		return report, err
 	}
-	writer, reader, err := s.createRestoreSQL(ctx, j, artifact)
-	if err != nil {
-		return report, err
-	}
-	defer writer.Close()
-	defer reader.Close()
+	var writer, reader *sql.DB
+	var redisAdmin *RedisClient
+	var redisIdentity teamDataRedis
+	redisAttempted := false
 	defer func() {
 		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		e := s.revokeSQLWriter(c, j.ID)
-		if e == nil {
-			report.WriteCredentialRevoked = true
-		} else if err == nil {
-			err = e
+		if writer != nil {
+			writer.Close()
+		}
+		sqlErr := s.revokeSQLWriter(c, j.ID)
+		var redisErr error
+		if redisAttempted {
+			if redisAdmin == nil && redisIdentity.address != "" {
+				redisAdmin, redisErr = connectTeamRedis(c, redisIdentity, "admin")
+			}
+			if redisAdmin == nil && redisErr == nil {
+				redisErr = errors.New("restore Redis revocation unconfirmed")
+			}
+			if redisAdmin != nil {
+				defer redisAdmin.Close()
+				redisErr = revokeTeamRedisWriter(c, redisAdmin)
+			}
+		}
+		report.WriteCredentialRevoked = sqlErr == nil && redisErr == nil
+		if err == nil {
+			err = errors.Join(sqlErr, redisErr)
 		}
 	}()
+	writer, reader, err = s.createRestoreSQL(ctx, j, artifact)
+	if err != nil {
+		return report, err
+	}
+	defer reader.Close()
 	directory := filepath.Join(s.cfg.RestoreRoot, j.ID)
 	if err = os.Mkdir(directory, 0700); err != nil {
 		return report, err
@@ -234,7 +252,9 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if err = s.probeObjectReader(ctx, bucket); err != nil {
 		return report, err
 	}
+	redisAttempted = true
 	r, e := s.createTeamRedis(ctx, j)
+	redisIdentity = r
 	if e != nil {
 		return report, e
 	}
@@ -243,11 +263,10 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 		return report, e
 	}
 	defer redisWriter.Close()
-	redisAdmin, e := connectTeamRedis(ctx, r, "admin")
+	redisAdmin, e = connectTeamRedis(ctx, r, "admin")
 	if e != nil {
 		return report, e
 	}
-	defer redisAdmin.Close()
 	redisReader, e := connectTeamRedis(ctx, r, "reader")
 	if e != nil {
 		return report, e
@@ -273,7 +292,7 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if err = s.revokeSQLWriter(ctx, j.ID); err != nil {
 		return report, err
 	}
-	if _, err = redisAdmin.command(ctx, []byte("ACL"), []byte("DELUSER"), []byte("writer")); err != nil {
+	if err = revokeTeamRedisWriter(ctx, redisAdmin); err != nil {
 		return report, err
 	}
 	if probe, e := connectTeamRedis(ctx, r, "writer"); e == nil {
@@ -303,8 +322,15 @@ func (s *TeamDataService) cleanup(ctx context.Context, id string) error {
 	if e != nil {
 		return e
 	}
-	if j.Operation != "restore" || j.ConfigHash != s.configHash || (j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled") {
+	if (j.Operation != "restore" && j.Operation != "verify") || j.ConfigHash != s.configHash || (j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled") {
 		return errors.New("state_conflict")
+	}
+	if j.Operation == "verify" {
+		if e = s.catalog().Release(ctx, j.SourceID, id, "job:"+id); e != nil {
+			return e
+		}
+		_, e = s.db.ExecContext(ctx, "UPDATE system_team_data_backup_jobs SET status='cleaned',phase='cleaned',updated_at=UTC_TIMESTAMP(6) WHERE public_id=? AND status IN ('succeeded','failed','canceled')", id)
+		return e
 	}
 	if e = s.deleteTeamRedis(ctx, id); e != nil {
 		return e

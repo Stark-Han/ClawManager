@@ -30,7 +30,7 @@ func (h *TeamDataBackupHandler) Register(r *gin.RouterGroup) {
 }
 func teamDataHTTPError(c *gin.Context, e error) {
 	switch e.Error() {
-	case "backup_protected", "backup_in_use", "minimum_recovery_points", "backup_deleting", "catalog_changed", "state_conflict":
+	case "backup_protected", "backup_in_use", "minimum_recovery_points", "backup_deleting", "catalog_changed", "state_conflict", "feature_disabled":
 		c.JSON(409, gin.H{"success": false, "code": e.Error()})
 	case "confirmation_invalid":
 		c.JSON(400, gin.H{"success": false, "code": "confirmation_invalid"})
@@ -92,7 +92,7 @@ func (h *TeamDataBackupHandler) discover(c *gin.Context) {
 	}
 	data, e := h.service.Discover(c.Request.Context(), c.Query("cursor"), 20)
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": data})
@@ -103,7 +103,7 @@ func (h *TeamDataBackupHandler) artifacts(c *gin.Context) {
 	}
 	data, e := h.service.Catalog(c.Request.Context())
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"items": data}})
@@ -113,7 +113,7 @@ func (h *TeamDataBackupHandler) importArtifact(c *gin.Context) {
 		return
 	}
 	if e := h.service.Import(c.Request.Context(), c.Param("id"), c.GetInt("userID")); e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"imported": true}})
@@ -143,7 +143,7 @@ func (h *TeamDataBackupHandler) overview(c *gin.Context) {
 	}
 	data, e := h.service.Overview(c.Request.Context())
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": data})
@@ -154,7 +154,7 @@ func (h *TeamDataBackupHandler) list(c *gin.Context) {
 	}
 	items, e := h.service.List(c.Request.Context())
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": gin.H{"items": items}})
@@ -165,7 +165,7 @@ func (h *TeamDataBackupHandler) detail(c *gin.Context) {
 	}
 	j, e := h.service.Get(c.Request.Context(), c.Param("id"))
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": j})
@@ -183,7 +183,7 @@ func (h *TeamDataBackupHandler) create(c *gin.Context) {
 	}
 	j, e := h.service.Create(c.Request.Context(), c.GetInt("userID"), c.GetHeader("Idempotency-Key"), input.Operation, input.SourceID)
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"success": true, "data": j})
@@ -193,12 +193,12 @@ func (h *TeamDataBackupHandler) cancel(c *gin.Context) {
 		return
 	}
 	if e := h.service.Cancel(c.Request.Context(), c.Param("id")); e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	j, e := h.service.Get(c.Request.Context(), c.Param("id"))
 	if e != nil {
-		backupError(c, e)
+		teamDataHTTPError(c, e)
 		return
 	}
 	c.JSON(200, gin.H{"success": true, "data": j})

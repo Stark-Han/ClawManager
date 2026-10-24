@@ -31,6 +31,20 @@ func teamDataRedisConfig(r teamDataRedis, id string) string {
 }
 
 func teamDataRedisName(id string) string { return "team-data-redis-" + id[4:24] }
+
+func revokeTeamRedisWriter(ctx context.Context, admin *RedisClient) error {
+	if _, e := admin.command(ctx, []byte("ACL"), []byte("DELUSER"), []byte("writer")); e != nil {
+		return e
+	}
+	u, e := admin.command(ctx, []byte("ACL"), []byte("GETUSER"), []byte("writer"))
+	if e != nil {
+		return e
+	}
+	if u != nil {
+		return errors.New("Redis restore writer still active")
+	}
+	return nil
+}
 func teamDataLabels(id string) map[string]string {
 	return map[string]string{"app": teamDataRedisName(id), "clawmanager.io/team-data-run": id}
 }

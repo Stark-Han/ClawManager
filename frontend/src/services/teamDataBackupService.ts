@@ -15,8 +15,8 @@ export interface TeamDataJob {
  status:string;phase:string;error_code?:string;cancel_requested:boolean;
  created_at:string;started_at?:string;finished_at?:string;report?:TeamDataReport;
 }
-export interface TeamDataOverview {configured:boolean;storage?:string;consistency?:string;max_bytes?:number;current_teams?:number;historical_deleted_teams?:number}
-export interface TeamDataArtifact {backup_id:string;commit_sha256:string;captured_at:string;bytes:number;protected:boolean;health:string;verified_at?:string;leases:Record<string,string>;deleting:boolean;deleted:boolean;deleted_versions:number}
+export interface TeamDataOverview {configured:boolean;disabled?:boolean;storage?:string;consistency?:string;max_bytes?:number;current_teams?:number;historical_deleted_teams?:number}
+export interface TeamDataArtifact {backup_id:string;commit_sha256:string;captured_at:string;bytes:number;protected:boolean;health:string;verified_at?:string;checked_at?:string;last_error?:string;leases:Record<string,string>;deleting:boolean;deleted:boolean;deleted_versions:number}
 export interface TeamDataDeletePreview {backup_id:string;bytes:number;versions:number;expires_at:string;confirmation:string}
 export interface TeamDataDiscovery {items:Array<{backup_id:string;state:string;error_code?:string;commit_sha256?:string;captured_at?:string;bytes:number}>;next_cursor:string;partial:boolean;authoritative_snapshot:boolean}
 const base='/admin/system-backup/team-data';

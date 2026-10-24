@@ -123,6 +123,8 @@ func (s *TeamDataService) execute(parent context.Context, lock *sql.Conn, j Team
 		err = errors.New("validation_failed")
 	} else if j.ConfigHash != s.configHash {
 		err = errors.New("configuration_changed")
+	} else if s.cfg.Disabled && j.Operation != "cleanup" {
+		err = errors.New("feature_disabled")
 	} else {
 		switch j.Operation {
 		case "backup":
@@ -214,6 +216,8 @@ func teamDataFailure(err error) string {
 		return "restore_redis_database_unavailable"
 	case "configuration_changed":
 		return "configuration_changed"
+	case "feature_disabled":
+		return "feature_disabled"
 	}
 	if strings.Contains(err.Error(), "schema differs") || strings.Contains(err.Error(), "schema changed") {
 		return "schema_changed"

@@ -25,6 +25,7 @@ import (
 // TeamDataConfig is operator-owned bootstrap. Browser requests cannot supply
 // credentials, database names, endpoints or filesystem paths.
 type TeamDataConfig struct {
+	Disabled                      bool   `json:"disabled,omitempty"`
 	MinimumRecoveryPoints         int    `json:"minimum_recovery_points,omitempty"`
 	InstallationID                string `json:"installation_id"`
 	Namespace                     string `json:"namespace"`
@@ -239,12 +240,16 @@ func newTeamDataService(ctx context.Context, db *sql.DB, path string, recovery b
 	}
 	identityConfig := c
 	identityConfig.MinimumRecoveryPoints = 0
+	identityConfig.Disabled = false
 	configHash, hashErr := RequestHash(identityConfig)
 	if hashErr != nil {
 		admin.Close()
 		return nil, hashErr
 	}
 	owner, _ := RandomID("online_")
+	if recovery {
+		owner, _ = RandomID("recovery_")
+	}
 	rc, e := rest.InClusterConfig()
 	if e != nil {
 		admin.Close()
@@ -299,7 +304,7 @@ func (s *TeamDataService) Overview(ctx context.Context) (map[string]any, error) 
 	if e := s.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(status<>'deleted'),0),COALESCE(SUM(status='deleted'),0) FROM teams").Scan(&current, &historical); e != nil {
 		return nil, e
 	}
-	return map[string]any{"configured": true, "storage": s.cfg.BackupBucket, "consistency": "best_effort", "max_bytes": s.cfg.MaxBytes, "scope": "team_data", "excluded": "global_ai_gateway_chat_metering_risk_logs", "restore_mode": "isolated_data_copy", "current_teams": current, "historical_deleted_teams": historical}, nil
+	return map[string]any{"configured": true, "disabled": s.cfg.Disabled, "storage": s.cfg.BackupBucket, "consistency": "best_effort", "max_bytes": s.cfg.MaxBytes, "scope": "team_data", "excluded": "global_ai_gateway_chat_metering_risk_logs", "restore_mode": "isolated_data_copy", "current_teams": current, "historical_deleted_teams": historical}, nil
 }
 
 const teamDataColumns = "public_id,operation,COALESCE(source_backup_id,''),status,phase,error_code,cancel_requested,created_at,started_at,finished_at,report_json,config_hash,COALESCE(owner_id,'')"
@@ -337,6 +342,9 @@ func (s *TeamDataService) List(ctx context.Context) ([]TeamDataJob, error) {
 }
 
 func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation, source string) (TeamDataJob, error) {
+	if s.cfg.Disabled && operation != "cleanup" {
+		return TeamDataJob{}, errors.New("feature_disabled")
+	}
 	if s.recoveryOnly && operation == "backup" {
 		return TeamDataJob{}, errors.New("recovery_only")
 	}
@@ -392,7 +400,7 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 	}
 	if operation == "cleanup" {
 		j, e := s.Get(ctx, source)
-		if e != nil || j.Operation != "restore" || j.ConfigHash != s.configHash || (j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled") {
+		if e != nil || (j.Operation != "restore" && j.Operation != "verify") || j.ConfigHash != s.configHash || (j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled") {
 			return TeamDataJob{}, errors.New("state_conflict")
 		}
 	}

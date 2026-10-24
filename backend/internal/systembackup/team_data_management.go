@@ -274,12 +274,21 @@ func (s *TeamDataService) minimumRecoveryPoints() int {
 	return s.cfg.MinimumRecoveryPoints
 }
 func (s *TeamDataService) Protect(ctx context.Context, id string, actor int, protect bool) error {
+	if s.cfg.Disabled && !protect {
+		return errors.New("feature_disabled")
+	}
 	return s.catalog().SetProtected(ctx, id, actor, protect)
 }
 func (s *TeamDataService) DeletePreview(ctx context.Context, id string, actor int) (TeamDataDeletePreview, error) {
+	if s.cfg.Disabled {
+		return TeamDataDeletePreview{}, errors.New("feature_disabled")
+	}
 	return s.catalog().PreviewDelete(ctx, id, actor, s.minimumRecoveryPoints())
 }
 func (s *TeamDataService) DeleteConfirmed(ctx context.Context, id, token, key string, actor int) (TeamDataJob, error) {
+	if s.cfg.Disabled {
+		return TeamDataJob{}, errors.New("feature_disabled")
+	}
 	if actor < 1 || !idemPattern.MatchString(key) {
 		return TeamDataJob{}, errors.New("validation_failed")
 	}
@@ -313,6 +322,42 @@ func (s *TeamDataService) DeleteConfirmed(ctx context.Context, id, token, key st
 }
 func (s *TeamDataService) verifyBackup(ctx context.Context, j TeamDataJob) (r TeamDataReport, err error) {
 	r = TeamDataReport{BackupID: j.SourceID, Purpose: "team_data", Consistency: "best_effort", SourceUnaffected: true}
+	// A queued job already owns a reference. Record failures and release it
+	// even when opening commit/manifest fails before content validation starts.
+	defer func() {
+		c, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stop()
+		operationErr := err
+		updateErr := s.catalog().Update(c, func(state *TeamDataCatalog) error {
+			v, ok := state.Artifacts[j.SourceID]
+			if !ok || v.Deleted || v.Deleting {
+				return nil
+			}
+			now := time.Now().UTC()
+			v.CheckedAt = &now
+			v.Health = "verified"
+			v.LastError = ""
+			if operationErr == nil {
+				v.VerifiedAt = &now
+			} else {
+				v.Health = "unavailable"
+				code := operationErr.Error()
+				if strings.Contains(code, "checksum") || code == "artifact_conflict" || code == "signature_invalid" {
+					v.Health = "damaged"
+				}
+				if strings.Contains(code, "key") || strings.Contains(code, "authentication") {
+					v.Health = "key_unavailable"
+				}
+				v.LastError = PublicError(operationErr)
+			}
+			state.Artifacts[j.SourceID] = v
+			return nil
+		})
+		releaseErr := s.catalog().Release(c, j.SourceID, j.ID, "job:"+j.ID)
+		if err == nil {
+			err = errors.Join(updateErr, releaseErr)
+		}
+	}()
 	a, e := OpenPublishedArtifact(ctx, s.store, s.cfg.InstallationID, j.SourceID, s.catalog().PublicKey, s.cfg.KeyVersion)
 	if e != nil {
 		return r, e
@@ -323,48 +368,12 @@ func (s *TeamDataService) verifyBackup(ctx context.Context, j TeamDataJob) (r Te
 	if e = s.catalog().Acquire(ctx, j.SourceID, j.ID, "job:"+j.ID); e != nil {
 		return r, e
 	}
-	defer func() {
-		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if releaseErr := s.catalog().Release(c, j.SourceID, j.ID, "job:"+j.ID); err == nil && releaseErr != nil {
-			err = releaseErr
-		}
-	}()
 	if e = s.phase(ctx, j, "verifying_backup"); e != nil {
 		return r, e
 	}
 	e = ValidatePublishedSnapshot(ctx, s.store, a, s.wrapper, CaptureBudget{s.cfg.MaxBytes, s.cfg.MaxItems})
-	health := "verified"
-	if e != nil {
-		health = "unavailable"
-		if strings.Contains(e.Error(), "checksum") || e.Error() == "artifact_conflict" {
-			health = "damaged"
-		}
-		if strings.Contains(e.Error(), "key") || strings.Contains(e.Error(), "authentication") {
-			health = "key_unavailable"
-		}
-	}
-	updateCtx, updateCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer updateCancel()
-	updateErr := s.catalog().Update(updateCtx, func(c *TeamDataCatalog) error {
-		v := c.Artifacts[j.SourceID]
-		now := time.Now().UTC()
-		v.CheckedAt = &now
-		v.Health = health
-		if e == nil {
-			v.VerifiedAt = &now
-			v.LastError = ""
-		} else {
-			v.LastError = PublicError(e)
-		}
-		c.Artifacts[j.SourceID] = v
-		return nil
-	})
 	if e != nil {
 		return r, e
-	}
-	if updateErr != nil {
-		return r, updateErr
 	}
 	r.IntegrityVerified = true
 	for _, p := range a.Manifest.Payload.Parts {

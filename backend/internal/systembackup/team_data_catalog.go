@@ -321,6 +321,9 @@ func (s *TeamDataService) Discover(ctx context.Context, cursor string, limit int
 	return DiscoverTeamDataArtifacts(ctx, s.catalog(), cursor, limit)
 }
 func (s *TeamDataService) Import(ctx context.Context, id string, actor int) error {
+	if s.cfg.Disabled {
+		return errors.New("feature_disabled")
+	}
 	a, e := OpenPublishedArtifact(ctx, s.store, s.cfg.InstallationID, id, s.signer.Public().(ed25519.PublicKey), s.cfg.KeyVersion)
 	if e != nil {
 		return e
