@@ -435,6 +435,7 @@ func main() {
 			return backupgate.HoldRequest(ctx, backupHTTPPool, db.SQLGateScope())
 		})
 		defer restoreBoundary()
+		go (systembackup.Gate{DB: backupHTTPPool}).RunExpiryWatchdog(leaderCtx, db.SQLGateScope())
 		if northboundCoreServer != nil {
 			northboundCoreServer.Handler = backupgate.HTTPBoundary(northboundCoreServer.Handler, "northbound.core_http")
 		}
