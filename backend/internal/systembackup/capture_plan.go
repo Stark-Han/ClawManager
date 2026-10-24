@@ -201,11 +201,26 @@ func (s Store) BindUploadJob(ctx context.Context, l Leadership, t Task, a Attemp
 	return s.bindFrozenBackupJob(ctx, l, t, a, job, want, []string{"validating", "canceling"})
 }
 
+func (s Store) BindBackupVerifyJob(ctx context.Context, l Leadership, t Task, a Attempt, job *batchv1.Job) error {
+	if a.Phase != "verify" {
+		return errors.New("validation_failed")
+	}
+	want, _, err := verifyJob(a)
+	if err != nil {
+		return err
+	}
+	return s.bindFrozenBackupJob(ctx, l, t, a, job, want, []string{"publishing", "finalization_unknown", "canceling"})
+}
+
 func (s Store) bindFrozenBackupJob(ctx context.Context, l Leadership, t Task, a Attempt, job, want *batchv1.Job, states []string) error {
 	if job == nil || job.UID == "" {
 		return errors.New("validation_failed")
 	}
-	if !matchesCaptureJob(want, job) {
+	valid := matchesCaptureJob(want, job)
+	if a.Phase == "verify" {
+		valid = matchesVerifyJob(want, job)
+	}
+	if !valid {
 		return errors.New("artifact_conflict")
 	}
 	tx, x, err := s.beginCaptureMutation(ctx, l, t)

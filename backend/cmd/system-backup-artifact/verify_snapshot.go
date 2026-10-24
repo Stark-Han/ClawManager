@@ -18,6 +18,6 @@ func verifySnapshot(ctx context.Context, path, origin, id string, b systembackup
 		if err = systembackup.ValidatePublishedSnapshot(ctx, store, artifact, wrapper, b); err != nil {
 			return err
 		}
-		return json.NewEncoder(out).Encode(systembackup.IntegrityReport{BackupID: id, Origin: origin, Purpose: artifact.Manifest.Payload.Purpose, Consistency: artifact.Manifest.Payload.Consistency, IntegrityVerified: true, SnapshotValidated: true, PartsVerified: len(artifact.Manifest.Payload.Parts)})
+		return json.NewEncoder(out).Encode(systembackup.IntegrityReport{BackupID: id, Origin: origin, Purpose: artifact.Manifest.Payload.Purpose, Consistency: artifact.Manifest.Payload.Consistency, IntegrityVerified: true, SnapshotValidated: true, PartsVerified: len(artifact.Manifest.Payload.Parts), ManifestSHA256: artifact.Commit.Payload.Manifest.SHA256, IndexSHA256: artifact.Commit.Payload.Index.SHA256, CommitSHA256: artifact.CommitReference.SHA256})
 	})
 }

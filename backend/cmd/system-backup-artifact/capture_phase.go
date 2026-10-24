@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"clawreef/internal/backupgate"
 	"clawreef/internal/systembackup"
 )
 
@@ -63,6 +64,12 @@ func runCapturePhase(ctx context.Context, bootstrapPath, operationPath, origin, 
 		return err
 	}
 	defer closeSource()
+	if request.Phase == "capture" {
+		stage = "source_gate_identity"
+		if err = backupgate.RequireSameDatabase(ctx, source.MySQL, gate); err != nil {
+			return errors.New("writer_registry_drift")
+		}
+	}
 	stage = "validate_sources"
 	if err = source.ValidateForPhase(request.Phase); err != nil {
 		return err

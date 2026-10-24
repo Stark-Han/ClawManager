@@ -34,6 +34,24 @@ type UploadJobResult struct {
 }
 type UploadJobs struct{ Client kubernetes.Interface }
 
+func (j UploadJobs) Existing(ctx context.Context, a Attempt) (*batchv1.Job, error) {
+	want, r, err := uploadJob(a)
+	if err != nil {
+		return nil, err
+	}
+	if err = (VerifyJobs{Client: j.Client}).namespace(ctx, r.VerifyJobRequest); err != nil {
+		return nil, err
+	}
+	job, err := j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, want.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !matchesCaptureJob(want, job) {
+		return nil, errors.New("artifact_conflict")
+	}
+	return job, nil
+}
+
 func uploadJob(a Attempt) (*batchv1.Job, UploadJobRequest, error) {
 	var r UploadJobRequest
 	if strictDecode(a.Request, &r) != nil || a.Phase != "upload" || r.BackupID != a.TaskID || r.DeadlineAt.IsZero() || r.OrdinaryStage.UID == r.SecretStage.UID {

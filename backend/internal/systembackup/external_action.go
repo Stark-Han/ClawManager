@@ -59,7 +59,7 @@ func (s Store) GetExternalAction(ctx context.Context, taskID, kind string) (Exte
 
 func (r *FinalWriteRequest) validate(origin, id string) error {
 	purpose := "artifact"
-	suffix := map[string]string{"manifest_put": "manifest.json", "marker_put": "_COMMITTED", "acceptance_put": "_ACCEPTANCE"}[r.Type]
+	suffix := map[string]string{"manifest_put": "manifest.json", "index_put": "index.json", "marker_put": "_COMMITTED", "acceptance_put": "_ACCEPTANCE"}[r.Type]
 	key := artifactPrefix(origin, id) + suffix
 	if r.Type == "catalog_registration_append" {
 		purpose = "catalog"
@@ -143,7 +143,7 @@ func (s Store) PrepareExternalAction(ctx context.Context, l Leadership, t Task, 
 	if (r.Type == "acceptance_put" || r.Type == "catalog_registration_append") && x.Purpose != "acceptance" {
 		return zero, x, errors.New("validation_failed")
 	}
-	if predecessor := map[string]string{"marker_put": "manifest_put", "acceptance_put": "marker_put", "catalog_registration_append": "acceptance_put"}[r.Type]; predecessor != "" {
+	if predecessor := map[string]string{"index_put": "manifest_put", "marker_put": "index_put", "acceptance_put": "marker_put", "catalog_registration_append": "acceptance_put"}[r.Type]; predecessor != "" {
 		var state string
 		if err = tx.QueryRowContext(ctx, "SELECT state FROM system_backup_external_actions WHERE task_id=? AND action_type=?", x.ID, predecessor).Scan(&state); errors.Is(err, sql.ErrNoRows) {
 			return zero, x, errors.New("coordination_invalid")

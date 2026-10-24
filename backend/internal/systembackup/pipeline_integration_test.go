@@ -125,6 +125,9 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 			}
 		}
 	}
+	if e = ValidatePublishedSnapshot(ctx, external, published, wrapper, budget); e != nil {
+		t.Fatal("independent snapshot format validation:", PublicError(e))
+	}
 	t.Log("capture and publication complete")
 	// From here no source adapter is supplied to any restoration function.
 	recovered, e := OpenPublishedArtifact(ctx, external, "fixture-installation", id, pub, "v1")

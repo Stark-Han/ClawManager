@@ -120,6 +120,11 @@ func (r CaptureTaskRunner) Tick(ctx context.Context, s Store, l Leadership, t Ta
 		if !current.Config.Enabled {
 			return s.SetPendingReason(ctx, l, t, "kill_switch_disabled")
 		}
+		if publisher, ok := r.Publisher.(interface{ ReadyForPurpose(string) error }); ok {
+			if err := publisher.ReadyForPurpose(t.Purpose); err != nil {
+				return s.SetPendingReason(ctx, l, t, "dependency_backoff")
+			}
+		}
 		var first string
 		if err = s.DB.QueryRowContext(ctx, "SELECT public_id FROM system_backup_tasks WHERE origin_installation_id=? AND task_type='backup' AND status IN ('pending','preparing','ready_for_capture','acquiring_gate','capturing') ORDER BY created_at,public_id LIMIT 1", s.InstallationID).Scan(&first); err != nil {
 			return err
@@ -418,6 +423,17 @@ func (r CaptureTaskRunner) abort(ctx context.Context, s Store, l Leadership, t T
 	}
 	if !stopped {
 		return nil
+	}
+	if publisher, ok := r.Publisher.(interface {
+		Abort(context.Context, Store, Leadership, Task) (bool, error)
+	}); ok {
+		done, err := publisher.Abort(ctx, s, l, t)
+		if err != nil {
+			return err
+		}
+		if !done {
+			return nil
+		}
 	}
 	if hasPlan {
 		g, err := s.captureGate(ctx, p.Request.Ordinary.Gate.Scope)

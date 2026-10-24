@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"regexp"
@@ -35,6 +36,8 @@ type VerifyJobRequest struct {
 	DeadlineSeconds  int64     `json:"deadline_seconds"`
 	DeadlineAt       time.Time `json:"deadline_at,omitempty"`
 	ValidateSnapshot bool      `json:"validate_snapshot,omitempty"`
+	BootstrapUID     string    `json:"bootstrap_uid,omitempty"`
+	MaxItems         int       `json:"max_items,omitempty"`
 }
 type IntegrityReport struct {
 	BackupID           string `json:"backup_id"`
@@ -45,18 +48,46 @@ type IntegrityReport struct {
 	AcceptanceEligible bool   `json:"acceptance_eligible"`
 	PartsVerified      int    `json:"parts_verified"`
 	SnapshotValidated  bool   `json:"snapshot_validated,omitempty"`
+	ManifestSHA256     string `json:"manifest_sha256,omitempty"`
+	IndexSHA256        string `json:"index_sha256,omitempty"`
+	CommitSHA256       string `json:"commit_sha256,omitempty"`
 }
 type VerifyJobResult struct {
-	State  string           `json:"state"`
-	JobUID string           `json:"job_uid"`
-	Report *IntegrityReport `json:"report,omitempty"`
+	State   string           `json:"state"`
+	JobUID  string           `json:"job_uid"`
+	Report  *IntegrityReport `json:"report,omitempty"`
+	Failure string           `json:"failure_category,omitempty"`
 }
 type VerifyJobs struct{ Client kubernetes.Interface }
+
+func (j VerifyJobs) Existing(ctx context.Context, a Attempt) (*batchv1.Job, error) {
+	want, r, err := verifyJob(a)
+	if err != nil {
+		return nil, err
+	}
+	if err = j.namespace(ctx, r); err != nil {
+		return nil, err
+	}
+	job, err := j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, want.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !matchesVerifyJob(want, job) {
+		return nil, errors.New("artifact_conflict")
+	}
+	return job, nil
+}
 
 var imageDigestPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$`)
 var attemptIDPattern = regexp.MustCompile(`^sat_[a-f0-9]{32}$`)
 
 func (r VerifyJobRequest) Validate() error {
+	if r.ValidateSnapshot && (r.MaxItems < 1 || r.MaxItems > 100000000) {
+		return errors.New("validation_failed")
+	}
+	if r.BootstrapUID != "" && !refPattern.MatchString(r.BootstrapUID) || r.ValidateSnapshot && r.BootstrapUID == "" {
+		return errors.New("validation_failed")
+	}
 	for _, v := range []string{r.Namespace, r.ServiceAccount, r.BootstrapSecret} {
 		if len(validation.IsDNS1123Subdomain(v)) != 0 || v == "" {
 			return errors.New("validation_failed")
@@ -88,6 +119,7 @@ func verifyJob(a Attempt) (*batchv1.Job, VerifyJobRequest, error) {
 	}
 	if r.ValidateSnapshot {
 		job.Spec.Template.Spec.Containers[0].Args[1] = "verify-snapshot"
+		job.Spec.Template.Spec.Containers[0].Args = append(job.Spec.Template.Spec.Containers[0].Args, "--max-items", strconv.Itoa(r.MaxItems))
 	}
 	return job, r, nil
 }
@@ -105,6 +137,9 @@ func (j VerifyJobs) namespace(ctx context.Context, r VerifyJobRequest) error {
 // Exact name + frozen request allows adoption after a lost Create response.
 // A colliding or mutated Job is rejected, never overwritten or deleted.
 func (j VerifyJobs) Ensure(ctx context.Context, a Attempt) (*batchv1.Job, error) {
+	return j.EnsureBound(ctx, a, "", true)
+}
+func (j VerifyJobs) EnsureBound(ctx context.Context, a Attempt, uid string, create bool) (*batchv1.Job, error) {
 	expected, r, e := verifyJob(a)
 	if e != nil {
 		return nil, e
@@ -113,7 +148,19 @@ func (j VerifyJobs) Ensure(ctx context.Context, a Attempt) (*batchv1.Job, error)
 		return nil, e
 	}
 	job, e := j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, expected.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(e) {
+	if uid == "" && !create {
+		return nil, errors.New("coordination_invalid")
+	}
+	if r.BootstrapUID != "" {
+		secret, err := j.Client.CoreV1().Secrets(r.Namespace).Get(ctx, r.BootstrapSecret, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		if string(secret.UID) != r.BootstrapUID || secret.Immutable == nil || !*secret.Immutable || secret.DeletionTimestamp != nil {
+			return nil, errors.New("isolation_invalid")
+		}
+	}
+	if apierrors.IsNotFound(e) && uid == "" && create {
 		job, e = j.Client.BatchV1().Jobs(r.Namespace).Create(ctx, expected, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(e) {
 			job, e = j.Client.BatchV1().Jobs(r.Namespace).Get(ctx, expected.Name, metav1.GetOptions{})
@@ -122,7 +169,7 @@ func (j VerifyJobs) Ensure(ctx context.Context, a Attempt) (*batchv1.Job, error)
 	if e != nil {
 		return nil, e
 	}
-	if !matchesVerifyJob(expected, job) {
+	if !matchesVerifyJob(expected, job) || uid != "" && string(job.UID) != uid {
 		return nil, errors.New("artifact_conflict")
 	}
 	return job, nil
@@ -149,11 +196,21 @@ func matchesVerifyJob(want, got *batchv1.Job) bool {
 	return a.Name == b.Name && a.Image == b.Image && reflect.DeepEqual(a.Command, b.Command) && reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.VolumeMounts, b.VolumeMounts) && reflect.DeepEqual(a.SecurityContext, b.SecurityContext) && len(b.Env) == 0 && len(b.EnvFrom) == 0 && b.TerminationMessagePath == a.TerminationMessagePath && b.TerminationMessagePolicy == a.TerminationMessagePolicy && got.Spec.BackoffLimit != nil && *got.Spec.BackoffLimit == 0 && got.Spec.ActiveDeadlineSeconds != nil && *got.Spec.ActiveDeadlineSeconds == *want.Spec.ActiveDeadlineSeconds
 }
 func (j VerifyJobs) Observe(ctx context.Context, a Attempt) (VerifyJobResult, error) {
-	var out VerifyJobResult
 	job, e := j.Ensure(ctx, a)
 	if e != nil {
-		return out, e
+		return VerifyJobResult{}, e
 	}
+	return j.observeJob(ctx, a, job)
+}
+func (j VerifyJobs) ObserveBound(ctx context.Context, a Attempt, uid string) (VerifyJobResult, error) {
+	job, err := j.EnsureBound(ctx, a, uid, false)
+	if err != nil {
+		return VerifyJobResult{}, err
+	}
+	return j.observeJob(ctx, a, job)
+}
+func (j VerifyJobs) observeJob(ctx context.Context, a Attempt, job *batchv1.Job) (VerifyJobResult, error) {
+	var out VerifyJobResult
 	out.JobUID = string(job.UID)
 	out.State = "running"
 	complete, failed := false, false
@@ -212,6 +269,15 @@ func (j VerifyJobs) Observe(ctx context.Context, a Attempt) (VerifyJobResult, er
 	out.State = "succeeded"
 	out.Report = report
 	return out, nil
+}
+
+func (j VerifyJobs) StopBound(ctx context.Context, a Attempt, uid string) (bool, error) {
+	if uid == "" {
+		return false, errors.New("cleanup_unsafe_target")
+	}
+	a.Status = "succeeded"
+	a.Result, _ = json.Marshal(VerifyJobResult{State: "succeeded", JobUID: uid})
+	return j.Stop(ctx, a)
 }
 
 // Stop never creates an absent Job and only deletes the matching identity.

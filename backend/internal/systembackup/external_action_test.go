@@ -89,6 +89,19 @@ func TestExternalActionFreezesBytesAndSerializesFinalWrites(t *testing.T) {
 	if err = s.ResolveExternalAction(ctx, l, x, a, "provider_unreachable", ObjectReference{}); PublicError(err) != "state_conflict" {
 		t.Fatal("terminal action was reopened", err)
 	}
+	if _, _, err = s.PrepareExternalAction(ctx, l, x, r); PublicError(err) != "coordination_invalid" {
+		t.Fatal("marker bypassed missing index", err)
+	}
+	indexRequest := r
+	indexRequest.Type = "index_put"
+	indexRequest.Key = artifactPrefix(s.InstallationID, x.ID) + "index.json"
+	indexAction, _, err := s.PrepareExternalAction(ctx, l, x, indexRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ResolveExternalAction(ctx, l, x, indexAction, "confirmed_present", ObjectReference{Key: indexAction.Request.Key, VersionID: "index-v1", Bytes: int64(len(indexAction.Request.Payload)), SHA256: indexAction.Request.SHA256}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err = s.PrepareExternalAction(ctx, l, x, r); err != nil {
 		t.Fatal("next final action blocked", err)
 	}

@@ -33,6 +33,23 @@ func run(ctx context.Context) error {
 		return errors.New("controller identity or schema unavailable")
 	}
 	controller := systembackup.Controller{Store: store, Owner: owner, PollInterval: 5 * time.Second}
+	if configPath := os.Getenv("SYSTEM_BACKUP_CAPTURE_RUNNER_FILE"); configPath != "" {
+		config, e := rest.InClusterConfig()
+		if e != nil {
+			return errors.New("capture runner requires in-cluster identity")
+		}
+		config.Timeout = 10 * time.Second
+		client, e := kubernetes.NewForConfig(config)
+		if e != nil {
+			return errors.New("capture runner client unavailable")
+		}
+		runner, closeRunner, e := systembackup.LoadCaptureTaskRunner(ctx, configPath, client)
+		if e != nil {
+			return e
+		}
+		defer closeRunner()
+		controller.Capturer = runner
+	}
 	if configPath := os.Getenv("SYSTEM_BACKUP_VERIFY_RUNNER_FILE"); configPath != "" {
 		info, e := os.Stat(configPath)
 		if e != nil || !info.Mode().IsRegular() || info.Size() > 16384 {

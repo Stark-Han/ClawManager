@@ -8,9 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -89,11 +87,10 @@ func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, 
 	if e := store.ProbeRead(ctx); e != nil {
 		return out, e
 	}
-	root, e := os.OpenRoot(stage)
+	index, e := UploadCapturedParts(ctx, store, CaptureStageDirectories{Ordinary: stage, Secrets: stage}, manifest, key.Public().(ed25519.PublicKey), keyVersion, maxBytes)
 	if e != nil {
 		return out, e
 	}
-	defer root.Close()
 	prefix := artifactPrefix(manifest.Payload.OriginInstallationID, manifest.Payload.BackupID)
 	manifestBytes, e := canonicalJSON(manifest)
 	if e != nil {
@@ -103,52 +100,8 @@ func PublishFunctionalArtifact(ctx context.Context, store ImmutableObjectStore, 
 	if e != nil {
 		return out, e
 	}
-	index := ArtifactIndex{Schema: "system-backup-index.v1", BackupID: manifest.Payload.BackupID, OriginInstallationID: manifest.Payload.OriginInstallationID, ManifestSHA256: manifestRef.SHA256, Parts: []PartIndex{}}
-	var total int64
-	for _, part := range manifest.Payload.Parts {
-		if part.CiphertextBytes > maxBytes-total {
-			return out, errors.New("capacity_exceeded")
-		}
-		total += part.CiphertextBytes
-		f, e := root.Open(part.Name + ".enc")
-		if e != nil {
-			return out, errors.New("staging part unavailable")
-		}
-		p := PartIndex{Name: part.Name, Objects: []ObjectReference{}}
-		hash := sha256.New()
-		var size int64
-		buffer := make([]byte, artifactChunkBytes)
-		for sequence := 0; ; sequence++ {
-			n, readErr := io.ReadFull(f, buffer)
-			if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
-				f.Close()
-				return out, readErr
-			}
-			if n > 0 {
-				size += int64(n)
-				if size > part.CiphertextBytes {
-					f.Close()
-					return out, errors.New("staging checksum mismatch")
-				}
-				hash.Write(buffer[:n])
-				ref, e := store.PutImmutable(ctx, fmt.Sprintf("%sparts/%s/%08d.bin", prefix, part.Name, sequence), buffer[:n])
-				if e != nil {
-					f.Close()
-					return out, e
-				}
-				p.Objects = append(p.Objects, ref)
-			}
-			if readErr != nil {
-				break
-			}
-		}
-		if e = f.Close(); e != nil {
-			return out, e
-		}
-		if size != part.CiphertextBytes || hex.EncodeToString(hash.Sum(nil)) != part.CiphertextSHA256 {
-			return out, errors.New("staging checksum mismatch")
-		}
-		index.Parts = append(index.Parts, p)
+	if manifestRef.SHA256 != index.ManifestSHA256 {
+		return out, errors.New("artifact_conflict")
 	}
 	signature, e := signObject("clawmanager:artifact-index:v1", index, key, keyVersion)
 	if e != nil {
