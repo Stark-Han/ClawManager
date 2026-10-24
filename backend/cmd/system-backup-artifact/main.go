@@ -238,7 +238,7 @@ func main() {
 	switch *operation {
 	case "team-data-discover":
 		e = discoverTeamData(ctx, *config, *origin, *cursor, *pageSize, output)
-	case "team-data-recover", "team-data-cleanup":
+	case "team-data-recover", "team-data-cleanup", "team-data-verify":
 		e = recoverTeamData(ctx, *operation, *config, *operationConfig, *origin, *id, output)
 	case "verify":
 		e = verify(ctx, *config, *origin, *id, *max, output)

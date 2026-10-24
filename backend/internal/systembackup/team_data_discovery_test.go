@@ -136,4 +136,15 @@ func TestTeamDataRestoreAcceptsImportedArtifactWithoutSourceJob(t *testing.T) {
 	if e != nil || j.SourceID != a.Manifest.Payload.BackupID || j.Status != "pending" {
 		t.Fatal("imported artifact still depends on source job", e, j)
 	}
+	state, _, e := s.catalog().Load(context.Background())
+	if e != nil || len(state.Artifacts[j.SourceID].Leases) != 1 {
+		t.Fatal("queued restore is not protected from deletion", e)
+	}
+	if e = s.Cancel(context.Background(), j.ID); e != nil {
+		t.Fatal(e)
+	}
+	state, _, e = s.catalog().Load(context.Background())
+	if e != nil || len(state.Artifacts[j.SourceID].Leases) != 0 {
+		t.Fatal("pending cancellation leaked reference", e)
+	}
 }

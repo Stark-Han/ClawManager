@@ -24,6 +24,17 @@ func teamDataJobFixture(t *testing.T) *TeamDataService {
 	if _, e = db.Exec(string(raw)); e != nil {
 		t.Fatal(e)
 	}
+	raw, e = os.ReadFile("../db/migrations/094_add_team_data_backup_management_operations.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, statement := range strings.Split(string(raw), ";") {
+		if strings.TrimSpace(statement) != "" {
+			if _, e = db.Exec(statement); e != nil {
+				t.Fatal(e)
+			}
+		}
+	}
 	return &TeamDataService{db: db, configHash: strings.Repeat("a", 64), owner: "test-worker"}
 }
 

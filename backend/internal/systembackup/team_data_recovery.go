@@ -10,6 +10,12 @@ import (
 // Recover invokes the same restore implementation against an explicitly
 // configured disaster-side control DB. No source job record is required.
 func (s *TeamDataService) Recover(ctx context.Context, origin, id, commit string) (TeamDataJob, error) {
+	return s.runRecoveryJob(ctx, "restore", origin, id, commit)
+}
+func (s *TeamDataService) VerifyRecovery(ctx context.Context, origin, id, commit string) (TeamDataJob, error) {
+	return s.runRecoveryJob(ctx, "verify", origin, id, commit)
+}
+func (s *TeamDataService) runRecoveryJob(ctx context.Context, operation, origin, id, commit string) (TeamDataJob, error) {
 	if !s.recoveryOnly || origin != s.cfg.InstallationID {
 		return TeamDataJob{}, errors.New("validation_failed")
 	}
@@ -27,7 +33,7 @@ func (s *TeamDataService) Recover(ctx context.Context, origin, id, commit string
 	if e != nil {
 		return TeamDataJob{}, e
 	}
-	j, e := s.Create(ctx, 1, key, "restore", id)
+	j, e := s.Create(ctx, 1, key, operation, id)
 	if e != nil {
 		return j, e
 	}
@@ -35,7 +41,13 @@ func (s *TeamDataService) Recover(ctx context.Context, origin, id, commit string
 	if e != nil {
 		return j, e
 	}
-	r, operationErr := s.restore(ctx, j)
+	var r TeamDataReport
+	var operationErr error
+	if operation == "verify" {
+		r, operationErr = s.verifyBackup(ctx, j)
+	} else {
+		r, operationErr = s.restore(ctx, j)
+	}
 	status, phase, code := "succeeded", "complete", ""
 	if operationErr != nil {
 		status = "failed"

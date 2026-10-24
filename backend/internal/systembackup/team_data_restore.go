@@ -388,6 +388,9 @@ func (s *TeamDataService) cleanup(ctx context.Context, id string) error {
 			return e
 		}
 	}
+	if e = s.catalog().Release(ctx, j.SourceID, id, "job:"+id); e != nil {
+		return e
+	}
 	_, e = s.db.ExecContext(ctx, "UPDATE system_team_data_backup_jobs SET status='cleaned',phase='cleaned',updated_at=UTC_TIMESTAMP(6) WHERE public_id=? AND status IN ('succeeded','failed','canceled')", id)
 	return e
 }

@@ -36,6 +36,8 @@ type TeamDataArtifact struct {
 	Protected       bool              `json:"protected"`
 	Health          string            `json:"health"`
 	VerifiedAt      *time.Time        `json:"verified_at,omitempty"`
+	CheckedAt       *time.Time        `json:"checked_at,omitempty"`
+	LastError       string            `json:"last_error,omitempty"`
 	Leases          map[string]string `json:"leases"`
 	Deleting        bool              `json:"deleting"`
 	Deleted         bool              `json:"deleted"`
@@ -170,6 +172,8 @@ func (c TeamDataCatalogStore) Import(ctx context.Context, a PublishedArtifact, a
 			now := time.Now().UTC()
 			record.Health = "verified"
 			record.VerifiedAt = &now
+			record.CheckedAt = &now
+			record.LastError = ""
 		}
 		s.Artifacts[id] = record
 		s.Audit = append(s.Audit, TeamDataAudit{time.Now().UTC(), actor, "import", id})
@@ -197,7 +201,7 @@ func (c TeamDataCatalogStore) Release(ctx context.Context, id, run, owner string
 	return c.Update(ctx, func(s *TeamDataCatalog) error {
 		a, ok := s.Artifacts[id]
 		if !ok {
-			return errors.New("not_found")
+			return nil // Legacy restore copies predate storage-side references.
 		}
 		if previous, ok := a.Leases[run]; ok && previous != owner {
 			return errors.New("ownership_lost")

@@ -131,6 +131,14 @@ func (s *TeamDataService) execute(parent context.Context, lock *sql.Conn, j Team
 			report, err = s.restore(ctx, j)
 		case "cleanup":
 			err = s.cleanup(ctx, j.SourceID)
+		case "verify":
+			report, err = s.verifyBackup(ctx, j)
+		case "delete":
+			var actor int
+			err = s.db.QueryRowContext(ctx, "SELECT actor_id FROM system_team_data_backup_jobs WHERE public_id=?", j.ID).Scan(&actor)
+			if err == nil {
+				err = s.catalog().ContinueDelete(ctx, j.SourceID, actor, func(_ int) error { return s.phase(ctx, j, "deleting_versions") })
+			}
 		default:
 			err = errors.New("validation_failed")
 		}

@@ -38,7 +38,7 @@ func recoverTeamData(ctx context.Context, operation, bootstrapPath, operationPat
 	}
 	defer control.Close()
 	if c.PrepareControl {
-		if operation != "team-data-recover" {
+		if operation != "team-data-recover" && operation != "team-data-verify" {
 			return errors.New("validation_failed")
 		}
 		if e = appdb.PrepareIsolatedRestoreSchema(ctx, control); e != nil {
@@ -61,7 +61,12 @@ func recoverTeamData(ctx context.Context, operation, bootstrapPath, operationPat
 		if e != nil {
 			return e
 		}
-		result, e := s.Recover(ctx, origin, id, a.CommitReference.SHA256)
+		var result systembackup.TeamDataJob
+		if operation == "team-data-verify" {
+			result, e = s.VerifyRecovery(ctx, origin, id, a.CommitReference.SHA256)
+		} else {
+			result, e = s.Recover(ctx, origin, id, a.CommitReference.SHA256)
+		}
 		if writeErr := json.NewEncoder(out).Encode(result); e == nil {
 			e = writeErr
 		}

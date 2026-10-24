@@ -24,6 +24,67 @@ func (h *TeamDataBackupHandler) Register(r *gin.RouterGroup) {
 	r.GET("/team-data/discover", h.discover)
 	r.GET("/team-data/artifacts", h.artifacts)
 	r.POST("/team-data/artifacts/:id/import", h.importArtifact)
+	r.POST("/team-data/artifacts/:id/protection", h.protect)
+	r.POST("/team-data/artifacts/:id/delete-preview", h.deletePreview)
+	r.POST("/team-data/artifacts/:id/delete", h.deleteArtifact)
+}
+func teamDataHTTPError(c *gin.Context, e error) {
+	switch e.Error() {
+	case "backup_protected", "backup_in_use", "minimum_recovery_points", "backup_deleting", "catalog_changed", "state_conflict":
+		c.JSON(409, gin.H{"success": false, "code": e.Error()})
+	case "confirmation_invalid":
+		c.JSON(400, gin.H{"success": false, "code": "confirmation_invalid"})
+	default:
+		backupError(c, e)
+	}
+}
+func (h *TeamDataBackupHandler) protect(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	var body struct {
+		Protected *bool `json:"protected"`
+	}
+	if !backupBody(c, &body) {
+		return
+	}
+	if body.Protected == nil {
+		teamDataHTTPError(c, errors.New("validation_failed"))
+		return
+	}
+	if e := h.service.Protect(c.Request.Context(), c.Param("id"), c.GetInt("userID"), *body.Protected); e != nil {
+		teamDataHTTPError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": gin.H{"protected": *body.Protected}})
+}
+func (h *TeamDataBackupHandler) deletePreview(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	preview, e := h.service.DeletePreview(c.Request.Context(), c.Param("id"), c.GetInt("userID"))
+	if e != nil {
+		teamDataHTTPError(c, e)
+		return
+	}
+	c.JSON(200, gin.H{"success": true, "data": preview})
+}
+func (h *TeamDataBackupHandler) deleteArtifact(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	var body struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if !backupBody(c, &body) {
+		return
+	}
+	j, e := h.service.DeleteConfirmed(c.Request.Context(), c.Param("id"), body.Confirmation, c.GetHeader("Idempotency-Key"), c.GetInt("userID"))
+	if e != nil {
+		teamDataHTTPError(c, e)
+		return
+	}
+	c.JSON(202, gin.H{"success": true, "data": j})
 }
 func (h *TeamDataBackupHandler) discover(c *gin.Context) {
 	if !h.available(c) {

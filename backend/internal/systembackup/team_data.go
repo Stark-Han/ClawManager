@@ -25,6 +25,7 @@ import (
 // TeamDataConfig is operator-owned bootstrap. Browser requests cannot supply
 // credentials, database names, endpoints or filesystem paths.
 type TeamDataConfig struct {
+	MinimumRecoveryPoints         int    `json:"minimum_recovery_points,omitempty"`
 	InstallationID                string `json:"installation_id"`
 	Namespace                     string `json:"namespace"`
 	NamespaceUID                  string `json:"namespace_uid"`
@@ -137,7 +138,7 @@ func newTeamDataService(ctx context.Context, db *sql.DB, path string, recovery b
 	if DecodeStrictJSON(raw, &c) != nil {
 		return nil, errors.New("validation_failed")
 	}
-	if !refPattern.MatchString(c.InstallationID) || c.Namespace == "" || c.NamespaceUID == "" || !refPattern.MatchString(c.KeyVersion) || !imageDigestPattern.MatchString(c.RedisImage) || c.SourceBucket == "" || c.SourceBucket == c.BackupBucket || c.BackupBucket == "" || c.MaxBytes < 1<<20 || c.MaxBytes > 128<<30 || c.MaxItems < 1 || c.MaxItems > 5000000 || c.DeadlineSeconds < 60 || c.DeadlineSeconds > 10800 {
+	if c.MinimumRecoveryPoints < 0 || c.MinimumRecoveryPoints > 100 || !refPattern.MatchString(c.InstallationID) || c.Namespace == "" || c.NamespaceUID == "" || !refPattern.MatchString(c.KeyVersion) || !imageDigestPattern.MatchString(c.RedisImage) || c.SourceBucket == "" || c.SourceBucket == c.BackupBucket || c.BackupBucket == "" || c.MaxBytes < 1<<20 || c.MaxBytes > 128<<30 || c.MaxItems < 1 || c.MaxItems > 5000000 || c.DeadlineSeconds < 60 || c.DeadlineSeconds > 10800 {
 		return nil, errors.New("validation_failed")
 	}
 	for _, root := range []string{c.SourceRoot, c.RuntimeRoot, c.StageRoot, c.RestoreRoot} {
@@ -236,7 +237,9 @@ func newTeamDataService(ctx context.Context, db *sql.DB, path string, recovery b
 		admin.Close()
 		return nil, errors.New("restore namespace is outside this installation")
 	}
-	configHash, hashErr := RequestHash(c)
+	identityConfig := c
+	identityConfig.MinimumRecoveryPoints = 0
+	configHash, hashErr := RequestHash(identityConfig)
 	if hashErr != nil {
 		admin.Close()
 		return nil, hashErr
@@ -337,7 +340,7 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 	if s.recoveryOnly && operation == "backup" {
 		return TeamDataJob{}, errors.New("recovery_only")
 	}
-	if actor < 1 || !idemPattern.MatchString(key) || (operation != "backup" && operation != "restore" && operation != "cleanup") || (operation == "backup" && source != "") || (operation == "restore" && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sbk_"))) || (operation == "cleanup" && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sdr_"))) {
+	if actor < 1 || !idemPattern.MatchString(key) || (operation != "backup" && operation != "restore" && operation != "cleanup" && operation != "verify" && operation != "delete") || (operation == "backup" && source != "") || ((operation == "restore" || operation == "verify" || operation == "delete") && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sbk_"))) || (operation == "cleanup" && (!publicIDPattern.MatchString(source) || !strings.HasPrefix(source, "sdr_"))) {
 		return TeamDataJob{}, errors.New("validation_failed")
 	}
 	hash, _ := RequestHash(map[string]string{"operation": operation, "source_backup_id": source})
@@ -358,7 +361,7 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 	if !errors.Is(e, sql.ErrNoRows) {
 		return TeamDataJob{}, e
 	}
-	if operation == "restore" {
+	if operation == "restore" || operation == "verify" {
 		j, e := s.Get(ctx, source)
 		if e != nil || j.Status != "succeeded" || j.Operation != "backup" || j.ConfigHash != s.configHash {
 			state, _, catalogErr := s.catalog().Load(ctx)
@@ -366,6 +369,25 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 			if catalogErr != nil || !ok || a.Deleted || a.Deleting {
 				return TeamDataJob{}, errors.New("artifact_unavailable")
 			}
+		}
+		if s.store.Client != nil {
+			state, _, e := s.catalog().Load(ctx)
+			if e != nil {
+				return TeamDataJob{}, e
+			}
+			if a, ok := state.Artifacts[source]; ok && (a.Deleted || a.Deleting) {
+				return TeamDataJob{}, errors.New("backup_deleting")
+			}
+		}
+	}
+	if operation == "delete" {
+		state, _, e := s.catalog().Load(ctx)
+		if e != nil {
+			return TeamDataJob{}, e
+		}
+		a, ok := state.Artifacts[source]
+		if !ok || !a.Deleting || a.Deleted || a.DeleteActor != actor {
+			return TeamDataJob{}, errors.New("confirmation_invalid")
 		}
 	}
 	if operation == "cleanup" {
@@ -390,6 +412,22 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 		}
 		return TeamDataJob{}, e
 	}
+	// Reserve the storage-side reference before accepting a queued restore or
+	// verification. The same CAS state is used by independent recovery tools.
+	if operation == "restore" || operation == "verify" {
+		a, e := OpenPublishedArtifact(ctx, s.store, s.cfg.InstallationID, source, s.catalog().PublicKey, s.cfg.KeyVersion)
+		if e != nil {
+			return TeamDataJob{}, e
+		}
+		if e = s.catalog().Import(ctx, a, actor, false); e != nil {
+			return TeamDataJob{}, e
+		}
+		if e = s.catalog().Acquire(ctx, source, id, "job:"+id); e != nil {
+			return TeamDataJob{}, e
+		}
+		// A COMMIT error may have committed. Retain this reference on an
+		// unknown DB result rather than permitting an unsafe concurrent delete.
+	}
 	if e = tx.Commit(); e != nil {
 		return TeamDataJob{}, e
 	}
@@ -397,6 +435,10 @@ func (s *TeamDataService) Create(ctx context.Context, actor int, key, operation,
 }
 
 func (s *TeamDataService) Cancel(ctx context.Context, id string) error {
+	before, e := s.Get(ctx, id)
+	if e != nil {
+		return e
+	}
 	r, e := s.db.ExecContext(ctx, "UPDATE system_team_data_backup_jobs SET cancel_requested=1,finished_at=CASE WHEN status='pending' THEN UTC_TIMESTAMP(6) ELSE finished_at END,status=CASE WHEN status='pending' THEN 'canceled' ELSE 'canceling' END,updated_at=UTC_TIMESTAMP(6) WHERE public_id=? AND status IN ('pending','running','canceling')", id)
 	if e != nil {
 		return e
@@ -404,6 +446,15 @@ func (s *TeamDataService) Cancel(ctx context.Context, id string) error {
 	n, _ := r.RowsAffected()
 	if n == 0 {
 		return errors.New("state_conflict")
+	}
+	if before.Status == "pending" && (before.Operation == "restore" || before.Operation == "verify") {
+		after, e := s.Get(ctx, id)
+		if e != nil {
+			return e
+		}
+		if after.Status == "canceled" {
+			return s.catalog().Release(ctx, before.SourceID, before.ID, "job:"+before.ID)
+		}
 	}
 	return nil
 }
