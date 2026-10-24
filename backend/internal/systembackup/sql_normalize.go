@@ -248,7 +248,10 @@ func NormalizeSQLSnapshot(ctx context.Context, r io.Reader, w io.Writer, at time
 }
 
 func SnapshotBusinessTables(ctx context.Context, q SQLQueryer) ([]string, error) {
-	names, e := DiscoverTables(ctx, q)
+	return snapshotBusinessTables(ctx, q, false)
+}
+func snapshotBusinessTables(ctx context.Context, q SQLQueryer, teamData bool) ([]string, error) {
+	names, e := discoverTables(ctx, q, teamData)
 	if e != nil {
 		return nil, e
 	}

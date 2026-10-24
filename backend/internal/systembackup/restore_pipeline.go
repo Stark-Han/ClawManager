@@ -118,7 +118,11 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 	if e = RequireReadOnlyVerifier(ctx, target.Verifier, target.Database); e != nil {
 		return report, e
 	}
-	if e = ValidateSchema(ctx, target.MySQL); e != nil {
+	validate := ValidateSchema
+	if artifact.Manifest.Payload.Purpose == "team_data" {
+		validate = ValidateTeamDataSchema
+	}
+	if e = validate(ctx, target.MySQL); e != nil {
 		return report, e
 	}
 	if e = VerifyPublishedArtifact(ctx, store, artifact, wrapper, budget.MaxBytes); e != nil {

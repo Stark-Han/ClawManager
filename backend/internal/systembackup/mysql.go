@@ -48,6 +48,9 @@ type SQLQueryer interface {
 }
 
 func DiscoverTables(ctx context.Context, q SQLQueryer) ([]string, error) {
+	return discoverTables(ctx, q, false)
+}
+func discoverTables(ctx context.Context, q SQLQueryer, teamData bool) ([]string, error) {
 	rows, err := q.QueryContext(ctx, "SELECT TABLE_NAME,TABLE_TYPE,COALESCE(ENGINE,'') FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME")
 	if err != nil {
 		return nil, err
@@ -63,6 +66,9 @@ func DiscoverTables(ctx context.Context, q SQLQueryer) ([]string, error) {
 			return nil, fmt.Errorf("unsupported schema object: %s", name)
 		}
 		if _, ok := Policy(name); !ok {
+			if teamData && teamDataHistoricalOperationTable(name) {
+				continue
+			}
 			return nil, fmt.Errorf("unassigned schema object: %s", name)
 		}
 		out = append(out, name)

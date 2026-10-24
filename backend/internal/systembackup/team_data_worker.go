@@ -174,6 +174,8 @@ func teamDataFailure(err error) string {
 		return "cluster_resource_missing"
 	}
 	switch err.Error() {
+	case "unsupported_schema":
+		return "schema_changed"
 	case "file changed during capture", "file identity changed during capture":
 		return "source_file_changed"
 	case "symlink escapes managed file roots":

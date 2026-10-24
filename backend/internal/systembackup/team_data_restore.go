@@ -29,7 +29,7 @@ func (s *TeamDataService) restoreDatabase(ctx context.Context, id string) (*sql.
 	return sql.Open("mysql", c.FormatDSN())
 }
 
-func (s *TeamDataService) createRestoreSQL(ctx context.Context, j TeamDataJob) (writer, reader *sql.DB, err error) {
+func (s *TeamDataService) createRestoreSQL(ctx context.Context, j TeamDataJob, artifact PublishedArtifact) (writer, reader *sql.DB, err error) {
 	database := teamDataDatabase(j.ID)
 	if !restoreDatabasePattern.MatchString(database) {
 		return nil, nil, errors.New("validation_failed")
@@ -43,6 +43,9 @@ func (s *TeamDataService) createRestoreSQL(ctx context.Context, j TeamDataJob) (
 	}
 	defer admin.Close()
 	if err = appdb.PrepareIsolatedRestoreSchema(ctx, admin); err != nil {
+		return nil, nil, err
+	}
+	if err = ConsumePublishedPart(ctx, s.store, artifact, "mysql", s.wrapper, s.cfg.MaxBytes, func(r io.Reader) error { return alignTeamDataRestoreSchema(ctx, admin, r) }); err != nil {
 		return nil, nil, err
 	}
 	// The marker is control data and never part of a business SQL restore.
@@ -184,7 +187,7 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if err = s.phase(ctx, j, "provisioning_copy"); err != nil {
 		return report, err
 	}
-	writer, reader, err := s.createRestoreSQL(ctx, j)
+	writer, reader, err := s.createRestoreSQL(ctx, j, artifact)
 	if err != nil {
 		return report, err
 	}

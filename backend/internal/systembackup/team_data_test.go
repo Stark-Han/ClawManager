@@ -97,6 +97,50 @@ func TestTeamDataExportPreservesTeamResultsWithoutGlobalGatewayRows(t *testing.T
 	}
 }
 
+func TestTeamDataCaptureRecognizesHistoricalRuntimeSchema(t *testing.T) {
+	db := fullSchemaDB(t)
+	ctx := context.Background()
+	for _, statement := range []string{
+		"ALTER TABLE instances ADD COLUMN workbuddy_storage_identity VARCHAR(512) NULL",
+		"CREATE TABLE workbuddy_browser_grants(id BIGINT PRIMARY KEY) ENGINE=InnoDB",
+	} {
+		if _, e := db.ExecContext(ctx, statement); e != nil {
+			t.Fatal(e)
+		}
+	}
+	// This is the real online preflight that failed before reading any data.
+	if e := ValidateTeamDataSchema(ctx, db); e != nil {
+		t.Fatal("online capture rejected existing runtime metadata", e)
+	}
+	if e := ValidateSchema(ctx, db); e == nil {
+		t.Fatal("strict full-system contract was widened")
+	}
+	tables, e := snapshotBusinessTables(ctx, db, true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var archive bytes.Buffer
+	if _, e = ExportTeamDataMySQL(ctx, db, &archive, tables); e != nil {
+		t.Fatal(e)
+	}
+	target, name := isolatedSchemaDB(t, db)
+	if e = alignTeamDataRestoreSchema(ctx, target, bytes.NewReader(archive.Bytes())); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = RestoreMySQL(ctx, target, "", name, bytes.NewReader(archive.Bytes()), nil); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = VerifyMySQL(ctx, target, bytes.NewReader(archive.Bytes()), 10000); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec("ALTER TABLE team_tasks ADD COLUMN unexpected_execution_token TEXT NULL"); e != nil {
+		t.Fatal(e)
+	}
+	if e = ValidateTeamDataSchema(ctx, db); e == nil {
+		t.Fatal("unreviewed Team field was silently accepted")
+	}
+}
+
 func TestTeamDataFileAliasesPreserveSharedLinksWithoutWideningNormalCapture(t *testing.T) {
 	physical, logical, target := t.TempDir(), t.TempDir(), t.TempDir()
 	shared, instance := filepath.Join(physical, "shared"), filepath.Join(physical, "instance")

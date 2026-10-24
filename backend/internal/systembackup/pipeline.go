@@ -45,10 +45,14 @@ func CaptureFunctionalBundle(ctx context.Context, stage, origin, id string, sour
 	if e != nil || len(entries) != 0 {
 		return zero, errors.New("fresh encrypted staging required")
 	}
-	if e = ValidateSchema(ctx, source.MySQL); e != nil {
+	validate := ValidateSchema
+	if source.TeamDataOnly {
+		validate = ValidateTeamDataSchema
+	}
+	if e = validate(ctx, source.MySQL); e != nil {
 		return zero, e
 	}
-	tables, e := SnapshotBusinessTables(ctx, source.MySQL)
+	tables, e := snapshotBusinessTables(ctx, source.MySQL, source.TeamDataOnly)
 	if e != nil {
 		return zero, e
 	}
