@@ -154,6 +154,10 @@ func (s *TeamDataService) execute(parent context.Context, lock *sql.Conn, j Team
 			status, code = "canceled", "canceled_by_actor"
 		}
 		log.Printf("Team data operation failed: id=%s phase=%s code=%s", j.ID, actual.Phase, code)
+		// These errors contain registered table/column names, never cell values.
+		if strings.HasPrefix(err.Error(), "value mismatch: ") || strings.HasPrefix(err.Error(), "row count mismatch: ") {
+			log.Printf("Team data SQL readback: id=%s detail=%s", j.ID, err.Error())
+		}
 	}
 	raw, _ := json.Marshal(report)
 	_, _ = s.db.ExecContext(finish, "UPDATE system_team_data_backup_jobs SET status=?,phase=?,error_code=?,report_json=?,finished_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6) WHERE public_id=? AND owner_id=? AND status IN ('running','canceling')", status, phase, code, raw, j.ID, s.owner)
@@ -205,6 +209,12 @@ func teamDataFailure(err error) string {
 	}
 	if strings.Contains(err.Error(), "schema differs") || strings.Contains(err.Error(), "schema changed") {
 		return "schema_changed"
+	}
+	if strings.HasPrefix(err.Error(), "value mismatch: ") {
+		return "restore_sql_value_mismatch"
+	}
+	if strings.HasPrefix(err.Error(), "row count mismatch: ") {
+		return "restore_sql_row_count_mismatch"
 	}
 	return PublicError(err)
 }

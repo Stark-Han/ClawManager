@@ -1,6 +1,7 @@
 package systembackup
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -162,7 +163,32 @@ func NormalizeDataRow(table SQLTable, row team.Row, now time.Time) (team.Change,
 		// The P0 drill never starts their consumers. Changing that boundary requires
 		// a separate production-restore design and execution guards.
 	}
-	return change, err
+	if err != nil {
+		return change, err
+	}
+	// Fixed expiration values must use the same precision as MySQL readback.
+	// Keep exact comparison; do not relax the verifier or rewrite saved history.
+	for _, column := range table.Columns {
+		kind := strings.ToLower(column.Type)
+		if kind != "date" && !strings.HasPrefix(kind, "datetime") && !strings.HasPrefix(kind, "timestamp") {
+			continue
+		}
+		before, exists := change.Before[column.Name]
+		after := change.After[column.Name]
+		if !exists || after.IsNull || (before.IsNull == after.IsNull && bytes.Equal(before.Data, after.Data)) {
+			continue
+		}
+		parsed, e := time.Parse("2006-01-02 15:04:05.999999", string(after.Data))
+		if e != nil {
+			return change, errors.New("invalid normalized SQL timestamp")
+		}
+		value, e := sqlCell(parsed, column)
+		if e != nil {
+			return change, e
+		}
+		change.After[column.Name] = value
+	}
+	return change, nil
 }
 
 // NormalizeSQLSnapshot produces another verifiable stream; Before/After must

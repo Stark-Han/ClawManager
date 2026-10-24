@@ -3,9 +3,40 @@ package systembackup
 import (
 	"bytes"
 	"clawreef/internal/systembackup/team"
+	"context"
 	"testing"
 	"time"
 )
+
+func TestExpiredCredentialsReadBackWithDeclaredSQLPrecision(t *testing.T) {
+	db := fixtureDatabase(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		"CREATE TABLE northbound_auth_challenges(id BIGINT PRIMARY KEY,status VARCHAR(32),expires_at DATETIME(6)) ENGINE=InnoDB",
+		"CREATE TABLE northbound_sessions(id BIGINT PRIMARY KEY,status VARCHAR(32),access_expires_at DATETIME(6),refresh_expires_at DATETIME(6)) ENGINE=InnoDB",
+		"INSERT INTO northbound_auth_challenges VALUES(1,'pending','2026-10-24 12:34:56.123456')",
+		"INSERT INTO northbound_sessions VALUES(1,'active','2026-10-24 12:34:56.123456','2026-10-25 12:34:56.654321')",
+	} {
+		if _, e := db.ExecContext(ctx, q); e != nil {
+			t.Fatal(e)
+		}
+	}
+	var original, normalized bytes.Buffer
+	if _, e := ExportMySQL(ctx, db, &original, []string{"northbound_auth_challenges", "northbound_sessions"}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := NormalizeSQLSnapshot(ctx, bytes.NewReader(original.Bytes()), &normalized, time.Now().UTC(), func(SQLTable, team.Change) error { return nil }); e != nil {
+		t.Fatal(e)
+	}
+	for _, q := range []string{"UPDATE northbound_auth_challenges SET status='used',expires_at='2000-01-01 00:00:00'", "UPDATE northbound_sessions SET status='revoked',access_expires_at='2000-01-01 00:00:00',refresh_expires_at='2000-01-01 00:00:00'"} {
+		if _, e := db.ExecContext(ctx, q); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := VerifyMySQL(ctx, db, bytes.NewReader(normalized.Bytes()), 100); e != nil {
+		t.Fatal("normalized dates failed exact database readback", e)
+	}
+}
 
 func TestNormalizePassedPreflightRetainsOriginalWithoutResumingUpgrade(t *testing.T) {
 	row := team.Row{"id": team.Value("7"), "status": team.Value("preflight_passed"), "phase": team.Value("preflight"), "preflight_json": team.Value(`{"saved":"original assessment"}`), "auto_rollback": team.Value("1")}
