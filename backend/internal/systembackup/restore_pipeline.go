@@ -21,6 +21,7 @@ type DataRestoreTarget struct {
 	MySQL, Verifier *sql.DB
 	Database        string
 	Redis           *RedisClient
+	RedisVerifier   *RedisClient
 	Objects         *minio.Client
 	BucketMapping   map[string]string
 	Directory       string
@@ -215,9 +216,13 @@ func RestorePublishedData(ctx context.Context, store ImmutableObjectStore, artif
 		return report, e
 	}
 	report.Phase = "redis_verification"
+	redisVerifier := target.RedisVerifier
+	if redisVerifier == nil {
+		redisVerifier = target.Redis
+	}
 	if e = consume("redis", func(r io.Reader) error {
 		var e error
-		report.VerifiedRedisCount, e = VerifyRedisHistory(ctx, target.Redis, r, RedisBudget{MaxBytes: budget.MaxBytes, MaxItems: budget.MaxItems, MaxInventoryBytes: min(budget.MaxBytes/8, 64<<20)}, runID)
+		report.VerifiedRedisCount, e = VerifyRedisHistory(ctx, redisVerifier, r, RedisBudget{MaxBytes: budget.MaxBytes, MaxItems: budget.MaxItems, MaxInventoryBytes: min(budget.MaxBytes/8, 64<<20)}, runID)
 		return e
 	}); e != nil {
 		return report, e

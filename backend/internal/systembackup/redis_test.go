@@ -78,6 +78,54 @@ func TestRESPRejectsUnboundedMalformedAndNestedReplies(t *testing.T) {
 	}
 }
 
+func TestRedisHistoryVerifiesUnorderedBinaryHashAndSetContents(t *testing.T) {
+	source := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_PORT")
+	target := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT")
+	ctx := context.Background()
+	id, _ := RandomID("test_")
+	run, _ := RandomID("sdr_")
+	hashKey, setKey := []byte(id+":hash"), []byte(id+":set")
+	t.Cleanup(func() {
+		for _, key := range [][]byte{hashKey, setKey} {
+			_, _ = source.command(context.Background(), []byte("DEL"), key)
+			_, _ = target.command(context.Background(), []byte("DEL"), []byte("cm:restore-history:"+run+":"+hex.EncodeToString(key)))
+		}
+	})
+	value := bytes.Repeat([]byte{0, 255, 128, 'x'}, 128)
+	for i := 0; i < 100; i++ {
+		field := []byte(fmt.Sprintf("field-%04d", i))
+		member := append([]byte(fmt.Sprintf("member-%04d-", i)), 0, 255)
+		if _, e := source.command(ctx, []byte("HSET"), hashKey, field, value); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := source.command(ctx, []byte("SADD"), setKey, member); e != nil {
+			t.Fatal(e)
+		}
+	}
+	var archive bytes.Buffer
+	b := RedisBudget{100, 4 << 20, 1 << 20}
+	if e := CaptureRedisLogical(ctx, source, &archive, b); e != nil {
+		t.Fatal(e)
+	}
+	if e := RestoreRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), b, run); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := VerifyRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), b, run); e != nil {
+		t.Fatal("unordered serialization reported false data loss", e)
+	}
+	actualHash := []byte("cm:restore-history:" + run + ":" + hex.EncodeToString(hashKey))
+	actualSet := []byte("cm:restore-history:" + run + ":" + hex.EncodeToString(setKey))
+	_, _ = target.command(ctx, []byte("HSET"), actualHash, []byte("field-0000"), []byte("corrupt"))
+	if _, e := VerifyRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), b, run); e == nil {
+		t.Fatal("hash value corruption accepted")
+	}
+	_, _ = target.command(ctx, []byte("HSET"), actualHash, []byte("field-0000"), value)
+	_, _ = target.command(ctx, []byte("SADD"), actualSet, []byte("unexpected member"))
+	if _, e := VerifyRedisHistory(ctx, target, bytes.NewReader(archive.Bytes()), b, run); e == nil {
+		t.Fatal("extra set member accepted")
+	}
+}
+
 func TestRedisPermissionErrorRetainsOnlySafeCode(t *testing.T) {
 	b := int64(1024)
 	_, e := readRedisReply(bufio.NewReader(strings.NewReader("-NOPERM private-key-and-command-detail\r\n")), &b, 0)

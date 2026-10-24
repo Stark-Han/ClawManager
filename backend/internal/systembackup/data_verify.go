@@ -224,7 +224,14 @@ func VerifyRedisHistory(ctx context.Context, c *RedisClient, r io.Reader, b Redi
 		dump, ok := values[0].([]byte)
 		kind, kok := values[1].([]byte)
 		ttl, tok := values[2].(int64)
-		if !ok || !kok || !tok || ttl != -1 || string(kind) != record.Type || !bytes.Equal(dump, record.Dump) {
+		if !ok || !kok || !tok || ttl != -1 || string(kind) != record.Type {
+			return errors.New("restored Redis history mismatch")
+		}
+		equal, e := redisDumpsEqual(record.Type, record.Dump, dump)
+		if e != nil {
+			return e
+		}
+		if !equal {
 			return errors.New("restored Redis history mismatch")
 		}
 		count++

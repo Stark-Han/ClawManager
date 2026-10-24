@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,36 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 		source.Objects.RemoveBucket(context.Background(), targetBucket)
 	})
 	restoreTarget := DataRestoreTarget{MySQL: target, Verifier: verifier, Database: targetName, Redis: redisTarget, Objects: source.Objects, BucketMapping: map[string]string{sourceObjects.Bucket: targetBucket}, Directory: workspaceTarget, Control: control}
+	// Exercise the production writer/reader separation during restoration,
+	// rather than discovering permission errors only in the final verifier.
+	password, _ := RandomID("")
+	for _, role := range []string{"writer", "reader"} {
+		for _, line := range strings.Split(teamDataRedisConfig(teamDataRedis{writer: password, reader: password}, run), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 || fields[0] != "user" || fields[1] != role {
+				continue
+			}
+			user := run + "_" + role
+			args := [][]byte{[]byte("ACL"), []byte("SETUSER"), []byte(user)}
+			for _, field := range fields[2:] {
+				args = append(args, []byte(field))
+			}
+			if _, err := redisTarget.command(ctx, args...); err != nil {
+				t.Fatal(err)
+			}
+			defer redisTarget.command(context.Background(), []byte("ACL"), []byte("DELUSER"), []byte(user))
+			client, err := ConnectRedis(ctx, RedisOptions{Database: redisFixtureDatabase(t), Address: "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT"), Username: user, Password: password, MaxReplyBytes: 64 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if role == "writer" {
+				restoreTarget.Redis = client
+			} else {
+				restoreTarget.RedisVerifier = client
+			}
+		}
+	}
 	var report DataRestoreReport
 	if exe := os.Getenv("TEST_SYSTEM_BACKUP_VERIFY_EXE"); exe != "" {
 		report = runRestoreCLI(t, ctx, exe, external, recovered, wrapper, pub, run, restoreTarget, verifierDSN)
@@ -214,7 +245,9 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 	if _, e = RestorePublishedData(ctx, external, recovered, wrapper, run, restoreTarget, budget); e == nil {
 		t.Fatal("restore retry overwrote owned targets")
 	}
-	verifyRestoredWithReadOnlyAccounts(t, ctx, external, recovered, wrapper, pub, report, restoreTarget, verifierDSN, budget)
+	verifyTarget := restoreTarget
+	verifyTarget.Redis = redisTarget // Fixture admin provisions a separate verifier ACL.
+	verifyRestoredWithReadOnlyAccounts(t, ctx, external, recovered, wrapper, pub, report, verifyTarget, verifierDSN, budget)
 	expectedPurpose := "functional_test"
 	if teamData {
 		expectedPurpose = "team_data"

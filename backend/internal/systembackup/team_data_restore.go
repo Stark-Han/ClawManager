@@ -247,7 +247,7 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 	if err = s.phase(ctx, j, "restoring_data"); err != nil {
 		return report, err
 	}
-	restored, e := RestorePublishedData(ctx, s.store, artifact, s.wrapper, j.ID, DataRestoreTarget{MySQL: writer, Verifier: reader, Database: teamDataDatabase(j.ID), Redis: redisWriter, Objects: s.objects, BucketMapping: mapping, Directory: directory, Control: Store{DB: s.db, InstallationID: s.cfg.InstallationID}}, CaptureBudget{s.cfg.MaxBytes, s.cfg.MaxItems})
+	restored, e := RestorePublishedData(ctx, s.store, artifact, s.wrapper, j.ID, DataRestoreTarget{MySQL: writer, Verifier: reader, Database: teamDataDatabase(j.ID), Redis: redisWriter, RedisVerifier: redisReader, Objects: s.objects, BucketMapping: mapping, Directory: directory, Control: Store{DB: s.db, InstallationID: s.cfg.InstallationID}}, CaptureBudget{s.cfg.MaxBytes, s.cfg.MaxItems})
 	report.Restore = &restored
 	if e != nil {
 		return report, e
