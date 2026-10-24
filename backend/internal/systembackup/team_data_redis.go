@@ -25,6 +25,11 @@ var teamDataPolicyGVR = schema.GroupVersionResource{Group: "networking.k8s.io", 
 
 type teamDataRedis struct{ address, admin, writer, reader string }
 
+func teamDataRedisConfig(r teamDataRedis, id string) string {
+	prefix := "cm:restore-history:" + id + ":*"
+	return fmt.Sprintf("bind 0.0.0.0\nport 6379\nprotected-mode yes\nsave \"\"\nappendonly no\ndatabases 1\nuser default off\nuser admin on >%s ~* +@all\nuser writer on >%s ~%s +select +restore +dbsize +info +ping\nuser reader on >%s ~%s +select +dump +type +pttl +dbsize +info +ping +eval_ro\n", r.admin, r.writer, prefix, r.reader, prefix)
+}
+
 func teamDataRedisName(id string) string { return "team-data-redis-" + id[4:24] }
 func teamDataLabels(id string) map[string]string {
 	return map[string]string{"app": teamDataRedisName(id), "clawmanager.io/team-data-run": id}
@@ -41,8 +46,7 @@ func (s *TeamDataService) createTeamRedis(ctx context.Context, j TeamDataJob) (t
 		}
 		*dst = v
 	}
-	prefix := "cm:restore-history:" + j.ID + ":*"
-	conf := fmt.Sprintf("bind 0.0.0.0\nport 6379\nprotected-mode yes\nsave \"\"\nappendonly no\ndatabases 1\nuser default off\nuser admin on >%s ~* +@all\nuser writer on >%s ~%s +restore +dbsize +info +ping\nuser reader on >%s ~%s +dump +type +pttl +dbsize +info +ping +eval_ro\n", out.admin, out.writer, prefix, out.reader, prefix)
+	conf := teamDataRedisConfig(out, j.ID)
 	secret := &corev1.Secret{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}, ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.cfg.Namespace, Labels: labels}, Data: map[string][]byte{"redis.conf": []byte(conf), "admin": []byte(out.admin), "writer": []byte(out.writer), "reader": []byte(out.reader)}}
 	if e := s.createTeamDataObject(ctx, teamDataSecretGVR, j.ID, secret); e != nil {
 		return out, e

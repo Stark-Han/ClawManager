@@ -64,6 +64,9 @@ func TestSixRealSourcesPublishAndDataOnlyRestore(t *testing.T) {
 		t.Fatal(e)
 	}
 	redisKey, _ := RandomID("pipeline_")
+	if teamData {
+		redisKey = "claw:team:901:backup:" + redisKey
+	}
 	key := []byte(redisKey)
 	if _, e := source.Redis.command(ctx, []byte("SET"), key, payload); e != nil {
 		t.Fatal(e)

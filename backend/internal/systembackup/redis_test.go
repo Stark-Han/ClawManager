@@ -20,6 +20,50 @@ func TestRESPRejectsUnboundedMalformedAndNestedReplies(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisPermissionErrorRetainsOnlySafeCode(t *testing.T) {
+	b := int64(1024)
+	_, e := readRedisReply(bufio.NewReader(strings.NewReader("-NOPERM private-key-and-command-detail\r\n")), &b, 0)
+	if e == nil || !strings.Contains(e.Error(), "NOPERM") || strings.Contains(e.Error(), "private-key") {
+		t.Fatal("permission result unavailable or detail leaked", e)
+	}
+}
+
+func TestTeamDataRedisACLAllowsConnectionAndReadOnlyVerification(t *testing.T) {
+	c := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_PORT")
+	id, _ := RandomID("sdr_")
+	password, _ := RandomID("")
+	r := teamDataRedis{admin: password, writer: password, reader: password}
+	ctx := context.Background()
+	for _, line := range strings.Split(teamDataRedisConfig(r, id), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[0] != "user" || (fields[1] != "writer" && fields[1] != "reader") {
+			continue
+		}
+		role := fields[1]
+		user := "test_" + id[4:16] + role
+		args := [][]byte{[]byte("ACL"), []byte("SETUSER"), []byte(user)}
+		for _, f := range fields[2:] {
+			args = append(args, []byte(f))
+		}
+		if _, e := c.command(ctx, args...); e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(func() { _, _ = c.command(context.Background(), []byte("ACL"), []byte("DELUSER"), []byte(user)) })
+		client, e := ConnectRedis(ctx, RedisOptions{Address: "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_REDIS_PORT"), Username: user, Password: password, MaxReplyBytes: 1 << 20})
+		if e != nil {
+			t.Errorf("%s cannot connect with generated ACL: %v", role, e)
+			continue
+		}
+		if role == "reader" {
+			_, e = client.command(ctx, []byte("SET"), []byte("cm:restore-history:"+id+":probe"), []byte("must not write"))
+			if e == nil || !strings.Contains(e.Error(), "NOPERM") {
+				t.Error("read-only proof failed", e)
+			}
+		}
+		client.Close()
+	}
+}
 func redisFixtureDatabase(t *testing.T) int {
 	t.Helper()
 	raw := os.Getenv("TEST_SYSTEM_BACKUP_REDIS_DATABASE")

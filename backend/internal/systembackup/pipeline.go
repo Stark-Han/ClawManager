@@ -123,6 +123,9 @@ func captureAdapters(source CaptureSources, b CaptureBudget, tables []string) []
 			return e
 		}},
 		{"redis", func(ctx context.Context, w io.Writer) error {
+			if source.TeamDataOnly {
+				return CaptureTeamDataRedisLogical(ctx, source.Redis, w, RedisBudget{MaxBytes: b.MaxBytes, MaxItems: b.MaxItems, MaxInventoryBytes: min(b.MaxBytes/8, 64<<20)})
+			}
 			return CaptureRedisLogical(ctx, source.Redis, w, RedisBudget{MaxBytes: b.MaxBytes, MaxItems: b.MaxItems, MaxInventoryBytes: min(b.MaxBytes/8, 64<<20)})
 		}},
 		{"object_storage", func(ctx context.Context, w io.Writer) error {

@@ -35,6 +35,35 @@ func TestTeamDataWorkerStartsWithInstallationMutex(t *testing.T) {
 	}
 }
 
+func TestTeamDataRedisDoesNotCaptureGlobalRuntimeEventStream(t *testing.T) {
+	c := redisFixture(t, "TEST_SYSTEM_BACKUP_REDIS_PORT")
+	ctx := context.Background()
+	id, _ := RandomID("test_")
+	keys := []string{"claw:team:123:backup-test:" + id, "backup-global-runtime:" + id}
+	for _, key := range keys {
+		if _, e := c.command(ctx, []byte("SET"), []byte(key), []byte("retained history")); e != nil {
+			t.Fatal(e)
+		}
+	}
+	t.Cleanup(func() {
+		for _, key := range keys {
+			_, _ = c.command(context.Background(), []byte("DEL"), []byte(key))
+		}
+	})
+	var archive bytes.Buffer
+	b := RedisBudget{MaxItems: 100, MaxBytes: 1 << 20, MaxInventoryBytes: 1 << 20}
+	if e := CaptureTeamDataRedisLogical(ctx, c, &archive, b); e != nil {
+		t.Fatal(e)
+	}
+	var names []string
+	if e := ReadRedisSnapshot(bytes.NewReader(archive.Bytes()), b, func(r RedisRecord) error { names = append(names, string(r.Key)); return nil }); e != nil {
+		t.Fatal(e)
+	}
+	if len(names) != 1 || names[0] != keys[0] {
+		t.Fatal("Team backup included unrelated runtime stream/cache", names)
+	}
+}
+
 func TestTeamDataJobsIdempotencyBusyAndPendingCancel(t *testing.T) {
 	s := teamDataJobFixture(t)
 	ctx := context.Background()

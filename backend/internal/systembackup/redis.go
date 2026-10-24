@@ -120,7 +120,10 @@ func readRedisReply(r *bufio.Reader, budget *int64, depth int) (any, error) {
 		return nil, errors.New("Redis reply budget exceeded")
 	}
 	line, e := r.ReadSlice('\n')
-	if e != nil || len(line) < 3 || len(line) > 4096 || line[len(line)-2] != '\r' {
+	if e != nil {
+		return nil, fmt.Errorf("Redis reply read failed: %w", e)
+	}
+	if len(line) < 3 || len(line) > 4096 || line[len(line)-2] != '\r' {
 		return nil, errors.New("invalid Redis reply")
 	}
 	*budget -= int64(len(line))
@@ -133,6 +136,11 @@ func readRedisReply(r *bufio.Reader, budget *int64, depth int) (any, error) {
 	case '+':
 		return []byte(value), nil
 	case '-':
+		code := strings.SplitN(value, " ", 2)[0]
+		switch code {
+		case "NOPERM", "NOAUTH", "WRONGPASS", "BUSYKEY":
+			return nil, fmt.Errorf("Redis command rejected: %s", code)
+		}
 		return nil, errors.New("Redis command rejected")
 	case ':':
 		n, e := strconv.ParseInt(value, 10, 64)
@@ -205,6 +213,15 @@ func (b RedisBudget) validate() error {
 // expirations using Redis DUMP. It is not itself a cross-source checkpoint: the
 // caller must hold the proven writer barrier and account for expiring keys.
 func CaptureRedisLogical(ctx context.Context, c *RedisClient, w io.Writer, b RedisBudget) error {
+	return captureRedisLogical(ctx, c, w, b, false)
+}
+
+// Team data excludes the global runtime-event log and unrelated caches. A key
+// that expires before its atomic read is absent at that observation time.
+func CaptureTeamDataRedisLogical(ctx context.Context, c *RedisClient, w io.Writer, b RedisBudget) error {
+	return captureRedisLogical(ctx, c, w, b, true)
+}
+func captureRedisLogical(ctx context.Context, c *RedisClient, w io.Writer, b RedisBudget, teamData bool) error {
 	if e := b.validate(); e != nil {
 		return e
 	}
@@ -217,9 +234,13 @@ func CaptureRedisLogical(ctx context.Context, c *RedisClient, w io.Writer, b Red
 	var inventory int64
 	cursor := "0"
 	for {
-		reply, e := c.command(ctx, []byte("SCAN"), []byte(cursor), []byte("COUNT"), []byte("500"))
+		args := [][]byte{[]byte("SCAN"), []byte(cursor), []byte("COUNT"), []byte("500")}
+		if teamData {
+			args = append(args, []byte("MATCH"), []byte("claw:team:*"))
+		}
+		reply, e := c.command(ctx, args...)
 		if e != nil {
-			return e
+			return fmt.Errorf("Redis SCAN failed: %w", e)
 		}
 		parts, ok := reply.([]any)
 		if !ok || len(parts) != 2 {
@@ -273,9 +294,12 @@ func CaptureRedisLogical(ctx context.Context, c *RedisClient, w io.Writer, b Red
 	for _, key := range keys {
 		reply, e := c.command(ctx, []byte("EVAL_RO"), script, []byte("1"), key)
 		if e != nil {
-			return e
+			return fmt.Errorf("Redis key capture failed: %w", e)
 		}
 		values, ok := reply.([]any)
+		if teamData && ok && len(values) == 0 {
+			continue
+		}
 		if !ok || len(values) != 5 {
 			return errors.New("Redis inventory changed during capture")
 		}
@@ -438,7 +462,7 @@ func RestoreRedisHistory(ctx context.Context, c *RedisClient, r io.Reader, b Red
 func redisServerID(ctx context.Context, c *RedisClient) (string, error) {
 	reply, e := c.command(ctx, []byte("INFO"), []byte("server"))
 	if e != nil {
-		return "", e
+		return "", fmt.Errorf("Redis identity failed: %w", e)
 	}
 	raw, ok := reply.([]byte)
 	if !ok {
