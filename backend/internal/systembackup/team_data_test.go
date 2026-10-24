@@ -35,6 +35,13 @@ func teamDataJobFixture(t *testing.T) *TeamDataService {
 			}
 		}
 	}
+	raw, e = os.ReadFile("../db/migrations/095_add_team_data_provisioning_receipts.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec(string(raw)); e != nil {
+		t.Fatal(e)
+	}
 	return &TeamDataService{db: db, configHash: strings.Repeat("a", 64), owner: "test-worker"}
 }
 

@@ -31,27 +31,21 @@ func (s *TeamDataService) restoreDatabase(ctx context.Context, id string) (*sql.
 
 func (s *TeamDataService) createRestoreSQL(ctx context.Context, j TeamDataJob, artifact PublishedArtifact) (writer, reader *sql.DB, err error) {
 	database := teamDataDatabase(j.ID)
-	if !restoreDatabasePattern.MatchString(database) {
-		return nil, nil, errors.New("validation_failed")
-	}
-	if _, err = s.admin.ExecContext(ctx, "CREATE DATABASE `"+database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"); err != nil {
-		return nil, nil, err
-	}
-	admin, err := s.restoreDatabase(ctx, j.ID)
+	admin, err := s.prepareRestoreDatabase(ctx, j, func(ctx context.Context, admin *sql.DB) error {
+		if e := appdb.PrepareIsolatedRestoreSchema(ctx, admin); e != nil {
+			return e
+		}
+		if e := ConsumePublishedPart(ctx, s.store, artifact, "mysql", s.wrapper, s.cfg.MaxBytes, func(r io.Reader) error { return alignTeamDataRestoreSchema(ctx, admin, r) }); e != nil {
+			return e
+		}
+		// Retain the target marker for older copies and independent inspection.
+		_, e := admin.ExecContext(ctx, "INSERT INTO system_team_data_backup_jobs(public_id,operation,source_backup_id,actor_id,idempotency_key,request_hash,config_hash,status) VALUES(?,'restore',?,1,'resource-owner',?,?,'cleaned')", j.ID, j.SourceID, s.configHash, s.configHash)
+		return e
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 	defer admin.Close()
-	if err = appdb.PrepareIsolatedRestoreSchema(ctx, admin); err != nil {
-		return nil, nil, err
-	}
-	if err = ConsumePublishedPart(ctx, s.store, artifact, "mysql", s.wrapper, s.cfg.MaxBytes, func(r io.Reader) error { return alignTeamDataRestoreSchema(ctx, admin, r) }); err != nil {
-		return nil, nil, err
-	}
-	// The marker is control data and never part of a business SQL restore.
-	if _, err = admin.ExecContext(ctx, "INSERT INTO system_team_data_backup_jobs(public_id,operation,source_backup_id,actor_id,idempotency_key,request_hash,config_hash,status) VALUES(?,'restore',?,1,'resource-owner',?,?,'cleaned')", j.ID, j.SourceID, s.configHash, s.configHash); err != nil {
-		return nil, nil, err
-	}
 	writePassword, e := RandomID("")
 	if e != nil {
 		return nil, nil, e
@@ -239,7 +233,7 @@ func (s *TeamDataService) restore(ctx context.Context, j TeamDataJob) (report Te
 		return report, err
 	}
 	bucket := teamDataBucket(j.ID)
-	if err = s.objects.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+	if err = s.createRestoreBucket(ctx, j); err != nil {
 		return report, err
 	}
 	ownerTag, e := tags.NewTags(map[string]string{"clawmanager-team-data-run": j.ID}, false)
@@ -322,7 +316,13 @@ func (s *TeamDataService) cleanup(ctx context.Context, id string) error {
 	if e != nil {
 		return e
 	}
-	if (j.Operation != "restore" && j.Operation != "verify") || j.ConfigHash != s.configHash || (j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled") {
+	if (j.Operation != "restore" && j.Operation != "verify") || j.ConfigHash != s.configHash {
+		return errors.New("state_conflict")
+	}
+	if j.Status == "cleaned" {
+		return nil
+	}
+	if j.Status != "succeeded" && j.Status != "failed" && j.Status != "canceled" {
 		return errors.New("state_conflict")
 	}
 	if j.Operation == "verify" {
@@ -352,7 +352,17 @@ func (s *TeamDataService) cleanup(ctx context.Context, id string) error {
 		e = d.QueryRowContext(ctx, "SELECT COUNT(*) FROM system_team_data_backup_jobs WHERE public_id=? AND config_hash=?", id, s.configHash).Scan(&owned)
 		d.Close()
 		if e != nil || owned != 1 {
-			return errors.New("restore database ownership not proven")
+			var server string
+			if e = s.admin.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&server); e != nil {
+				return e
+			}
+			proven, e := s.provisionOwned(ctx, j, "database", database, server)
+			if e != nil {
+				return e
+			}
+			if !proven {
+				return errors.New("restore_ownership_unproven")
+			}
 		}
 		if e = s.revokeSQLWriter(ctx, id); e != nil {
 			return e
@@ -370,7 +380,13 @@ func (s *TeamDataService) cleanup(ctx context.Context, id string) error {
 	} else if ok {
 		t, e := s.objects.GetBucketTagging(ctx, bucket)
 		if e != nil || t.ToMap()["clawmanager-team-data-run"] != id {
-			return errors.New("restore bucket ownership not proven")
+			proven, e := s.provisionOwned(ctx, j, "bucket", bucket, "")
+			if e != nil {
+				return e
+			}
+			if !proven {
+				return errors.New("restore_ownership_unproven")
+			}
 		}
 		for object := range s.objects.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true, WithVersions: true}) {
 			if object.Err != nil {

@@ -18,6 +18,7 @@ export default function TeamDataBackupsPage(){
  const text=(a:string,b:string)=>zh?a:b;const label=(v:string)=>zh?zhLabels[v]??v:v.replaceAll('_',' ');
  const failure=(code:string)=>{
   const messages:Record<string,[string,string]>={feature_disabled:['新备份操作已关闭，历史查询与清理仍可使用。','New work is disabled. History and cleanup remain available.'],process_interrupted:['执行因服务重启而中断；不会自动重跑，可清理副本后重试。','Interrupted by a service restart. Clean up the copy before retrying.'],deadline_exceeded:['操作超时；已有备份保留，可查看结果并清理副本。','Operation timed out. Existing backups are preserved. Review results and clean up the copy.'],artifact_unavailable:['无法访问备份存储，请检查连接和访问权限。','Backup storage is unavailable. Check connectivity and access.'],encryption_key_unavailable:['无法读取解密密钥，请检查服务器配置。','The decryption key is unavailable. Check server configuration.'],conflict_active_job:['已有操作正在执行，请等待完成。','Another operation is active. Wait for completion.'],canceled_by_actor:['操作已取消，已有备份保留。','Operation canceled. Existing backups are preserved.']};
+  if(code==='restore_ownership_unproven')return text('副本资源归属未确认，已停止自动删除。请管理员按作业编号核对创建记录和目标资源；确认前不要删除或重新使用这些资源。','Copy ownership is unconfirmed; automatic deletion stopped. Ask an administrator to inspect the job creation records and target resources before deleting or reusing them.');
   const pair=messages[code];return pair?text(...pair):text('操作未完成，请检查存储、权限和可用空间；可下载报告查看详情。','Operation failed. Check storage, permissions and available space. Download the report for details.');
  };
  const date=(v?:string)=>v?new Date(v).toLocaleString(): '—';

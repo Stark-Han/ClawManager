@@ -188,6 +188,8 @@ func teamDataFailure(err error) string {
 		return "cluster_resource_missing"
 	}
 	switch err.Error() {
+	case "restore_ownership_unproven":
+		return "restore_ownership_unproven"
 	case "unsupported_schema":
 		return "schema_changed"
 	case "source object changed":
