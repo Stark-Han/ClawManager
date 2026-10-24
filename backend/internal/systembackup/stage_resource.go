@@ -14,13 +14,14 @@ import (
 var stageResourceIDPattern = regexp.MustCompile(`^srs_[a-f0-9]{32}$`)
 
 type StageVolumeRequest struct {
-	Phase         string `json:"phase"`
-	Namespace     string `json:"namespace"`
-	NamespaceUID  string `json:"namespace_uid"`
-	NodeName      string `json:"node_name"`
-	HostRoot      string `json:"host_root"`
-	StorageClass  string `json:"storage_class"`
-	CapacityBytes int64  `json:"capacity_bytes"`
+	Phase              string `json:"phase"`
+	Namespace          string `json:"namespace"`
+	NamespaceUID       string `json:"namespace_uid"`
+	SourceNamespaceUID string `json:"source_namespace_uid,omitempty"`
+	NodeName           string `json:"node_name"`
+	HostRoot           string `json:"host_root"`
+	StorageClass       string `json:"storage_class"`
+	CapacityBytes      int64  `json:"capacity_bytes"`
 }
 type StageVolume struct {
 	ID, TaskID, State, Hash     string
@@ -30,10 +31,27 @@ type StageVolume struct {
 }
 
 func (r StageVolumeRequest) Validate() error {
-	if r.Phase != "capture" && r.Phase != "secret_capture" || r.Namespace == "" || len(validation.IsDNS1123Subdomain(r.Namespace)) != 0 || !refPattern.MatchString(r.NamespaceUID) || r.NodeName == "" || len(validation.IsDNS1123Subdomain(r.NodeName)) != 0 || !path.IsAbs(r.HostRoot) || path.Clean(r.HostRoot) != r.HostRoot || r.HostRoot == "/" || strings.ContainsAny(r.HostRoot, "\\:\x00") || r.StorageClass == "" || len(validation.IsDNS1123Subdomain(r.StorageClass)) != 0 || r.CapacityBytes < 1<<20 || r.CapacityBytes > 1<<40 {
+	if r.Phase == "restore" {
+		if !refPattern.MatchString(r.SourceNamespaceUID) || r.SourceNamespaceUID == r.NamespaceUID {
+			return errors.New("isolation_invalid")
+		}
+	} else if r.SourceNamespaceUID != "" {
+		return errors.New("validation_failed")
+	}
+	if r.Phase != "capture" && r.Phase != "secret_capture" && r.Phase != "restore" || r.Namespace == "" || len(validation.IsDNS1123Subdomain(r.Namespace)) != 0 || !refPattern.MatchString(r.NamespaceUID) || r.NodeName == "" || len(validation.IsDNS1123Subdomain(r.NodeName)) != 0 || !path.IsAbs(r.HostRoot) || path.Clean(r.HostRoot) != r.HostRoot || r.HostRoot == "/" || strings.ContainsAny(r.HostRoot, "\\:\x00") || r.StorageClass == "" || len(validation.IsDNS1123Subdomain(r.StorageClass)) != 0 || r.CapacityBytes < 1<<20 || r.CapacityBytes > 1<<40 {
 		return errors.New("validation_failed")
 	}
 	return nil
+}
+
+func stagePreparing(t Task, phase string) bool {
+	return t.Type == Backup && phase != "restore" && t.Status == "preparing" || t.Type == Drill && phase == "restore" && t.Status == "provisioning"
+}
+func (s Store) beginStageMutation(ctx context.Context, l Leadership, t Task, phase string) (*sql.Tx, Task, error) {
+	if phase == "restore" {
+		return s.beginDrillMutation(ctx, l, t)
+	}
+	return s.beginCaptureMutation(ctx, l, t)
 }
 func (v StageVolume) Name() string     { return "backup-stage-" + strings.TrimPrefix(v.ID, "srs_") }
 func (v StageVolume) HostPath() string { return path.Join(v.Request.HostRoot, v.ID) }
@@ -60,7 +78,7 @@ func (s Store) StageVolume(ctx context.Context, taskID, phase string) (StageVolu
 }
 
 func (s Store) withStageDirectoryFence(ctx context.Context, l Leadership, t Task, v StageVolume, fn func() error) error {
-	tx, x, err := s.beginCaptureMutation(ctx, l, t)
+	tx, x, err := s.beginStageMutation(ctx, l, t, v.Request.Phase)
 	if err != nil {
 		return err
 	}
@@ -69,7 +87,7 @@ func (s Store) withStageDirectoryFence(ctx context.Context, l Leadership, t Task
 	if err != nil {
 		return err
 	}
-	if x.Status != "preparing" || actual.Hash != v.Hash || actual.State != "prepared" && actual.State != "ready" {
+	if !stagePreparing(x, v.Request.Phase) || actual.Hash != v.Hash || actual.State != "prepared" && actual.State != "ready" {
 		return errors.New("state_conflict")
 	}
 	if err = fn(); err != nil {
@@ -82,7 +100,7 @@ func (s Store) PrepareStageVolume(ctx context.Context, l Leadership, t Task, r S
 	if r.Validate() != nil {
 		return zero, errors.New("validation_failed")
 	}
-	tx, x, err := s.beginCaptureMutation(ctx, l, t)
+	tx, x, err := s.beginStageMutation(ctx, l, t, r.Phase)
 	if err != nil {
 		return zero, err
 	}
@@ -101,7 +119,7 @@ func (s Store) PrepareStageVolume(ctx context.Context, l Leadership, t Task, r S
 	if !errors.Is(err, sql.ErrNoRows) {
 		return zero, err
 	}
-	if x.Status != "preparing" || x.CommitStarted {
+	if !stagePreparing(x, r.Phase) || x.CommitStarted {
 		return zero, errors.New("state_conflict")
 	}
 	var valid bool
@@ -129,7 +147,7 @@ func (s Store) PrepareStageVolume(ctx context.Context, l Leadership, t Task, r S
 }
 
 func (s Store) updateStageVolume(ctx context.Context, l Leadership, t Task, v StageVolume, action, uid string) error {
-	tx, _, err := s.beginCaptureMutation(ctx, l, t)
+	tx, _, err := s.beginStageMutation(ctx, l, t, v.Request.Phase)
 	if err != nil {
 		return err
 	}
