@@ -159,3 +159,76 @@ func TestStageResourcesAdoptOriginalUIDsAndWaitForUnmountBeforeCleanup(t *testin
 		}
 	}
 }
+
+func TestStageUnknownCreatesAreNeitherRepeatedNorCleanedUsingStaleState(t *testing.T) {
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		t.Skip("single-node directory provider requires Unix root")
+	}
+	for _, resource := range []string{"persistentvolumeclaims", "persistentvolumes"} {
+		for _, scenario := range []string{"retry", "cleanup"} {
+			t.Run(resource+"/"+scenario, func(t *testing.T) {
+				ctx := context.Background()
+				s := Store{controlDB(t), "unknown-stage-create"}
+				if err := s.Bootstrap(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.SaveConfig(ctx, 0, 1, testConfig(), permitConfig); err != nil {
+					t.Fatal(err)
+				}
+				l, err := s.AcquireLeadership(ctx, "unknown-stage-controller", time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				x, _, err := s.Create(ctx, 1, "unknown-stage-0001", CreateTaskRequest{Type: Backup, Purpose: "functional_test"}, permitTask)
+				if err != nil {
+					t.Fatal(err)
+				}
+				x, err = s.ClaimLedTask(ctx, l, x.ID, x.Version, time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				x, err = s.Advance(ctx, x, l.Owner, "preparing", "none")
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := StageVolumeRequest{Phase: "capture", Namespace: "owned-stage", NamespaceUID: "owned-namespace", NodeName: "owned-node", HostRoot: "/owned/stage", StorageClass: "manual", CapacityBytes: 8 << 20}
+				v, err := s.PrepareStageVolume(ctx, l, x, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.Namespace, UID: types.UID(r.NamespaceUID)}})
+				client.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+					p := action.(k8stesting.CreateAction).GetObject().(*corev1.PersistentVolumeClaim)
+					p.UID = "original-pvc"
+					p.Status.Phase = corev1.ClaimBound
+					return false, nil, nil
+				})
+				creates := 0
+				client.PrependReactor("create", resource, func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+					creates++
+					return true, nil, errors.New("create response unavailable")
+				})
+				d := LocalStageVolumes{Client: client, MountDirectory: t.TempDir()}
+				if _, _, err = d.Ensure(ctx, s, l, x, v); err == nil {
+					t.Fatal("fixture did not lose Create response")
+				}
+				if scenario == "retry" {
+					if _, _, err = d.Ensure(ctx, s, l, x, v); err == nil {
+						t.Fatal("unknown create was considered safe")
+					}
+				}
+				if creates != 1 {
+					t.Fatal("stale resource state repeated unknown Create", creates)
+				}
+				for i := 0; i < 2; i++ {
+					if done, err := d.Cleanup(ctx, s, l, x, v); err != nil || done {
+						t.Fatal("stale unsent flag claimed unknown resource cleanup", done, err)
+					}
+				}
+				if _, err = os.Stat(filepath.Join(d.MountDirectory, v.ID)); err != nil {
+					t.Fatal("unknown resource ownership directory removed", err)
+				}
+			})
+		}
+	}
+}

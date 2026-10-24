@@ -148,6 +148,9 @@ func (s Store) updateStageVolume(ctx context.Context, l Leadership, t Task, v St
 		if actual.State != "prepared" {
 			return errors.New("state_conflict")
 		}
+		if action == "pvc_sent" && actual.PVCCreateSent || action == "pv_sent" && actual.PVCreateSent {
+			return unknownBackupExecution(errors.New("artifact_unavailable"))
+		}
 		column := "pvc_create_sent"
 		if action == "pv_sent" {
 			column = "pv_create_sent"

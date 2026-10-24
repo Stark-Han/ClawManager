@@ -67,6 +67,14 @@ func (d LocalStageVolumes) namespace(ctx context.Context, v StageVolume) error {
 	return nil
 }
 func (d LocalStageVolumes) Ensure(ctx context.Context, s Store, l Leadership, t Task, v StageVolume) (StageVolume, bool, error) {
+	actual, err := s.StageVolume(ctx, t.ID, v.Request.Phase)
+	if err != nil {
+		return v, false, err
+	}
+	if actual.ID != v.ID || actual.Hash != v.Hash {
+		return v, false, errors.New("artifact_conflict")
+	}
+	v = actual
 	if err := d.namespace(ctx, v); err != nil {
 		return v, false, err
 	}
@@ -84,6 +92,9 @@ func (d LocalStageVolumes) Ensure(ctx context.Context, s Store, l Leadership, t 
 		pvc, err = d.Client.CoreV1().PersistentVolumeClaims(v.Request.Namespace).Create(ctx, stagePVC(v), metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			pvc, err = d.Client.CoreV1().PersistentVolumeClaims(v.Request.Namespace).Get(ctx, v.Name(), metav1.GetOptions{})
+		}
+		if err != nil {
+			return v, false, unknownBackupExecution(err)
 		}
 	}
 	if err != nil {
@@ -106,6 +117,9 @@ func (d LocalStageVolumes) Ensure(ctx context.Context, s Store, l Leadership, t 
 		pv, err = d.Client.CoreV1().PersistentVolumes().Create(ctx, stagePV(v), metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			pv, err = d.Client.CoreV1().PersistentVolumes().Get(ctx, v.Name(), metav1.GetOptions{})
+		}
+		if err != nil {
+			return v, false, unknownBackupExecution(err)
 		}
 	}
 	if err != nil {
@@ -131,6 +145,14 @@ func (d LocalStageVolumes) Ensure(ctx context.Context, s Store, l Leadership, t 
 }
 
 func (d LocalStageVolumes) Cleanup(ctx context.Context, s Store, l Leadership, t Task, v StageVolume) (bool, error) {
+	actual, err := s.StageVolume(ctx, t.ID, v.Request.Phase)
+	if err != nil {
+		return false, err
+	}
+	if actual.ID != v.ID || actual.Hash != v.Hash {
+		return false, errors.New("artifact_conflict")
+	}
+	v = actual
 	if err := d.namespace(ctx, v); err != nil {
 		return false, err
 	}
