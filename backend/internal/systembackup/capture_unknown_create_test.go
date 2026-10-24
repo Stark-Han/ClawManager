@@ -48,8 +48,9 @@ func TestUnknownCaptureCreateNeverStartsAnotherSourceRead(t *testing.T) {
 	if err := c.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Tick(ctx); err == nil || !jobs.lost {
-		t.Fatal("fixture did not lose create response", err)
+	_ = c.Tick(ctx)
+	if !jobs.lost {
+		t.Fatal("fixture did not lose create response")
 	}
 	_ = c.Tick(ctx)
 	if jobs.created != 1 {
@@ -117,5 +118,49 @@ func TestLegacyUnboundCaptureAttemptKeepsUnknownSendAfterMigration(t *testing.T)
 	_, err = s.ensureBackupExecution(ctx, l, task, a, func(step context.Context) (*batchv1.Job, error) { return jobs.Ensure(step, a, "", true) }, func(step context.Context) (*batchv1.Job, error) { return jobs.Existing(step, a) }, func(step context.Context, job *batchv1.Job) error { return s.BindCaptureJob(step, l, task, a, job) })
 	if err == nil || jobs.created != 0 {
 		t.Fatal("upgrade restarted an unknown legacy source read", jobs.created, err)
+	}
+}
+
+func TestUnknownCaptureDoesNotStopOtherTasksFromCanceling(t *testing.T) {
+	ctx := context.Background()
+	s := Store{controlDB(t), "unknown-capture-poll"}
+	if err := s.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveConfig(ctx, 0, 1, testConfig(), permitConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHealth(ctx, 1, "writer_registry", "healthy", "none", strings.Repeat("a", 64), 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Gate{s.DB}).EnsureScope(ctx, "installation"); err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := s.Create(ctx, 1, "unknown-poll-backup-0001", CreateTaskRequest{Type: Backup, Purpose: "functional_test"}, permitTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := &disappearedCaptureCreate{fixtureCaptureJobs: &fixtureCaptureJobs{s: s, jobs: map[string]*batchv1.Job{}}}
+	c := Controller{Store: s, Owner: "unknown-poll-controller", Capturer: &CaptureTaskRunner{Jobs: jobs, Resources: &fixtureCaptureResources{scope: "installation"}, Publisher: &fixtureCapturePublisher{}}}
+	if err = c.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := s.Create(ctx, 1, "unknown-poll-preflight-0001", CreateTaskRequest{Type: Preflight, Purpose: "functional_test", SourceID: source.ID}, permitTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Cancel(ctx, other.ID, other.Version, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Tick(ctx); err != nil {
+		t.Fatal("unknown job shut down controller polling", err)
+	}
+	actual, err := s.Get(ctx, other.ID)
+	if err != nil || actual.Status != "canceled" {
+		t.Fatal("one unknown Job starved another task's cancellation", actual, err)
+	}
+	backup, err := s.Get(ctx, source.ID)
+	if err != nil || backup.AttentionReason != "external_result_unknown" || backup.Terminal() {
+		t.Fatal("unknown execution was hidden or finalized", backup, err)
 	}
 }

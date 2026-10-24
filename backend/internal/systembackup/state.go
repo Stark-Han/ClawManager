@@ -98,6 +98,11 @@ func (t Task) Transition(next, failure string, now time.Time) (Task, error) {
 	if next != "failed" && next != "canceled" && failure != "none" {
 		return t, errors.New("invalid failure category for active state")
 	}
+	// Advancing requires new durable phase evidence. Do not clear attention
+	// merely because a caller proposed an invalid transition.
+	if i >= 0 && i+1 < len(path) && path[i+1] == next {
+		t.AttentionReason = ""
+	}
 	t.Status = next
 	if t.StartedAt == nil && next != "pending" && next != "canceling" && !t.Terminal() {
 		t.StartedAt = &now

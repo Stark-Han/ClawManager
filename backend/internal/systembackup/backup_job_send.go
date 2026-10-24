@@ -5,10 +5,35 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 )
+
+var errBackupExecutionUnknown = errors.New("external_result_unknown")
+
+func unknownBackupExecution(err error) error {
+	return fmt.Errorf("%w: %s", errBackupExecutionUnknown, PublicError(err))
+}
+
+func (s Store) awaitOriginalBackupExecution(ctx context.Context, l Leadership, t Task) error {
+	tx, x, err := s.beginCaptureMutation(ctx, l, t)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if x.AttentionReason == "external_result_unknown" {
+		return tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE system_backup_tasks SET attention_reason='external_result_unknown',row_version=row_version+1 WHERE public_id=?", x.ID); err != nil {
+		return err
+	}
+	if err = appendEvent(ctx, tx, x.ID, "diagnostic.job.awaiting_original", map[string]string{"reason": "external_result_unknown"}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 func backupSendState(phase, status string) bool {
 	switch phase {
@@ -106,7 +131,7 @@ func (s Store) ensureBackupExecution(ctx context.Context, l Leadership, t Task, 
 		job, err = create(step)
 		cancel()
 		if err != nil {
-			return b, err
+			return b, unknownBackupExecution(err)
 		}
 		if err = tx.Commit(); err != nil {
 			return b, err
@@ -114,7 +139,7 @@ func (s Store) ensureBackupExecution(ctx context.Context, l Leadership, t Task, 
 	} else {
 		job, err = existing(ctx)
 		if err != nil {
-			return b, err
+			return b, unknownBackupExecution(err)
 		}
 	}
 	if err = bind(ctx, job); err != nil {

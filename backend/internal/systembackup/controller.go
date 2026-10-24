@@ -239,6 +239,12 @@ func (c Controller) Tick(ctx context.Context) error {
 		}
 		if c.Capturer != nil && t.Type == Backup && !t.Terminal() {
 			if e = c.Capturer.Tick(ctx, c.Store, l, t, cfg); e != nil && !errors.Is(e, ErrFence) {
+				if errors.Is(e, errBackupExecutionUnknown) {
+					if e = c.Store.awaitOriginalBackupExecution(ctx, l, t); e != nil && !errors.Is(e, ErrFence) {
+						return e
+					}
+					continue
+				}
 				return e
 			}
 			continue
