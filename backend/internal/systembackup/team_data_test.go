@@ -3,10 +3,12 @@ package systembackup
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func teamDataJobFixture(t *testing.T) *TeamDataService {
@@ -20,6 +22,17 @@ func teamDataJobFixture(t *testing.T) *TeamDataService {
 		t.Fatal(e)
 	}
 	return &TeamDataService{db: db, configHash: strings.Repeat("a", 64), owner: "test-worker"}
+}
+
+func TestTeamDataWorkerStartsWithInstallationMutex(t *testing.T) {
+	s := teamDataJobFixture(t)
+	s.cfg.InstallationID = "fixture-installation"
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := s.runOwned(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatal("worker did not start and wait without panicking", err)
+	}
 }
 
 func TestTeamDataJobsIdempotencyBusyAndPendingCancel(t *testing.T) {

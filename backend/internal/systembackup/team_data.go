@@ -225,7 +225,11 @@ func NewTeamDataService(ctx context.Context, db *sql.DB, path string) (*TeamData
 		admin.Close()
 		return nil, errors.New("restore namespace is outside this installation")
 	}
-	configHash, _ := RequestHash(c)
+	configHash, hashErr := RequestHash(c)
+	if hashErr != nil {
+		admin.Close()
+		return nil, hashErr
+	}
 	owner, _ := RandomID("online_")
 	rc, e := rest.InClusterConfig()
 	if e != nil {

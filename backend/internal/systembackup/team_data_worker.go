@@ -38,7 +38,10 @@ func (s *TeamDataService) runOwned(ctx context.Context) error {
 	}
 	defer conn.Close()
 	var acquired sql.NullInt64
-	installationHash, _ := RequestHash(s.cfg.InstallationID)
+	installationHash, hashErr := RequestHash(map[string]string{"installation_id": s.cfg.InstallationID})
+	if hashErr != nil {
+		return hashErr
+	}
 	name := "team-data-" + installationHash[:40]
 	if e = conn.QueryRowContext(ctx, "SELECT GET_LOCK(?,0)", name).Scan(&acquired); e != nil {
 		return e
