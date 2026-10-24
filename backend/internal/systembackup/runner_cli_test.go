@@ -1,8 +1,10 @@
 package systembackup
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -40,14 +42,28 @@ func runRestoreCLI(t *testing.T, ctx context.Context, exe string, store Immutabl
 		return c.FormatDSN()
 	}
 	config := writeJSON("restore.json", map[string]any{"run_id": run, "mysql_dsn_file": write("target.dsn", []byte(dsn(target.Database))), "verifier_dsn_file": write("verify.dsn", []byte(verifierDSN)), "control_dsn_file": write("control.dsn", []byte(dsn(controlName))), "control_installation_id": target.Control.InstallationID, "redis": map[string]any{"address": "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT"), "database": redisFixtureDatabase(t), "secure": false, "credentials_file": writeJSON("redis.json", map[string]string{"username": "", "password": os.Getenv("TEST_SYSTEM_BACKUP_REDIS_PASSWORD")})}, "objects": map[string]any{"endpoint": "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_MINIO_PORT"), "secure": false, "credentials_file": credentials}, "bucket_mapping": target.BucketMapping, "directory": target.Directory})
-	cmd := exec.CommandContext(ctx, exe, "--operation", "restore", "--bootstrap", bootstrap, "--operation-config", config, "--origin", artifact.Manifest.Payload.OriginInstallationID, "--backup", artifact.Manifest.Payload.BackupID, "--max-bytes", "67108864", "--max-items", "10000", "--timeout", "2m")
+	aid, _ := RandomID("sat_")
+	binding := DataOperationBinding{Operation: "restore", RunID: run, AttemptID: aid, TargetUID: "isolated-fixture-target", Origin: artifact.Manifest.Payload.OriginInstallationID, BackupID: artifact.Manifest.Payload.BackupID, CommitSHA256: artifact.CommitReference.SHA256}
+	bindingRaw, _ := json.Marshal(binding)
+	termination := filepath.Join(dir, "termination.json")
+	cmd := exec.CommandContext(ctx, exe, "--operation", "restore", "--bootstrap", bootstrap, "--operation-config", config, "--origin", artifact.Manifest.Payload.OriginInstallationID, "--backup", artifact.Manifest.Payload.BackupID, "--max-bytes", "67108864", "--max-items", "10000", "--timeout", "2m", "--data-request", base64.RawURLEncoding.EncodeToString(bindingRaw), "--report-file", termination)
 	out, e := cmd.CombinedOutput()
 	if e != nil {
 		t.Fatalf("independent restore executable failed: %s (%v)", out, e)
 	}
+	var receipt DataOperationReceipt
+	saved, e := os.ReadFile(termination)
+	if e != nil || len(saved) > 4096 || !bytes.Equal(saved, out) || json.Unmarshal(out, &receipt) != nil || receipt.DataOperationBinding != binding || !receipt.IntegrityVerified || receipt.AcceptanceEligible {
+		t.Fatal("restore CLI bounded receipt invalid", e)
+	}
+	raw, e := os.ReadFile(filepath.Join(target.Directory, "restore-report.json"))
 	var report DataRestoreReport
-	if e = json.Unmarshal(out, &report); e != nil {
-		t.Fatal("restore CLI report invalid", e)
+	if e != nil || json.Unmarshal(raw, &report) != nil {
+		t.Fatal("restore full report invalid", e)
+	}
+	want, e := RestoreReceipt(binding, report)
+	if e != nil || want.SQLSHA256 != receipt.SQLSHA256 || !want.NormalizedAt.Equal(receipt.NormalizedAt) {
+		t.Fatal("bounded receipt disagrees with full readback", e)
 	}
 	return report
 }

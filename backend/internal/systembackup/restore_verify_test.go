@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -72,13 +73,20 @@ func verifyRestoredWithReadOnlyAccounts(t *testing.T, ctx context.Context, store
 		archiveCred := jsonFile("archive.json", map[string]string{"access_key": os.Getenv("TEST_SYSTEM_BACKUP_MINIO_USER"), "secret_key": os.Getenv("TEST_SYSTEM_BACKUP_MINIO_PASSWORD")})
 		bootstrap := jsonFile("bootstrap.json", map[string]any{"endpoint": endpoint, "bucket": store.Bucket, "root": store.Root, "secure": false, "credentials_file": archiveCred, "verification_key_file": write("verify.pub", pub), "verification_key_version": "v1", "encryption_key_file": write("encryption.key", wrapper.Key), "encryption_reference": wrapper.Reference})
 		config := jsonFile("verify-restored.json", map[string]any{"intent": intent, "verifier_dsn_file": write("verify.dsn", []byte(verifierDSN)), "redis": map[string]any{"address": "127.0.0.1:" + os.Getenv("TEST_SYSTEM_BACKUP_REDIS_TARGET_PORT"), "database": redisFixtureDatabase(t), "secure": false, "credentials_file": jsonFile("redis.json", map[string]string{"username": redisUser, "password": password})}, "objects": map[string]any{"endpoint": endpoint, "secure": false, "credentials_file": jsonFile("target-objects.json", map[string]string{"access_key": user, "secret_key": os.Getenv("TEST_SYSTEM_BACKUP_RESTORED_OBJECT_PASSWORD")})}, "bucket_mapping": target.BucketMapping, "directory": target.Directory})
-		cmd := exec.CommandContext(ctx, exe, "--operation", "verify-restored", "--bootstrap", bootstrap, "--operation-config", config, "--origin", artifact.Manifest.Payload.OriginInstallationID, "--backup", artifact.Manifest.Payload.BackupID, "--max-bytes", "67108864", "--max-items", "10000", "--timeout", "2m")
+		aid, _ := RandomID("sat_")
+		binding := DataOperationBinding{Operation: "verify-restored", RunID: report.RunID, AttemptID: aid, TargetUID: "isolated-fixture-target", Origin: artifact.Manifest.Payload.OriginInstallationID, BackupID: artifact.Manifest.Payload.BackupID, CommitSHA256: artifact.CommitReference.SHA256}
+		binding.IntentSHA256, _ = RequestHash(intent)
+		bindingRaw, _ := json.Marshal(binding)
+		termination := filepath.Join(dir, "termination.json")
+		cmd := exec.CommandContext(ctx, exe, "--operation", "verify-restored", "--bootstrap", bootstrap, "--operation-config", config, "--origin", artifact.Manifest.Payload.OriginInstallationID, "--backup", artifact.Manifest.Payload.BackupID, "--max-bytes", "67108864", "--max-items", "10000", "--timeout", "2m", "--data-request", base64.RawURLEncoding.EncodeToString(bindingRaw), "--report-file", termination)
 		raw, e := cmd.CombinedOutput()
 		if e != nil {
 			t.Fatalf("read-only verifier CLI failed: %s (%v)", raw, e)
 		}
-		var got RestoredDataVerification
-		if json.Unmarshal(raw, &got) != nil || !got.IntegrityVerified || got.AcceptanceEligible {
+		var result DataOperationReceipt
+		saved, e := os.ReadFile(termination)
+		want, receiptErr := RestoredVerificationReceipt(binding, intent, got)
+		if e != nil || receiptErr != nil || !bytes.Equal(saved, raw) || len(raw) > 4096 || json.Unmarshal(raw, &result) != nil || !result.IntegrityVerified || result.AcceptanceEligible || result.DataOperationBinding != binding || result.SQLSHA256 != want.SQLSHA256 {
 			t.Fatal("invalid independent verifier CLI report")
 		}
 	}

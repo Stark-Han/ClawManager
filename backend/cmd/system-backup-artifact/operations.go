@@ -187,6 +187,13 @@ func connectKubernetes(c kubeConfig) (dynamic.Interface, error) {
 }
 
 func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPath, origin, id string, budget systembackup.CaptureBudget, out io.Writer) error {
+	return runBoundDataOperation(ctx, operation, bootstrapPath, operationPath, origin, id, budget, nil, out)
+}
+
+func runBoundDataOperation(ctx context.Context, operation, bootstrapPath, operationPath, origin, id string, budget systembackup.CaptureBudget, binding *systembackup.DataOperationBinding, out io.Writer) error {
+	if binding != nil && (binding.Validate() != nil || binding.Operation != operation || binding.Origin != origin || binding.BackupID != id) {
+		return errors.New("validation_failed")
+	}
 	return withBootstrap(ctx, bootstrapPath, func(cfg bootstrap, store systembackup.ImmutableObjectStore, pub ed25519.PublicKey, wrapper systembackup.AESKeyWrapper) error {
 		switch operation {
 		case "verify-restored":
@@ -197,6 +204,12 @@ func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPa
 			artifact, e := systembackup.OpenPublishedArtifact(ctx, store, origin, id, pub, cfg.VerificationKeyVersion)
 			if e != nil {
 				return e
+			}
+			if binding != nil {
+				intentHash, err := systembackup.RequestHash(c.Intent)
+				if err != nil || binding.IntentSHA256 != intentHash || binding.RunID != c.Intent.RunID || binding.CommitSHA256 != artifact.CommitReference.SHA256 {
+					return errors.New("artifact_conflict")
+				}
 			}
 			target := systembackup.RestoredDataReader{Directory: c.Directory, BucketMapping: c.BucketMapping}
 			target.MySQL, target.Database, e = connectDB(ctx, c.VerifierDSNFile)
@@ -216,6 +229,16 @@ func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPa
 			}
 			defer closeObjects()
 			report, e := systembackup.VerifyRestoredData(ctx, store, artifact, wrapper, c.Intent, target, budget)
+			if binding != nil {
+				if e != nil {
+					return e
+				}
+				receipt, err := systembackup.RestoredVerificationReceipt(*binding, c.Intent, report)
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(out).Encode(receipt)
+			}
 			if writeErr := json.NewEncoder(out).Encode(report); e == nil {
 				e = writeErr
 			}
@@ -291,6 +314,9 @@ func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPa
 			if e != nil {
 				return e
 			}
+			if binding != nil && (binding.RunID != c.RunID || binding.CommitSHA256 != artifact.CommitReference.SHA256) {
+				return errors.New("artifact_conflict")
+			}
 			target := systembackup.DataRestoreTarget{Directory: c.Directory, BucketMapping: c.BucketMapping}
 			target.MySQL, target.Database, e = connectDB(ctx, c.MySQLDSNFile)
 			if e != nil {
@@ -320,6 +346,16 @@ func runDataOperation(ctx context.Context, operation, bootstrapPath, operationPa
 			}
 			defer closeObjects()
 			report, e := systembackup.RestorePublishedData(ctx, store, artifact, wrapper, c.RunID, target, budget)
+			if binding != nil {
+				if e != nil {
+					return e
+				}
+				receipt, err := systembackup.RestoreReceipt(*binding, report)
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(out).Encode(receipt)
+			}
 			if writeErr := json.NewEncoder(out).Encode(report); e == nil {
 				e = writeErr
 			}

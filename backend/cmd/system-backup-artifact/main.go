@@ -185,6 +185,7 @@ func main() {
 	readyFile := flag.String("ready-file", "", "capture-phase readiness file")
 	captureRequest := flag.String("capture-request", "", "frozen non-secret capture request (base64url)")
 	uploadRequest := flag.String("upload-request", "", "frozen non-secret upload request (base64url)")
+	dataRequest := flag.String("data-request", "", "frozen isolated data execution identity (base64url)")
 	operation := flag.String("operation", "verify", "verify, capture, restore or verify-restored (data-only)")
 	operationConfig := flag.String("operation-config", "", "source or isolated target configuration file")
 	maxItems := flag.Int("max-items", 1000000, "maximum records/files per data source")
@@ -226,7 +227,7 @@ func main() {
 	var report bytes.Buffer
 	var output io.Writer = os.Stdout
 	if *reportFile != "" {
-		if *operation != "verify" && *operation != "verify-snapshot" && *operation != "capture-phase" && *operation != "upload-parts" {
+		if *operation != "verify" && *operation != "verify-snapshot" && *operation != "capture-phase" && *operation != "upload-parts" && !((*operation == "restore" || *operation == "verify-restored") && *dataRequest != "") {
 			fmt.Fprintln(os.Stderr, "report file is unsupported for this operation")
 			os.Exit(2)
 		}
@@ -259,7 +260,17 @@ func main() {
 		if *operationConfig == "" || *maxItems < 1 || *maxItems > 100000000 {
 			e = errors.New("validation_failed")
 		} else {
-			e = runDataOperation(ctx, *operation, *config, *operationConfig, *origin, *id, systembackup.CaptureBudget{MaxBytes: *max, MaxItems: *maxItems}, os.Stdout)
+			var binding *systembackup.DataOperationBinding
+			if *dataRequest != "" {
+				binding = &systembackup.DataOperationBinding{}
+				raw, err := base64.RawURLEncoding.Strict().DecodeString(*dataRequest)
+				if err != nil || len(raw) > 4096 || systembackup.DecodeStrictJSON(raw, binding) != nil || binding.Validate() != nil || binding.Operation != *operation {
+					e = errors.New("validation_failed")
+				}
+			}
+			if e == nil {
+				e = runBoundDataOperation(ctx, *operation, *config, *operationConfig, *origin, *id, systembackup.CaptureBudget{MaxBytes: *max, MaxItems: *maxItems}, binding, output)
+			}
 		}
 	default:
 		e = errors.New("validation_failed")
