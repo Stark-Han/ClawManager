@@ -291,6 +291,8 @@ type teamService struct {
 	staleMonitorStarted   bool
 	runtimeWorkspaceRoot  string
 	workspaceText         *workspaceFileService
+	observationMu         sync.Mutex
+	observationPods       map[string]teamObservationPods
 }
 
 type teamOpenClawConfigPlanner interface {
@@ -1672,6 +1674,9 @@ func (s *teamService) GetTeam(userID, teamID int) (*TeamDetailsPayload, error) {
 	// sweep. Work on response copies only: GET must not write business state.
 	for idx := range members {
 		_, _, _, _ = s.reconcileTeamMemberRuntimeAvailability(&members[idx], workItems, time.Now().UTC())
+	}
+	if team.ResourceScope == models.TeamScopeNorthbound {
+		members = s.ObserveTeamMembers(context.Background(), []models.Team{*team}, members)
 	}
 	leader := findTeamLeader(members)
 	return &TeamDetailsPayload{

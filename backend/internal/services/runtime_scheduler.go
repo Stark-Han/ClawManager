@@ -279,8 +279,32 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 	if rollout.Status != "pending" {
 		return nil
 	}
+	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil {
+		active, err := s.rolloutRepo.ListActive(ctx, rollout.RuntimeType)
+		if err != nil {
+			return err
+		}
+		for _, other := range active {
+			if other.ID != rollout.ID && (other.Status == "running" || other.ID < rollout.ID) {
+				return nil
+			}
+		}
+	}
+	if isEmptyOpenClawPoolReset(rollout) {
+		if err := s.startOpenClawPoolReplacement(ctx, rollout); err != nil {
+			now, message := time.Now().UTC(), err.Error()
+			_ = s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "error", nil, &now, &message)
+			return err
+		}
+		return nil
+	}
 	if handled, err := s.startPoolRollout(ctx, rollout); handled {
 		return err
+	}
+	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil {
+		if _, ok := s.deployments.(k8s.RuntimePoolValidationService); ok {
+			return s.startOrdinaryOpenClawValidation(ctx, rollout)
+		}
 	}
 	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID != nil {
 		if s.upgrade == nil {
@@ -292,6 +316,10 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 			return err
 		}
 	}
+	return s.startRuntimeRolloutWork(ctx, rollout)
+}
+
+func (s *RuntimeScheduler) startRuntimeRolloutWork(ctx context.Context, rollout *models.RuntimeRollout) error {
 	emptyOpenClawPoolReset := isEmptyOpenClawPoolReset(rollout)
 	if emptyOpenClawPoolReset {
 		if s.upgrade == nil {
@@ -305,6 +333,9 @@ func (s *RuntimeScheduler) StartRollout(ctx context.Context, rolloutID int64) er
 	}
 
 	startedAt := time.Now().UTC()
+	if rollout.StartedAt != nil {
+		startedAt = *rollout.StartedAt
+	}
 	if err := s.rolloutRepo.UpdateStatus(ctx, rollout.ID, "running", &startedAt, nil, nil); err != nil {
 		return err
 	}
@@ -889,6 +920,15 @@ func runtimeDeploymentFallbackState(k8sState string) string {
 func (s *RuntimeScheduler) finishRolloutIfReady(ctx context.Context, rollout models.RuntimeRollout) error {
 	if s == nil || s.podRepo == nil || s.rolloutRepo == nil {
 		return nil
+	}
+	if rollout.RuntimeType == RuntimeTypeOpenClaw && rollout.PreflightID == nil {
+		if _, ok := s.rolloutRepo.(rolloutCheckpointStore); ok {
+			if p, err := s.loadPoolReplacement(ctx, rollout.ID); err != nil {
+				return err
+			} else if p != nil {
+				return s.advanceOpenClawPoolReplacement(ctx, rollout, p)
+			}
+		}
 	}
 	if rollout.RuntimeType != RuntimeTypeOpenClaw {
 		p, err := LoadRuntimePoolProgress(ctx, s.rolloutRepo, rollout.ID)

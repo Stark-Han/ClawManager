@@ -1,5 +1,7 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FilePenLine, FileText, MessagesSquare } from "lucide-react";
+import WorkspaceMarkdownPreview from "../../components/WorkspaceMarkdownPreview";
+import WorkspacePreviewBoundary from "../../components/WorkspacePreviewBoundary";
 import { WorkspaceTextEditor, editableWorkspaceName, type WorkspaceTextOperations } from "../../components/WorkspaceTextEditor";
 import TeamBadge from '../../components/teams/TeamBadge';
 import { memberIcon } from '../../lib/teamIcons';
@@ -514,10 +516,6 @@ const eventTimeMs = (event: TeamEvent) => {
   const ms = value ? new Date(value).getTime() : 0;
   return Number.isFinite(ms) ? ms : 0;
 };
-
-const WorkspaceMarkdownPreview = React.lazy(
-  () => import("../../components/WorkspaceMarkdownPreview"),
-);
 
 const chatEventTimeValue = (
   event: TeamEvent,
@@ -1863,15 +1861,9 @@ function WorkspacePreviewModal({
         <div className="team-preview-body min-h-0 overflow-auto overscroll-contain bg-slate-50 p-5 sm:p-6">
           {refreshError && <p role="status" className="mb-3 text-sm text-amber-700">{refreshError}</p>}
           {isMarkdown ? (
-            <React.Suspense
-              fallback={
-                <div className="flex min-h-48 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm text-slate-500">
-                  正在渲染 Markdown…
-                </div>
-              }
-            >
+            <WorkspacePreviewBoundary key={preview.path} content={content}>
               <WorkspaceMarkdownPreview content={content} />
-            </React.Suspense>
+            </WorkspacePreviewBoundary>
           ) : (
             <pre className="whitespace-pre-wrap break-words rounded-xl bg-white p-4 text-sm leading-6 text-slate-800 shadow-inner">
               {content}

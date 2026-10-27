@@ -70,22 +70,24 @@ func (s *RuntimeUpgradeService) filterUpgradePlacement(ctx context.Context, id i
 			return nil, fmt.Errorf("%w: default placement has no verified instance/rollout birth boundary", errRuntimeControlPlanePending)
 		}
 		var emptyStarted *time.Time
+		emptyRecord := current
 		emptyBarrier := isEmptyOpenClawPoolReset(current)
 		if isEmptyOpenClawPoolReset(current) {
 			emptyStarted = current.StartedAt
 		} else {
-			row, err = s.sess.SQL().QueryRowContext(ctx, `SELECT started_at FROM runtime_rollouts WHERE runtime_type='openclaw' AND status='finished' AND phase='empty_pool_reset' AND id<=? ORDER BY id DESC LIMIT 1`, current.ID)
+			emptyRecord = &models.RuntimeRollout{RuntimeType: RuntimeTypeOpenClaw, Phase: RuntimeUpgradePhaseEmptyPoolReset}
+			row, err = s.sess.SQL().QueryRowContext(ctx, `SELECT started_at,preflight_json FROM runtime_rollouts WHERE runtime_type='openclaw' AND status='finished' AND phase='empty_pool_reset' AND id<=? ORDER BY id DESC LIMIT 1`, current.ID)
 			if err != nil {
 				return nil, err
 			}
-			err = row.Scan(&emptyStarted)
+			err = row.Scan(&emptyStarted, &emptyRecord.PreflightJSON)
 			emptyBarrier = err == nil
 			if err != nil && err != sql.ErrNoRows {
 				return nil, err
 			}
 		}
 		if emptyBarrier {
-			if emptyStarted == nil || created.IsZero() || created.Before(*emptyStarted) {
+			if emptyStarted == nil || created.IsZero() || (created.Before(*emptyStarted) && !s.poolSwitchWaitingInstance(ctx, emptyRecord, id)) {
 				return nil, fmt.Errorf("%w: existing instance data has no compatible placement after pool switch", errRuntimeControlPlanePending)
 			}
 		}
@@ -119,7 +121,7 @@ func (s *RuntimeUpgradeService) filterUpgradePlacement(ctx context.Context, id i
 // Recovery/lab runs are not a new global default. Read existing records rather
 // than rewriting upgrade history, so already-finished switches are repaired too.
 func (s *RuntimeUpgradeService) defaultPlacementRollout(ctx context.Context) (*models.RuntimeRollout, error) {
-	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT id,COALESCE(source_images_json,'{}'),target_image_ref,phase,started_at,preflight_id
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT id,COALESCE(source_images_json,'{}'),target_image_ref,phase,started_at,preflight_id,preflight_json
 	 FROM runtime_rollouts WHERE runtime_type='openclaw' AND status='finished'
 	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.recovery_mode')),'')=''
 	 AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(preflight_json,'$.upgrade_lab_run_id')),'null')='null'
@@ -129,7 +131,7 @@ func (s *RuntimeUpgradeService) defaultPlacementRollout(ctx context.Context) (*m
 	}
 	r := &models.RuntimeRollout{RuntimeType: RuntimeTypeOpenClaw}
 	var source string
-	if err = row.Scan(&r.ID, &source, &r.TargetImageRef, &r.Phase, &r.StartedAt, &r.PreflightID); err == sql.ErrNoRows {
+	if err = row.Scan(&r.ID, &source, &r.TargetImageRef, &r.Phase, &r.StartedAt, &r.PreflightID, &r.PreflightJSON); err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
 		return nil, err

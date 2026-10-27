@@ -695,7 +695,7 @@ export default function IEISystemListInstancesPage() {
                   </select>
                 ) : null}
               </div>
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-4">
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
                 {visibleInstances.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-slate-200 px-4 py-10 text-center text-sm text-slate-500">
                     没有符合条件的实例

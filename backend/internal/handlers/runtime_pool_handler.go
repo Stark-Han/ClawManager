@@ -111,8 +111,16 @@ func (h *RuntimePoolHandler) GetRollout(c *gin.Context) {
 		utils.HandleError(c, err)
 		return
 	}
+	operation, err := services.LoadRuntimePoolOperation(c.Request.Context(), h.rolloutRepo, id)
+	if err != nil {
+		utils.HandleError(c, err)
+		return
+	}
+	if operation != nil {
+		details.Execution = nil
+	}
 	utils.Success(c, http.StatusOK, "Runtime rollout retrieved successfully", gin.H{
-		"rollout": details.Rollout, "items": details.Items, "audits": details.Audits, "pool_progress": progress, "execution": details.Execution,
+		"rollout": details.Rollout, "items": details.Items, "audits": details.Audits, "pool_progress": progress, "pool_operation": operation, "execution": details.Execution,
 	})
 }
 
@@ -223,6 +231,7 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 	rolloutPhase := "requested"
 	var sourceImagesJSON *string
 	var targetImageDigest *string
+	var poolSwitchJSON *string
 	if runtimeType == services.RuntimeTypeHermes {
 		resolved, digest, err := services.ResolveHermesRolloutImage(c.Request.Context(), targetImage)
 		if err != nil {
@@ -288,6 +297,9 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 			sourceImagesJSON = &value
 			if classification.EmptyPoolReset {
 				rolloutPhase = services.RuntimeUpgradePhaseEmptyPoolReset
+				raw, _ := json.Marshal(map[string]any{"pool_switch_waiting_instance_ids": classification.WaitingInstanceIDs})
+				value := string(raw)
+				poolSwitchJSON = &value
 			}
 		}
 		if classification.ImageDigest != "" {
@@ -300,6 +312,7 @@ func (h *RuntimePoolHandler) StartRollout(c *gin.Context) {
 		TargetImageRef:    targetImage,
 		SourceImagesJSON:  sourceImagesJSON,
 		TargetImageDigest: targetImageDigest,
+		PreflightJSON:     poolSwitchJSON,
 		Status:            "pending",
 		Phase:             rolloutPhase,
 		BatchSize:         batchSize,

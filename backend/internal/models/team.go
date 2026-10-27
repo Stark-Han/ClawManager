@@ -133,6 +133,8 @@ type TeamMember struct {
 	LastSummary   *string    `db:"last_summary" json:"last_summary,omitempty"`
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt     time.Time  `db:"updated_at" json:"updated_at"`
+	// A read-only observation, never a task heartbeat or persisted member state.
+	RuntimeObservation *TeamMemberRuntimeObservation `db:"-" json:"runtime_observation,omitempty"`
 }
 
 func (TeamMember) TableName() string {

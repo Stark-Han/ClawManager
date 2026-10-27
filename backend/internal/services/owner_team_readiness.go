@@ -117,6 +117,9 @@ func (s *teamService) finishOwnerTeamProvision(ctx context.Context, team *models
 			return &OwnerTeamRuntimePending{InstanceID: instance.ID}
 		}
 	}
+	// Warm the same read-only observations used by the portal for every member.
+	// This neither invents a task heartbeat nor waits for a model/first task.
+	_ = s.ObserveTeamMembers(ctx, []models.Team{*team}, members)
 	team.Status, team.UpdatedAt = models.TeamStatusRunning, time.Now().UTC()
 	if err := s.repo.UpdateTeam(team); err != nil {
 		return err

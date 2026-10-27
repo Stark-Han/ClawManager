@@ -237,6 +237,18 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 			writeError(c, err)
 			return
 		}
+		if observer, ok := a.teams.(services.TeamMemberObserver); ok {
+			var all []models.TeamMember
+			for _, team := range items {
+				all = append(all, groups[team.ID]...)
+			}
+			for id := range groups {
+				groups[id] = nil
+			}
+			for _, member := range observer.ObserveTeamMembers(c.Request.Context(), items, all) {
+				groups[member.TeamID] = append(groups[member.TeamID], member)
+			}
+		}
 		for _, team := range items {
 			views = append(views, ownerTeamSummary(team, groups[team.ID]))
 		}
@@ -264,6 +276,11 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 	case "members.list":
 		var members []models.TeamMember
 		members, err = a.store.Members(id)
+		if err == nil {
+			if observer, ok := a.teams.(services.TeamMemberObserver); ok {
+				members = observer.ObserveTeamMembers(c.Request.Context(), []models.Team{*team}, members)
+			}
+		}
 		result = ownerTeamMemberViews(members)
 	case "teams.update":
 		var req struct {

@@ -12,6 +12,17 @@ New scope grants are explicit; old keys do not automatically gain Team privilege
 
 ## Complete route list
 
+Member responses include a read-only `runtime_observation` with `state`
+(`online`, `starting`, `offline`, `unknown`), an optional fixed `reason`, and
+`observed_at`. This observation combines current instance/binding health and
+independent collaboration presence. `last_seen_at` remains the last Team event;
+an unused or quiet member does not need a task to become available. Presence
+never changes assignment IDs, results or task completion. List summaries also
+return `confirming_count` and `fault_count`; an initial confirmation is distinct
+from an observed failure. Missing collaboration proof after the startup grace
+period is reported for inspection; an unavailable status store is not reported
+as a dead member. No new Runtime or model tool parameters are required.
+
 | Method / relative path | Required scope |
 | --- | --- |
 | GET `/team-capabilities` | `teams:read` |
@@ -94,3 +105,24 @@ Model actions return202; unknown paid results are not automatically repeated. Te
 The owner portal uses the selected master/detail Team workspace, independent of dashboard statistics. Member links enter northbound instance details. Full Team chat reuses the original work area with one built-in file browser (no duplicated outer instance file browser). Navigation/drafts/reading anchors are scoped by owner+Team and never resend on return.
 
 Migration077 is additive/restartable. Existing Teams/templates remain cm with null owner; IDs, paths, Redis keys and histories are not rewritten. Back up MySQL before deployment. Do NOT roll back to an App predating resource_scope while owner Teams exist: it can mix resource types. Use a compatible rollback build that keeps scope guards/background consumers, with the new entry disabled. Disabling entry never deletes data or cancels existing background work.
+
+
+### Portal workspace presentation
+
+The northbound Team dashboard uses a bounded master/detail workspace. Template
+lists and editor content scroll inside the panel; headings and form actions stay
+visible. Team and standalone instance cards share portal geometry tokens, with
+neutral surfaces and an optional hover-only rotating Team border (disabled by
+reduced-motion preferences).
+
+Template drafts are scoped by owner and template in session storage and retain
+the revision they were based on. Initial loading must finish before the editor
+is exposed. Refreshing the list never replaces form input. A version conflict
+keeps the draft; loading the latest revision is an explicit action and never
+retries a mutation automatically. Generation continues to use the existing
+idempotent operation APIs. Saving only the name does not call generation.
+
+Native dialogs contain team creation, management and member-duty adjustment;
+closing an edited dialog requires acknowledging the unsaved input. These UI
+changes do not alter Team ownership, dispatch, receipts, Runtime selection, or
+file editing/preview semantics.

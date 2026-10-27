@@ -19,11 +19,14 @@ func ownerTeamMemberViews(members []models.TeamMember) []map[string]interface{} 
 		if m.Status == models.TeamMemberStatusDeleted {
 			continue
 		}
-		if (m.Availability == models.TeamMemberAvailabilityIdle || m.Availability == models.TeamMemberAvailabilityBusy) && (m.LastSeenAt == nil || time.Since(*m.LastSeenAt) > 2*time.Minute || time.Until(*m.LastSeenAt) > time.Minute) {
+		if m.RuntimeObservation == nil && (m.Availability == models.TeamMemberAvailabilityIdle || m.Availability == models.TeamMemberAvailabilityBusy) && (m.LastSeenAt == nil || time.Since(*m.LastSeenAt) > 2*time.Minute || time.Until(*m.LastSeenAt) > time.Minute) {
 			m.Availability = models.TeamMemberAvailabilityUnknown
 		}
 		view := map[string]interface{}{"id": m.ID, "team_id": m.TeamID, "instance_id": m.InstanceID, "member_key": m.MemberKey, "display_name": m.DisplayName, "icon_key": m.IconKey, "role": m.Role, "runtime_type": m.RuntimeType, "instance_mode": m.InstanceMode, "description": m.Description, "status": m.Status, "current_task_id": m.CurrentTaskID, "progress": m.Progress, "last_seen_at": m.LastSeenAt, "availability": m.Availability, "runtime_status": m.RuntimeStatus, "runtime_task_id": m.RuntimeTaskID, "runtime_intent": m.RuntimeIntent, "last_summary": m.LastSummary, "created_at": m.CreatedAt, "updated_at": m.UpdatedAt}
-		if m.BlockedReason != nil && strings.TrimSpace(*m.BlockedReason) != "" {
+		if m.RuntimeObservation != nil {
+			view["runtime_observation"] = m.RuntimeObservation
+		}
+		if m.BlockedReason != nil && strings.TrimSpace(*m.BlockedReason) != "" && !(m.RuntimeObservation != nil && m.RuntimeObservation.State != "offline" && strings.HasPrefix(strings.TrimSpace(*m.BlockedReason), "Runtime unavailable: ")) {
 			view["blocked_reason"] = "成员暂不可用，请查看实例状态"
 		}
 		views = append(views, view)
@@ -34,17 +37,30 @@ func ownerTeamMemberViews(members []models.TeamMember) []map[string]interface{} 
 func ownerTeamSummary(team models.Team, members []models.TeamMember) map[string]interface{} {
 	view := ownerTeamView(team)
 	view["members"] = ownerTeamMemberViews(members)
-	available, total := 0, 0
+	available, total, confirming, faults := 0, 0, 0, 0
 	for _, m := range members {
 		if m.Status == models.TeamMemberStatusDeleted {
 			continue
 		}
 		total++
-		if (m.Availability == models.TeamMemberAvailabilityIdle || m.Availability == models.TeamMemberAvailabilityBusy) && m.LastSeenAt != nil && time.Since(*m.LastSeenAt) <= 2*time.Minute && time.Until(*m.LastSeenAt) <= time.Minute && m.Status != models.TeamMemberStatusFailed && m.Status != models.TeamMemberStatusCreating {
+		if m.RuntimeObservation != nil {
+			if m.RuntimeObservation.State == "online" && (m.Availability == "idle" || m.Availability == "busy") && m.Status != "failed" && m.Status != "deleting" {
+				available++
+			} else if m.RuntimeObservation.State == "offline" || m.RuntimeObservation.Reason == "collaboration_heartbeat_missing" || m.Availability == "blocked" || m.Status == "failed" {
+				faults++
+			} else {
+				confirming++
+			}
+		} else if (m.Availability == models.TeamMemberAvailabilityIdle || m.Availability == models.TeamMemberAvailabilityBusy) && m.LastSeenAt != nil && time.Since(*m.LastSeenAt) <= 2*time.Minute && time.Until(*m.LastSeenAt) <= time.Minute && m.Status != models.TeamMemberStatusFailed && m.Status != models.TeamMemberStatusCreating {
 			available++
+		} else if m.Availability == "blocked" || m.Availability == "offline" || m.Status == "failed" {
+			faults++
+		} else {
+			confirming++
 		}
 	}
 	view["member_count"], view["available_count"] = total, available
+	view["confirming_count"], view["fault_count"] = confirming, faults
 	return view
 }
 

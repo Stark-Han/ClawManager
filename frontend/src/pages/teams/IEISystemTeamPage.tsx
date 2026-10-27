@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import { ArrowLeft } from 'lucide-react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import type UserLayout from '../../components/UserLayout';
 import { TeamPageEnvironmentProvider } from '../../components/teams/TeamPageEnvironment';
@@ -10,7 +11,7 @@ import '../../components/teams/owner-team-workspace.css';
 
 function NorthboundTeamLayout({ title, titleAccessory, children }: ComponentProps<typeof UserLayout>) {
   const { id } = useParams(); const location = useLocation();
-  return <main className="ot-northbound-layout"><header className="ot-northbound-header"><div><Link to={ownerTeamOverviewURL(Number(id), location.state?.portalReturnSearch || '')}>← 我的团队空间</Link><h1>{title || '团队对话'}</h1></div>{titleAccessory}</header><section className="ot-northbound-body">{children}</section></main>;
+  return <main className="ot-northbound-layout"><header className="ot-northbound-header"><div><Link className="ot-secondary ot-return" to={ownerTeamOverviewURL(Number(id), location.state?.portalReturnSearch || '')}><ArrowLeft size={15}/>我的团队空间</Link><h1>{title || '团队对话'}</h1></div>{titleAccessory}</header><section className="ot-northbound-body">{children}</section></main>;
 }
 
 export default function IEISystemTeamPage() {

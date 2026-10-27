@@ -11,7 +11,7 @@ ownerTeamHTTP.interceptors.response.use(r => r, error => {
   return Promise.reject(error);
 });
 export type TeamWorkspaceAPI = Omit<typeof teamService, 'createTeam' | 'listTeams'>;
-export interface OwnerTeamSummary extends Team { members: TeamMember[]; member_count: number; available_count: number }
+export interface OwnerTeamSummary extends Team { members: TeamMember[]; member_count: number; available_count: number; confirming_count?: number; fault_count?: number }
 export interface TeamOperation { operation_id: string; status: string; attempt_count?: number; team_id?: number; template_id?: number; error_code?: string; error_message?: string }
 export interface OwnerTeamCapabilities { enabled: boolean; can_create: boolean; create_disabled_reason?: string; runtime_types?: string[]; instance_modes?: string[] }
 export interface OwnerTeamCatalogEntry { key: string; revision: number; name: string; description: string; communication_mode: string; members: { member_id: string; name: string; role: string; is_leader: boolean; runtime_type: string; instance_mode: string }[] }
@@ -72,7 +72,7 @@ export const ownerTeamService = {
   removeMember: async (id: number, member: string) => (await ownerTeamHTTP.delete(`/teams/${id}/members/${encodeURIComponent(member)}`, { data: { confirm_data_loss: true }, headers: { 'Idempotency-Key': ownerTeamRequestKey() } })).data.data as TeamOperation,
   update: async (id: number, data: { name: string; description?: string }) => { await ownerTeamHTTP.patch(`/teams/${id}`, data); },
   templates: (signal?: AbortSignal) => get<{ templates: CustomTeamTemplate[] }>('/custom-team-templates', undefined, signal),
-  template: (id: number) => get<CustomTeamTemplate>(`/custom-team-templates/${id}`),
+  template: (id: number, signal?: AbortSignal) => get<CustomTeamTemplate>(`/custom-team-templates/${id}`, undefined, signal),
   generateTemplate: (data: { intent: string; member_count?: number }, key: string) => post<TeamOperation>('/custom-team-templates', data, key),
   updateTemplate: async (id: number, name: string, expected_revision: number) => (await ownerTeamHTTP.patch(`/custom-team-templates/${id}`, { name, expected_revision })).data.data as CustomTeamTemplate,
   deleteTemplate: async (id: number) => { await ownerTeamHTTP.delete(`/custom-team-templates/${id}`); },
