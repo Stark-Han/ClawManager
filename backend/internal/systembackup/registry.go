@@ -27,7 +27,7 @@ type ObjectPolicy struct {
 // silently include newly introduced credentials or runnable work on restore.
 var businessTables = map[string][]string{
 	"users":      {"users", "user_quotas", "enterprise_auth_settings", "iei_session_revocations", "northbound_auth_challenges", "northbound_sessions"},
-	"ai_gateway": {"llm_models", "model_invocations", "audit_events", "cost_records", "risk_rules", "risk_hits", "chat_sessions", "chat_messages", "instance_gateway_token_aliases"},
+	"ai_gateway": {"llm_models", "model_invocations", "audit_events", "cost_records", "risk_rules", "risk_hits", "chat_sessions", "chat_messages", "instance_gateway_token_aliases", "gateway_keys", "gateway_key_budget_reservations", "gateway_key_budget_ledger", "routing_classifier_settings", "llm_model_user_grants", "gateway_image_artifacts", "gateway_image_jobs"},
 	"instances":  {"instances", "persistent_volumes", "backups", "backup_schedules", "instance_usage", "instance_agents", "instance_browser_workers", "instance_runtime_status", "instance_desired_state", "instance_commands", "instance_config_revisions", "instance_runtime_bindings", "instance_external_access", "runtime_pods", "runtime_rollouts", "runtime_rollout_checkpoints", "runtime_upgrade_items", "runtime_upgrade_audits", "instance_lifecycle_batches", "instance_lifecycle_batch_items", "instance_lifecycle_batch_attempts", "instance_lifecycle_manual_guards", "instance_lifecycle_scheduler", "workspace_file_audits", "openclaw_config_resources", "openclaw_config_bundles", "openclaw_config_bundle_items", "openclaw_config_bundle_skills", "openclaw_injection_snapshots"},
 	"teams":      {"teams", "team_members", "team_tasks", "team_events", "team_work_items", "team_event_outbox", "team_workflow_phases", "custom_team_templates", "team_workspace_file_audits", "owner_team_provision_steps", "owner_team_admission_locks"},
 	"resources":  {"system_image_settings", "egress_private_exceptions", "security_scan_configs", "security_scan_jobs", "security_scan_job_items", "security_scan_reports", "audit_logs", "northbound_admin_settings", "northbound_caller_policies", "northbound_operations", "northbound_owner_records", "northbound_settings_audit"},
@@ -38,6 +38,11 @@ var controlTables = []string{"schema_migrations", "system_backup_installation_st
 
 func Registry() []ObjectPolicy {
 	out := []ObjectPolicy{{"system_team_data_backup_jobs", "system_backup", "internal", "metadata_only", "reference_only"}}
+	// These rows reference live processes, generations or outstanding writes.
+	// Restoring them must never enroll a copied instance or replay remote work.
+	for _, name := range []string{"gateway_runtime_tasks", "gateway_runtime_task_models", "gateway_runtime_protocols", "gateway_runtime_maintenance", "gateway_runtime_upgrades", "gateway_runtime_upgrade_stops", "instance_workspace_write_intents"} {
+		out = append(out, ObjectPolicy{name, "system_backup", "secret", "metadata_only", "reference_only"})
+	}
 	for category, names := range businessTables {
 		for _, name := range names {
 			// All raw database payloads are encrypted. Public reports use separate

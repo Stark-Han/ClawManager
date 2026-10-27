@@ -64,3 +64,42 @@ func TestNormalizeCurrentUpgradeIntermediateStates(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoredGatewayStateCannotAuthenticateOrReplay(t *testing.T) {
+	cases := []struct {
+		table string
+		row   team.Row
+		want  map[string]string
+	}{
+		{"gateway_keys", team.Row{"status": team.Value("active"), "token_hash": team.Value("unique-original-hash"), "expires_at": team.Null()}, map[string]string{"status": "revoked", "token_hash": "unique-original-hash", "expires_at": "2000-01-01 00:00:00"}},
+		{"routing_classifier_settings", team.Row{"routing_mode": team.Value("laya"), "base_url": team.Value("https://private.invalid"), "encrypted_api_key": team.Value("ciphertext")}, map[string]string{"routing_mode": "rules", "base_url": "", "encrypted_api_key": ""}},
+		{"gateway_image_artifacts", team.Row{"ready": team.Value("1"), "expires_at": team.Value("2027-01-01 00:00:00")}, map[string]string{"ready": "0", "expires_at": "2000-01-01 00:00:00"}},
+		{"gateway_image_jobs", team.Row{"state": team.Value("running"), "settled": team.Value("0"), "analytics_recorded": team.Value("0"), "charge": team.Value("0.25")}, map[string]string{"state": "failed", "settled": "1", "analytics_recorded": "1", "charge": "0.25"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.table, func(t *testing.T) {
+			table := SQLTable{Name: tc.table}
+			for name := range tc.row {
+				table.Columns = append(table.Columns, SQLColumn{Name: name})
+			}
+			change, err := NormalizeDataRow(table, tc.row, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, want := range tc.want {
+				if string(change.After[name].Data) != want {
+					t.Fatalf("%s=%q, want %q", name, change.After[name].Data, want)
+				}
+				if !bytes.Equal(change.Before[name].Data, tc.row[name].Data) {
+					t.Fatal("original evidence changed")
+				}
+			}
+		})
+	}
+	for _, name := range []string{"gateway_runtime_tasks", "gateway_runtime_task_models", "gateway_runtime_protocols", "gateway_runtime_maintenance", "gateway_runtime_upgrades", "gateway_runtime_upgrade_stops", "instance_workspace_write_intents"} {
+		policy, ok := Policy(name)
+		if !ok || policy.BackupStrategy != "metadata_only" || policy.RestoreStrategy != "reference_only" {
+			t.Fatalf("live runtime coordination %s would be replayed", name)
+		}
+	}
+}

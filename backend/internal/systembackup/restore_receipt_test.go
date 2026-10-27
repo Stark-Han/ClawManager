@@ -35,7 +35,7 @@ func TestDataRestoreReceiptFitsJobTerminationAndRetainsVerificationIntent(t *tes
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(got)
-	if len(raw)+1 > 4096 || got.SQLTables != 75 || got.SQLRows != 75 || !validHash(got.SQLSHA256) || !got.IntegrityVerified || got.AcceptanceEligible || len(got.HistoryParts) != 2 || !got.NormalizedAt.Equal(r.StartedAt) {
+	if len(raw)+1 > 4096 || got.SQLTables != len(r.SQL.Tables) || got.SQLRows != int64(len(r.SQL.Tables)) || !validHash(got.SQLSHA256) || !got.IntegrityVerified || got.AcceptanceEligible || len(got.HistoryParts) != 2 || !got.NormalizedAt.Equal(r.StartedAt) {
 		t.Fatal("incomplete bounded result", len(raw), got)
 	}
 	if strings.Contains(string(raw), "team_tasks") {

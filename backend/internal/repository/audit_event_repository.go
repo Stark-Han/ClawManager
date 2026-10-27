@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -34,10 +35,14 @@ func NewAuditEventRepositoryExistingTable(sess db.Session) AuditEventRepository 
 }
 
 func (r *auditEventRepository) Create(event *models.AuditEvent) error {
+	return r.CreateContext(context.Background(), event)
+}
+
+func (r *auditEventRepository) CreateContext(ctx context.Context, event *models.AuditEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now()
 	}
-	res, err := r.sess.Collection("audit_events").Insert(event)
+	res, err := r.sess.WithContext(ctx).Collection("audit_events").Insert(event)
 	if err != nil {
 		return fmt.Errorf("failed to create audit event: %w", err)
 	}

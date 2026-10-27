@@ -161,7 +161,7 @@ func (r *modelInvocationRepository) ListRecentByInstanceSession(instanceID int, 
 		limit = 20
 	}
 	query := `
-SELECT id, trace_id, session_id, request_id, user_id, instance_id, instance_mode, runtime_type, gateway_id, runtime_pod_id, model_id, provider_type, requested_model, actual_provider_model, traffic_class, request_payload, response_payload, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, is_streaming, status, error_message, created_at, completed_at
+SELECT id, trace_id, session_id, request_id, user_id, instance_id, instance_mode, runtime_type, gateway_id, runtime_pod_id, gateway_key_id, model_id, provider_type, requested_model, actual_provider_model, traffic_class, request_payload, response_payload, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, latency_ms, ttft_ms, generation_ms, tokens_per_second, attempt_no, is_streaming, status, error_message, created_at, completed_at
 FROM model_invocations
 WHERE instance_id = ?
   AND session_id = ?
@@ -193,6 +193,7 @@ LIMIT ?`
 			&item.RuntimeType,
 			&item.GatewayID,
 			&item.RuntimePodID,
+			&item.GatewayKeyID,
 			&item.ModelID,
 			&item.ProviderType,
 			&item.RequestedModel,
@@ -206,6 +207,10 @@ LIMIT ?`
 			&item.CachedTokens,
 			&item.ReasoningTokens,
 			&item.LatencyMs,
+			&item.TTFTMs,
+			&item.GenerationMs,
+			&item.TokensPerSecond,
+			&item.AttemptNo,
 			&item.IsStreaming,
 			&item.Status,
 			&item.ErrorMessage,

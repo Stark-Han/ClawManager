@@ -145,6 +145,21 @@ func NormalizeDataRow(table SQLTable, row team.Row, now time.Time) (team.Change,
 	case "llm_models":
 		set("is_active", "0")
 		erase("api_key", "api_key_secret_ref")
+	case "gateway_keys":
+		set("status", "revoked")
+		set("expires_at", "2000-01-01 00:00:00")
+	case "routing_classifier_settings":
+		set("routing_mode", "rules")
+		erase("base_url", "encrypted_api_key")
+	case "gateway_image_artifacts":
+		set("ready", "0")
+		set("expires_at", "2000-01-01 00:00:00")
+	case "gateway_image_jobs":
+		err = stopState("state", "failed", []string{"preparing", "running"}, []string{"completed", "failed"})
+		// Preserve charge/estimate and the original encrypted row for review;
+		// an isolated restore must not settle or emit accounting a second time.
+		set("settled", "1")
+		set("analytics_recorded", "1")
 	case "enterprise_auth_settings":
 		set("enabled", "0")
 		set("allow_local_fallback", "0")

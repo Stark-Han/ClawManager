@@ -103,6 +103,12 @@
         "type": "timestamp",
         "nullable": "YES",
         "extra": "DEFAULT_GENERATED"
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "YES",
+        "extra": ""
       }
     ],
     "primary_key": [
@@ -565,6 +571,12 @@
         "type": "timestamp",
         "nullable": "YES",
         "extra": "DEFAULT_GENERATED"
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "YES",
+        "extra": ""
       }
     ],
     "primary_key": [
@@ -889,6 +901,478 @@
         "type": "timestamp",
         "nullable": "YES",
         "extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_key": [
+      "id"
+    ]
+  },
+  {
+    "name": "gateway_image_artifacts",
+    "columns": [
+      {
+        "name": "id",
+        "type": "varchar(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "user_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "instance_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "model_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "request_id",
+        "type": "varchar(100)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "media_type",
+        "type": "varchar(32)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "byte_size",
+        "type": "bigint",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "encryption_key",
+        "type": "varbinary(32)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "ready",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "created_at",
+        "type": "datetime",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "expires_at",
+        "type": "datetime",
+        "nullable": "NO",
+        "extra": ""
+      }
+    ],
+    "primary_key": [
+      "id"
+    ]
+  },
+  {
+    "name": "gateway_image_jobs",
+    "columns": [
+      {
+        "name": "request_id",
+        "type": "varchar(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "scope_hash",
+        "type": "char(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "idempotency_hash",
+        "type": "char(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "request_hash",
+        "type": "char(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "user_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "instance_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "model_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "state",
+        "type": "varchar(16)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "reservation_id",
+        "type": "varchar(64)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "estimate",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "charge",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "settled",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "result_metadata",
+        "type": "longtext",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "error_code",
+        "type": "varchar(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "deadline_at",
+        "type": "datetime",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "created_at",
+        "type": "datetime",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "updated_at",
+        "type": "datetime",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "analytics_context",
+        "type": "longtext",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "analytics_outcome",
+        "type": "longtext",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "analytics_recorded",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      }
+    ],
+    "primary_key": [
+      "request_id"
+    ]
+  },
+  {
+    "name": "gateway_key_budget_ledger",
+    "columns": [
+      {
+        "name": "reservation_id",
+        "type": "varchar(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "actual_cost",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "recorded_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED"
+      }
+    ],
+    "primary_key": [
+      "reservation_id"
+    ]
+  },
+  {
+    "name": "gateway_key_budget_reservations",
+    "columns": [
+      {
+        "name": "reservation_id",
+        "type": "varchar(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "reserved_cost",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "actual_cost",
+        "type": "decimal(18,8)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "settlement_status",
+        "type": "varchar(16)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "expires_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED"
+      }
+    ],
+    "primary_key": [
+      "reservation_id"
+    ]
+  },
+  {
+    "name": "gateway_keys",
+    "columns": [
+      {
+        "name": "id",
+        "type": "bigint",
+        "nullable": "NO",
+        "extra": "auto_increment"
+      },
+      {
+        "name": "key_id",
+        "type": "varchar(96)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "key_prefix",
+        "type": "varchar(128)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "token_hash",
+        "type": "char(64)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "key_type",
+        "type": "varchar(32)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "name",
+        "type": "varchar(160)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "description",
+        "type": "text",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "owner_user_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "instance_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "allowed_model_groups",
+        "type": "json",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "status",
+        "type": "varchar(24)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "expires_at",
+        "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "last_used_at",
+        "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "created_by_user_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "revoked_at",
+        "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "revoked_by_user_id",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "revocation_reason",
+        "type": "varchar(255)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED"
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "rpm_limit",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "tpm_limit",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "concurrent_requests_limit",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "budget_limit",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "budget_period",
+        "type": "varchar(16)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "budget_spent",
+        "type": "decimal(18,8)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "budget_reset_at",
+        "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "budget_currency_review_required",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "budget_currency_reviewed_at",
+        "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
       }
     ],
     "primary_key": [
@@ -2314,6 +2798,33 @@
     ]
   },
   {
+    "name": "llm_model_user_grants",
+    "columns": [
+      {
+        "name": "model_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "user_id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED"
+      }
+    ],
+    "primary_key": [
+      "model_id",
+      "user_id"
+    ]
+  },
+  {
     "name": "llm_models",
     "columns": [
       {
@@ -2347,6 +2858,36 @@
         "extra": ""
       },
       {
+        "name": "model_group",
+        "type": "varchar(100)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "deployment_priority",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "max_concurrent_requests",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "context_window_tokens",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "quality_tier",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
         "name": "base_url",
         "type": "varchar(500)",
         "nullable": "NO",
@@ -2367,6 +2908,42 @@
       {
         "name": "reasoning_enabled",
         "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "reasoning_control_mode",
+        "type": "varchar(40)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "supports_tools",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "tools_support_override",
+        "type": "tinyint(1)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "supports_vision",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "vision_support_override",
+        "type": "tinyint(1)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "capability_source",
+        "type": "varchar(64)",
         "nullable": "NO",
         "extra": ""
       },
@@ -2423,6 +3000,42 @@
         "type": "timestamp",
         "nullable": "YES",
         "extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "visibility_scope",
+        "type": "varchar(24)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "access_policy_version",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "model_kind",
+        "type": "varchar(32)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "image_generation_enabled",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "image_edit_enabled",
+        "type": "tinyint(1)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "image_price_per_image",
+        "type": "decimal(18,8)",
+        "nullable": "YES",
+        "extra": ""
       }
     ],
     "primary_key": [
@@ -2571,6 +3184,30 @@
         "extra": ""
       },
       {
+        "name": "ttft_ms",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "generation_ms",
+        "type": "int",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "tokens_per_second",
+        "type": "decimal(12,4)",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "attempt_no",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
         "name": "is_streaming",
         "type": "tinyint(1)",
         "nullable": "NO",
@@ -2597,6 +3234,12 @@
       {
         "name": "completed_at",
         "type": "timestamp",
+        "nullable": "YES",
+        "extra": ""
+      },
+      {
+        "name": "gateway_key_id",
+        "type": "bigint",
         "nullable": "YES",
         "extra": ""
       }
@@ -4224,6 +4867,50 @@
         "type": "timestamp",
         "nullable": "YES",
         "extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+      }
+    ],
+    "primary_key": [
+      "id"
+    ]
+  },
+  {
+    "name": "routing_classifier_settings",
+    "columns": [
+      {
+        "name": "id",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "base_url",
+        "type": "varchar(500)",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "timeout_ms",
+        "type": "int",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "encrypted_api_key",
+        "type": "text",
+        "nullable": "NO",
+        "extra": ""
+      },
+      {
+        "name": "updated_at",
+        "type": "timestamp",
+        "nullable": "NO",
+        "extra": "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"
+      },
+      {
+        "name": "routing_mode",
+        "type": "varchar(16)",
+        "nullable": "NO",
+        "extra": ""
       }
     ],
     "primary_key": [
