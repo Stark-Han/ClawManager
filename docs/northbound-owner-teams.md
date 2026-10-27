@@ -126,3 +126,18 @@ Native dialogs contain team creation, management and member-duty adjustment;
 closing an edited dialog requires acknowledging the unsaved input. These UI
 changes do not alter Team ownership, dispatch, receipts, Runtime selection, or
 file editing/preview semantics.
+
+
+The compact template editor keeps Team information beside one selected member's
+full duties and deliverables on wide screens. Actual template members use a
+three-column selector with up to two rows; medium screens switch information
+panes and phones use an accessible member select. A requested member count is
+an input to template revision, never a reason to invent member placeholders.
+
+Operation feedback floats at the upper right without changing panel dimensions.
+Success dismisses automatically; pending/error feedback remains available, and
+closing a notice never cancels or forgets the accepted operation. A bounded,
+owner-scoped browser-session history stores only notice summaries and operation
+IDs. Inspecting an operation reads its current status through the existing
+scoped API; retries continue to use the established recovery endpoint. Late
+progress cannot overwrite a recorded terminal result.

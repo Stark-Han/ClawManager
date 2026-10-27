@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check, ChevronUp, Plus, RefreshCw, Search, Settings2, Trash2, UserMinus, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, ChevronUp, History, Plus, RefreshCw, Search, Settings2, Trash2, UserMinus, Users } from 'lucide-react';
 import { OwnerTeamOperationError, withOwnerTeamIntent, pendingOwnerTeamIntent, recoverOwnerTeamIntent, ownerTeamService, ownerTeamWorkspaceAPI, waitForOwnerTeamOperation, type OwnerTeamSummary, type OwnerTeamCatalogEntry, type TeamOperation } from '../../services/ownerTeamService';
 import type { OwnerTeamsState } from '../../hooks/useOwnerTeams';
 import type { TeamDetails, TeamMember } from '../../types/team';
@@ -8,6 +8,7 @@ import type { CustomTeamTemplate } from '../../types/customTeamTemplate';
 import TeamBadge from './TeamBadge';
 import { OwnerTeamTemplates } from './OwnerTeamTemplates';
 import { OwnerTeamDialog, useOwnerTeamDraftGuard } from './OwnerTeamDialog';
+import { OwnerTeamNotifications, useOwnerTeamFeedback } from './OwnerTeamNotifications';
 import { memberIcon } from '../../lib/teamIcons';
 import { memberRailState } from './teamMemberPresentation';
 import './owner-team-workspace.css';
@@ -60,6 +61,11 @@ function useTeamOperation(owner: string, onDone: () => Promise<void>) {
 }
 
 export function OwnerTeamDashboard({ state }: { state: OwnerTeamsState }) {
+  return <OwnerTeamNotifications key={state.owner} owner={state.owner}><OwnerTeamDashboardContent state={state}/></OwnerTeamNotifications>;
+}
+
+function OwnerTeamDashboardContent({ state }: { state: OwnerTeamsState }) {
+  const feedback = useOwnerTeamFeedback();
   const [params, setParams] = useSearchParams();
   const section = params.get('team_section') === 'templates' ? 'templates' : 'teams';
   const setSection = (value: 'teams' | 'templates') => { const next = new URLSearchParams(window.location.search); next.set('team_section', value); next.delete('token'); setParams(next, { replace: true }); };
@@ -71,7 +77,24 @@ export function OwnerTeamDashboard({ state }: { state: OwnerTeamsState }) {
   const [narrowDetail, setNarrowDetail] = useState(false);
   const operation = useTeamOperation(state.owner, state.refresh);
   const pendingIntent = pendingOwnerTeamIntent(state.owner);
-  const [recoveryError, setRecoveryError] = useState('');
+  const reportOperation = (op: TeamOperation, error = '') => {
+    const failed = op.status === 'failed' || !!error;
+    feedback.notify({ id: op.operation_id, operationID: op.operation_id, attemptCount: op.attempt_count, terminal: ['succeeded', 'failed'].includes(op.status), kind: failed ? 'error' : op.status === 'succeeded' ? 'success' : 'pending', title: failed ? '操作尚未完成' : op.status === 'succeeded' ? '操作已完成' : '操作进行中', message: error || op.error_message || (op.status === 'succeeded' ? '后台已确认完成，可继续查看和管理。' : '可以继续浏览，关闭通知不会取消后台操作。'), actions: failed ? [{ label: '重新检查进度', onClick: operation.retryRead }, ...(op.status === 'failed' && op.team_id ? [{ label: '重试原操作', onClick: () => void operation.retryFailed() }] : [])] : undefined });
+  };
+  useEffect(() => {
+    if (operation.operation) reportOperation(operation.operation, operation.error);
+  // Stable business transitions, not notification/history renders, produce feedback.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operation.operation?.operation_id, operation.operation?.status, operation.operation?.attempt_count, operation.error, feedback.notify]);
+  useEffect(() => {
+    feedback.setOperationHandler(op => { operation.begin(op); reportOperation(op); });
+    return () => feedback.setOperationHandler(null);
+  });
+  useEffect(() => {
+    if (!pendingIntent) return;
+    feedback.notify({ id: `unconfirmed:${pendingIntent}`, kind: 'warning', title: '上次提交尚未确认', message: '原提交已保留，请先检查进度，避免重复创建。', actions: [{ label: '恢复提交并检查进度', onClick: () => { void recoverOwnerTeamIntent(state.owner, pendingIntent).then(operation.begin).catch(error => feedback.notify({ id: `unconfirmed:${pendingIntent}`, kind: 'error', title: '暂时无法确认提交', message: message(error) })); } }] });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingIntent, state.owner, feedback.notify]);
   useEffect(() => {
     let active = true; setDetails(null); setDetailError('');
     if (!state.selectedID) return;
@@ -80,11 +103,11 @@ export function OwnerTeamDashboard({ state }: { state: OwnerTeamsState }) {
     return () => { active = false; clearInterval(timer); };
   }, [state.selectedID, state.owner]);
   const selected = state.teams.find(t => t.id === state.selectedID) || (details && details.team.id === state.selectedID ? { ...details.team, members: details.members, member_count: details.members.length, available_count: details.members.filter(m => ['idle','busy'].includes(m.availability || '')).length } : undefined);
-  return <section className="ot-workspace"><header className="ot-heading"><div><h2>团队空间</h2><p>{state.total} 个团队 · 创建、管理与协作</p></div><div className="ot-actions"><button className="ot-primary" disabled={!state.capabilities?.can_create} title={state.capabilities?.create_disabled_reason} onClick={() => setCreate(true)}><Plus size={16}/> 新建 Team</button></div></header>
-    {pendingIntent && <p className="ot-note" role="status">上次提交结果尚未确认。<button onClick={() => { setRecoveryError(''); void recoverOwnerTeamIntent(state.owner, pendingIntent).then(operation.begin).catch(error => setRecoveryError(message(error))); }}>恢复上次提交并查看进度</button>{recoveryError}</p>}
+  return <section className="ot-workspace"><header className="ot-heading"><div><h2>团队空间</h2><p>{state.total} 个团队 · 创建、管理与协作</p></div><div className="ot-actions"><button type="button" className="ot-secondary" onClick={feedback.openHistory}><History size={15}/>操作记录</button><button className="ot-primary" disabled={!state.capabilities?.can_create} title={state.capabilities?.create_disabled_reason} onClick={() => setCreate(true)}><Plus size={16}/> 新建 Team</button></div></header>
+
     {!state.capabilities?.can_create && <p className="ot-note">{state.capabilities?.create_disabled_reason || '当前暂不能创建团队；已有团队不受影响。'}</p>}
     <div className="ot-tabs" role="tablist" aria-label="团队空间"><button role="tab" aria-selected={section === 'teams'} onClick={() => setSection('teams')}>我的 Team</button><button role="tab" aria-selected={section === 'templates'} onClick={() => setSection('templates')}>团队模板</button></div>
-    {operation.operation && <div className={operation.error ? 'ot-note' : 'ot-operation'} role="status"><span>{operation.operation.status === 'succeeded' ? '操作已完成' : operation.error || '正在创建团队并等待成员就绪…'}</span>{operation.error ? <><button onClick={operation.retryRead}>重新检查进度</button>{operation.operation.status === 'failed' && operation.operation.team_id && <button onClick={() => void operation.retryFailed()}>重试原操作</button>}<button onClick={operation.dismiss}>收起记录</button></> : operation.operation.status === 'succeeded' && <button onClick={operation.dismiss}>关闭</button>}</div>}
+
     {section === 'templates' ? <OwnerTeamTemplates key={state.owner} owner={state.owner} canGenerate={state.capabilities?.can_create === true} onOperation={operation.begin}/> : <div className={`ot-master-detail ${narrowDetail ? 'show-detail' : ''}`}>
       <div className="ot-master"><label className="ot-search"><Search size={14}/><input aria-label="筛选团队" placeholder="搜索团队…" value={state.query} onChange={e => state.setQuery(e.target.value)}/></label>{state.error && <p role="alert" className="ot-error">{state.error}</p>}{state.teams.map(t => <button key={t.id} aria-pressed={state.selectedID === t.id} className="ot-master-item" onClick={() => { state.select(t.id); setNarrowDetail(true); }}><strong>{t.name}</strong><span>#{t.id} · {t.available_count}/{t.member_count} 可用</span><small>{teamLabel(t)}</small></button>)}{state.hasMore && <button onClick={state.loadMore}>加载更多</button>}</div>
       <div className="ot-detail"><button className="ot-mobile-back ot-secondary" onClick={() => setNarrowDetail(false)}><ArrowLeft size={14}/>团队列表</button>{detailError ? <p role="alert" className="ot-error">{detailError}</p> : selected ? <>
