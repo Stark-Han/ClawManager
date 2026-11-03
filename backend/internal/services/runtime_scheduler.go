@@ -185,20 +185,30 @@ func (s *RuntimeScheduler) Start(ctx context.Context) {
 	if s.proxyPolicy != nil {
 		go s.runProxyPolicyRenewal(ctx)
 	}
-	go func() {
-		ticker := time.NewTicker(s.tick)
-		defer ticker.Stop()
-
-		s.reconcileIfLeader(ctx)
-		for {
-			select {
-			case <-ctx.Done():
+	// Upgrade RPCs may legitimately take minutes. They must not prevent another
+	// Runtime from creating/recovering a Gateway or noticing a lost Pod. Each
+	// loop remains serial and uses the same leader, backup and instance fences.
+	for _, reconcile := range []func(context.Context){s.reconcileIfLeader, s.reconcileRolloutsIfLeader} {
+		go func(reconcile func(context.Context)) {
+			ticker := time.NewTicker(s.tick)
+			defer ticker.Stop()
+			if ctx.Err() != nil {
 				return
-			case <-ticker.C:
-				s.reconcileIfLeader(ctx)
 			}
-		}
-	}()
+			reconcile(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if ctx.Err() != nil {
+						return
+					}
+					reconcile(ctx)
+				}
+			}
+		}(reconcile)
+	}
 }
 
 func (s *RuntimeScheduler) HeartbeatTimeout() time.Duration {
@@ -1507,12 +1517,30 @@ func (s *RuntimeScheduler) reconcileIfLeader(ctx context.Context) {
 	if s.leader != nil && !s.leader.IsLeader(ctx) {
 		return
 	}
-	if err := s.reconcile(ctx); err != nil {
+	if err := s.reconcileState(ctx, false); err != nil {
 		log.Printf("runtime scheduler reconcile failed: %v", err)
 	}
 }
 
+func (s *RuntimeScheduler) reconcileRolloutsIfLeader(ctx context.Context) {
+	release, err := backupgate.HoldWorkUnit(ctx, "runtime.rollouts")
+	if err != nil {
+		return
+	}
+	defer release()
+	if s.leader != nil && !s.leader.IsLeader(ctx) {
+		return
+	}
+	if err := s.reconcileRollouts(ctx); err != nil {
+		log.Printf("runtime rollout reconcile failed: %v", err)
+	}
+}
+
 func (s *RuntimeScheduler) reconcile(ctx context.Context) error {
+	return s.reconcileState(ctx, true)
+}
+
+func (s *RuntimeScheduler) reconcileState(ctx context.Context, includeRollouts bool) error {
 	if s == nil || s.instanceRepo == nil || s.bindingRepo == nil || s.podRepo == nil {
 		return fmt.Errorf("runtime scheduler dependencies are not configured")
 	}
@@ -1525,8 +1553,10 @@ func (s *RuntimeScheduler) reconcile(ctx context.Context) error {
 	if err := s.failoverStalePods(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	if err := s.reconcileRollouts(ctx); err != nil {
-		errs = append(errs, err)
+	if includeRollouts {
+		if err := s.reconcileRollouts(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	creating, err := s.instanceRepo.GetV2Creating(ctx, runtimeSchedulerBatchLimit)
 	if err != nil {
