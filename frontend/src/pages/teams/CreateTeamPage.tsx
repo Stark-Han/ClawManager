@@ -1006,11 +1006,7 @@ const CreateTeamPage: React.FC = () => {
                 <SummaryRow
                   label="运行方式"
                   value={
-                    members.some(
-                      (member) => !member.isLeader && member.runtimeType === "hermes",
-                    )
-                      ? "OpenClaw Leader + 混合 Lite Worker"
-                      : "OpenClaw Lite"
+                    [...new Set(members.map(member => `${member.runtimeType === "opencode" ? "OpenCode" : member.runtimeType === "hermes" ? "Hermes" : "OpenClaw"} ${member.instanceMode === "pro" ? "Pro" : "Lite"}`))].join(" + ")
                   }
                 />
                 <SummaryRow
@@ -1022,8 +1018,8 @@ const CreateTeamPage: React.FC = () => {
                   value={`${sharedStorageGb || 0} GiB`}
                 />
                 <SummaryRow
-                  label="默认镜像"
-                  value={selectedImage?.display_name || selectedImage?.image || "无"}
+                  label="成员镜像"
+                  value={[...new Set(members.map(member => { const image = imageForRuntime(member.runtimeType, member.instanceMode); return images.find(item => item.image === image)?.display_name || image || "无"; }))].join("；")}
                 />
                 {members.some(
                   (member) => !member.isLeader && member.runtimeType === "hermes",

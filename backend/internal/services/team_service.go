@@ -2835,6 +2835,12 @@ func teamMemberExecutionSelfCheckGuidance(member plannedTeamMember) []string {
 }
 
 func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) string {
+	runtimeGuidance := "- You are running inside a ClawManager managed OpenClaw/Hermes runtime."
+	browserGuidance := "- Browser is available to every supported Team worker. Open Team files with team_artifact_preview when that tool is exposed; on an older Runtime without it, use static file inspection. Do not use file:// or start a temporary file server."
+	if member.RuntimeType == "opencode" {
+		runtimeGuidance = "- You are running inside a ClawManager managed OpenCode runtime."
+		browserGuidance = "- Use team_artifact_preview for managed Team previews. If no browser tool is installed, inspect files statically and report that limitation; do not claim browser verification. Do not use file:// or start a temporary file server."
+	}
 	communicationMode := teamCommunicationModeLeaderMediated
 	teamID := ""
 	if team != nil {
@@ -2847,11 +2853,11 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 		"This file defines the stable Team runtime contract. Treat SOUL.md as the member-specific identity and role file.",
 		"",
 		"## Runtime Capabilities",
-		"- You are running inside a ClawManager managed OpenClaw/Hermes runtime.",
+		runtimeGuidance,
 		"- Use the available runtime tools normally, but coordinate Team work through the ClawManager Team channel.",
 		"- Use team_send for assignments, handoffs, clarifying questions, blockers, and final delivery messages.",
 		"- Use team_status / progress updates to report work state when available.",
-		"- Browser is available to every supported Team worker. Open Team files with team_artifact_preview when that tool is exposed; on an older Runtime without it, use static file inspection. Do not use file:// or start a temporary file server.",
+		browserGuidance,
 		"- When your assigned work is ready, call team_complete_task once with the result. A normal assistant reply remains non-terminal; if the receipt is missed, ClawManager Monitor sends a separate reminder without extending the current turn.",
 		"- In an active Team turn, task and assignment identity is inherited by the Runtime. Reuse IDs supplied by ClawManager when present, but omit optional IDs rather than inventing replacements.",
 		"",
