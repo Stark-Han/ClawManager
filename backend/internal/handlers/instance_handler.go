@@ -1573,7 +1573,7 @@ func (h *InstanceHandler) GenerateAccessToken(c *gin.Context) {
 	accessURL := h.proxyService.GetProxyURLForInstance(instance, "")
 
 	if accessURL == "" {
-		utils.Error(c, http.StatusServiceUnavailable, "Unable to generate access URL")
+		unavailableInstanceAccess(c, instance)
 		return
 	}
 
@@ -2807,7 +2807,7 @@ func (h *InstanceHandler) requireExternalAccessInstance(c *gin.Context, access *
 func (h *InstanceHandler) issueShortExternalAccessToken(c *gin.Context, instance *models.Instance, code string, access *models.InstanceExternalAccess) (*services.AccessToken, bool) {
 	accessURL := h.externalAccessEntryURL(instance)
 	if accessURL == "" {
-		utils.Error(c, http.StatusServiceUnavailable, "Unable to generate access URL")
+		unavailableInstanceAccess(c, instance)
 		return nil, false
 	}
 	targetPort := h.proxyService.GetTargetPortForInstance(instance)

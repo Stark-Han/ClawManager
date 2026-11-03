@@ -107,7 +107,10 @@ export default function IEISystemInstancePage() {
           setInstance(null);
           setError("访问验证失效，请返回列表重新登录或确认实例权限。");
         } else {
-          setRuntimeError(nextInstance.status === "stopped" ? "实例已停止，运行界面暂不可用。" : nextInstance.status === "error" ? "实例运行异常，暂时无法连接运行界面。" : "暂时无法连接运行界面，请稍后重新连接。");
+          const accessCode = axios.isAxiosError(accessError) ? accessError.response?.data?.error_code : undefined;
+          setRuntimeError(accessCode === "runtime_access_not_configured"
+            ? "OpenCode 访问入口尚未正确配置，请联系管理员。无需重启实例。"
+            : nextInstance.status === "stopped" ? "实例已停止，运行界面暂不可用。" : nextInstance.status === "error" ? "实例运行异常，暂时无法连接运行界面。" : "暂时无法连接运行界面，请稍后重新连接。");
         }
       }
     } catch (openError) {

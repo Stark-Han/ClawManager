@@ -508,7 +508,7 @@ func (h *IEISystemHandler) GenerateInstanceAccess(c *gin.Context) {
 
 	accessURL := h.instanceHandler.proxyService.GetProxyURLForInstance(instance, "")
 	if strings.TrimSpace(accessURL) == "" {
-		utils.Error(c, http.StatusServiceUnavailable, "Unable to generate access URL")
+		unavailableInstanceAccess(c, instance)
 		return
 	}
 	targetPort := h.instanceHandler.proxyService.GetTargetPortForInstance(instance)

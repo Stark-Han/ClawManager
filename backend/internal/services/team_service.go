@@ -5102,6 +5102,7 @@ func buildLeaderSynthesisReminderPrompt(task *models.TeamTask, resultItems []mod
 		"[LEADER_SYNTHESIS_REMINDER] All tracked member assignments for this root task have delivered terminal results in the ClawManager ledger.",
 		fmt.Sprintf("rootTaskId=%s rootMessageId=%s workId=leader-final-synthesis assignmentId=leader-final-synthesis", rootTaskRef, task.MessageID),
 		"Synthesize the final user-facing answer from the confirmed member results below, then call team_complete_task for the root task. Do not re-dispatch finished assignments unless the evidence below is actually insufficient.",
+		"Shared task files are dispatch snapshots. Use team_status for current receipts and workflow facts; a reminder never creates another assignment.",
 		"",
 		"Confirmed member results:",
 	}
@@ -5112,6 +5113,11 @@ func buildLeaderSynthesisReminderPrompt(task *models.TeamTask, resultItems []mod
 			summary = item.Title
 		}
 		lines = append(lines, fmt.Sprintf("- %s: %s", item.WorkID, summary))
+		if result := acknowledgedWorkItemContext(item); result != nil {
+			if encoded, err := json.Marshal(result); err == nil {
+				lines = append(lines, string(encoded))
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -5124,6 +5130,7 @@ func buildLeaderDecisionReminderPrompt(task *models.TeamTask, resultItems []mode
 		"If more implementation, verification, review, or refinement is required, publish the next planVersion and dispatch those assignments.",
 		"If no required action remains, explicitly record that the workflow is sealed with a leader_synthesis progress update. Only after that explicit decision may you submit a final user-facing result with team_complete_task.",
 		"Do not call team_complete_task merely because the current phase's workers have finished.",
+		"Shared task files are dispatch snapshots. Use team_status for current receipts. Do not repeat running or accepted assignments; only a genuine next phase or authorized rework creates new work.",
 		"",
 		"Confirmed current-phase results:",
 	}
@@ -5134,6 +5141,11 @@ func buildLeaderDecisionReminderPrompt(task *models.TeamTask, resultItems []mode
 			summary = item.Title
 		}
 		lines = append(lines, fmt.Sprintf("- %s: %s", item.WorkID, summary))
+		if result := acknowledgedWorkItemContext(item); result != nil {
+			if encoded, err := json.Marshal(result); err == nil {
+				lines = append(lines, string(encoded))
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -8465,6 +8477,7 @@ func (s *teamService) publishTeamRootWorkflowState(bus *redisBus, task *models.T
 					"validationTargetAssignmentId": derefTeamString(item.ReviewTargetAssignmentID),
 					"validationTargetRevision":     derefTeamInt(item.ReviewTargetRevision),
 					"updatedAt":                    item.UpdatedAt.Format(time.RFC3339Nano),
+					"acceptedResult":               acknowledgedWorkItemContext(item),
 				}
 			}
 			state["assignments"] = assignments
@@ -8476,7 +8489,7 @@ func (s *teamService) publishTeamRootWorkflowState(bus *redisBus, task *models.T
 	}
 	// This key is an optimization used only to suppress stale reminders. Redis
 	// or old-runtime incompatibility must never block the business workflow.
-	_ = bus.Set(context.Background(), teamRootWorkflowStateKey(task.TeamID, rootTaskID), string(encoded), 7*24*time.Hour)
+	publishTeamWorkflowContext(bus, teamRootWorkflowStateKey(task.TeamID, rootTaskID), encoded)
 }
 
 // teamAssignmentRevisionRecoveryAllowed derives revision authority exclusively
