@@ -34,7 +34,8 @@ if previous then
  local ok, old = pcall(cjson.decode, previous)
  if ok and old.rootTaskId == next.rootTaskId then
   if tonumber(old.ledgerVersion or 0) > tonumber(next.ledgerVersion or 0) then return 0 end
-  if old.terminal == true and next.terminal ~= true then return 0 end
+  if tonumber(old.ledgerVersion or 0) == tonumber(next.ledgerVersion or 0)
+   and old.terminal == true and next.terminal ~= true then return 0 end
   if tonumber(old.ledgerVersion or 0) == tonumber(next.ledgerVersion or 0)
    and old.assignmentLedgerComplete == true and next.assignmentLedgerComplete ~= true then return 0 end
  end

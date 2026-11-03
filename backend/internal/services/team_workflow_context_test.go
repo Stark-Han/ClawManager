@@ -69,8 +69,12 @@ func TestTeamWorkflowProjectionRealRedisMonotonic(t *testing.T) {
 		t.Fatalf("stale projection won: %#v", v)
 	}
 	put(8, true, true)
-	put(9, false, true)
+	put(8, false, true)
 	if read()["terminal"] != true {
 		t.Fatal("terminal projection regressed")
+	}
+	put(9, false, true)
+	if read()["ledgerVersion"] != float64(9) {
+		t.Fatal("advisory cache overruled a newer SQL business version")
 	}
 }
