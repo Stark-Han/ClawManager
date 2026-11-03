@@ -137,7 +137,7 @@ func (a *OwnerTeamAPI) submitCreate(c *gin.Context, identity OwnerTeamIdentity) 
 		if m.InstanceMode == "" {
 			m.InstanceMode = "lite"
 		}
-		if (m.RuntimeType != "openclaw" && m.RuntimeType != "hermes") || (m.InstanceMode != "lite" && m.InstanceMode != "pro") || m.IsLeader && m.RuntimeType != "openclaw" {
+		if (m.RuntimeType != "openclaw" && m.RuntimeType != "hermes" && m.RuntimeType != "opencode") || (m.InstanceMode != "lite" && m.InstanceMode != "pro") || m.IsLeader && m.RuntimeType != "openclaw" && m.RuntimeType != "opencode" {
 			writeError(c, apiError(422, "RUNTIME_DISABLED", "不支持的成员 Runtime 或模式", nil))
 			return
 		}

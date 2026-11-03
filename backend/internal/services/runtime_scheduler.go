@@ -2095,6 +2095,8 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		}
 		return fmt.Errorf("classify schedulable %s runtime pods: %w", runtimeType, err)
 	}
+	pods = filterOpenCodeTeamPods(&instance, pods)
+
 	if runtimeType == RuntimeTypeOpenClaw && s.upgrade != nil {
 		verifiedCount := len(pods)
 		pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
@@ -2466,6 +2468,9 @@ func (s *RuntimeScheduler) prepareGatewayStartForUpgrade(ctx context.Context, in
 }
 
 func (s *RuntimeScheduler) prepareGatewayStartParameters(ctx context.Context, instance models.Instance, runtimeType string, pod models.RuntimePod) (*runtimeGatewayStart, error) {
+	if len(filterOpenCodeTeamPods(&instance, []models.RuntimePod{pod})) == 0 {
+		return nil, fmt.Errorf("%w: OpenCode Team adapter is unavailable on the serving Runtime", errRuntimeControlPlanePending)
+	}
 	if s.agentClient == nil || s.bindingRepo == nil || s.instanceRepo == nil {
 		return nil, fmt.Errorf("runtime scheduler gateway dependencies are not configured")
 	}

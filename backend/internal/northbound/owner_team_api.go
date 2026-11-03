@@ -205,7 +205,7 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 				reason = failure.Message
 			}
 		}
-		ownerTeamSuccess(c, map[string]interface{}{"enabled": true, "can_create": createErr == nil, "create_disabled_reason": reason, "runtime_types": []string{"openclaw", "hermes"}, "instance_modes": []string{"lite", "pro"}, "custom_member_min": 2, "custom_member_max": 6})
+		ownerTeamSuccess(c, map[string]interface{}{"enabled": true, "can_create": createErr == nil, "create_disabled_reason": reason, "runtime_types": []string{"openclaw", "hermes", "opencode"}, "instance_modes": []string{"lite", "pro"}, "custom_member_min": 2, "custom_member_max": 6})
 		return
 	}
 	if strings.HasPrefix(route.Action, "catalog.") {

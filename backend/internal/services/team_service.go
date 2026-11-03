@@ -14425,8 +14425,8 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 			leaderCount++
 			role = "leader"
 		}
-		if isLeader && (runtimeType != "openclaw" || instanceMode != InstanceModeLite) {
-			return nil, fmt.Errorf("team leader must use OpenClaw Lite")
+		if isLeader && runtimeType != "opencode" && (runtimeType != "openclaw" || instanceMode != InstanceModeLite) {
+			return nil, fmt.Errorf("team leader must use OpenClaw Lite or a supported OpenCode runtime")
 		}
 		if runtimeType == "hermes" && instanceMode != InstanceModeLite {
 			return nil, fmt.Errorf("Hermes team workers must use Lite mode")
@@ -14779,7 +14779,7 @@ func normalizeTeamMemberRuntimeType(raw string) (string, error) {
 		return "openclaw", nil
 	}
 	switch runtimeType {
-	case "openclaw", "hermes":
+	case "openclaw", "hermes", "opencode":
 		return runtimeType, nil
 	default:
 		return "", fmt.Errorf("unsupported team member runtime type: %s", raw)
