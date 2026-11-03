@@ -14,6 +14,16 @@ Linux 6.8. Runtime workspaces use direct NFS mounts. The existing manual workspa
 PVC is not Longhorn; available Longhorn StorageClasses do not prove that this
 claim satisfies the multi-node slot storage contract.
 
+Real probes subsequently ran in a separate tenant-owned test namespace, with no
+business mounts or credentials. Both master-pinned probes were rejected because
+that node had reached its 110-Pod capacity. On the other node, the unchanged
+shared sandbox Linux gate failed with `bwrap: setting up uid map: Permission
+denied` under the requested Pod user-namespace/security context. The independent
+Longhorn RWX test claim bound successfully; a cross-node result is not available
+because the master-side probe could not start. A bound claim is not cross-node
+acceptance. These are explicit M0 blockers for slot activation, not reasons to
+weaken the isolation policy or alter cluster-wide settings during M1.
+
 Run the read-only inventory against explicitly selected deployments:
 
 ```sh
