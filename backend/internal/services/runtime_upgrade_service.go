@@ -2350,10 +2350,10 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 				}
 			}
 		}
-		if !podID.Valid && candidate.InstanceStatus != "stopped" && !(candidate.InstanceStatus == "error" && scope.allowsRecovery(instanceID)) {
+		if !podID.Valid && candidate.InstanceStatus != "stopped" && !((candidate.InstanceStatus == "error" || candidate.InstanceStatus == "creating") && scope.allowsRecovery(instanceID) && scope.RecoveryParentID > 0) {
 			blockers = append(blockers, fmt.Sprintf("instance %d is %s without a Runtime binding; wait for runtime reconciliation before upgrading", instanceID, candidate.InstanceStatus))
 		}
-		if !podID.Valid && candidate.InstanceStatus == "error" && scope.allowsRecovery(instanceID) && scope.RecoveryParentID > 0 {
+		if !podID.Valid && (candidate.InstanceStatus == "error" || candidate.InstanceStatus == "creating") && scope.allowsRecovery(instanceID) && scope.RecoveryParentID > 0 {
 			prior, err := s.recoveryStoppedSource(ctx, scope.RecoveryParentID, instanceID, runtimeGeneration)
 			if err != nil {
 				blockers = append(blockers, err.Error())
