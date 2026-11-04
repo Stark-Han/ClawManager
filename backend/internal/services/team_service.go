@@ -530,6 +530,9 @@ func (s *teamService) ensureConsumersForActiveTeams(ctx context.Context) {
 }
 
 func (s *teamService) CreateTeam(userID int, req CreateTeamRequest) (*TeamDetailsPayload, error) {
+	if err := ValidateNewTeamRequest(req); err != nil {
+		return nil, err
+	}
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return nil, fmt.Errorf("team name is required")

@@ -54,6 +54,10 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		utils.ValidationError(c, err)
 		return
 	}
+	if err := services.ValidateNewTeamRequest(req); err != nil {
+		utils.Error(c, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	team, err := h.teamService.CreateTeam(userID.(int), req)
 	if err != nil {
 		utils.HandleError(c, err)

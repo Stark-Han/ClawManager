@@ -205,7 +205,8 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 				reason = failure.Message
 			}
 		}
-		ownerTeamSuccess(c, map[string]interface{}{"enabled": true, "can_create": createErr == nil, "create_disabled_reason": reason, "runtime_types": []string{"openclaw", "hermes", "opencode"}, "instance_modes": []string{"lite", "pro"}, "custom_member_min": 2, "custom_member_max": 6})
+		rules := services.CurrentTeamCreationRules()
+		ownerTeamSuccess(c, map[string]interface{}{"enabled": true, "can_create": createErr == nil, "create_disabled_reason": reason, "runtime_types": rules.RuntimeTypes, "leader_runtime_types": rules.LeaderRuntimeTypes, "worker_runtime_types": rules.WorkerRuntimeTypes, "instance_modes": rules.InstanceModes, "communication_modes": rules.CommunicationModes, "custom_member_min": 2, "custom_member_max": 6})
 		return
 	}
 	if strings.HasPrefix(route.Action, "catalog.") {
@@ -413,6 +414,17 @@ func (a *OwnerTeamAPI) retryOperation(c *gin.Context, identity OwnerTeamIdentity
 	if op.Status != "failed" || req.ExpectedAttempt != op.AttemptCount {
 		writeError(c, apiError(409, "OPERATION_CHANGED", "操作状态已变化，请重新检查", nil))
 		return
+	}
+	if op.OperationType == "owner_team_teams_create" {
+		var frozen ownerTeamStoredRequest
+		if json.Unmarshal([]byte(op.RequestPayload), &frozen) != nil || frozen.TeamRequest == nil {
+			writeError(c, apiError(409, "TEAM_CREATION_POLICY", "原创建配置不可用，已有资源已保留", nil))
+			return
+		}
+		if err := services.ValidateNewTeamRequest(*frozen.TeamRequest); err != nil {
+			writeError(c, apiError(409, "TEAM_CREATION_POLICY", err.Error()+"；已有资源已保留，不能继续新增成员", nil))
+			return
+		}
 	}
 	changed, err := a.store.RetryOperation(op, req.ExpectedAttempt)
 	if err != nil {

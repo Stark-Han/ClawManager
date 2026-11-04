@@ -354,6 +354,8 @@ func (r *NorthboundRepository) FinishOwnerTeamOperation(ctx context.Context, op 
 		status, code, message = "failed", "OWNER_TEAM_OPERATION_FAILED", "操作未完成；已保留现有资源，请查看操作记录"
 		text := strings.ToLower(cause.Error())
 		switch {
+		case strings.Contains(text, "team_creation_policy:"):
+			code, message = "TEAM_CREATION_POLICY", "原创建配置不符合当前 Team 规则；Leader 必须为 OpenClaw Lite，Worker 仅支持 Lite。已有资源已保留，不能继续新增成员"
 		case strings.Contains(text, "runtime readiness timed out"):
 			code, message = "OWNER_TEAM_RUNTIME_TIMEOUT", "成员启动验证超时；现有实例和数据已保留，解决运行异常后可重试原操作"
 		case strings.Contains(text, "owner_team_step_uncertain"):

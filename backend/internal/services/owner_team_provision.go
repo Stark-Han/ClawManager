@@ -53,6 +53,9 @@ type OwnerTeamProvisioner interface {
 }
 
 func (s *teamService) ValidateOwnerTeamCreate(userID int, owner string, req CreateTeamRequest) error {
+	if err := ValidateNewTeamRequest(req); err != nil {
+		return err
+	}
 	plans, err := planTeamMembers(req.Name, req.Members)
 	if err != nil {
 		return err
@@ -102,6 +105,11 @@ func (s *teamService) ProvisionOwnerTeam(ctx context.Context, team *models.Team,
 		return err
 	} else if done {
 		return s.finishOwnerTeamProvision(ctx, team)
+	}
+	// Already committed historical members may finish readiness above. Never
+	// allocate missing resources from an obsolete, now-disallowed frozen plan.
+	if err := ValidateNewTeamRequest(req); err != nil {
+		return fmt.Errorf("TEAM_CREATION_POLICY: %w", err)
 	}
 	var pending []CreateInstanceRequest
 	for _, plan := range plans {
