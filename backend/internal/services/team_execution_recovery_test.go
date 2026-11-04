@@ -214,3 +214,11 @@ func TestLeaderNewRootCannotBeClearedByHistoricalCards(t *testing.T) {
 		}
 	}
 }
+
+func TestLeaderNewRootReconcilesIdleAvailabilityWithoutReleasingOwnership(t *testing.T) {
+	leader := &models.TeamMember{ID: 1, Role: "leader", CurrentTaskID: intPtr(373), Status: "busy", Availability: "idle"}
+	items := []models.TeamWorkItem{{OwnerMemberID: intPtr(1), RootTaskID: 372, Status: "succeeded", WorkID: "leader-final-synthesis"}}
+	if !reconcileTeamMemberOperationalState(leader, items) || leader.Availability != "busy" || leader.CurrentTaskID == nil || *leader.CurrentTaskID != 373 {
+		t.Fatal("active Leader availability stayed idle")
+	}
+}

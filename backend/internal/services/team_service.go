@@ -10099,7 +10099,7 @@ func (s *teamService) projectTeamEventAttempt(team *models.Team, bus *redisBus, 
 		taskIsActive := task != nil && !isTerminalTeamTaskStatus(task.Status)
 		if !passiveMonitorEvent && !stateNeutralAssignmentEvent && taskIsActive && (leaderDispatchOnly || eventType == "task_received" || eventType == "task_started" || taskProjection.status == models.TeamTaskStatusRunning || taskProjection.status == models.TeamTaskStatusDispatched) {
 			member.Status = models.TeamMemberStatusBusy
-			if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown {
+			if member.Availability == "" || member.Availability == models.TeamMemberAvailabilityUnknown || member.Availability == models.TeamMemberAvailabilityIdle {
 				member.Availability = models.TeamMemberAvailabilityBusy
 			}
 			member.CurrentTaskID = &task.ID
@@ -10226,6 +10226,10 @@ func reconcileTeamMemberOperationalState(member *models.TeamMember, items []mode
 			}
 		}
 		if !ownsCurrent {
+			if member.Status == models.TeamMemberStatusBusy && member.Availability == models.TeamMemberAvailabilityIdle {
+				member.Availability = models.TeamMemberAvailabilityBusy
+				return true
+			}
 			return false
 		}
 	}
