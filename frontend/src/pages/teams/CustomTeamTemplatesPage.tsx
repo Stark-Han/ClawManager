@@ -1,3 +1,4 @@
+import { customTemplateCreationError, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -393,12 +394,12 @@ const CustomTeamTemplatesPage: React.FC = () => {
                       {editorChanged ? " · 有未应用的整体修改" : ""}
                     </div>
                   </div>
-                  <Link
+                  {customTemplateCreationError(selected) ? <span role="alert" className="text-sm text-red-600">{customTemplateCreationError(selected)}</span> : <Link
                     to={`/teams/new?template=custom-${selected.id}`}
                     className="app-button-primary inline-flex items-center gap-2"
                   >
                     使用此模板创建 Team <ArrowRight size={16} />
-                  </Link>
+                  </Link>}
                 </section>
 
                 <section className="app-panel overflow-hidden">
@@ -497,7 +498,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
                     <div>
                       <h2 className="text-lg font-semibold text-gray-900">成员职责</h2>
                       <p className="mt-1 text-sm text-gray-500">
-                        默认收起便于浏览；展开成员后可用自然语言单独细化延展职责。
+                        {TEAM_CREATION_NOTICE} Runtime 在使用模板创建时选择。
                       </p>
                     </div>
                     <span className="text-sm text-gray-500">共 {selected.spec.members.length} 人</span>

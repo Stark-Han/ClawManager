@@ -1,3 +1,4 @@
+import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import OpenClawConfigPlanSection, {
@@ -47,6 +48,7 @@ const memberTemplateFromCustom = (
   template: CustomTeamTemplate,
 ): TeamMemberTemplate => ({
   id: `custom-${template.id}`,
+  creationError: customTemplateCreationError(template),
   name: template.name,
   teamName: template.name,
   description: template.spec.summary,
@@ -356,10 +358,8 @@ const CreateTeamPage: React.FC = () => {
   const openCodeLiteImage = images.find(item => item.instance_type === "opencode" && item.is_enabled !== false && normalizedImageRuntimeType(item) === "gateway")?.image || "";
   const imageForRuntime = useCallback(
     (runtimeType: RuntimeType, mode: InstanceMode = "lite") =>
-      runtimeType === "hermes" ? hermesLiteImage : runtimeType === "opencode"
-        ? mode === "pro" ? images.find(item => item.instance_type === "opencode" && item.is_enabled !== false && normalizedImageRuntimeType(item) === imageRuntimeTypeForMode("pro"))?.image || "" : openCodeLiteImage
-        : openClawLiteImage,
-    [images, hermesLiteImage, openClawLiteImage, openCodeLiteImage],
+      mode !== "lite" ? "" : runtimeType === "hermes" ? hermesLiteImage : runtimeType === "opencode" ? openCodeLiteImage : openClawLiteImage,
+    [hermesLiteImage, openClawLiteImage, openCodeLiteImage],
   );
 
   useEffect(() => {
@@ -412,7 +412,7 @@ const CreateTeamPage: React.FC = () => {
   const updateWorkerRuntime = (memberDraftId: string, runtimeType: RuntimeType) => {
     setMembers((current) =>
       current.map((member) => {
-        if (member.id !== memberDraftId || (member.isLeader && runtimeType === "hermes")) {
+        if (member.id !== memberDraftId || (member.isLeader && runtimeType !== "openclaw")) {
           return member;
         }
         return {
@@ -557,6 +557,7 @@ const CreateTeamPage: React.FC = () => {
   );
 
   const validationError = useMemo(() => {
+    if (selectedTemplate?.creationError) return selectedTemplate.creationError;
     if (!name.trim()) {
       return "Team 名称不能为空";
     }
@@ -581,9 +582,8 @@ const CreateTeamPage: React.FC = () => {
         return `成员 ID 重复：${memberId}`;
       }
       memberIds.add(memberId);
-      if (member.isLeader && member.runtimeType !== "openclaw" && member.runtimeType !== "opencode") {
-        return "Leader 必须使用 OpenClaw 或 OpenCode";
-      }
+      const policyError = teamMemberCreationError(member);
+      if (policyError) return policyError;
       if (!imageForRuntime(member.runtimeType, member.instanceMode)) {
         return `没有可用的 ${member.runtimeType} ${member.instanceMode} 镜像`;
       }
@@ -592,7 +592,7 @@ const CreateTeamPage: React.FC = () => {
       }
     }
     return null;
-  }, [imageForRuntime, loadingImages, members, name, openClawLiteImage]);
+  }, [imageForRuntime, loadingImages, members, name, openClawLiteImage, selectedTemplate]);
 
   const environmentDraft = buildEnvironmentOverridesPayload();
   const openClawPlanInvalid =
@@ -912,6 +912,7 @@ const CreateTeamPage: React.FC = () => {
                 </div>
               )}
 
+              <p className="mt-3 text-xs text-gray-500">{TEAM_CREATION_NOTICE}</p>
               <div className="mt-5 overflow-hidden rounded-xl border border-[#eadfd8]">
                 <div className="hidden grid-cols-[minmax(110px,0.8fr)_minmax(130px,0.9fr)_minmax(190px,1.15fr)_minmax(140px,0.9fr)_minmax(260px,1.7fr)] gap-3 border-b border-[#eadfd8] bg-gray-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 lg:grid">
                   <div>成员 ID</div>
@@ -951,10 +952,10 @@ const CreateTeamPage: React.FC = () => {
                           运行时
                         </div>
                         <div className="flex flex-wrap gap-2">
-                          <select aria-label={`${member.memberId} 运行时`} value={member.runtimeType} onChange={event => updateWorkerRuntime(member.id, event.target.value as RuntimeType)} className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs">
-                            {(["openclaw", "hermes", "opencode"] as RuntimeType[]).filter(type => !member.isLeader || type !== "hermes").map(type => <option key={type} value={type} disabled={!imageForRuntime(type)}>{type === "opencode" ? "OpenCode" : type === "hermes" ? "Hermes Lite" : "OpenClaw Lite"}</option>)}
-                          </select>
-                          {member.runtimeType === "opencode" && <select aria-label={`${member.memberId} 实例模式`} value={member.instanceMode} onChange={event => { const instanceMode = event.target.value as InstanceMode; setMembers(current => current.map(item => item.id === member.id ? { ...item, instanceMode, image: imageForRuntime(item.runtimeType, instanceMode) } : item)); }} className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs"><option value="lite">Lite</option><option value="pro" disabled={!imageForRuntime("opencode", "pro")}>Pro</option></select>}
+                          {member.isLeader ? <span className="rounded-lg border border-[#eadfd8] bg-gray-50 px-3 py-1.5 text-xs">OpenClaw Lite · 固定 Leader</span> : <select aria-label={`${member.memberId} 运行时`} value={member.runtimeType} onChange={event => updateWorkerRuntime(member.id, event.target.value as RuntimeType)} disabled={submitting} className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs">
+                            {teamRuntimeOptions(false).map(type => <option key={type} value={type} disabled={!imageForRuntime(type)}>{type === "opencode" ? "OpenCode Lite" : type === "hermes" ? "Hermes Lite" : "OpenClaw Lite"}{!imageForRuntime(type) ? "（镜像未配置）" : ""}</option>)}
+                          </select>}
+
                         </div>
                       </div>
                       <div>

@@ -27,6 +27,7 @@ export type TeamMemberTemplateMember = {
 };
 
 export type TeamMemberTemplate = {
+  creationError?: string;
   id: string;
   name: string;
   teamName?: string;

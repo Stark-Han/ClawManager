@@ -11,7 +11,8 @@
     "test:instance-access": "node --test src/hooks/useInstanceDesktopAccess.test.mjs",
     "test:runtime-management": "node --experimental-strip-types --test scripts/runtime-management.test.mjs",
     "test:opencode-default-entry": "node scripts/opencode-default-entry.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:team-creation": "node --experimental-strip-types scripts/team-creation-policy.test.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",

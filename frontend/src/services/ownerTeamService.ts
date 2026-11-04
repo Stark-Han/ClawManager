@@ -13,7 +13,7 @@ ownerTeamHTTP.interceptors.response.use(r => r, error => {
 export type TeamWorkspaceAPI = Omit<typeof teamService, 'createTeam' | 'listTeams'>;
 export interface OwnerTeamSummary extends Team { members: TeamMember[]; member_count: number; available_count: number; confirming_count?: number; fault_count?: number }
 export interface TeamOperation { operation_id: string; status: string; attempt_count?: number; team_id?: number; template_id?: number; error_code?: string; error_message?: string }
-export interface OwnerTeamCapabilities { enabled: boolean; can_create: boolean; create_disabled_reason?: string; runtime_types?: string[]; instance_modes?: string[] }
+export interface OwnerTeamCapabilities { enabled: boolean; can_create: boolean; create_disabled_reason?: string; runtime_types?: string[]; instance_modes?: string[]; leader_runtime_types?: string[]; worker_runtime_types?: string[]; communication_modes?: string[] }
 export interface OwnerTeamCatalogEntry { key: string; revision: number; name: string; description: string; communication_mode: string; members: { member_id: string; name: string; role: string; is_leader: boolean; runtime_type: string; instance_mode: string }[] }
 
 export function ownerTeamRequestKey(): string { return `owner-team-${crypto.randomUUID()}`; }
