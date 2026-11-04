@@ -19,10 +19,21 @@ func acknowledgedWorkItemContext(item models.TeamWorkItem) map[string]interface{
 	if truncated {
 		text = string(runes[:4000])
 	}
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"summary": workItemResultSummary(item), "resultMarkdown": text,
 		"resultTruncated": truncated, "artifactRefs": workItemArtifactRefs(item),
 	}
+	if supplement, ok := payload["deliverySupplement"].(map[string]interface{}); ok {
+		text := eventString(supplement, "text")
+		runes := []rune(text)
+		if len(runes) > 4000 {
+			text = string(runes[:4000])
+		}
+		out["supplementaryText"] = text
+		out["supplementTruncated"] = len(runes) > 4000 || eventBool(supplement, "textTruncated")
+		out["supplementSourceRecordId"] = eventString(supplement, "sourceRecordId")
+	}
+	return out
 }
 
 // This protects the existing advisory projection, not the SQL state machine.

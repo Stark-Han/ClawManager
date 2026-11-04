@@ -1019,6 +1019,8 @@ func (s *teamService) createRootCoordinationRecovery(
 		"monitor":                   true,
 		"monitorType":               intent,
 		"completionRecoveryAttempt": recoveryAttempt,
+		"recoveryFaultKey":          sourcePayload["recoveryFaultKey"],
+		"boundedRecoveryAttempt":    sourcePayload["boundedRecoveryAttempt"],
 		"sourceTurnObservation":     eventString(sourcePayload, "turnObservationOutcome", "turn_observation_outcome"),
 	}
 	if eventBool(sourcePayload, "lastToolFailed", "last_tool_failed") {
@@ -3784,7 +3786,10 @@ func (s *teamService) projectConsumedTeamEvent(ctx context.Context, team *models
 	}
 	defer release()
 	if err := s.projectTeamEvent(team, bus, message); err != nil {
-		fmt.Printf("Warning: failed to project Team %d event %s: %v\n", team.ID, message.ID, err)
+		fmt.Printf("Warning: failed to project Team %d event %s\n", team.ID, message.ID)
+		if saveErr := s.preserveProjectionFailure(team, message); saveErr != nil {
+			return false
+		}
 	}
 	team.RedisEventsLastID = message.ID
 	team.UpdatedAt = time.Now().UTC()
@@ -3835,6 +3840,9 @@ func (s *teamService) runTeamMaintenanceSweep(ctx context.Context) {
 	}
 	if err := s.sweepStaleTasks(); err != nil {
 		fmt.Printf("Warning: failed to sweep stale Team tasks: %v\n", err)
+	}
+	if err := s.sweepRootExecutionRecovery(); err != nil {
+		fmt.Printf("Warning: root recovery sweep unavailable\n")
 	}
 	if err := s.sweepAssignmentStatusChecks(); err != nil {
 		fmt.Printf("Warning: failed to sweep Team assignment status checks: %v\n", err)
@@ -3895,6 +3903,13 @@ func (s *teamService) deliverTeamEventOutbox(team *models.Team, bus *redisBus, o
 	}
 	if err := s.requireTeamRedisDeliveryAvailable(context.Background(), team, bus); err != nil {
 		return err
+	}
+	if outbox.Destination == teamProjectionRetryDestination {
+		var message redisStreamMessage
+		if err := json.Unmarshal([]byte(outbox.PayloadJSON), &message); err != nil {
+			return err
+		}
+		return s.projectTeamEventAttempt(team, bus, message, true)
 	}
 	payload := map[string]interface{}{}
 	if err := json.Unmarshal([]byte(outbox.PayloadJSON), &payload); err != nil {
@@ -4251,7 +4266,7 @@ func (s *teamService) sweepAssignmentStatusChecks() error {
 		if normalizedTeamCommunicationMode(team.CommunicationMode) != teamCommunicationModeLeaderMediated {
 			continue
 		}
-		items, err := s.repo.ListWorkItemsByTeamID(team.ID, 500)
+		items, err := s.monitorWorkItems(team.ID)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -9297,13 +9312,16 @@ func inferLeaderDispatchTarget(payload map[string]interface{}) string {
 }
 
 func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message redisStreamMessage) error {
-	if exists, err := s.repo.EventExistsByStreamID(team.ID, message.ID); err != nil || exists {
+	return s.projectTeamEventAttempt(team, bus, message, false)
+}
+func (s *teamService) projectTeamEventAttempt(team *models.Team, bus *redisBus, message redisStreamMessage, replay bool) error {
+	if exists, err := s.repo.EventExistsByStreamID(team.ID, message.ID); err != nil || (exists && !replay) {
 		return err
 	}
 	payload := mergeRedisEventPayload(message.Fields)
 	eventID := eventString(payload, "eventId", "event_id")
 	if eventID != "" {
-		if exists, err := s.repo.EventExistsByEventID(team.ID, eventID); err != nil || exists {
+		if exists, err := s.repo.EventExistsByEventID(team.ID, eventID); err != nil || (exists && !replay) {
 			return err
 		}
 	}
@@ -9406,6 +9424,9 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 				return nil
 			}
 		}
+	}
+	if eventString(payload, "eventKind") == "delivery_supplement" {
+		return s.projectNativeDeliverySupplement(team, bus, task, member, payload, message.ID)
 	}
 	hydrateExplicitCompletionEnvelope(payload, team, task, member, message.ID)
 	normalizeTrustedTeamChatOrder(payload, task, time.Now().UTC())
@@ -9765,14 +9786,7 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 					payload["visible_to_chat"] = true
 					payload["displayKey"] = fmt.Sprintf("worker-result:%d:%s:%d", task.ID, assignmentID, teamMaxInt(eventInt(payload, "revision"), 1))
 					enrichTeamCollaborationStep(team, "member_result_updated", payload, member, task)
-					updateEventID := fmt.Sprintf(
-						"member-result-updated:%d:%d:%s:%s:%s",
-						team.ID,
-						task.ID,
-						normalizeTeamRedisKeyPart(member.MemberKey),
-						normalizeTeamRedisKeyPart(assignmentID),
-						normalizeTeamRedisKeyPart(contentHash),
-					)
+					updateEventID := boundedTeamEventID("member-result-updated", team.ID, task.ID, member.MemberKey, assignmentID, teamMaxInt(eventInt(payload, "revision"), 1), contentHash)
 					updatePayloadJSON, marshalErr := marshalOptionalJSON(payload)
 					if marshalErr != nil {
 						return marshalErr
@@ -9782,16 +9796,39 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 						EventID: &updateEventID, EventType: "member_result_updated",
 						PayloadJSON: updatePayloadJSON, OccurredAt: eventTime(payload), CreatedAt: time.Now().UTC(),
 					}
-					if createErr := s.repo.CreateEvent(updateEvent); createErr != nil && !errors.Is(createErr, repository.ErrDuplicateTeamEvent) {
-						return createErr
+					items, listErr := s.repo.ListWorkItemsByRootTaskID(task.ID)
+					if listErr != nil {
+						return listErr
 					}
-					if notifyErr := s.createLeaderMediatedResultNotification(team, bus, task, member, payload, updateEvent); notifyErr != nil {
-						return notifyErr
+					var corrected *models.TeamWorkItem
+					for idx := range items {
+						if workItemBusinessID(items[idx]) == assignmentID && teamMaxInt(items[idx].Revision, 1) == teamMaxInt(eventInt(payload, "revision"), 1) && items[idx].OwnerMemberID != nil && *items[idx].OwnerMemberID == member.ID {
+							corrected = &items[idx]
+							break
+						}
 					}
+					if corrected == nil {
+						return fmt.Errorf("accepted correction work item missing")
+					}
+					corrected.ResultJSON = updatePayloadJSON
+					corrected.ArtifactRefsJSON, _ = marshalOptionalJSON(explicitTeamArtifactReferences(payload))
+					expected := task.LedgerVersion
 					task.LedgerVersion++
 					task.UpdatedAt = time.Now().UTC()
-					if updateErr := s.repo.UpdateTask(task); updateErr != nil {
-						return updateErr
+					ackOutbox, ackErr := completionAcknowledgementOutbox(team, task, member, payload, teamCompletionDecisionAccepted, "assignment_result_updated", updateEventID, time.Now().UTC())
+					if ackErr != nil {
+						return ackErr
+					}
+					leader, leaderErr := s.repo.GetMemberByID(task.TargetMemberID)
+					if leaderErr != nil {
+						return leaderErr
+					}
+					var notice *models.TeamEventOutbox
+					if leader != nil {
+						notice = deliverySupplementOutbox(team, task, leader, member, payload, updateEventID)
+					}
+					if err := s.commitTeamDelivery(corrected, updateEvent, ackOutbox, task, expected, notice); err != nil {
+						return err
 					}
 					s.publishTeamRootWorkflowState(bus, task)
 					if isCompletionProposal {
@@ -9957,10 +9994,12 @@ func (s *teamService) projectTeamEvent(team *models.Team, bus *redisBus, message
 	}
 	if !atomicRootCompletionAccepted {
 		if err := s.persistTeamEventWithRecovery(team, bus, task, member, payload, event); err != nil {
-			if errors.Is(err, repository.ErrDuplicateTeamEvent) {
+			if !errors.Is(err, repository.ErrDuplicateTeamEvent) {
+				return err
+			}
+			if !replay {
 				return nil
 			}
-			return err
 		}
 	}
 	reviewInvalidated := false

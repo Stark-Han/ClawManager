@@ -895,3 +895,66 @@ func (r *teamRepository) ListWorkItemsByTeamID(teamID int, limit int) ([]models.
 	}
 	return items, nil
 }
+
+func (r *teamRepository) ListActiveTeamTasksAfterID(after, limit int) ([]models.TeamTask, error) {
+	var rows []models.TeamTask
+	err := r.sess.Collection("team_tasks").Find(db.Cond{"id >": after, "status IN": []string{"pending", "dispatched", "running", "waiting"}}).OrderBy("id").Limit(limit).All(&rows)
+	return rows, err
+}
+func (r *teamRepository) ListRootMonitorEvents(taskID, limit int) ([]models.TeamEvent, error) {
+	var rows []models.TeamEvent
+	err := r.sess.Collection("team_events").Find(db.Cond{"task_id": taskID}).OrderBy("-id").Limit(limit).All(&rows)
+	return rows, err
+}
+func (r *teamRepository) ListMonitorWorkItems(teamID int) ([]models.TeamWorkItem, error) {
+	var rows []models.TeamWorkItem
+	err := r.sess.SQL().Select("w.*").From("team_work_items w").Join("team_tasks t").On("w.root_task_id = t.id").Where("w.team_id = ? AND t.status IN ('pending','dispatched','running','waiting')", teamID).OrderBy("w.id").All(&rows)
+	return rows, err
+}
+
+// Result metadata, delivery history, workflow version and the notification/ACK
+// intent commit together; a lost reply can safely observe this same record.
+func (r *teamRepository) CommitTeamDelivery(item *models.TeamWorkItem, event *models.TeamEvent, outbox *models.TeamEventOutbox, task *models.TeamTask, expected int64, observations []*models.TeamEvent, extra ...*models.TeamEventOutbox) error {
+	return r.sess.Tx(func(sess db.Session) error {
+		var version int64
+		var status string
+		row, err := sess.SQL().QueryRow("SELECT ledger_version,status FROM team_tasks WHERE id=? FOR UPDATE", task.ID)
+		if err != nil {
+			return err
+		}
+		if err = row.Scan(&version, &status); err != nil {
+			return err
+		}
+		if version != expected || status != task.Status {
+			return fmt.Errorf("delivery ledger changed; retry original projection")
+		}
+		tx := &teamRepository{sess: sess}
+		if err := tx.UpsertWorkItem(item); err != nil {
+			return err
+		}
+		if err := tx.CreateEvent(event); err != nil && !errors.Is(err, ErrDuplicateTeamEvent) {
+			return err
+		}
+		for _, observation := range observations {
+			if err := tx.CreateEvent(observation); err != nil && !errors.Is(err, ErrDuplicateTeamEvent) {
+				return err
+			}
+		}
+		if err := tx.UpdateTask(task); err != nil {
+			return err
+		}
+		if outbox != nil {
+			if err := tx.CreateEventOutbox(outbox); err != nil {
+				return err
+			}
+		}
+		for _, o := range extra {
+			if o != nil {
+				if err := tx.CreateEventOutbox(o); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
