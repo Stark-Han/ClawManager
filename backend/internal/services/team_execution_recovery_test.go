@@ -133,7 +133,7 @@ func TestStoppedLeaderRecoveryIsShortBoundedAndKeepsOriginalRoot(t *testing.T) {
 	repo := &teamRepositoryStub{teamsByID: map[int]*models.Team{512: {ID: 512, Status: "running"}}, membersByID: map[int]*models.TeamMember{1: member}, createdEvents: []models.TeamEvent{{ID: 1, TeamID: 512, TaskID: intPtr(33), MemberID: intPtr(1), PayloadJSON: &failure, CreatedAt: now}}}
 	service := &teamService{repo: repo}
 	for i := 0; i < 3; i++ {
-		if err := service.recoverRootExecution(task, now.Add(time.Duration(i)*time.Minute)); err != nil {
+		if err := service.recoverRootExecution(task, now.Add(time.Duration(i)*2*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 		if len(repo.outboxRows) != i+1 {
@@ -142,7 +142,7 @@ func TestStoppedLeaderRecoveryIsShortBoundedAndKeepsOriginalRoot(t *testing.T) {
 		for idx := range repo.createdEvents {
 			p := teamEventPayloadMap(repo.createdEvents[idx])
 			if eventInt(p, "boundedRecoveryAttempt") == i+1 {
-				repo.createdEvents[idx].CreatedAt = now.Add(time.Duration(i) * time.Minute)
+				repo.createdEvents[idx].CreatedAt = now.Add(time.Duration(i) * 2 * time.Minute)
 			}
 		}
 		var envelope map[string]interface{}
@@ -152,14 +152,18 @@ func TestStoppedLeaderRecoveryIsShortBoundedAndKeepsOriginalRoot(t *testing.T) {
 		if eventString(envelope, "taskId") != "team-512-task-33" || eventBool(envelope, "requiresCompletion") || eventString(envelope, "intent") != "root_coordination_recovery" {
 			t.Fatal("recovery changed dispatch contract")
 		}
-		if err := service.recoverRootExecution(task, now.Add(time.Duration(i)*time.Minute)); err != nil {
+		if err := service.recoverRootExecution(task, now.Add(time.Duration(i)*2*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 		if len(repo.outboxRows) != i+1 {
 			t.Fatal("duplicate recovery admitted")
 		}
+		// A new attempt requires an actual failed native delivery, not elapsed
+		// time while the preceding reminder is still queued.
+		failurePayload, _ := marshalOptionalJSON(map[string]interface{}{"eventKind": "runtime_reconciliation_needed", "retryable": true, "executionStopped": true, "recoveryFaultKey": "fault-one", "boundedRecoveryAttempt": i + 1})
+		repo.createdEvents = append(repo.createdEvents, models.TeamEvent{ID: len(repo.createdEvents) + 1, TeamID: 512, TaskID: intPtr(33), MemberID: intPtr(1), PayloadJSON: failurePayload, CreatedAt: now.Add(time.Duration(i)*2*time.Minute + time.Second)})
 	}
-	if err := service.recoverRootExecution(task, now.Add(4*time.Minute)); err != nil {
+	if err := service.recoverRootExecution(task, now.Add(8*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if len(repo.outboxRows) != 3 || len(repo.workItems) != 0 || task.Status != "running" {
@@ -174,4 +178,29 @@ func TestStoppedLeaderRecoveryIsShortBoundedAndKeepsOriginalRoot(t *testing.T) {
 	}
 	bus, _ := newRedisBus(url)
 	defer bus.Del(context.Background(), teamInboxKey(512, "leader"))
+}
+
+type supervisedRootRepository struct{ *teamRepositoryStub }
+
+func (r *supervisedRootRepository) ListActiveTeamTasksAfterID(int, int) ([]models.TeamTask, error) {
+	return nil, nil
+}
+func (r *supervisedRootRepository) ListRootMonitorEvents(taskID, limit int) ([]models.TeamEvent, error) {
+	return r.ListEventsByTeamID(12, limit)
+}
+func (r *supervisedRootRepository) ListMonitorWorkItems(teamID int) ([]models.TeamWorkItem, error) {
+	return r.ListWorkItemsByTeamID(teamID, 500)
+}
+func TestLegacyTimeoutCannotBypassUnknownNativeExecution(t *testing.T) {
+	now := time.Now().UTC()
+	task := &models.TeamTask{ID: 3, TeamID: 12, TargetMemberID: 1, Status: "running", CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)}
+	p := `{"eventKind":"runtime_reconciliation_needed","retryable":true,"executionStopped":false}`
+	r := &supervisedRootRepository{&teamRepositoryStub{teamsByID: map[int]*models.Team{12: {ID: 12, Status: "running"}}, membersByID: map[int]*models.TeamMember{1: {ID: 1, TeamID: 12, MemberKey: "leader", Role: "leader", Status: "busy"}}, createdEvents: []models.TeamEvent{{ID: 1, TeamID: 12, TaskID: intPtr(3), MemberID: intPtr(1), PayloadJSON: &p, CreatedAt: now.Add(-time.Hour)}}}}
+	s := &teamService{repo: r}
+	if e := s.observeTaskStall(task, 30*time.Minute); e != nil {
+		t.Fatal(e)
+	}
+	if len(r.outboxRows) != 0 || task.Status != "running" {
+		t.Fatal("legacy fallback admitted an unconfirmed competing execution")
+	}
 }

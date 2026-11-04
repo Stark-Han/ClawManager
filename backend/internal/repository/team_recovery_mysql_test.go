@@ -88,7 +88,7 @@ func TestRecoveryObservationAndOutboxAreAtomicMySQL(t *testing.T) {
 		}
 		now := time.Now().UTC()
 		old := `{"completionId":"receipt","summary":"old"}`
-		item := &models.TeamWorkItem{TeamID: team.ID, RootTaskID: task.ID, OwnerMemberID: &member.ID, WorkID: "work", Status: "succeeded", RequiredForRoot: true, Revision: 1, ResultJSON: &old, FinishedAt: &now}
+		item := &models.TeamWorkItem{TeamID: team.ID, RootTaskID: task.ID, OwnerMemberID: &member.ID, WorkID: "work", Status: "succeeded", RequiredForRoot: true, ReviewRequired: true, ValidatedRevision: func() *int { v := 1; return &v }(), Revision: 1, ResultJSON: &old, FinishedAt: &now}
 		if e := repo.UpsertWorkItem(item); e != nil {
 			t.Fatal(e)
 		}
@@ -129,6 +129,10 @@ func TestRecoveryObservationAndOutboxAreAtomicMySQL(t *testing.T) {
 		current, e = repo.GetTaskByID(task.ID)
 		if e != nil || current.LedgerVersion != 2 {
 			t.Fatal("correction did not commit", e)
+		}
+		items, e = repo.ListWorkItemsByRootTaskID(task.ID)
+		if e != nil || items[0].ResultJSON == nil || *items[0].ResultJSON != body || items[0].ValidatedRevision != nil {
+			t.Fatal("correction/result review boundary not committed", e)
 		}
 		if committer.CommitTeamDelivery(&corrected, event, ack, &changed, 1, nil) == nil {
 			t.Fatal("stale ledger overwrote result")

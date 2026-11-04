@@ -932,6 +932,14 @@ func (r *teamRepository) CommitTeamDelivery(item *models.TeamWorkItem, event *mo
 		if err := tx.UpsertWorkItem(item); err != nil {
 			return err
 		}
+		if event.EventType == "member_result_updated" && item.ReviewRequired {
+			// A correction changes accepted content without changing work identity.
+			// An old review of that content cannot authorize the replacement.
+			if err := tx.InvalidateWorkItemReview(item.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+			item.ValidatedRevision = nil
+		}
 		if err := tx.CreateEvent(event); err != nil && !errors.Is(err, ErrDuplicateTeamEvent) {
 			return err
 		}

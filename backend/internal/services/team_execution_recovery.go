@@ -183,29 +183,39 @@ func (s *teamService) recoverRootExecution(task *models.TeamTask, now time.Time)
 		fault = boundedTeamEventID("root-fault", task.ID, memberID, failure.ID, failure.CreatedAt.UnixNano())
 	}
 	attempts := 0
+	var blockedAt time.Time
 	last := failure.CreatedAt
 	for _, e := range events {
 		p := teamEventPayloadMap(e)
 		if eventString(p, "recoveryFaultKey") != fault {
 			continue
 		}
-		if eventBool(p, "recoveryBlocked") {
-			return nil
+		if eventBool(p, "recoveryBlocked") && e.CreatedAt.After(blockedAt) {
+			blockedAt = e.CreatedAt
 		}
 		if eventInt(p, "boundedRecoveryAttempt") > attempts {
 			attempts = eventInt(p, "boundedRecoveryAttempt")
 			last = e.CreatedAt
 		}
 	}
+	if !blockedAt.IsZero() && !failure.CreatedAt.After(blockedAt) {
+		return nil
+	}
+	// A queued/unconfirmed reminder is not a failed execution. Wait for its
+	// actual failure report before admitting the next bounded model attempt.
+	pending := attempts > eventInt(fp, "boundedRecoveryAttempt")
+	if pending && now.Sub(last) < 3*time.Minute {
+		return nil
+	}
 	stopped := eventBool(fp, "executionStopped")
 	// Old/unknown executions receive observations only; never run a competing
 	// model on the assumption that an expired status is proof of process exit.
-	if !stopped || attempts >= 3 {
+	if pending || !stopped || attempts >= 3 {
 		if now.Sub(failure.CreatedAt) < 3*time.Minute {
 			return nil
 		}
 		id := boundedTeamEventID("recovery-blocked", fault)
-		p := map[string]interface{}{"eventKind": "runtime_recovery_blocked", "recoveryFaultKey": fault, "recoveryBlocked": true, "nonAuthoritative": true, "stateEffect": "none", "rootTaskTerminal": false, "visibleToChat": true, "summary": "执行恢复暂时受阻：尚未确认原执行退出，或有限恢复仍未成功。原任务和数据已保留，系统将继续检查恢复条件。"}
+		p := map[string]interface{}{"eventKind": "runtime_recovery_blocked", "recoveryFaultKey": fault, "recoveryBlocked": true, "nonAuthoritative": true, "stateEffect": "none", "rootTaskTerminal": false, "visibleToChat": true, "summary": "执行恢复暂时受阻：恢复请求尚待确认、原执行尚未确认退出，或有限恢复仍未成功。原任务和数据已保留，系统将继续检查恢复条件。"}
 		raw, _ := marshalOptionalJSON(p)
 		return s.repo.CreateEvent(&models.TeamEvent{TeamID: team.ID, TaskID: &task.ID, MemberID: &memberID, EventID: &id, EventType: "message_warning", PayloadJSON: raw, CreatedAt: now})
 	}
@@ -351,6 +361,12 @@ func (s *teamService) commitTeamDelivery(item *models.TeamWorkItem, event *model
 	}
 	if err := s.repo.UpsertWorkItem(item); err != nil {
 		return err
+	}
+	if event.EventType == "member_result_updated" && item.ReviewRequired {
+		if err := s.repo.InvalidateWorkItemReview(item.ID, time.Now().UTC()); err != nil {
+			return err
+		}
+		item.ValidatedRevision = nil
 	}
 	if err := s.repo.UpdateTask(task); err != nil {
 		return err
