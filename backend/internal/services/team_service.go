@@ -10128,7 +10128,7 @@ func (s *teamService) projectTeamEventAttempt(team *models.Team, bus *redisBus, 
 				}
 			}
 		}
-		if task != nil && task.Status == models.TeamTaskStatusSucceeded {
+		if task != nil && task.Status == models.TeamTaskStatusSucceeded && (member.CurrentTaskID == nil || *member.CurrentTaskID == task.ID) {
 			member.Status = models.TeamMemberStatusIdle
 			member.CurrentTaskID = nil
 			member.Progress = 100
@@ -10214,6 +10214,20 @@ func reconcileTeamMemberOperationalState(member *models.TeamMember, items []mode
 	}
 	if len(owned) == 0 {
 		return false
+	}
+	// Leader coordination can own a new root before it has a synthesis card.
+	// Historical cards must not replace that current control-plane ownership.
+	if isLeaderTeamMember(member) && member.CurrentTaskID != nil {
+		ownsCurrent := false
+		for _, item := range owned {
+			if item.RootTaskID == *member.CurrentTaskID {
+				ownsCurrent = true
+				break
+			}
+		}
+		if !ownsCurrent {
+			return false
+		}
 	}
 	changed := false
 	setString := func(target *string, value string) {

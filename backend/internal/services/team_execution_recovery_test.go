@@ -204,3 +204,13 @@ func TestLegacyTimeoutCannotBypassUnknownNativeExecution(t *testing.T) {
 		t.Fatal("legacy fallback admitted an unconfirmed competing execution")
 	}
 }
+
+func TestLeaderNewRootCannotBeClearedByHistoricalCards(t *testing.T) {
+	for _, status := range []string{"succeeded", "running", "waiting"} {
+		leader := &models.TeamMember{ID: 1, Role: "leader", CurrentTaskID: intPtr(372), Status: "busy", Availability: "busy"}
+		items := []models.TeamWorkItem{{OwnerMemberID: intPtr(1), RootTaskID: 371, Status: status, WorkID: "leader-final-synthesis"}}
+		if reconcileTeamMemberOperationalState(leader, items) || leader.CurrentTaskID == nil || *leader.CurrentTaskID != 372 || leader.Status != "busy" {
+			t.Fatal("historical card replaced active Leader root", status)
+		}
+	}
+}
