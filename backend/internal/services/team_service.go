@@ -5863,6 +5863,22 @@ func (s *teamService) observeTaskStall(task *models.TeamTask, timeout time.Durat
 	if team == nil || team.Status == models.TeamStatusDeleted || team.Status == models.TeamStatusDeleting {
 		return nil
 	}
+	// Native supervised roots use the same bounded recovery at every timeout.
+	// The legacy thirty-minute reminder must not bypass a held execution or
+	// exhausted short-cycle budget and admit a second model turn.
+	if _, supported := s.repo.(teamExecutionMonitorRepository); supported {
+		events, e := s.rootMonitorEvents(task.ID, team.ID)
+		if e != nil {
+			return e
+		}
+		for _, event := range events {
+			p := teamEventPayloadMap(event)
+			kind := eventString(p, "eventKind")
+			if kind == "runtime_execution_started" || kind == "runtime_reconciliation_needed" {
+				return s.recoverRootExecution(task, time.Now().UTC())
+			}
+		}
+	}
 	cutoff := time.Now().UTC().Add(-timeout)
 	active, err := s.taskHasRecentActivity(team, task, cutoff)
 	if err != nil {
