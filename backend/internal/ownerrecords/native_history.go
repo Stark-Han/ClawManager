@@ -94,13 +94,6 @@ func readNativeHistory(ctx context.Context, root, workspace string, identity Ide
 				query = openCodeRecentSQL
 			}
 		}
-		if len(cutoff) > 0 && !recent {
-			condition := fmt.Sprintf("u.timestamp>=%.6f AND ", float64(cutoff[0].UnixMilli())/1000)
-			if identity.Runtime == "opencode" {
-				condition = fmt.Sprintf("u.time_created>=%d AND ", cutoff[0].UnixMilli())
-			}
-			query = strings.Replace(query, "WHERE ", "WHERE "+condition, 1)
-		}
 		path := filepath.Join(expected, filepath.FromSlash(relative))
 		if err := checkHistoryPath(root, path); err != nil {
 			return nil, err
@@ -111,6 +104,21 @@ func readNativeHistory(ctx context.Context, root, workspace string, identity Ide
 					return nil, err
 				}
 			}
+		}
+		if identity.Runtime == "opencode" {
+			// Detect the authoritative format without opening or migrating it.
+			var err error
+			query, err = openCodeHistoryQuery(ctx, filepath.Join(expected, filepath.FromSlash(relative)), recent)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(cutoff) > 0 && !recent {
+			condition := fmt.Sprintf("u.timestamp>=%.6f AND ", float64(cutoff[0].UnixMilli())/1000)
+			if identity.Runtime == "opencode" {
+				condition = fmt.Sprintf("u.time_created>=%d AND ", cutoff[0].UnixMilli())
+			}
+			query = strings.Replace(query, "WHERE ", "WHERE "+condition, 1)
 		}
 		cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", path, query)
 		output := &cappedOutput{max: 4 << 20}
