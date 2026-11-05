@@ -1,7 +1,48 @@
 # DeepSeek Harness 版本同步与 Team Worker 接入说明
 
-核对日期：2026-11-05。本轮完成代码只读对比、32543 只读库存检查和方案编写，
-没有升级 DSH、开放创建权限、修改调度、创建实例或派发模型任务。
+原始核对日期：2026-11-05。原分析基线保留在下文；实施结果已更新到第 0 节。
+
+## 0. 第一次开发交付：M0、M1 已完成并在 32543 验收
+
+本轮严格限定团队仓库 `codex/team-personal-integration`。个人两个仓库仅只读已提交
+来源，没有修改其工作区。App 本轮只更新交接文档，Runtime 按功能适配新版 DSH，
+没有整体移植个人单体 Agent，也没有修改稳定 Team 调度或增加 Worker 必填参数。
+
+| 阶段 | 结果 | 提交与证据 |
+| --- | --- | --- |
+| M0 | 固定 0.2.1-rc.3 完整依赖/原件与原生宿主契约；工具上下文、非人工输入、真实取消/idle、同会话恢复可用 | Runtime `396af99`，后续 `73cbfe6` 加强实际取消及子进程限制断言 |
+| M1 | Lite/Pro 同版本；模型窗口/vision、组合 preset、Cookie 续期、nofile、受限模块加载、Pro 模式选择已适配 | Runtime `1523f11`、构建输入 `21e5d05`/`cd6f79f`、修复 `01b8077` |
+| 发布与现场验收 | 两个镜像已 push；32543 新增独立 DSH 池及原生访问域名；普通 Lite #589、Pro #590 页面与真实模型回复通过 | Runtime `docs/dsh-m0-m1-release-20261105.md` 记录完整 digest、来源、验收和回退 |
+
+现场与预想存在一个重要差异：32543 仍使用兼容进程池，未启用全局 native slots。
+本轮保留其实际部署契约，只新增独立 DSH 池，不为此迁移已有产品。镜像保留团队
+isolated slots 支持；只有可信 supervisor 的 IsolatedLifecycle 才允许内层使用外层
+实例私有持久化 `/tmp`，兼容池保留内层 tmpfs，read-only 未修改，Pro 保持原始 sandbox。
+不能把本次发布写成“全局沙箱迁移已完成”。
+
+最终镜像业务源码为 Runtime `01b8077`；后续只有测试和交接更新。
+
+- Lite：`10.130.14.23:5000/agentsruntime/deepseek-harness-lite@sha256:a356a00e15da7e9e8807cdcdf913acfa617ed5d9c17ac3f4828a9ed22b28f431`。
+- Pro：`10.130.14.23:5000/agentsruntime/deepseek-harness@sha256:6dd7f1a01a4b7644fec6fe6f6621b36b7f9b5495555cd15fa0500e07fdebe371`。
+
+App 沿用已验收的 `clawmanager-hxc-app:team-portal-sync-20261105-v2`，无需重打业务镜像。
+在 `/home/hxc` 用该 APP_IMAGE、`TENANT_SUFFIX=-hxc-peer`、`NODE_PORT=32543`
+执行 `clawmanager-apply.sh` 成功。Core 只追加 DSH 独立域名配置，镜像目录只更新
+DSH id7/id8；服务端原配置保存在 `/home/hxc/team-dsh-m1-20261105/`，旧目录值保存于
+本地忽略的验收证据目录。实例和旧数据没有删除。
+
+必要验收包括：固定原生包契约；真实低权限镜像启动；Cookie 续期及不重放；模型配置；
+旧 0.1.2-alpha.3 会话迁移及用户 profile/技能/文件保留；现有外层私有 tmp 隔离/恢复；
+最终 Lite/Pro 现场依赖与二进制匹配；#589/#590 的公开模型回复和 native 完成事实。
+北向原规则仍为 Team Lite、Claw Leader、自定义 2–6 人，DSH 不在 Team 候选中；
+原有 29 个 Runtime Pod UID/镜像未变，Team175/任务381报告 SHA 与 3166 bytes 均未变。
+App 业务代码/schema 未变，未重复无关的全量构建和大规模验收。
+
+**第二次开发尚未开始：M2–M4 的 DSH Team 宿主、正式回执/正文、观察与能力过滤、
+CM/北向/自定义准入、产物预览及 Team 真实闭环继续保留。** 本轮镜像 manifest 明确
+`teamEnabled=false`，不能因普通实例可用就手动开放 Team 选项。
+新版会话已写入后不能直接假定旧包能读；回退先停止新增分配、保留绑定及数据，
+在隔离副本验证，不能删除 NFS 目录或整份覆盖后来变化的部署配置。
 
 ## 1. 当前代码与提交状态
 
@@ -221,4 +262,5 @@ DSH 宿主插件处理其自己的会话/Agent、工具注册和公开事件；T
 身份/去重/恢复保护＋统计与权限”均通过，才称 DSH Team 已接通。
 单纯升级 npm、设置环境、增加选项或让页面 HTTP 200 都不算完成。
 
-本说明不承诺尚未实施的能力已存在；本轮没有改业务代码，也没有对 DSH 做功能验收。
+原始分析时未做业务开发或 DSH 验收；本次 M0/M1 的实施、发布和验收见第 0 节。
+未实施能力仍按 M2–M4 明确保留，不把普通实例成功等同于 DSH Team 已完成。
