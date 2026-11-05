@@ -1201,6 +1201,13 @@ func main() {
 		northboundSettings.Use(middleware.NewAdminAuth(userRepo))
 		{
 			northboundSettings.GET("", northboundAdminHandler.Overview)
+			portalAdmin := handlers.NewOwnerPortalAdminHandler(ownerStore)
+			northboundSettings.GET("/portal/users", portalAdmin.Users)
+			northboundSettings.GET("/portal/sync", portalAdmin.SyncRecords)
+			northboundSettings.GET("/portal/sync/overview", portalAdmin.SyncOverview)
+			northboundSettings.POST("/portal/sync/retry", portalAdmin.RetrySync)
+			northboundSettings.GET("/portal/calendar", portalAdmin.Calendar)
+			northboundSettings.POST("/portal/calendar", portalAdmin.MutateCalendar)
 			northboundSettings.PUT("/settings", northboundAdminHandler.SaveSettings)
 			northboundSettings.PATCH("/settings/:section", northboundAdminHandler.SaveSettingsSection)
 			northboundSettings.PUT("/callers", northboundAdminHandler.SaveCaller)
