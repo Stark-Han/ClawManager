@@ -150,6 +150,9 @@ func (s *Store) Apply(ctx context.Context, identity Identity, fact Fact) (bool, 
 	}
 	applied := false
 	err := s.Session.TxContext(ctx, func(tx db.Session) error {
+		if err := validateScanGeneration(ctx, tx, identity); err != nil {
+			return err
+		}
 		// A profile lock serializes owner aggregate updates across App replicas.
 		_, err := tx.SQL().ExecContext(ctx, `INSERT INTO northbound_owner_records
    (record_type,record_key,scope_id,owner,owner_normalized,status,prompt_tokens,completion_tokens,total_tokens,invocation_count,question_count,session_count)

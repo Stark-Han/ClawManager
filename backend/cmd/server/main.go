@@ -41,6 +41,10 @@ import (
 )
 
 func main() {
+	// Read-only analytics helpers must exit before starting any services.
+	if len(os.Args) == 2 && os.Args[1] == ownerrecords.HistoryReaderArgument {
+		os.Exit(ownerrecords.RunHistoryReaderCLI(os.Stdin, os.Stdout))
+	}
 	build := buildinfo.Current()
 	log.Printf("Starting ClawManager version=%s commit=%s build_time=%s", build.Version, build.Commit, build.BuildTime)
 
@@ -1436,6 +1440,11 @@ func main() {
 	// call is idempotent and covers the leader-election-disabled path.
 	leaderCancel()
 	stopBackground()
+	readerDrain, stopReaderDrain := context.WithTimeout(context.Background(), 3*time.Second)
+	if !ownerrecords.DrainHistoryReaders(readerDrain) {
+		log.Printf("History reader exit could not be confirmed; its safety guard remains held")
+	}
+	stopReaderDrain()
 	if runtimeAdminEventBridgeCancel != nil {
 		runtimeAdminEventBridgeCancel()
 	}
