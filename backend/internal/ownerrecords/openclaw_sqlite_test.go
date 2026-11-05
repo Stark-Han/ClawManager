@@ -21,6 +21,44 @@ import (
 
 // Real SQLite fixture, not a mocked SELECT. The fixture is generated only in
 // t.TempDir and contains no Runtime/user data or external model requests.
+func TestOpenClaw102LargeSQLiteSnapshotWithinReadBudget(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("real sqlite3 fixture requires the acceptance image")
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "openclaw", "user-1", "instance-17")
+	db := filepath.Join(workspace, "home", ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite")
+	if err := os.MkdirAll(filepath.Dir(db), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fixture := `CREATE TABLE session_windows(session_id TEXT PRIMARY KEY,updated_at INTEGER); CREATE TABLE transcript_events(session_id TEXT,seq INTEGER,event_json TEXT,event_zstd BLOB,event_utf8_bytes INTEGER,PRIMARY KEY(session_id,seq)); CREATE TABLE session_transcript_cold_archives(session_id TEXT,generation TEXT,archive_name TEXT,archive_sha256 TEXT,event_count INTEGER,raw_bytes INTEGER,archive_bytes INTEGER,last_seq INTEGER,storage TEXT,archive_blob BLOB); INSERT INTO session_windows VALUES('s1',1792026001000);`
+	// A realistic multi-megabyte snapshot: bounded individual events, many
+	// records. SQLite's -json wrapper must not re-escape the complete JSON cell.
+	for n, event := range openClaw102TestEvents() {
+		fixture += "INSERT INTO transcript_events VALUES('s1'," + strconv.Itoa(n) + ",'" + strings.ReplaceAll(event, "'", "''") + "',NULL,NULL);"
+	}
+	fixture += `WITH RECURSIVE n(i) AS (SELECT 100 UNION ALL SELECT i+1 FROM n WHERE i<576) INSERT INTO transcript_events SELECT 's1',i,json_object('type','diagnostic','padding',hex(zeroblob(2048))),NULL,NULL FROM n;`
+	seed := exec.Command("sqlite3", db)
+	seed.Stdin = strings.NewReader(fixture)
+	if out, err := seed.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	before, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := ReadNativeHistory(ctx, root, workspace, Identity{Scope: 1, Instance: 17, Runtime: "openclaw"})
+	if err != nil || len(got) != 1 || got[0].ID != "same-run-before-migration" {
+		t.Fatalf("large native snapshot must fit the existing read budget: questions=%d err=%v", len(got), err)
+	}
+	after, err := os.ReadFile(db)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read changed native database", err)
+	}
+}
+
 func TestOpenClaw102SQLiteMustNotDisappearWhenJSONLRetired(t *testing.T) {
 	if _, err := exec.LookPath("sqlite3"); err != nil {
 		t.Skip("real sqlite3 fixture requires the acceptance image")

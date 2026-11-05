@@ -53,9 +53,13 @@ type openClaw102Snapshot struct {
 }
 
 func readHistorySQLite(ctx context.Context, path, query string, limit int) ([]byte, error) {
+	return readHistorySQLiteOutput(ctx, path, query, limit, "-json")
+}
+
+func readHistorySQLiteOutput(ctx context.Context, path, query string, limit int, mode string) ([]byte, error) {
 	// busy_timeout emits a row, so set it through the shell's non-outputting
 	// .timeout instead of accidentally decoding two JSON documents.
-	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", "-cmd", ".timeout 100", path)
+	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-noheader", mode, "-cmd", ".timeout 100", path)
 	cmd.Stdin = strings.NewReader("PRAGMA query_only=ON; " + query)
 	out, diagnostic := &cappedOutput{max: limit}, &cappedOutput{max: 4096}
 	cmd.Stdout, cmd.Stderr = out, diagnostic
@@ -173,18 +177,16 @@ func readOpenClawSQLiteAgents(ctx context.Context, root, base string, recent boo
 		if !recent && len(cutoff) > 0 {
 			start = cutoff[0]
 		}
-		raw, err = readHistorySQLite(ctx, db, openClaw102SnapshotSQL(start, openClaw102AcknowledgedSQL(ctx, agent)), openClaw102ReadBytes)
+		// This SELECT already returns exactly one JSON object. SQLite 3.48's
+		// -json mode re-escapes that whole value with many small writes, exhausting
+		// the reader budget on ordinary multi-megabyte transcripts. Raw list
+		// output preserves the same atomic, bounded snapshot without the wrapper.
+		raw, err = readHistorySQLiteOutput(ctx, db, openClaw102SnapshotSQL(start, openClaw102AcknowledgedSQL(ctx, agent)), openClaw102ReadBytes, "-list")
 		if err != nil {
 			return nil, skip, err
 		}
-		var rows []struct {
-			Snapshot string `json:"snapshot"`
-		}
-		if json.Unmarshal(raw, &rows) != nil || len(rows) != 1 {
-			return nil, skip, errHistoryRestricted
-		}
 		var snapshot openClaw102Snapshot
-		if json.Unmarshal([]byte(rows[0].Snapshot), &snapshot) != nil {
+		if json.Unmarshal(raw, &snapshot) != nil {
 			return nil, skip, errHistoryRestricted
 		}
 		qs, err := decodeOpenClaw102Snapshot(ctx, root, agent, snapshot, recent, start, &budget)
