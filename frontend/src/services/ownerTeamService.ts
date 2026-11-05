@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { isConfirmedOwnerSessionFailure, OWNER_SESSION_INVALID } from '../lib/ownerReadNotice';
 import type { teamService } from './teamService';
 import type { Team, TeamMember, TeamDetails, DispatchTeamTaskRequest, TeamTask, TeamTasksHistoryResponse, TeamEventsHistoryResponse, TeamWorkspaceListResponse, TeamWorkspacePreviewResponse } from '../types/team';
 import type { WorkspaceText } from '../components/WorkspaceTextEditor';
@@ -7,6 +8,7 @@ import type { CustomTeamTemplate } from '../types/customTeamTemplate';
 // Intentionally independent of the CM JWT client/interceptors.
 export const ownerTeamHTTP = axios.create({ baseURL: '/api/v1/ieisystem', withCredentials: true });
 ownerTeamHTTP.interceptors.response.use(r => r, error => {
+  if (isConfirmedOwnerSessionFailure(error)) window.dispatchEvent(new Event(OWNER_SESSION_INVALID));
   if (axios.isAxiosError(error)) error.message = error.response?.data?.message || error.response?.data?.error || error.message;
   return Promise.reject(error);
 });
