@@ -2,8 +2,8 @@ import type { CustomTeamTemplate } from '../types/customTeamTemplate';
 
 export const TEAM_LEADER_RUNTIME = 'openclaw' as const;
 export const TEAM_INSTANCE_MODE = 'lite' as const;
-export const TEAM_WORKER_RUNTIMES = ['openclaw', 'hermes', 'opencode'] as const;
-export const TEAM_CREATION_NOTICE = 'Leader 固定为 OpenClaw Lite；Worker 可选 OpenClaw、Hermes、OpenCode，均使用 Lite。';
+export const TEAM_WORKER_RUNTIMES = ['openclaw', 'hermes', 'opencode', 'deepseek-harness'] as const;
+export const TEAM_CREATION_NOTICE = 'Leader 固定为 OpenClaw Lite；Worker 可选 OpenClaw、Hermes、OpenCode、DeepSeek Harness，均使用 Lite。';
 
 export function teamRuntimeOptions(leader: boolean, advertised?: readonly string[]) {
   const options = leader ? [TEAM_LEADER_RUNTIME] : [...TEAM_WORKER_RUNTIMES];
@@ -34,4 +34,8 @@ export function customTemplateCreationError(template: CustomTeamTemplate) {
     if (index === 0 ? !member.isLeader : member.isLeader || reservedTeamLeaderRole(member.role)) return '模板必须有且只有首位 Leader，请先修订模板。';
   }
   return '';
+}
+
+export function teamRuntimeLabel(type: string) {
+  return ({ openclaw: 'OpenClaw', hermes: 'Hermes', opencode: 'OpenCode', 'deepseek-harness': 'DeepSeek Harness' } as Record<string,string>)[type] || type;
 }

@@ -1,4 +1,4 @@
-import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
+import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions, teamRuntimeLabel, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import OpenClawConfigPlanSection, {
@@ -194,7 +194,7 @@ const draftFromTemplateMember = (
 
   const runtimeType: RuntimeType = isLeader
     ? LEADER_RUNTIME_TYPE
-    : templateMember.runtimeType === "hermes" || templateMember.runtimeType === "opencode"
+    : templateMember.runtimeType === "hermes" || templateMember.runtimeType === "opencode" || templateMember.runtimeType === "deepseek-harness"
       ? templateMember.runtimeType
       : "openclaw";
 
@@ -355,11 +355,12 @@ const CreateTeamPage: React.FC = () => {
   );
   const selectedHermesImage = defaultHermesMemberImages[0];
   const hermesLiteImage = selectedHermesImage?.image || "";
+  const dshLiteImage = images.find(item => item.instance_type === "deepseek-harness" && item.is_enabled !== false && normalizedImageRuntimeType(item) === "gateway")?.image || "";
   const openCodeLiteImage = images.find(item => item.instance_type === "opencode" && item.is_enabled !== false && normalizedImageRuntimeType(item) === "gateway")?.image || "";
   const imageForRuntime = useCallback(
     (runtimeType: RuntimeType, mode: InstanceMode = "lite") =>
-      mode !== "lite" ? "" : runtimeType === "hermes" ? hermesLiteImage : runtimeType === "opencode" ? openCodeLiteImage : openClawLiteImage,
-    [hermesLiteImage, openClawLiteImage, openCodeLiteImage],
+      mode !== "lite" ? "" : runtimeType === "hermes" ? hermesLiteImage : runtimeType === "opencode" ? openCodeLiteImage : runtimeType === "deepseek-harness" ? dshLiteImage : openClawLiteImage,
+    [hermesLiteImage, openClawLiteImage, openCodeLiteImage, dshLiteImage],
   );
 
   useEffect(() => {
@@ -953,7 +954,7 @@ const CreateTeamPage: React.FC = () => {
                         </div>
                         <div className="flex flex-wrap gap-2">
                           {member.isLeader ? <span className="rounded-lg border border-[#eadfd8] bg-gray-50 px-3 py-1.5 text-xs">OpenClaw Lite · 固定 Leader</span> : <select aria-label={`${member.memberId} 运行时`} value={member.runtimeType} onChange={event => updateWorkerRuntime(member.id, event.target.value as RuntimeType)} disabled={submitting} className="rounded-lg border border-[#eadfd8] bg-white px-3 py-1.5 text-xs">
-                            {teamRuntimeOptions(false).map(type => <option key={type} value={type} disabled={!imageForRuntime(type)}>{type === "opencode" ? "OpenCode Lite" : type === "hermes" ? "Hermes Lite" : "OpenClaw Lite"}{!imageForRuntime(type) ? "（镜像未配置）" : ""}</option>)}
+                            {teamRuntimeOptions(false).map(type => <option key={type} value={type} disabled={!imageForRuntime(type)}>{`${teamRuntimeLabel(type)} Lite`}{!imageForRuntime(type) ? "（镜像未配置）" : ""}</option>)}
                           </select>}
 
                         </div>
@@ -1007,7 +1008,7 @@ const CreateTeamPage: React.FC = () => {
                 <SummaryRow
                   label="运行方式"
                   value={
-                    [...new Set(members.map(member => `${member.runtimeType === "opencode" ? "OpenCode" : member.runtimeType === "hermes" ? "Hermes" : "OpenClaw"} ${member.instanceMode === "pro" ? "Pro" : "Lite"}`))].join(" + ")
+                    [...new Set(members.map(member => `${teamRuntimeLabel(member.runtimeType)} ${member.instanceMode === "pro" ? "Pro" : "Lite"}`))].join(" + ")
                   }
                 />
                 <SummaryRow

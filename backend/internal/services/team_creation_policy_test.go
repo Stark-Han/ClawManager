@@ -3,7 +3,7 @@ package services
 import "testing"
 
 func TestNewTeamCreationPolicy(t *testing.T) {
-	for _, runtime := range []string{"openclaw", "hermes", "opencode"} {
+	for _, runtime := range []string{"openclaw", "hermes", "opencode", "deepseek-harness"} {
 		base := CreateTeamRequest{Members: []CreateTeamMemberRequest{{MemberID: "leader", IsLeader: true, RuntimeType: "openclaw"}, {MemberID: "worker", Role: "worker", RuntimeType: runtime}}}
 		if err := ValidateNewTeamRequest(base); err != nil {
 			t.Fatalf("Lite %s: %v", runtime, err)

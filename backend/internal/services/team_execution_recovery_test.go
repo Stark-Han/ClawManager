@@ -21,41 +21,43 @@ func TestDeliveryEventIDFitsRealSchemaAndSeparatesCorrections(t *testing.T) {
 
 func TestNativeSupplementPreservesReceiptAndCannotCloseOrReopenRoot(t *testing.T) {
 	for _, status := range []string{"running", "succeeded"} {
-		t.Run(status, func(t *testing.T) {
-			now := time.Now().UTC()
-			task := &models.TeamTask{ID: 3, TeamID: 12, TargetMemberID: 1, MessageID: "root", Status: status, LedgerVersion: 4}
-			member := &models.TeamMember{ID: 2, TeamID: 12, MemberKey: "worker", RuntimeType: "opencode"}
-			original := `{"completionId":"receipt","sourceMessageId":"original-input","summary":"done","resultMarkdown":"done","contentHash":"original-hash"}`
-			repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{{ID: 4, TeamID: 12, RootTaskID: 3, WorkID: "work", AssignmentID: stringPtr("work"), Revision: 1, OwnerMemberID: intPtr(2), Status: "succeeded", FinishedAt: &now, ResultJSON: &original}}}
-			s := &teamService{repo: repo}
-			team := &models.Team{ID: 12}
-			payload := map[string]interface{}{"nativePublicDelivery": true, "sourceRecordId": "msg_answer", "nativeInputId": "msg_input", "sourceMessageId": "original-input", "assignmentId": "work", "revision": 1, "text": "Actual full public answer", "eventKind": "delivery_supplement", "eventId": "supplement", "nonAuthoritative": true, "stateEffect": "none", "visibleToChat": true}
-			if err := s.projectNativeDeliverySupplement(team, nil, task, member, payload, "20-0"); err != nil {
-				t.Fatal(err)
-			}
-			if task.Status != status || len(repo.workItems) != 1 {
-				t.Fatal("supplement changed workflow")
-			}
-			result := workItemResultPayload(repo.workItems[0])
-			if eventString(result, "contentHash") != "original-hash" || eventString(result, "resultMarkdown") != "done" {
-				t.Fatal("formal receipt overwritten")
-			}
-			c := acknowledgedWorkItemContext(repo.workItems[0])
-			if c["supplementaryText"] != "Actual full public answer" {
-				t.Fatal("Leader cannot read supplement")
-			}
-			if len(teamEventPayloads(repo.createdEvents)) != 1 {
-				t.Fatal("public delivery omitted from chat")
-			}
-			before := len(repo.createdEvents)
-			payload["sourceMessageId"] = "another-input"
-			if err := s.projectNativeDeliverySupplement(team, nil, task, member, payload, "21-0"); err != nil {
-				t.Fatal(err)
-			}
-			if len(repo.createdEvents) != before {
-				t.Fatal("foreign native turn was accepted")
-			}
-		})
+		for _, nativeRuntime := range []string{"opencode", "deepseek-harness"} {
+			t.Run(status, func(t *testing.T) {
+				now := time.Now().UTC()
+				task := &models.TeamTask{ID: 3, TeamID: 12, TargetMemberID: 1, MessageID: "root", Status: status, LedgerVersion: 4}
+				member := &models.TeamMember{ID: 2, TeamID: 12, MemberKey: "worker", RuntimeType: nativeRuntime}
+				original := `{"completionId":"receipt","sourceMessageId":"original-input","summary":"done","resultMarkdown":"done","contentHash":"original-hash"}`
+				repo := &teamRepositoryStub{workItems: []models.TeamWorkItem{{ID: 4, TeamID: 12, RootTaskID: 3, WorkID: "work", AssignmentID: stringPtr("work"), Revision: 1, OwnerMemberID: intPtr(2), Status: "succeeded", FinishedAt: &now, ResultJSON: &original}}}
+				s := &teamService{repo: repo}
+				team := &models.Team{ID: 12}
+				payload := map[string]interface{}{"nativePublicDelivery": true, "sourceRecordId": "msg_answer", "nativeInputId": "msg_input", "sourceMessageId": "original-input", "assignmentId": "work", "revision": 1, "text": "Actual full public answer", "eventKind": "delivery_supplement", "eventId": "supplement", "nonAuthoritative": true, "stateEffect": "none", "visibleToChat": true}
+				if err := s.projectNativeDeliverySupplement(team, nil, task, member, payload, "20-0"); err != nil {
+					t.Fatal(err)
+				}
+				if task.Status != status || len(repo.workItems) != 1 {
+					t.Fatal("supplement changed workflow")
+				}
+				result := workItemResultPayload(repo.workItems[0])
+				if eventString(result, "contentHash") != "original-hash" || eventString(result, "resultMarkdown") != "done" {
+					t.Fatal("formal receipt overwritten")
+				}
+				c := acknowledgedWorkItemContext(repo.workItems[0])
+				if c["supplementaryText"] != "Actual full public answer" {
+					t.Fatal("Leader cannot read supplement")
+				}
+				if len(teamEventPayloads(repo.createdEvents)) != 1 {
+					t.Fatal("public delivery omitted from chat")
+				}
+				before := len(repo.createdEvents)
+				payload["sourceMessageId"] = "another-input"
+				if err := s.projectNativeDeliverySupplement(team, nil, task, member, payload, "21-0"); err != nil {
+					t.Fatal(err)
+				}
+				if len(repo.createdEvents) != before {
+					t.Fatal("foreign native turn was accepted")
+				}
+			})
+		}
 	}
 }
 

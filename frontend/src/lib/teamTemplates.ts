@@ -2,7 +2,7 @@ import type { AgencyAgentProfileKey } from "./agencyAgentProfiles";
 import type { InstanceMode } from "../types/instance";
 import type { TeamCommunicationMode, TeamMemberRoleProfileRequest } from "../types/team";
 
-export type RuntimeType = "openclaw" | "hermes" | "opencode";
+export type RuntimeType = "openclaw" | "hermes" | "opencode" | "deepseek-harness";
 export type ResourcePresetKey = "small" | "medium" | "large" | "custom";
 
 export type TeamMemberTemplateMember = {

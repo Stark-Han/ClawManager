@@ -35,6 +35,13 @@ func TestDSHStreamingLargeAndPartial(t *testing.T) {
 	if !errors.Is(r.err, errHistoryRestricted) {
 		t.Fatal("line cap", r.err)
 	}
+	// Actual native Team hosts use a distinct non-human source, not a human RPC.
+	for _, source := range []string{"clawmanager-team", "runtime-context", "time-context"} {
+		r = parseDSHStream(context.Background(), strings.NewReader(head+strings.ReplaceAll(turn, `"kind":"user"`, `"kind":"`+source+`"`)))
+		if r.err != nil || len(r.facts) != 0 || len(r.recent) != 0 {
+			t.Fatal("automatic input counted as human", source, r.err)
+		}
+	}
 }
 
 func TestDSHFileIsolationAndBounds(t *testing.T) {

@@ -236,7 +236,7 @@ func (s *teamService) recoverRootExecution(task *models.TeamTask, now time.Time)
 // Only an acknowledged native final answer can supplement public delivery.
 // It does not alter accepted receipt/content hashes, reviews or root status.
 func (s *teamService) projectNativeDeliverySupplement(team *models.Team, bus *redisBus, task *models.TeamTask, member *models.TeamMember, p map[string]interface{}, stream string) error {
-	if task == nil || member == nil || member.RuntimeType != "opencode" || !eventBool(p, "nativePublicDelivery") || eventString(p, "sourceRecordId") == "" || eventString(p, "nativeInputId") == "" {
+	if task == nil || member == nil || (member.RuntimeType != "opencode" && member.RuntimeType != "deepseek-harness") || !eventBool(p, "nativePublicDelivery") || eventString(p, "sourceRecordId") == "" || eventString(p, "nativeInputId") == "" {
 		return nil
 	}
 	root := fmt.Sprintf("team-%d-task-%d", team.ID, task.ID)

@@ -76,6 +76,9 @@ func (s *instanceService) ValidateCreateRequests(userID int, requests []CreateIn
 	if len(requests) == 0 {
 		return nil
 	}
+	if err := s.ValidateTeamRuntimeRequests(requests); err != nil {
+		return err
+	}
 	for idx := range requests {
 		requests[idx].Name = strings.TrimSpace(requests[idx].Name)
 		if requests[idx].Name == "" {

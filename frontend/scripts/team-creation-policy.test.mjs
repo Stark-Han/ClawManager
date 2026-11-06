@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions } from '../src/lib/teamCreationPolicy.ts';
 
 assert.deepEqual(teamRuntimeOptions(true, ['openclaw','opencode','hermes']), ['openclaw']);
-assert.deepEqual(teamRuntimeOptions(false), ['openclaw','hermes','opencode']);
+assert.deepEqual(teamRuntimeOptions(false), ['openclaw','hermes','opencode','deepseek-harness']);
 for (const runtime of teamRuntimeOptions(false)) {
   assert.equal(teamMemberCreationError({isLeader:false,role:'developer',runtimeType:runtime,instanceMode:'lite'}), '');
   assert.ok(teamMemberCreationError({isLeader:false,role:'developer',runtimeType:runtime,instanceMode:'pro'}));

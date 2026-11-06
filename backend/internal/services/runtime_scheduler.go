@@ -2514,7 +2514,7 @@ func (s *RuntimeScheduler) prepareGatewayStartForUpgrade(ctx context.Context, in
 
 func (s *RuntimeScheduler) prepareGatewayStartParameters(ctx context.Context, instance models.Instance, runtimeType string, pod models.RuntimePod) (*runtimeGatewayStart, error) {
 	if len(filterOpenCodeTeamPods(&instance, []models.RuntimePod{pod})) == 0 {
-		return nil, fmt.Errorf("%w: OpenCode Team adapter is unavailable on the serving Runtime", errRuntimeControlPlanePending)
+		return nil, fmt.Errorf("%w: Native Team adapter is unavailable on the serving Runtime", errRuntimeControlPlanePending)
 	}
 	if s.agentClient == nil || s.bindingRepo == nil || s.instanceRepo == nil {
 		return nil, fmt.Errorf("runtime scheduler gateway dependencies are not configured")

@@ -30,7 +30,7 @@ export interface TeamMember {
   member_key: string;
   display_name: string;
   role: string;
-  runtime_type?: "openclaw" | "hermes" | "opencode";
+  runtime_type?: "openclaw" | "hermes" | "opencode" | "deepseek-harness";
   instance_mode?: "lite" | "pro";
   description?: string;
   status:
@@ -141,7 +141,7 @@ export interface CreateTeamMemberRequest {
   role: string;
   mode?: "lite" | "pro";
   instance_mode?: "lite" | "pro";
-  runtime_type?: "openclaw" | "hermes" | "opencode";
+  runtime_type?: "openclaw" | "hermes" | "opencode" | "deepseek-harness";
   description?: string;
   cpu_cores?: number;
   memory_gb?: number;

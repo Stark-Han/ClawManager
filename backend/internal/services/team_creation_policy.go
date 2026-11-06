@@ -16,7 +16,7 @@ type TeamCreationRules struct {
 }
 
 func CurrentTeamCreationRules() TeamCreationRules {
-	return TeamCreationRules{RuntimeTypes: []string{"openclaw", "hermes", "opencode"}, LeaderRuntimeTypes: []string{"openclaw"}, WorkerRuntimeTypes: []string{"openclaw", "hermes", "opencode"}, InstanceModes: []string{InstanceModeLite}, CommunicationModes: []string{teamCommunicationModeLeaderMediated}}
+	return TeamCreationRules{RuntimeTypes: []string{"openclaw", "hermes", "opencode", "deepseek-harness"}, LeaderRuntimeTypes: []string{"openclaw"}, WorkerRuntimeTypes: []string{"openclaw", "hermes", "opencode", "deepseek-harness"}, InstanceModes: []string{InstanceModeLite}, CommunicationModes: []string{teamCommunicationModeLeaderMediated}}
 }
 
 // ValidateNewTeamRequest performs no I/O. Call before name-conflict cleanup,

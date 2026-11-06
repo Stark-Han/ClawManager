@@ -544,6 +544,9 @@ func (s *teamService) CreateTeam(userID int, req CreateTeamRequest) (*TeamDetail
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateDshTeamAdmission(&models.Team{Name: req.Name}, memberPlans); err != nil {
+		return nil, err
+	}
 	existingTeam, err := s.repo.GetTeamByUserIDAndName(userID, req.Name)
 	if err != nil {
 		return nil, err
@@ -2842,6 +2845,9 @@ func teamMemberExecutionSelfCheckGuidance(member plannedTeamMember) []string {
 func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) string {
 	runtimeGuidance := "- You are running inside a ClawManager managed OpenClaw/Hermes runtime."
 	browserGuidance := "- Browser is available to every supported Team worker. Open Team files with team_artifact_preview when that tool is exposed; on an older Runtime without it, use static file inspection. Do not use file:// or start a temporary file server."
+	if member.RuntimeType == "deepseek-harness" {
+		runtimeGuidance = "- You are running inside a ClawManager managed DeepSeek Harness runtime."
+	}
 	if member.RuntimeType == "opencode" {
 		runtimeGuidance = "- You are running inside a ClawManager managed OpenCode runtime."
 		browserGuidance = "- Use team_artifact_preview for managed Team previews. If no browser tool is installed, inspect files statically and report that limitation; do not claim browser verification. Do not use file:// or start a temporary file server."
@@ -14523,8 +14529,8 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 		if isLeader && runtimeType != "opencode" && (runtimeType != "openclaw" || instanceMode != InstanceModeLite) {
 			return nil, fmt.Errorf("team leader must use OpenClaw Lite or a supported OpenCode runtime")
 		}
-		if runtimeType == "hermes" && instanceMode != InstanceModeLite {
-			return nil, fmt.Errorf("Hermes team workers must use Lite mode")
+		if (runtimeType == "hermes" || runtimeType == "deepseek-harness") && instanceMode != InstanceModeLite {
+			return nil, fmt.Errorf("Hermes/DeepSeek Harness team workers must use Lite mode")
 		}
 		profile := teamMemberProfileFromEnv(memberReq.EnvironmentOverrides)
 		effectiveRole := role
@@ -14874,7 +14880,7 @@ func normalizeTeamMemberRuntimeType(raw string) (string, error) {
 		return "openclaw", nil
 	}
 	switch runtimeType {
-	case "openclaw", "hermes", "opencode":
+	case "openclaw", "hermes", "opencode", "deepseek-harness":
 		return runtimeType, nil
 	default:
 		return "", fmt.Errorf("unsupported team member runtime type: %s", raw)

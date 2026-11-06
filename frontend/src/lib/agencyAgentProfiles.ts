@@ -19,7 +19,7 @@ export type TeamAgentRuntimeContext = {
   memberId: string;
   displayName: string;
   role: string;
-  runtimeType: "openclaw" | "hermes" | "opencode";
+  runtimeType: "openclaw" | "hermes" | "opencode" | "deepseek-harness";
   isLeader: boolean;
 };
 

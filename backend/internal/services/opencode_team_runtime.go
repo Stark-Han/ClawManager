@@ -10,7 +10,7 @@ import (
 const openCodeTeamProtocol = "opencode-team-v1"
 
 func filterOpenCodeTeamPods(instance *models.Instance, pods []models.RuntimePod) []models.RuntimePod {
-	if instance == nil || instance.Type != "opencode" || instance.EnvironmentOverridesJSON == nil {
+	if instance == nil || (instance.Type != "opencode" && instance.Type != "deepseek-harness") || instance.EnvironmentOverridesJSON == nil {
 		return pods
 	}
 	var env map[string]string
@@ -20,9 +20,13 @@ func filterOpenCodeTeamPods(instance *models.Instance, pods []models.RuntimePod)
 	if !strings.EqualFold(env["CLAWMANAGER_TEAM_ENABLED"], "true") {
 		return pods
 	}
+	wanted := openCodeTeamProtocol
+	if instance.Type == "deepseek-harness" {
+		wanted = "dsh-team-v1"
+	}
 	result := make([]models.RuntimePod, 0, len(pods))
 	for _, pod := range pods {
-		if stringValue(pod.TeamPluginVersion) == openCodeTeamProtocol {
+		if stringValue(pod.TeamPluginVersion) == wanted {
 			result = append(result, pod)
 		}
 	}
