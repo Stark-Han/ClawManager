@@ -14530,8 +14530,11 @@ func planTeamMembers(teamName string, members []CreateTeamMemberRequest) ([]plan
 		if isLeader && runtimeType != "opencode" && (runtimeType != "openclaw" || instanceMode != InstanceModeLite) {
 			return nil, fmt.Errorf("team leader must use OpenClaw Lite or a supported OpenCode runtime")
 		}
-		if (runtimeType == "hermes" || runtimeType == "deepseek-harness") && instanceMode != InstanceModeLite {
-			return nil, fmt.Errorf("Hermes/DeepSeek Harness team workers must use Lite mode")
+		if runtimeType == "hermes" && instanceMode != InstanceModeLite {
+			return nil, fmt.Errorf("Hermes team workers must use Lite mode")
+		}
+		if runtimeType == "deepseek-harness" && instanceMode != InstanceModeLite {
+			return nil, fmt.Errorf("DeepSeek Harness team workers must use Lite mode")
 		}
 		profile := teamMemberProfileFromEnv(memberReq.EnvironmentOverrides)
 		effectiveRole := role
