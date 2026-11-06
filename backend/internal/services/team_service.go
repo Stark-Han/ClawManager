@@ -4021,6 +4021,10 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 		if releaseErr := s.reconcileTerminalTeamMemberBindings(&team, members, now); releaseErr != nil {
 			errs = append(errs, releaseErr)
 		}
+		operationalItems, operationalErr := s.memberOperationalItems(team.ID, items)
+		if operationalErr != nil {
+			errs = append(errs, operationalErr)
+		}
 		for memberIdx := range members {
 			member := members[memberIdx]
 			if isLeaderTeamMember(&member) || !isActiveTeamMember(&member) {
@@ -4034,7 +4038,7 @@ func (s *teamService) sweepTeamControlPlaneConsistency() error {
 			if member.BlockedReason != nil && strings.TrimSpace(*member.BlockedReason) != "" && !strings.HasPrefix(strings.TrimSpace(*member.BlockedReason), teamRuntimeUnavailableReasonPrefix) {
 				continue
 			}
-			if reconcileTeamMemberOperationalState(&member, items) {
+			if operationalErr == nil && reconcileTeamMemberOperationalState(&member, operationalItems) {
 				member.UpdatedAt = now
 				if updateErr := s.repo.UpdateMember(&member); updateErr != nil {
 					errs = append(errs, updateErr)
@@ -10157,7 +10161,11 @@ func (s *teamService) projectTeamEventAttempt(team *models.Team, bus *redisBus, 
 		if memberItemsErr != nil {
 			return memberItemsErr
 		}
-		reconcileTeamMemberOperationalState(member, memberItems)
+		operationalItems, operationalErr := s.memberOperationalItems(team.ID, memberItems)
+		if operationalErr != nil {
+			return operationalErr
+		}
+		reconcileTeamMemberOperationalState(member, operationalItems)
 		member.UpdatedAt = now
 		if err := s.repo.UpdateMember(member); err != nil {
 			return err
