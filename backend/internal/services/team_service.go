@@ -2847,6 +2847,7 @@ func buildTeamMemberAgentsMarkdown(team *models.Team, member plannedTeamMember) 
 	browserGuidance := "- Browser is available to every supported Team worker. Open Team files with team_artifact_preview when that tool is exposed; on an older Runtime without it, use static file inspection. Do not use file:// or start a temporary file server."
 	if member.RuntimeType == "deepseek-harness" {
 		runtimeGuidance = "- You are running inside a ClawManager managed DeepSeek Harness runtime."
+		browserGuidance = "- Use team_artifact_preview for managed Team previews. If no browser tool is installed, inspect files statically and report that limitation; do not claim browser verification. Do not use file:// or start a temporary file server."
 	}
 	if member.RuntimeType == "opencode" {
 		runtimeGuidance = "- You are running inside a ClawManager managed OpenCode runtime."

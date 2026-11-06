@@ -2,6 +2,7 @@ package services
 
 import (
 	"clawreef/internal/models"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,6 +44,10 @@ func TestDshTeamAdmissionAndServingCapability(t *testing.T) {
 }
 
 func TestDshTeamLeaderAndProRejected(t *testing.T) {
+	prompt := buildTeamMemberAgentsMarkdown(&models.Team{ID: 1}, plannedTeamMember{RuntimeType: RuntimeTypeDeepSeekHarness})
+	if !strings.Contains(prompt, "DeepSeek Harness") || !strings.Contains(prompt, "If no browser tool is installed") {
+		t.Fatal("DSH prompt misstates native capabilities")
+	}
 	for _, leader := range []bool{false, true} {
 		req := CreateTeamRequest{Members: []CreateTeamMemberRequest{{MemberID: "leader", IsLeader: true, RuntimeType: "openclaw"}, {MemberID: "worker", Role: "worker", RuntimeType: RuntimeTypeDeepSeekHarness}}}
 		if leader {
