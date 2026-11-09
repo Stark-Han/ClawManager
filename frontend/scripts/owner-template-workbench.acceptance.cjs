@@ -17,6 +17,8 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
       if(conflict)return route.fulfill({status:409,json:{message:'模板版本已变化，请读取最新版本'}});
       const body=req.postDataJSON(); assert.equal(body.expected_revision,template.revision);template={...template,name:body.name,revision:template.revision+1};data=template;
     } else if(path.endsWith('/custom-team-templates/1') && method==='GET')data=template;
+    else if(path.endsWith('/teams/99'))data={team:{id:99,name:'论文精读验收团队',status:'running'},leader_member_id:'member-0',members:template.spec.members.map((m,i)=>({id:i+1,member_key:m.memberId,display_name:m.displayName,role:m.role,status:'idle',availability:'idle',runtime_type:'openclaw',instance_mode:'lite'})),tasks:[],events:[],work_items:[]};
+    else if(path.endsWith('/team-templates'))data={templates:[{key:'fixture',name:'论文精读',revision:1,members:template.spec.members.map(m=>({member_id:m.memberId,name:m.displayName,role:m.role,is_leader:m.isLeader,runtime_type:'openclaw',instance_mode:'lite'}))}]};
     else if(path.includes('/members/') && path.endsWith('/adjust')) {
       template={...template,revision:template.revision+1};data={operation_id:'adjust-fixture',status:'succeeded',template_id:1};
     } else if(path.endsWith('/team-operations/adjust-fixture'))data={operation_id:'adjust-fixture',status:'succeeded',template_id:1};
@@ -40,6 +42,8 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
   assert.equal(await goal.inputValue(),'尚未应用的目标草稿');
   assert.equal(await page.getByRole('tab',{name:'论文精读成员5',exact:true}).getAttribute('aria-selected'),'true');
   const aligned=await page.locator('.ot-editor-section-heading').evaluateAll(nodes=>Math.abs(nodes[0].getBoundingClientRect().top-nodes[1].getBoundingClientRect().top));assert(aligned<1);
+  await page.locator('.ot-template-list button').first().focus();
+  assert(await page.locator('.ot-template-list button').first().evaluate(b=>{const p=b.parentElement.getBoundingClientRect(),r=b.getBoundingClientRect();return r.left-p.left>=5&&r.top-p.top>=5}),'template focus ring clipped');
   conflict=true;await page.getByRole('button',{name:'重命名模板'}).click();await page.getByRole('textbox',{name:'模板名称',exact:true}).fill('冲突名称');await page.getByRole('button',{name:'保存名称',exact:true}).click();await page.getByRole('alert').filter({hasText:'模板版本已变化'}).first().waitFor();assert.equal(await goal.inputValue(),'尚未应用的目标草稿');
   page.once('dialog',d=>d.accept());await page.getByRole('dialog',{name:'重命名模板'}).getByRole('button',{name:'取消',exact:true}).click();
   for(const width of [1366,390]) {
@@ -47,5 +51,17 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
     if(width===390)await page.getByRole('combobox',{name:'当前模板成员'}).selectOption('member-4');
     const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false,'horizontal overflow at '+width);
   }
-  assert.deepEqual(errors,[]);console.log('PASS: six-member directory, aligned headings, rename/member edit preserve draft, conflict safety and responsive layout');await browser.close();
+  await page.setViewportSize({width:1366,height:850});
+  await page.goto((process.env.UI_BASE_URL || 'http://127.0.0.1:9059')+'/scripts/fixtures/owner-template-workbench.html?dashboard');
+  await page.getByRole('button',{name:'管理',exact:true}).click();
+  const manage=page.getByRole('dialog',{name:'管理 Team'});await manage.waitFor();
+  assert.equal(await manage.getByRole('button',{name:'移除成员'}).count(),0);
+  await manage.getByRole('button',{name:'关闭',exact:true}).click();
+  await page.getByRole('button',{name:'新建 Team',exact:true}).click();
+  const create=page.getByRole('dialog',{name:'新建 Team',exact:true});await create.waitFor();
+  const name=create.getByRole('textbox',{name:'团队名称',exact:true});await name.focus();
+  assert(await name.evaluate(b=>{const p=b.closest('.ot-form-scroll').getBoundingClientRect(),r=b.getBoundingClientRect();return r.left-p.left>=5&&r.right<=p.right-5}),'dialog field focus clipped');
+  await create.getByRole('button',{name:'取消',exact:true}).click();
+  await page.getByRole('button',{name:'操作记录',exact:true}).click();await page.getByRole('dialog',{name:'操作记录',exact:true}).waitFor();await page.getByRole('dialog',{name:'操作记录',exact:true}).getByRole('button',{name:'关闭',exact:true}).click();
+  assert.deepEqual(errors,[]);console.log('PASS: six-member directory, draft/conflict safety, responsive layout and shared dialogs/focus boundaries');await browser.close();
 })().catch(error=>{console.error(error);process.exit(1)});

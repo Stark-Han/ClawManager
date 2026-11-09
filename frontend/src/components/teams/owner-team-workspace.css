@@ -71,7 +71,9 @@
 /* Directory template editor: each pane owns one bounded scroll area. Keep
    four pixels around focusable controls rather than clipping their outlines. */
 .ot-directory-template-area{grid-template-rows:auto minmax(0,1fr)}
-.ot-directory-template-area .ot-template-list{padding:4px 5px 12px 4px}
+.ot-directory-template-area .ot-template-list{padding:6px 6px 12px}
+.ot-workspace .ot-master{padding:6px 6px 12px}
+.ot-directory-editor button:focus-visible{outline-offset:2px}
 .ot-directory-editor{padding:4px;gap:0}
 .ot-directory-editor>.ot-template-title{padding:0 0 14px;border-bottom:1px solid var(--ot-border);align-items:center;min-height:44px;flex-shrink:0}
 .ot-template-name{display:flex;align-items:center;gap:9px;flex-wrap:wrap;min-width:0;flex:1}
