@@ -71,7 +71,6 @@ export const ownerTeamService = {
   operation: (id: string, signal?: AbortSignal) => get<TeamOperation>(`/team-operations/${encodeURIComponent(id)}`, undefined, signal),
   retryOperation: (id: string, expected_attempt_count: number) => post<TeamOperation>(`/team-operations/${encodeURIComponent(id)}/retry`, { expected_attempt_count }),
   removeTeam: async (id: number) => (await ownerTeamHTTP.delete(`/teams/${id}`, { data: { confirm_data_loss: true }, headers: { 'Idempotency-Key': ownerTeamRequestKey() } })).data.data as TeamOperation,
-  removeMember: async (id: number, member: string) => (await ownerTeamHTTP.delete(`/teams/${id}/members/${encodeURIComponent(member)}`, { data: { confirm_data_loss: true }, headers: { 'Idempotency-Key': ownerTeamRequestKey() } })).data.data as TeamOperation,
   update: async (id: number, data: { name: string; description?: string }) => { await ownerTeamHTTP.patch(`/teams/${id}`, data); },
   templates: (signal?: AbortSignal) => get<{ templates: CustomTeamTemplate[] }>('/custom-team-templates', undefined, signal),
   template: (id: number, signal?: AbortSignal) => get<CustomTeamTemplate>(`/custom-team-templates/${id}`, undefined, signal),
@@ -92,10 +91,7 @@ export const ownerTeamWorkspaceAPI: TeamWorkspaceAPI = {
     const op = (await ownerTeamHTTP.delete(`/teams/${id}`, { data: { confirm_data_loss: true }, headers: { 'Idempotency-Key': ownerTeamRequestKey() } })).data.data as TeamOperation;
     await waitForOwnerTeamOperation(op.operation_id);
   },
-  deleteMember: async (id: number, member: number | string) => {
-    const op = (await ownerTeamHTTP.delete(`/teams/${id}/members/${encodeURIComponent(member)}`, { data: { confirm_data_loss: true }, headers: { 'Idempotency-Key': ownerTeamRequestKey() } })).data.data as TeamOperation;
-    await waitForOwnerTeamOperation(op.operation_id);
-  },
+  deleteMember: async () => { throw new Error('不支持单独删除团队成员；请删除整个 Team'); },
   listWorkspaceFiles: (id: number, path = '', signal?: AbortSignal) => get<TeamWorkspaceListResponse>(`/teams/${id}/workspace/files`, { path }, signal),
   previewWorkspaceFile: (id: number, path: string, signal?: AbortSignal) => get<TeamWorkspacePreviewResponse>(`/teams/${id}/workspace/preview`, { path }, signal),
   downloadWorkspaceFile: async (id: number, path: string) => (await ownerTeamHTTP.get<Blob>(`/teams/${id}/workspace/download`, { params: { path }, responseType: 'blob' })).data,

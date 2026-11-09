@@ -1,7 +1,7 @@
 import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions, teamRuntimeLabel, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Check, ChevronUp, History, Plus, RefreshCw, Search, Settings2, Trash2, UserMinus, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, ChevronUp, History, Plus, RefreshCw, Search, Settings2, Trash2, Users } from 'lucide-react';
 import { OwnerTeamOperationError, withOwnerTeamIntent, pendingOwnerTeamIntent, recoverOwnerTeamIntent, ownerTeamService, ownerTeamWorkspaceAPI, waitForOwnerTeamOperation, type OwnerTeamSummary, type OwnerTeamCatalogEntry, type TeamOperation } from '../../services/ownerTeamService';
 import type { OwnerTeamsState } from '../../hooks/useOwnerTeams';
 import type { TeamDetails, TeamMember } from '../../types/team';
@@ -150,8 +150,8 @@ function OwnerTeamManage({ details, onClose, onChange, onOperation }: { details:
   const run = async (action: () => Promise<void>) => { if (lock.current) return; lock.current = true; setBusy(true); setError(''); setNotice(''); try { await action(); } catch (error) { setError(message(error)); } finally { lock.current = false; setBusy(false); } };
   return <OwnerTeamDialog title="管理 Team" dirty={dirty} busy={busy} onClose={onClose}><form onSubmit={e => { e.preventDefault(); void run(async () => { await ownerTeamService.update(details.team.id, { name, description }); setSaved({ name, description }); await onChange(); setNotice('团队设置已保存。'); }); }}>
     <div className="ot-form-scroll"><label>团队名称<input required maxLength={100} disabled={busy} value={name} onChange={e => setName(e.target.value)}/></label><label>团队说明<textarea maxLength={2000} disabled={busy} value={description} onChange={e => setDescription(e.target.value)}/></label>
-    <div className="ot-section-title"><h4>成员管理</h4><span>{details.members.length} 名成员</span></div>
-    {details.members.map(m => <div key={m.id} className="ot-remove-member"><TeamBadge iconKey={memberIcon(m)} size="chat"/><span>{m.display_name}</span>{m.member_key === details.leader_member_id ? <small className="ot-tag">Leader</small> : <button type="button" className="ot-secondary ot-danger-text" disabled={busy} onClick={() => { if (window.confirm(`移除“${m.display_name}”会删除该成员实例及数据，请先保全需要的文件。确认继续？`)) void run(async () => { const op = await ownerTeamService.removeMember(details.team.id, m.member_key); onOperation(op); await onChange(); }); }}><UserMinus size={14}/>移除成员</button>}</div>)}
+    <div className="ot-section-title"><h4>团队成员</h4><span>{details.members.length} 名成员</span></div>
+    {details.members.map(m => <div key={m.id} className="ot-remove-member"><TeamBadge iconKey={memberIcon(m)} size="chat"/><span>{m.display_name}</span><small className="ot-muted">{m.member_key === details.leader_member_id ? 'Leader' : '成员'}</small></div>)}
     <section className="ot-danger-zone"><h4>删除团队</h4><p>删除成员实例及共享数据，操作无法撤销。</p><button type="button" className="ot-danger" disabled={busy} onClick={() => { if (window.confirm('删除整个 Team 会删除成员实例和共享数据，无法撤销。确认继续？')) void run(async () => { const op = await ownerTeamService.removeTeam(details.team.id); onOperation(op); onClose(); await onChange(); }); }}><Trash2 size={14}/>删除 Team 与数据</button></section>
     {error && <p role="alert" className="ot-error">{error}</p>}{notice && <p role="status" className="ot-inline-status">{notice}</p>}</div>
     <footer><button type="button" className="ot-secondary" disabled={busy} onClick={() => { if (!dirty || window.confirm('有尚未保存的修改，确认关闭？')) onClose(); }}>关闭</button><button className="ot-primary" disabled={busy}><Check size={15}/>{busy ? '正在保存…' : '保存设置'}</button></footer>

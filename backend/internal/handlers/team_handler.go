@@ -287,17 +287,13 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 }
 
 func (h *TeamHandler) DeleteMember(c *gin.Context) {
-	userID, _ := c.Get("userID")
-	teamID, ok := parseTeamID(c)
+	_, ok := parseTeamID(c)
 	if !ok {
 		return
 	}
-	memberID := c.Param("memberID")
-	if err := h.teamService.DeleteMember(userID.(int), teamID, memberID); err != nil {
-		utils.HandleError(c, err)
-		return
-	}
-	utils.Success(c, http.StatusOK, "Team member deleted successfully", gin.H{"member_id": memberID})
+	// Authentication and ownership are enforced by ResourceScopeGuard. Keep the
+	// route for old clients, but never enter the destructive engine from here.
+	c.JSON(http.StatusConflict, gin.H{"success": false, "error": services.TeamMemberRemovalUnsupportedMessage, "error_code": services.TeamMemberRemovalUnsupportedCode})
 }
 
 func parseTeamID(c *gin.Context) (int, bool) {

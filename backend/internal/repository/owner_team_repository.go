@@ -312,7 +312,7 @@ func (r *OwnerTeamRepository) MemberGroups(teams []models.Team) (map[int][]model
 }
 
 func (r *OwnerTeamRepository) InstanceTeam(instanceID int) (*models.Team, error) {
-	rows, err := r.sess.SQL().Query(`SELECT DISTINCT t.id FROM team_members m JOIN teams t ON t.id=m.team_id JOIN instances i ON i.id=? WHERE t.resource_scope='northbound' AND m.status<>'deleted' AND t.status<>'deleted' AND (m.instance_id=i.id OR i.provisioning_operation_id=SHA2(CONCAT('owner-team-',t.id,'-member-',m.member_key),256)) LIMIT 2`, instanceID)
+	rows, err := r.sess.SQL().Query(`SELECT DISTINCT t.id FROM team_members m JOIN teams t ON t.id=m.team_id JOIN instances i ON i.id=? WHERE m.status<>'deleted' AND t.status<>'deleted' AND (m.instance_id=i.id OR (t.resource_scope='northbound' AND i.provisioning_operation_id=SHA2(CONCAT('owner-team-',t.id,'-member-',m.member_key),256))) LIMIT 2`, instanceID)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +337,7 @@ func (r *OwnerTeamRepository) InstanceTeam(instanceID int) (*models.Team, error)
 		return nil, fmt.Errorf("ambiguous instance Team identity")
 	}
 	team, err := NewTeamRepository(r.sess).GetTeamByID(teamID)
-	if err != nil || team == nil || team.IsCM() {
+	if err != nil || team == nil {
 		return nil, err
 	}
 	return team, team.ValidateScope()

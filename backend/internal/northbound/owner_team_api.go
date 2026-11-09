@@ -347,7 +347,9 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 		if err == nil {
 			result = safeOwnerTeamValue(result)
 		}
-	case "teams.delete", "members.delete":
+	case "members.delete":
+		err = apiError(409, services.TeamMemberRemovalUnsupportedCode, services.TeamMemberRemovalUnsupportedMessage, nil)
+	case "teams.delete":
 		var req struct {
 			ConfirmDataLoss bool `json:"confirm_data_loss"`
 		}
@@ -395,6 +397,10 @@ func (a *OwnerTeamAPI) retryOperation(c *gin.Context, identity OwnerTeamIdentity
 	}
 	if identity.Principal != nil && (op.AuthScope == nil || !identity.Principal.HasScope(*op.AuthScope)) {
 		writeError(c, apiError(403, "SCOPE_DENIED", "Insufficient permission", nil))
+		return
+	}
+	if op.OperationType == "owner_team_members_delete" && op.Status != "queued" && op.Status != "processing" {
+		writeError(c, apiError(409, services.TeamMemberRemovalUnsupportedCode, services.TeamMemberRemovalUnsupportedMessage, nil))
 		return
 	}
 	if op.OperationType != "owner_team_teams_create" && op.OperationType != "owner_team_teams_delete" && op.OperationType != "owner_team_members_delete" {
@@ -715,6 +721,23 @@ func (a *OwnerTeamAPI) execute(ctx context.Context, op *models.NorthboundOperati
 		return nil, a.teams.DeleteTeam(team.UserID, team.ID)
 	}
 	if req.Action == "members.delete" {
+		// Only finish a removal that had already changed the member to deleting
+		// before this policy was installed. An old queued request is not consent
+		// to start a newly forbidden destructive action after deployment.
+		members, err := a.store.Members(team.ID)
+		if err != nil {
+			return nil, err
+		}
+		started := false
+		for _, member := range members {
+			if (member.MemberKey == req.MemberID || strconv.Itoa(member.ID) == req.MemberID) && member.Status == models.TeamMemberStatusDeleting {
+				started = true
+				break
+			}
+		}
+		if !started {
+			return nil, apiError(409, services.TeamMemberRemovalUnsupportedCode, services.TeamMemberRemovalUnsupportedMessage, nil)
+		}
 		return nil, a.teams.DeleteMember(team.UserID, team.ID, req.MemberID)
 	}
 	return nil, fmt.Errorf("unsupported Team operation")

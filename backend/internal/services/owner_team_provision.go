@@ -65,12 +65,13 @@ func (s *teamService) ValidateOwnerTeamCreate(userID int, owner string, req Crea
 }
 
 func (s *teamService) deleteTeamMemberInstance(team *models.Team, instanceID int) error {
-	if team.ResourceScope == models.TeamScopeNorthbound {
-		deleter, ok := s.instanceService.(interface{ DeleteForOwnerTeam(int, int) error })
-		if !ok {
-			return fmt.Errorf("Owner Team deletion guard unavailable")
-		}
+	// Carry the Team identity for either resource scope. Direct instance routes
+	// have no such identity and must not bypass whole-Team management.
+	if deleter, ok := s.instanceService.(interface{ DeleteForOwnerTeam(int, int) error }); ok {
 		return deleter.DeleteForOwnerTeam(team.ID, instanceID)
+	}
+	if team.ResourceScope == models.TeamScopeNorthbound {
+		return fmt.Errorf("Owner Team deletion guard unavailable")
 	}
 	return s.instanceService.Delete(instanceID)
 }
