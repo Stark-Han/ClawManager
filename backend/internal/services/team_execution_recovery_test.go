@@ -22,7 +22,7 @@ func TestRootDependencyObservationCannotHideStalledOrCompletedWork(t *testing.T)
 	for _, state := range []string{"succeeded", "failed", "cancelled", "waiting"} {
 		copy := item
 		copy.Status = state
-		if state != "waiting" && progressingRootDependency(task, copy, snapshot, now) {
+		if progressingRootDependency(task, copy, snapshot, now) {
 			t.Fatalf("%s hid a stalled root", state)
 		}
 	}

@@ -28,7 +28,7 @@ func boundedTeamEventID(kind string, values ...interface{}) string {
 const teamProjectionRetryDestination = "internal:team-event-projection"
 
 func progressingRootDependency(task *models.TeamTask, item models.TeamWorkItem, snapshot *teamAssignmentActivitySnapshot, now time.Time) bool {
-	return item.RootTaskID == task.ID && item.OwnerMemberID != nil && *item.OwnerMemberID != task.TargetMemberID && item.SupersededBy == nil && isActiveTeamWorkItemStatus(item.Status) && snapshot != nil && snapshot.activeTurn() && snapshot.fresh(now) && !snapshot.StallCandidate
+	return item.RootTaskID == task.ID && item.OwnerMemberID != nil && *item.OwnerMemberID != task.TargetMemberID && item.SupersededBy == nil && item.Status == models.TeamTaskStatusRunning && snapshot != nil && snapshot.activeTurn() && snapshot.fresh(now) && !snapshot.StallCandidate
 }
 
 func (s *teamService) rootHasProgressingDependency(bus *redisBus, task *models.TeamTask, now time.Time) bool {
