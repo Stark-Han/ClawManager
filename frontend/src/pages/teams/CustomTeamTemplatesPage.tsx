@@ -138,20 +138,12 @@ const CustomTeamTemplatesPage: React.FC = () => {
   const rename = async () => {
     if (!selected || !nameDraft.trim()) return;
     try {
-      setBusy("rename");
-      setError(null);
-      applyUpdated(
-        await customTeamTemplateService.rename(
-          selected.id,
-          nameDraft.trim(),
-          selected.revision,
-        ),
-      );
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(null);
-    }
+      setBusy("rename"); setError(null);
+      const updated = await customTeamTemplateService.rename(selected.id, nameDraft.trim(), selected.revision);
+      applyUpdated(updated, { syncEditor: false });
+      setNameDraft(updated.name);
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setBusy(null); }
   };
 
   const reviseTeam = async () => {
@@ -439,7 +431,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
                           onClick={() => void rename()}
                           className="app-button-secondary inline-flex items-center gap-2 disabled:opacity-50"
                         >
-                          <Save size={15} /> 仅保存名称
+                          <Save size={15} /> 保存名称
                         </button>
                       </div>
                     </label>
@@ -474,7 +466,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
                         className="app-button-primary inline-flex items-center gap-2 disabled:opacity-50"
                       >
                         <Sparkles size={16} />
-                        {busy === "revise-team" ? "整体调整中..." : "按新目标更新 Team"}
+                        {busy === "revise-team" ? "整体调整中..." : "按目标更新模板"}
                       </button>
                       <button
                         type="button"
@@ -484,7 +476,7 @@ const CustomTeamTemplatesPage: React.FC = () => {
                         title={editorChanged ? "请先应用整体修改" : undefined}
                       >
                         <RefreshCw size={15} />
-                        {busy === "regenerate-all" ? "重新生成中..." : "重新生成整个 Team"}
+                        {busy === "regenerate-all" ? "重新生成中..." : "重新生成整套模板"}
                       </button>
                       <p className="text-xs text-gray-500">
                         使用已保存的意图和人数重建全部成员；单个成员的职责调整请在下方进行。
