@@ -27,6 +27,27 @@ func boundedTeamEventID(kind string, values ...interface{}) string {
 
 const teamProjectionRetryDestination = "internal:team-event-projection"
 
+func progressingRootDependency(task *models.TeamTask, item models.TeamWorkItem, snapshot *teamAssignmentActivitySnapshot, now time.Time) bool {
+	return item.RootTaskID == task.ID && item.OwnerMemberID != nil && *item.OwnerMemberID != task.TargetMemberID && item.SupersededBy == nil && isActiveTeamWorkItemStatus(item.Status) && snapshot != nil && snapshot.activeTurn() && snapshot.fresh(now) && !snapshot.StallCandidate
+}
+
+func (s *teamService) rootHasProgressingDependency(bus *redisBus, task *models.TeamTask, now time.Time) bool {
+	items, err := s.monitorWorkItems(task.TeamID)
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		if item.RootTaskID != task.ID || item.OwnerMemberID == nil || *item.OwnerMemberID == task.TargetMemberID || item.SupersededBy != nil || !isActiveTeamWorkItemStatus(item.Status) {
+			continue
+		}
+		snapshot, _, err := s.readAssignmentActivitySnapshot(bus, task.TeamID, task, &item)
+		if err == nil && progressingRootDependency(task, item, snapshot, now) {
+			return true
+		}
+	}
+	return false
+}
+
 // Reuse the durable outbox as an internal replay lane. Never acknowledge a
 // failed projection unless its original transport identity has been saved.
 func (s *teamService) preserveProjectionFailure(team *models.Team, message redisStreamMessage) error {
@@ -131,6 +152,11 @@ func (s *teamService) recoverRootExecution(task *models.TeamTask, now time.Time)
 				snapshot, supported, readErr := s.readAssignmentActivitySnapshot(bus, team.ID, task, item)
 				if readErr == nil && supported && snapshot != nil && snapshot.activeTurn() && snapshot.fresh(now) {
 					if snapshot.StallCandidate {
+						// A healthy downstream execution is a known dependency, not
+						// evidence that the root owner needs another competing turn.
+						if s.rootHasProgressingDependency(bus, task, now) {
+							return nil
+						}
 						id := boundedTeamEventID("root-progress-blocked", task.ID, snapshot.TurnID)
 						if exists, e := s.repo.EventExistsByEventID(team.ID, id); e != nil {
 							return e

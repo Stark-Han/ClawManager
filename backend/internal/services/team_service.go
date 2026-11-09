@@ -1683,7 +1683,8 @@ func (s *teamService) GetTeam(userID, teamID int) (*TeamDetailsPayload, error) {
 	for idx := range members {
 		_, _, _, _ = s.reconcileTeamMemberRuntimeAvailability(&members[idx], workItems, time.Now().UTC())
 	}
-	if team.ResourceScope == models.TeamScopeNorthbound {
+	_, observesRuntime := s.repo.(teamRuntimeFactsReader)
+	if team.ResourceScope == models.TeamScopeNorthbound || observesRuntime {
 		members = s.ObserveTeamMembers(context.Background(), []models.Team{*team}, members)
 	}
 	leader := findTeamLeader(members)

@@ -97,9 +97,9 @@ function OwnerTeamDashboardContent({ state }: { state: OwnerTeamsState }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingIntent, state.owner, feedback.notify]);
   useEffect(() => {
-    let active = true; setDetails(null); setDetailError('');
+    let active = true, inFlight = false; setDetails(null); setDetailError('');
     if (!state.selectedID) return;
-    const refresh = async () => { try { const details = await ownerTeamWorkspaceAPI.getTeam(state.selectedID!); if (active) { setDetails(details); setDetailError(''); } } catch (error) { if (active) setDetailError(message(error)); } };
+    const refresh = async () => { if (inFlight) return; inFlight = true; try { const details = await ownerTeamWorkspaceAPI.getTeam(state.selectedID!); if (active) { setDetails(details); setDetailError(''); } } catch (error) { if (active) setDetailError(message(error)); } finally { inFlight = false; } };
     void refresh(); const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 5000);
     return () => { active = false; clearInterval(timer); };
   }, [state.selectedID, state.owner]);

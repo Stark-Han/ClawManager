@@ -11,6 +11,32 @@ import (
 	"time"
 )
 
+func TestRootDependencyObservationCannotHideStalledOrCompletedWork(t *testing.T) {
+	now := time.Now().UTC()
+	task := &models.TeamTask{ID: 3, TargetMemberID: 1}
+	item := models.TeamWorkItem{RootTaskID: 3, OwnerMemberID: intPtr(2), Status: "running"}
+	snapshot := &teamAssignmentActivitySnapshot{TurnState: "running", ObservedAt: now.Format(time.RFC3339Nano)}
+	if !progressingRootDependency(task, item, snapshot, now) {
+		t.Fatal("known active dependency not recognized")
+	}
+	for _, state := range []string{"succeeded", "failed", "cancelled", "waiting"} {
+		copy := item
+		copy.Status = state
+		if state != "waiting" && progressingRootDependency(task, copy, snapshot, now) {
+			t.Fatalf("%s hid a stalled root", state)
+		}
+	}
+	snapshot.StallCandidate = true
+	if progressingRootDependency(task, item, snapshot, now) {
+		t.Fatal("stalled worker hid root stall")
+	}
+	snapshot.StallCandidate = false
+	snapshot.ObservedAt = now.Add(-time.Hour).Format(time.RFC3339Nano)
+	if progressingRootDependency(task, item, snapshot, now) {
+		t.Fatal("old heartbeat hid root stall")
+	}
+}
+
 func TestDeliveryEventIDFitsRealSchemaAndSeparatesCorrections(t *testing.T) {
 	a := boundedTeamEventID("member-result-updated", 170, 371, "worker", strings.Repeat("assignment", 40), 1, "sha256:"+strings.Repeat("f", 64))
 	b := boundedTeamEventID("member-result-updated", 170, 371, "worker", strings.Repeat("assignment", 40), 1, "sha256:"+strings.Repeat("e", 64))

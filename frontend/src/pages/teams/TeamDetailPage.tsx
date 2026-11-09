@@ -966,6 +966,7 @@ const TeamDetailPage: React.FC = () => {
   const user = environment.owner ? { username: environment.owner, email: environment.owner, id: 0 } : cmUser;
   const teamId = id ? Number(id) : null;
   const [details, setDetails] = useState<TeamDetails | null>(null);
+  const teamRead = useRef({ sequence: 0, inFlight: false });
   const [loadedTasks, setLoadedTasks] = useState<TeamTask[]>([]);
   const [loadedEvents, setLoadedEvents] = useState<TeamEvent[]>([]);
   const [hasMoreTasks, setHasMoreTasks] = useState(false);
@@ -994,6 +995,8 @@ const TeamDetailPage: React.FC = () => {
   const ownerViewKey = environment.owner && teamId ? `owner-team-view:${environment.owner}:${teamId}` : '';
 
   useEffect(() => {
+    teamRead.current.sequence++;
+    teamRead.current.inFlight = false;
     setLoadedTasks([]);
     setLoadedEvents([]);
     setHasMoreTasks(false);
@@ -1022,7 +1025,7 @@ const TeamDetailPage: React.FC = () => {
         }
       } catch { /* A malformed presentation cache cannot grant access. */ }
     }
-    return () => workspaceFileRequest.current?.abort();
+    return () => { teamRead.current.sequence++; teamRead.current.inFlight = false; workspaceFileRequest.current?.abort(); };
   }, [teamId, ownerViewKey]);
 
   useEffect(() => {
@@ -1036,11 +1039,17 @@ const TeamDetailPage: React.FC = () => {
         setLoading(false);
         return;
       }
+      // A slow poll must not overlap the next poll indefinitely or overwrite
+      // a newer manual refresh. This gate affects reads only, never dispatch.
+      if (options?.background && teamRead.current.inFlight) return;
+      const sequence = ++teamRead.current.sequence;
+      teamRead.current.inFlight = true;
       try {
         if (!options?.background) {
           setLoading(true);
         }
         const data = await teamService.getTeam(teamId);
+        if (sequence !== teamRead.current.sequence) return;
         if (eventHistoryCursor.current === undefined && data.events_next_before_id) eventHistoryCursor.current = data.events_next_before_id;
         setDetails(data);
         setLoadedTasks((current) => mergeTasksByLatestState(current, data.tasks || []));
@@ -1057,9 +1066,10 @@ const TeamDetailPage: React.FC = () => {
         );
         setError(null);
       } catch (err: any) {
+        if (sequence !== teamRead.current.sequence) return;
         setError(err.response?.data?.error || "加载 Team 失败");
       } finally {
-        setLoading(false);
+        if (sequence === teamRead.current.sequence) { teamRead.current.inFlight = false; setLoading(false); }
       }
     },
     [teamId],
