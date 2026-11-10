@@ -46,6 +46,60 @@ and ordinary instance Pro capability retain their prior policies.
 
 ## Validation and operational limits
 
+### Current blocking findings (2026-11-10, not final acceptance)
+
+The HXC release is not fully accepted. Team182's last observed lifecycle is
+`recovery_required`, desired running, progress0/4; its four original instances
+are stopped. No new model task has been dispatched and the maintenance marker
+is retained. Original task395 remains formally succeeded; its final report is
+still3541bytes with SHA256
+`3309f56d5edf73193021c62ce9e2685ca51d55c8f3f844497cd16984ad72cd17`.
+
+The legacy Hermes credential rewrite failure was reproduced precisely:
+private generated files retained historical GID1000. The business bubblewrap
+namespace maps only its primary GID, reporting that historical group as65534;
+preserving the reported group during atomic replacement fails with EINVAL22.
+A credential-free temporary-file probe reproduced this, while actual generated
+configuration copied to private temporary directories passed the real migrator
+(combined and each generated file). The original file formats were not corrupt.
+
+After all four original members stopped and bindings were released, an
+administrator operation held lifecycle/writer flocks, reviewed1135 private
+inode groups (only known historical GID1000, correct existing instance owner),
+and normalized them to the respective mapped private primary GID. Ownership,
+modes and content were otherwise retained. Each private tree's before/after
+content hash matched; shared Team artifacts were untouched. Durable journal:
+`/workspaces/.clawmanager-admin-migrations/team-182-private-groups-20261110.json`.
+The subsequent attempt passed credential migration but failed in Hermes
+`PrepareWorkspace` (`workspace_helper_failed`). Its exact sub-step is still
+unresolved; do not claim the whole start chain is fixed or repeat the completed
+credential migration without new evidence.
+
+A separate ordinary-instance restart incompatibility was reproduced using a
+disposable, non-Team protected Hermes Lite instance607. Its native gateway first
+reached running; POST restart returned500 and advanced the instance generation
+from1to2 while the original generation1 binding/gateway remained running.
+The legacy `FenceRuntimeRestart` path (630c79673) advances generation before
+calling stop; upstream durable `stopV2Instance` (b8c53ffd3) rejects a binding
+whose generation then differs. These two contracts were not adapted together.
+The disposable instance was subsequently cleaned through the actual deletion
+and confirmed-stop path. Existing ordinary instances483/563 and Pro473 were not
+restarted. This does not establish that every ordinary deployment mode fails.
+
+Remaining implementation order is deliberately narrow:
+1. Resolve the exact Hermes workspace-preparation sub-step using the existing
+   fixed-category diagnostics and one isolated reproduction; preserve all guards.
+2. Adapt ordinary Lite restart to persist its original-source stop/restart
+   intent, retain the original generation through actual teardown, and only
+   then submit the new generation. Reuse the existing durable stop coordinator;
+   retries, restart of the backend, explicit cancellation and late source
+   callbacks must not launch a duplicate or replay a completed operation.
+   Keep the legacy/Pro behavior and Team whole-unit admission intact.
+3. Run only the affected regression tests and one fresh four-runtime Team
+   start/task/stop/start closure, plus one ordinary Hermes restart/data check.
+   Build/publish the final verified candidate and update this evidence once.
+Do not substitute another successful image push for this unfinished acceptance.
+
 Linux Runtime upgrade/gateway/slots/workspace tests passed. Real disposable
 MySQL tests cover whole-Team admission, fresh-heartbeat irrelevance, unfinished
 requests/reviews/deliveries, last-user-task completion, duplicate requests,
