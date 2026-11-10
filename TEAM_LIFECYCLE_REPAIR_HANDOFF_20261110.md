@@ -116,3 +116,20 @@ and persisted lifecycle metadata. Do not roll back to code unaware of intentiona
 Team stops, delete bindings/proofs, or restart old tasks. Keep maintenance while
 readiness is unconfirmed. An image rollback must still use confirmed-stop rules;
 it must not revert live database/workspace contents.
+
+## Final observation before17:40 deadline
+
+At17:38-17:39 CST, App/Core and northbound Gateway v13 and all four Runtime
+deployments were Ready; final v13 apply exit0 was read back. Hermes v10 digest
+above is actually serving and all four Lite catalogs are synchronized. Pro
+catalog preservation passes with the corrected complete row identity.
+Ordinary608's real Stop completed and its binding is absent, data retained.
+
+The original Team182 start was retried only after Hermes/Core rollout readiness.
+Hermes604 generation12 reached native `running` (`gw-604-12`), confirmed through
+the authenticated Unix slot-state endpoint. This proves the previously failing
+directory preparation and config write passed in the real protected instance.
+The Team is still being observed for whole-group readiness. Maintenance remains;
+no new model task was submitted. The four-member task/Stop/Start acceptance is
+not complete. Do not describe these changes as fully accepted or remove this
+remaining requirement after seeing a successful image push or one member start.
