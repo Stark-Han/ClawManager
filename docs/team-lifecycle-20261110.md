@@ -1,5 +1,16 @@
 # Team lifecycle and upstream integration — 2026-11-10
 
+## Latest timed follow-up
+
+See `TEAM_LIFECYCLE_REPAIR_HANDOFF_20261110.md` at the repository root for the
+current status, completed fixes, actual deployment, remaining acceptance and
+retrospective. The earlier blocking findings below are retained as history.
+App repair d923625c and Runtime repairs ab1f414/2013b58 are committed.
+Ordinary Hermes608 native restart to generation2 is verified. Shared namespace
+GID identity and Hermes's missing supplemental-group forwarding are repaired.
+App v13 apply completed with exit0. Whole-Team real acceptance is still pending;
+the last completed user task is395, not a newly passed lifecycle task.
+
 ## Sources and merge method
 
 Team repositories only, branch `codex/team-personal-integration`.
