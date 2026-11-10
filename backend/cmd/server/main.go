@@ -169,6 +169,9 @@ func main() {
 	services.SetOpenClawTransferRuntimeRepositories(instanceRepo, bindingRepo, runtimePodRepo)
 	runtimeAgentClient := services.NewRuntimeAgentClient(cfg.Runtime.AgentControlToken)
 	legacyRuntimeAgentClient := runtimeAgentClient
+	if cfg.Runtime.LegacyAgentControlToken != "" {
+		legacyRuntimeAgentClient = services.NewRuntimeAgentClient(cfg.Runtime.LegacyAgentControlToken)
+	}
 	var runtimeSecurity *services.RuntimeSecurityAuthority
 	// The zero inventory fails closed for protected assignments when their
 	// cluster ranges have not been configured, while legacy runtimes still work.

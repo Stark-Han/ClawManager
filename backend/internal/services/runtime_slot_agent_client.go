@@ -146,17 +146,28 @@ func NewSlotRuntimeAgentClientWithHTTPClient(controlToken string, kube kubernete
 		kube:                   kube, namespace: namespace, assignments: k8sservice.NewRuntimeAssignmentService(kube, namespace),
 	}
 	transport.legacyHTTP = client.allowLegacyHTTPEndpoint
+	transport.legacyToken = func() string {
+		if old, ok := client.legacy.(*runtimeAgentHTTPClient); ok {
+			return old.controlToken
+		}
+		return ""
+	}
 	return client
 }
 
 type slotTLSTransport struct {
-	base       http.RoundTripper
-	legacyHTTP func(context.Context, *url.URL) bool
+	base        http.RoundTripper
+	legacyHTTP  func(context.Context, *url.URL) bool
+	legacyToken func() string
 }
 
 func (t slotTLSTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Scheme != "https" && (r.URL.Scheme != "http" || t.legacyHTTP == nil || !t.legacyHTTP(r.Context(), r.URL)) {
 		return nil, fmt.Errorf("runtime slots require authenticated HTTPS")
+	}
+	if r.URL.Scheme == "http" && t.legacyToken != nil {
+		r = r.Clone(r.Context())
+		r.Header.Set("X-ClawManager-Control-Token", t.legacyToken())
 	}
 	return t.base.RoundTrip(r)
 }

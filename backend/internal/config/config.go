@@ -266,6 +266,7 @@ type RuntimePoolConfig struct {
 	WorkspacePVCClaimName     string               `yaml:"workspacePvcClaimName"`
 	WorkspaceNFSServer        string               `yaml:"workspaceNfsServer"`
 	WorkspaceNFSPath          string               `yaml:"workspaceNfsPath"`
+	LegacyAgentControlToken   string               `yaml:"legacyAgentControlToken"`
 	AgentControlToken         string               `yaml:"agentControlToken"`
 	AgentReportToken          string               `yaml:"agentReportToken"`
 	BackendReplicaID          string               `yaml:"backendReplicaId"`
@@ -452,6 +453,7 @@ func Load() (*Config, error) {
 			WorkspacePVCClaimName:     getEnv("RUNTIME_WORKSPACE_PVC_CLAIM", ""),
 			WorkspaceNFSServer:        getEnv("RUNTIME_WORKSPACE_NFS_SERVER", ""),
 			WorkspaceNFSPath:          getEnv("RUNTIME_WORKSPACE_NFS_PATH", "/"),
+			LegacyAgentControlToken:   getEnv("RUNTIME_LEGACY_AGENT_CONTROL_TOKEN", ""),
 			AgentControlToken:         getEnv("RUNTIME_AGENT_CONTROL_TOKEN", ""),
 			AgentReportToken:          getEnv("RUNTIME_AGENT_REPORT_TOKEN", ""),
 			BackendReplicaID:          getEnv("HOSTNAME", "clawmanager-backend-local"),
@@ -765,6 +767,7 @@ func applyEnvOverrides(config *Config) {
 	}
 
 	config.Runtime.ContainerSlots = getEnvInt("RUNTIME_CONTAINER_SLOTS", config.Runtime.ContainerSlots)
+	config.Runtime.LegacyAgentControlToken = getEnv("RUNTIME_LEGACY_AGENT_CONTROL_TOKEN", config.Runtime.LegacyAgentControlToken)
 	config.Runtime.SlotPoolPrefix = getEnv("RUNTIME_SLOT_POOL_PREFIX", config.Runtime.SlotPoolPrefix)
 	config.Runtime.SandboxProfile = getEnv("RUNTIME_SANDBOX_PROFILE", config.Runtime.SandboxProfile)
 	config.Runtime.DeepSeekHarnessImage = getEnv("DEEPSEEK_HARNESS_RUNTIME_IMAGE", config.Runtime.DeepSeekHarnessImage)

@@ -77,3 +77,26 @@ func TestSlotLegacyHTTPIsLimitedToExistingTenantPods(t *testing.T) {
 		t.Fatal("unowned endpoint admitted")
 	}
 }
+
+func TestMixedTransportKeepsOldCredentialOnlyForVerifiedLegacyHTTP(t *testing.T) {
+	tpt := slotTLSTransport{base: slotRoundTripper(func(r *http.Request) (*http.Response, error) {
+		want := "new"
+		if r.URL.Scheme == "http" {
+			want = "old"
+		}
+		if r.Header.Get("X-ClawManager-Control-Token") != want {
+			t.Fatal("cross-protocol credential")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	}), legacyHTTP: func(context.Context, *url.URL) bool { return true }, legacyToken: func() string { return "old" }}
+	for _, scheme := range []string{"http", "https"} {
+		r, _ := http.NewRequest("GET", scheme+"://10.0.0.7:19090/readyz", nil)
+		r.Header.Set("X-ClawManager-Control-Token", "new")
+		if _, err := tpt.RoundTrip(r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Header.Get("X-ClawManager-Control-Token") != "new" {
+			t.Fatal("mutated caller request")
+		}
+	}
+}
