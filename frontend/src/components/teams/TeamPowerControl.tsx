@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Power } from 'lucide-react';
 import type { TeamRuntimeState } from '../../types/team';
 
 export function teamPowerLabel(state?: TeamRuntimeState) {
@@ -25,7 +26,7 @@ export default function TeamPowerControl({ state, start, stop, onChange, classNa
     finally { setBusy(false); }
   };
   return <span className="inline-flex max-w-full flex-wrap items-center gap-2">
-    <button type="button" className={className} disabled={busy || transition} onClick={() => void run()}>{busy ? '正在提交…' : transition ? teamPowerLabel(state) : active ? '停止团队' : '启动团队'}</button>
+    <button type="button" className={className} disabled={busy || transition} onClick={() => void run()}><span>{busy ? '正在提交…' : transition ? teamPowerLabel(state) : active ? '停止团队' : '启动团队'}</span>{className.includes('ot-card-entry') && <Power size={14}/>}</button>
     {state?.state === "recovery_required" && state.desired_state === "stopped" && stop && <button type="button" className={className} disabled={busy} onClick={() => void run(true)}>核实并继续停止</button>}
     {error && <span role="alert" className="text-xs text-red-600">{error}</span>}
   </span>;
