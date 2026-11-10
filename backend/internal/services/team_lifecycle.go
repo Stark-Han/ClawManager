@@ -4,6 +4,7 @@ import (
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/upper/db/v4"
 	"sort"
@@ -144,8 +145,15 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 		if a != nil && (a.ActiveRequests > 0 || a.StartDeadlineAt != nil) {
 			return fmt.Errorf("成员仍有模型请求或启动操作")
 		}
-		if i.Status == "stopped" && a != nil && a.StopOperationID == "" {
-			continue
+		if i.Status == "stopped" && (a == nil || a.StopOperationID == "") {
+			b, e := c.instances.bindingRepo.GetByInstanceID(ctx, i.ID)
+			if e != nil {
+				return e
+			}
+			if b == nil {
+				continue
+			}
+			return fmt.Errorf("成员停止绑定仍未释放")
 		}
 		if a != nil && a.StopOperationID != "" {
 			return fmt.Errorf("成员停止结果仍在核实，请待核实后继续原团队操作")
@@ -168,6 +176,9 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 		proof, err := client.IdlePreflight(check, *p.AgentEndpoint, b.GatewayID, RuntimeIdleStopRequest{InstanceID: i.ID, Generation: i.RuntimeGeneration, PodUID: *p.PodUID})
 		cancel()
 		if err != nil {
+			if legacyTeamManualStop(op.Reason, err) {
+				continue
+			}
 			return fmt.Errorf("成员 %d 空闲预检未通过: %w", i.ID, err)
 		}
 		if proof == nil || !proof.ExecutionProofSupported || proof.ExecutionState != "idle" {
@@ -320,4 +331,10 @@ type teamIdleStopContextKey struct{}
 
 func withTeamIdleStop(ctx context.Context, id int) context.Context {
 	return context.WithValue(ctx, teamIdleStopContextKey{}, id)
+}
+
+// Only an explicit manual operation can use the existing confirmed-stop path
+// on a legacy Agent. Automatic idle stop must have positive execution proof.
+func legacyTeamManualStop(reason string, err error) bool {
+	return reason == "manual" && errors.Is(err, ErrRuntimeAgentNotFound)
 }
