@@ -16,10 +16,13 @@ import (
 
 // Store is Core-only. The northbound Gateway must not receive this dependency.
 type Store struct {
-	Session      db.Session
-	HistoryRoot  string
-	Availability func() bool
-	perf         performanceState
+	IsolatedReader    func(context.Context, []byte) ([]byte, bool, error)
+	Session           db.Session
+	HistoryRoot       string
+	Availability      func() bool
+	HistoryReader     func(context.Context, string, string, Identity, bool, ...time.Time) ([]NativeQuestion, error)
+	FingerprintReader func(context.Context, string, string, Identity) (string, error)
+	perf              performanceState
 }
 
 func (s *Store) Available() bool { return s != nil && (s.Availability == nil || s.Availability()) }

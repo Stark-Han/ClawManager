@@ -25,6 +25,7 @@ export function memberRuntime(availability?: string, runtimeStatus?: string) {
 
 // The rail must not let an idle scheduling projection hide a runtime failure.
 export function memberRailState(member: TeamMember) {
+ if (member.runtime_status === "stopped" || member.runtime_observation?.reason === "intentionally_stopped") return {label:"已停止",tone:"neutral"};
   if (memberHasRuntimeFault(member)) return { label: "运行异常", tone: "error" };
   if (member.status === "failed" || member.status === "deleting" || member.status === "deleted") return memberSchedule(member.status);
   if (member.runtime_observation) {

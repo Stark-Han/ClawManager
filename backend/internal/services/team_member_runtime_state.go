@@ -52,6 +52,15 @@ func projectTeamMemberInstanceAvailability(member *models.TeamMember, instance *
 			member.RuntimeStatus = &value
 		}
 	}
+	if status == "stopped" && instance.StoppedReason != "" {
+		member.Status = models.TeamMemberStatusOffline
+		member.Availability = models.TeamMemberAvailabilityOffline
+		setRuntimeStatus("stopped")
+		if runtimeBlock {
+			member.BlockedReason = nil
+		}
+		return false, *member != before
+	}
 	if teamMemberInstanceStarting(status) {
 		// Keep a busy member's assignment binding and progress during recovery.
 		if member.CurrentTaskID == nil && member.Status != models.TeamMemberStatusBusy && member.Status != models.TeamMemberStatusFailed {

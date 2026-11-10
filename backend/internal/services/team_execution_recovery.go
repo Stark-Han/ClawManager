@@ -109,6 +109,9 @@ func (s *teamService) recoverRootExecution(task *models.TeamTask, now time.Time)
 	if err != nil || team == nil || team.Status == "deleted" || team.Status == "deleting" {
 		return err
 	}
+	if s.requireTeamPowerRunning(context.Background(), team.ID) != nil {
+		return nil
+	}
 	events, err := s.rootMonitorEvents(task.ID, task.TeamID)
 	if err != nil {
 		return err

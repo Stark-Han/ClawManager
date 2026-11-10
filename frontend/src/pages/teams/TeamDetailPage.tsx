@@ -1,3 +1,4 @@
+import TeamPowerControl, { teamPowerLabel } from '../../components/teams/TeamPowerControl';
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FilePenLine, FileText, MessagesSquare } from "lucide-react";
 import WorkspaceMarkdownPreview from "../../components/WorkspaceMarkdownPreview";
@@ -1192,6 +1193,7 @@ const TeamDetailPage: React.FC = () => {
   }, [details?.team.id, workspacePreview]);
 
   const handleDispatch = async (event: React.FormEvent) => {
+    if (details?.team.runtime_state && details.team.runtime_state.state !== "running") { event.preventDefault(); setError("团队尚未启动完成，请先启动团队。草稿已保留。"); return; }
     event.preventDefault();
     if (dispatchLock.current) return;
     if (!teamId || !taskPrompt.trim()) {
@@ -1295,7 +1297,7 @@ const TeamDetailPage: React.FC = () => {
           <span
             className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(details.team.status)}`}
           >
-            {details.team.status}
+            {teamPowerLabel(details.team.runtime_state) || details.team.status}
           </span>
           <span className="text-sm font-medium text-gray-700">
             Team #{details.team.id}
@@ -1305,6 +1307,7 @@ const TeamDetailPage: React.FC = () => {
             共享目录：{details.team.shared_mount_path}
           </span>
           <div className="ml-1 flex flex-wrap items-center gap-2">
+ <TeamPowerControl state={details.team.runtime_state} start={() => teamService.startTeam(details.team.id)} stop={() => teamService.stopTeam(details.team.id)} onChange={() => loadTeam({background:true})}/>
             <button
               type="button"
               onClick={() => void loadTeam({ background: true })}
@@ -1331,6 +1334,7 @@ const TeamDetailPage: React.FC = () => {
       }
     >
       {error && <div role="alert" className="shrink-0 px-3 py-2 text-sm text-red-700">刷新失败：{error}（保留已加载的内容）</div>}
+      {details.team.runtime_state && details.team.runtime_state.state !== "running" && <div role="status" className="px-4 py-2 text-sm text-slate-600">{teamPowerLabel(details.team.runtime_state)}。历史对话和文件仍可查看，启动完成后可发送任务。{details.team.runtime_state.error && <span role="alert"> {details.team.runtime_state.error}</span>}</div>}
       <TeamChatWorkspace
         key={details.team.id}
         members={details.members}
@@ -2445,7 +2449,7 @@ function CollaborationPanel({
 
       {unread && <button type="button" className="mx-auto my-1 rounded-full border border-sky-200 px-3 py-1 text-xs text-sky-700" onClick={jumpToLatest}>有新消息 · 回到底部 ↓</button>}
 
-      <TeamTaskComposer members={members} leaderKey={leaderMemberId} targetKey={targetMember} onTargetChange={onTargetChange} value={taskPrompt} onChange={onTaskPromptChange} sending={dispatching} error={dispatchError} reference={reference} onClearReference={onClearReference} onSubmit={onDispatch} />
+      <TeamTaskComposer members={members} leaderKey={leaderMemberId} targetKey={targetMember} onTargetChange={onTargetChange} value={taskPrompt} onChange={onTaskPromptChange} sending={dispatching} disabled={!!team.runtime_state && team.runtime_state.state !== "running"} error={dispatchError} reference={reference} onClearReference={onClearReference} onSubmit={onDispatch} />
     </section>
   );
 }

@@ -251,6 +251,13 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 			}
 		}
 		for _, team := range items {
+			if power, ok := a.teams.(services.TeamLifecycleControl); ok {
+				team.RuntimeState, err = power.TeamPower(c.Request.Context(), team.ID)
+				if err != nil {
+					writeError(c, err)
+					return
+				}
+			}
 			views = append(views, ownerTeamSummary(team, groups[team.ID]))
 		}
 		ownerTeamSuccess(c, gin.H{"teams": views, "total": total, "page": page, "limit": limit})
@@ -268,6 +275,20 @@ func (a *OwnerTeamAPI) Handle(c *gin.Context, identity OwnerTeamIdentity, route 
 	c.Set("ownerTeamProviderUserID", team.UserID)
 	var result interface{}
 	switch route.Action {
+	case "teams.start", "teams.stop":
+		control, ok := a.teams.(services.TeamLifecycleControl)
+		if !ok {
+			err = apiError(503, "TEAM_POWER_UNAVAILABLE", "团队启停服务未就绪", nil)
+			break
+		}
+		target := "running"
+		if route.Action == "teams.stop" {
+			target = "stopped"
+		}
+		result, err = control.RequestTeamPower(c.Request.Context(), team.UserID, id, target)
+		if err != nil {
+			err = apiError(409, "TEAM_POWER_CONFLICT", err.Error(), nil)
+		}
 	case "teams.get":
 		var details *services.TeamDetailsPayload
 		details, err = a.teams.GetTeam(team.UserID, team.ID)

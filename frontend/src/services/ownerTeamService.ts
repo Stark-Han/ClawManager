@@ -64,6 +64,9 @@ async function get<T>(url: string, params?: object, signal?: AbortSignal): Promi
 async function post<T>(url: string, data: unknown, key?: string): Promise<T> { return (await ownerTeamHTTP.post(url, data, key ? { headers: { 'Idempotency-Key': key } } : undefined)).data.data; }
 
 export const ownerTeamService = {
+  startTeam: (id: number) => post<import('../types/team').TeamRuntimeState>(`/teams/${id}/start`, {}),
+  stopTeam: (id: number) => post<import('../types/team').TeamRuntimeState>(`/teams/${id}/stop`, {}),
+
   capabilities: (signal?: AbortSignal) => get<OwnerTeamCapabilities>('/team-capabilities', undefined, signal),
   list: (page = 1, limit = 100, q = '', signal?: AbortSignal) => get<{ teams: OwnerTeamSummary[]; total: number; page: number; limit: number }>('/teams', { page, limit, q }, signal),
   catalog: (signal?: AbortSignal) => get<{ templates: OwnerTeamCatalogEntry[] }>('/team-templates', undefined, signal),
@@ -83,6 +86,9 @@ export const ownerTeamService = {
 
 // Shared CM workspace receives this adapter; no iframe or CM login is involved.
 export const ownerTeamWorkspaceAPI: TeamWorkspaceAPI = {
+  startTeam: ownerTeamService.startTeam,
+  stopTeam: ownerTeamService.stopTeam,
+
   getTeam: (id: number) => get<TeamDetails>(`/teams/${id}`),
   getTeamTasks: (id: number, before_id?: number, limit = 20) => get<TeamTasksHistoryResponse>(`/teams/${id}/tasks`, { before_id, limit }),
   getTeamEvents: (id: number, before_id?: number, limit = 50) => get<TeamEventsHistoryResponse>(`/teams/${id}/events`, { before_id, limit }),

@@ -64,6 +64,12 @@ type historyReadResponse struct {
 // Invoked explicitly before normal server startup. It never loads configuration,
 // opens a DB, serves HTTP, or writes a workspace. Input/output have strict caps.
 func RunHistoryReaderCLI(input io.Reader, output io.Writer) int {
+	return RunHistoryReaderContext(context.Background(), input, output)
+}
+
+// RunHistoryReaderContext also runs inside the upstream credential-scoped NFS helper.
+func RunHistoryReaderContext(parent context.Context, input io.Reader, output io.Writer) int {
+	parent = context.WithValue(parent, nativeHistoryHelperContextKey{}, true)
 	var request historyReadRequest
 	decoder := json.NewDecoder(io.LimitReader(input, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -74,7 +80,7 @@ func RunHistoryReaderCLI(input io.Reader, output io.Writer) int {
 	if !filepath.IsAbs(request.Root) || filepath.Clean(request.Workspace) != expected {
 		return 2
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), nativeReadBudget)
+	ctx, cancel := context.WithTimeout(parent, nativeReadBudget)
 	defer cancel()
 	ctx = context.WithValue(withDSHBatch(ctx), dshGenerationKey{}, request.Generation)
 	response := historyReadResponse{}
@@ -205,6 +211,20 @@ func (s *Store) isolatedHistory(ctx context.Context, request historyReadRequest)
 		<-nativeReaderSlots
 		return response, err
 	}
+	if s.IsolatedReader != nil {
+		result, ended, readErr := s.IsolatedReader(ctx, raw)
+		if ended {
+			guard.release()
+			<-nativeReaderSlots
+		}
+		if readErr != nil {
+			return response, readErr
+		}
+		if err = json.Unmarshal(result, &response); err != nil {
+			return response, errHistoryCorrupt
+		}
+		return response, readResponseError(response)
+	}
 	cmd := exec.Command(executable, HistoryReaderArgument)
 	cmd.Env = []string{}
 	// Do not hand DB credentials, API keys or proxy settings to a filesystem reader.
@@ -320,3 +340,6 @@ func (s *Store) inspectNative(ctx context.Context, item scanItem, recent bool, c
 	}
 	return r, err
 }
+
+// HistoryReaderGroupDrained includes fixed SQLite descendants, not only the helper PID.
+func HistoryReaderGroupDrained(cmd *exec.Cmd) bool { return historyReaderGroupDrained(cmd) }

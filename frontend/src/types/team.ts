@@ -1,3 +1,4 @@
+export interface TeamRuntimeState { state: string; operation_id?: string; desired_state: string; reason?: string; progress: number; total: number; error?: string; started_at?: string; stopped_at?: string; can_start: boolean; can_stop: boolean }
 import type { OpenClawConfigPlan } from "./openclawConfig";
 
 export type TeamCommunicationMode =
@@ -6,6 +7,7 @@ export type TeamCommunicationMode =
   | "full_mesh";
 
 export interface Team {
+ runtime_state?: TeamRuntimeState;
   id: number;
   user_id: number;
   name: string;

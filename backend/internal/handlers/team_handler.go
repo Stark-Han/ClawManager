@@ -316,3 +316,26 @@ func parseOptionalIntQuery(c *gin.Context, key string) int {
 	}
 	return value
 }
+
+func (h *TeamHandler) Power(c *gin.Context) {
+	user, _ := c.Get("userID")
+	id, ok := parseTeamID(c)
+	if !ok {
+		return
+	}
+	control, ok := h.teamService.(services.TeamLifecycleControl)
+	if !ok {
+		utils.Error(c, 503, "团队启停服务未就绪")
+		return
+	}
+	target := "running"
+	if strings.HasSuffix(c.FullPath(), "/stop") {
+		target = "stopped"
+	}
+	result, err := control.RequestTeamPower(c.Request.Context(), user.(int), id, target)
+	if err != nil {
+		utils.Error(c, 409, err.Error())
+		return
+	}
+	utils.Success(c, 202, "团队启停操作已受理", result)
+}

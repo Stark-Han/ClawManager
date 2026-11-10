@@ -35,6 +35,13 @@ func observationFresh(t *time.Time, now time.Time, max time.Duration) bool {
 // Presence describes liveness only. Assignment IDs, availability and outcome
 // fields from old status records must never overwrite the current work ledger.
 func projectTeamMemberObservation(member models.TeamMember, instance models.Instance, gateway models.TeamMemberRuntimeObservation, raw string, now time.Time) models.TeamMember {
+	if instance.Status == "stopped" && instance.StoppedReason != "" {
+		member.RuntimeStatus = optionalString("stopped")
+		member.Availability = "offline"
+		member.BlockedReason = nil
+		member.RuntimeObservation = &models.TeamMemberRuntimeObservation{State: "offline", Reason: "intentionally_stopped"}
+		return member
+	}
 	obs := gateway
 	if gateway.State == "online" {
 		obs.State, obs.Reason, obs.ObservedAt = "unknown", "collaboration_unconfirmed", nil
@@ -205,7 +212,7 @@ func (s *teamService) observeMemberGateway(ctx context.Context, f models.TeamMem
 	}
 	b, p := f.Binding, f.Runtime
 	runtimeType, _ := v2RuntimeTypeForInstance(&i)
-	if b == nil || b.RuntimeType != runtimeType || b.Generation != i.RuntimeGeneration || b.State != "running" || b.GatewayID == "" || b.GatewayPort <= 0 || p == nil || p.RuntimeType != runtimeType || p.State != "ready" || !observationFresh(p.LastSeenAt, now, heartbeat.Timeout) || !observationFresh(b.LastHealthAt, now, heartbeat.Timeout) {
+	if b == nil || b.RuntimeType != runtimeType || b.Generation != i.RuntimeGeneration || b.State != "running" || b.GatewayID == "" || b.GatewayPort <= 0 || p == nil || p.RuntimeType != runtimeType || (p.State != "ready" && i.RuntimeSecurityProfile != RuntimeSecurityProfile) || !observationFresh(p.LastSeenAt, now, heartbeat.Timeout) || !observationFresh(b.LastHealthAt, now, heartbeat.Timeout) {
 		return result
 	}
 	read, ok := inventory[p.Namespace+"/"+p.DeploymentName]
@@ -218,7 +225,7 @@ func (s *teamService) observeMemberGateway(ctx context.Context, f models.TeamMem
 	}
 	result.Reason = "runtime_identity_unconfirmed"
 	for _, actual := range read.snapshot.pods {
-		if actual.State == "ready" && runtimeRolloutAgentMatchesPod(*p, actual) && runtimePodMatchesImage(*p, actual.ImageRef) {
+		if actual.ReadyForGateway(b.GatewayPort) && runtimeRolloutAgentMatchesPod(*p, actual) && runtimePodMatchesImage(*p, actual.ImageRef) {
 			result.State, result.Reason, result.ObservedAt = "online", "", b.LastHealthAt
 			if read.snapshot.delayed {
 				result.Reason = "runtime_inventory_delayed"
