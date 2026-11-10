@@ -90,18 +90,30 @@ func TestRuntimeSlotTerminationRequiresMatchingActualContainer(t *testing.T) {
 }
 
 func TestNFSProfileCompletesOnlyAfterTerminationAndWriterReconciliation(t *testing.T) {
-	testNFSContainerStop(t, false)
+	testNFSContainerStop(t, false, false)
 }
 
 func TestNFSProfileGracefulStopUsesTerminatedContainerProof(t *testing.T) {
-	testNFSContainerStop(t, true)
+	testNFSContainerStop(t, true, false)
 }
 
-func testNFSContainerStop(t *testing.T, graceful bool) {
+func TestNFSProfileManualOperatorFenceUsesExistingWriterReconciliation(t *testing.T) {
+	testNFSContainerStop(t, false, true)
+}
+
+func testNFSContainerStop(t *testing.T, graceful, external bool) {
 	t.Helper()
 	pod := slotTestPod()
 	pod.Labels["clawmanager.io/sandbox-profile"] = "nfs-rootless-v1"
 	pod.Spec.Containers = []corev1.Container{{Name: "slot-0", Env: []corev1.EnvVar{{Name: "RUNTIME_GATEWAY_PORT_START", Value: "20000"}}}}
+	if external {
+		yes, no := true, false
+		pod.Spec.HostUsers = &yes
+		pod.Spec.ShareProcessNamespace = &no
+		pod.Spec.NodeName = "node"
+		pod.Spec.Containers[0].Image = "registry/runtime@sha256:" + strings.Repeat("a", 64)
+		pod.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: &no, AllowPrivilegeEscalation: &no, Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"SETUID", "SETGID"}}}
+	}
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "slot-0", ContainerID: "containerd://old"}, {Name: "slot-1", ContainerID: "containerd://other"}}
 	kube := fake.NewSimpleClientset(pod)
 	reconciled := false
@@ -120,11 +132,24 @@ func testNFSContainerStop(t *testing.T, graceful bool) {
 				t.Fatal("graceful policy changed before reset")
 			}
 			message, _ := containerTerminationCommitment(runtimeSlotTerminationMessage{runtimeSlotStopIntent: intent, CleanupConfirmed: true})
+			if external {
+				yes := true
+				raw, _ := json.Marshal(runtimeSlotFenceRequest{Version: 1, Intent: intent, ContainerID: "containerd://old", ReplacementImage: pod.Spec.Containers[0].Image})
+				_, e := kube.CoreV1().ConfigMaps("runtime").Create(r.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "runtime-slot-fence-" + intent.OperationID, Namespace: "runtime", UID: "operator-request", CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)), Labels: map[string]string{"clawmanager.io/operator-recovery": slotKernelFenceSource}}, Immutable: &yes, Data: map[string]string{"request": string(raw)}}, metav1.CreateOptions{})
+				if e != nil {
+					t.Fatal(e)
+				}
+				message = "no native cleanup receipt"
+			}
 			current, err := kube.CoreV1().Pods("runtime").Get(r.Context(), pod.Name, metav1.GetOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			current.Status.ContainerStatuses[0].ContainerID = "containerd://new"
+			if external {
+				current.Status.ContainerStatuses[0].RestartCount = 1
+				current.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(time.Now().Add(time.Second))}
+			}
 			// The last slot is quarantined after restart, so PodReady is false.
 			// Stop recovery must still reach the coordinator by its pinned Pod IP.
 			current.Status.Conditions[0].Status = corev1.ConditionFalse
@@ -140,6 +165,9 @@ func testNFSContainerStop(t *testing.T, graceful bool) {
 			}
 			if proof.ContainerID != "containerd://old" || !proof.CleanupConfirmed {
 				t.Fatal("writer reconciliation lacked exact terminated container")
+			}
+			if external && (proof.ProofSource != slotKernelFenceSource || proof.FenceRequestUID != "operator-request" || proof.Graceful) {
+				t.Fatal("external fencing origin was lost")
 			}
 			reconciled = true
 			b, _ := json.Marshal(map[string]any{"gateway_id": proof.GatewayID, "operation_id": proof.OperationID, "worker_epoch": proof.WorkerEpoch, "container_id": proof.ContainerID, "stopped": true, "confirmed": true, "unmounted": true, "graceful": proof.Graceful})

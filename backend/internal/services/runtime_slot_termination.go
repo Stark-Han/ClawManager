@@ -33,8 +33,10 @@ type runtimeSlotTerminationMessage struct {
 
 type runtimeSlotContainerProof struct {
 	runtimeSlotTerminationMessage
-	ContainerID string    `json:"container_id"`
-	FinishedAt  time.Time `json:"finished_at"`
+	ContainerID     string    `json:"container_id"`
+	FinishedAt      time.Time `json:"finished_at"`
+	ProofSource     string    `json:"proof_source,omitempty"`
+	FenceRequestUID string    `json:"fence_request_uid,omitempty"`
 }
 
 func validContainerIntent(i runtimeSlotStopIntent) bool {
@@ -240,7 +242,7 @@ func (c *slotRuntimeAgentClient) stopContainerGateway(ctx context.Context, endpo
 	}
 	var proof runtimeSlotContainerProof
 	if len(saved) != 0 {
-		if decodeContainerProof(saved, &proof) != nil || proof.runtimeSlotStopIntent != *intent || !proof.CleanupConfirmed || proof.ContainerID == "" || proof.FinishedAt.IsZero() {
+		if decodeContainerProof(saved, &proof) != nil || proof.runtimeSlotStopIntent != *intent || !validSlotProofSource(proof) || !proof.CleanupConfirmed || proof.ContainerID == "" || proof.FinishedAt.IsZero() {
 			return fmt.Errorf("stored container termination proof is invalid")
 		}
 	} else {
@@ -253,6 +255,11 @@ func (c *slotRuntimeAgentClient) stopContainerGateway(ctx context.Context, endpo
 			return errors.Join(stopErr, err)
 		}
 		observed, err := runtimeSlotTerminationProof(pod, *intent)
+		if err != nil && !graceful && !intent.Graceful {
+			// Explicit operator fencing is separate from native graceful cleanup.
+			// No automatic restart or force-stop is initiated by this path.
+			observed, err = c.operatorContainerFenceProof(ctx, pod, *intent)
+		}
 		if err != nil {
 			return errors.Join(stopErr, err)
 		}

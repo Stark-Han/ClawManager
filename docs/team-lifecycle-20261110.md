@@ -69,6 +69,44 @@ recorded after actual publication. No minute-scale test timing in release images
 
 ## Rollback
 
+### Rootless node prerequisites and manual failed-start recovery
+
+Ubuntu restricted user namespaces can still deny NET_ADMIN inside bubblewrap
+even when the outer container uses AppArmor Unconfined. A no-business-volume
+probe using the exact upstream `TestRootlessNetworkReal` reproduced that denial
+on node1. An explicitly named HXC-only Localhost profile granting `userns` made
+that test pass (network, relay and cleanup). The global sysctl remains enabled.
+`RUNTIME_SLOT_APPARMOR_PROFILE` opts slots into this provisioned profile; empty
+retains upstream defaults and the coordinator is not changed. Provision the
+profile on every eligible node before enabling it. A missing profile must fail.
+
+A failed old namespace preparation can retain unconfirmed cleanup indefinitely.
+Normal automatic/graceful stops still require the native C1 commitment plus
+exact kubelet termination, writer-lock reconciliation and external-write fences.
+For an explicit administrator recovery only, an immutable ConfigMap named
+`runtime-slot-fence-<existing-stop-operation>` can request replacement of one
+exact old container by an immutable image. Its request schema is defined by
+`runtimeSlotFenceRequest`; it records the complete existing non-graceful intent,
+old ContainerID and replacement image before any external replacement.
+
+That request is not proof. The controller accepts this separate evidence source
+only after kubelet reports that exact container terminated after request creation
+and a different container is running in the same Pod UID/slot. It also verifies
+closed PID namespaces, no host namespace/mount, no privilege escalation and only
+SETUID/SETGID in all serving containers. The persisted proof identifies its
+source (`kubelet-container-fence-v1`) and request UID; it never fabricates a native
+C1 receipt or claims graceful shutdown. The new worker still acquires the old
+NFS lock, reconciles the same assignment and waits for controller finalization.
+Keep the request and proof for audit. Unknown/changed identities remain blocked.
+No owner/model endpoint creates this operator request; no automatic container
+replacement or Task/Worker API changes were added.
+
+Focused backend tests cover real pipeline dispatch of this proof and reject
+wrong CID/Pod/operation, mutable or late request, live old container, altered
+image, host/shared namespaces, host mount and extra outer capabilities. Runtime
+tests exercise both proof sources through writer-lock refusal, idempotent
+reconciliation and finalization. Live four-member task acceptance is still pending.
+
 Complete or reconcile pending operations first. Retain schema and native stop
 proofs. Use a compatible App that understands the lifecycle row; blindly running
 an older Team monitor can misclassify intentionally stopped members. Retain

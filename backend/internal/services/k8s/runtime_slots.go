@@ -142,6 +142,16 @@ func configureRuntimeSlots(deployment *appsv1.Deployment, spec RuntimeDeployment
 	if spec.SandboxProfile == RuntimeNFSRootlessProfile {
 		configureNFSRootlessSlots(deployment)
 	}
+	if spec.SlotAppArmorProfile != "" {
+		for i := range pod.Containers {
+			c := &pod.Containers[i]
+			if !strings.HasPrefix(c.Name, "slot-") {
+				continue
+			}
+			deployment.Spec.Template.Annotations["container.apparmor.security.beta.kubernetes.io/"+c.Name] = "localhost/" + spec.SlotAppArmorProfile
+			c.SecurityContext.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeLocalhost, LocalhostProfile: &spec.SlotAppArmorProfile}
+		}
+	}
 }
 
 func filterRuntimeSlotEnv(env []corev1.EnvVar) []corev1.EnvVar {
@@ -347,6 +357,9 @@ func RuntimeSlotDeploymentSpecs(cfg config.RuntimePoolConfig, agentSecretName st
 		namespace = "clawmanager-system"
 	}
 	var specs []RuntimeDeploymentSpec
+	if cfg.SlotAppArmorProfile != "" && len(validation.IsDNS1123Subdomain(cfg.SlotAppArmorProfile)) != 0 {
+		return nil, fmt.Errorf("invalid local slot AppArmor profile")
+	}
 	for _, runtime := range []struct{ kind, image string }{{"openclaw", cfg.OpenClawImage}, {"hermes", cfg.HermesImage}, {"opencode", cfg.OpenCodeImage}, {"deepseek-harness", cfg.DeepSeekHarnessImage}} {
 		if strings.TrimSpace(runtime.image) == "" {
 			return nil, fmt.Errorf("container slots require %s image", runtime.kind)
@@ -354,7 +367,7 @@ func RuntimeSlotDeploymentSpecs(cfg config.RuntimePoolConfig, agentSecretName st
 		if problems := validation.IsDNS1123Label(cfg.SlotPoolPrefix + runtime.kind + "-runtime"); len(problems) != 0 {
 			return nil, fmt.Errorf("invalid slot pool prefix")
 		}
-		specs = append(specs, RuntimeDeploymentSpec{Name: cfg.SlotPoolPrefix + runtime.kind + "-runtime", Namespace: namespace, RuntimeType: runtime.kind, Image: runtime.image, Replicas: 1, WorkspacePVCClaimName: cfg.WorkspacePVCClaimName, WorkspaceMountPath: cfg.WorkspaceRoot, GatewayPortStart: cfg.GatewayPortStart, GatewayPortEnd: cfg.GatewayPortEnd, SlotCount: cfg.ContainerSlots, SlotResources: *resources.DeepCopy(), PodResources: podResources.DeepCopy(), PodUserNamespaces: cfg.PodUserNamespaces, SandboxProfile: cfg.SandboxProfile, NetworkIsolation: cfg.NetworkIsolation, AgentTokenSecretName: agentSecretName, HermesDesktopWeb: runtime.kind == "hermes"})
+		specs = append(specs, RuntimeDeploymentSpec{Name: cfg.SlotPoolPrefix + runtime.kind + "-runtime", Namespace: namespace, RuntimeType: runtime.kind, Image: runtime.image, Replicas: 1, WorkspacePVCClaimName: cfg.WorkspacePVCClaimName, WorkspaceMountPath: cfg.WorkspaceRoot, GatewayPortStart: cfg.GatewayPortStart, GatewayPortEnd: cfg.GatewayPortEnd, SlotCount: cfg.ContainerSlots, SlotAppArmorProfile: cfg.SlotAppArmorProfile, SlotResources: *resources.DeepCopy(), PodResources: podResources.DeepCopy(), PodUserNamespaces: cfg.PodUserNamespaces, SandboxProfile: cfg.SandboxProfile, NetworkIsolation: cfg.NetworkIsolation, AgentTokenSecretName: agentSecretName, HermesDesktopWeb: runtime.kind == "hermes"})
 	}
 	return specs, nil
 }

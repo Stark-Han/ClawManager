@@ -253,6 +253,7 @@ type RuntimeSlotResources struct {
 
 type RuntimePoolConfig struct {
 	SlotPoolPrefix            string               `yaml:"slotPoolPrefix"`
+	SlotAppArmorProfile       string               `yaml:"slotAppArmorProfile"`
 	SandboxProfile            string               `yaml:"sandboxProfile"`
 	ContainerSlots            int                  `yaml:"containerSlots"`
 	SlotResources             RuntimeSlotResources `yaml:"slotResources"`
@@ -442,6 +443,7 @@ func Load() (*Config, error) {
 		},
 		Runtime: RuntimePoolConfig{
 			SlotPoolPrefix:            getEnv("RUNTIME_SLOT_POOL_PREFIX", ""),
+			SlotAppArmorProfile:       getEnv("RUNTIME_SLOT_APPARMOR_PROFILE", ""),
 			SandboxProfile:            getEnv("RUNTIME_SANDBOX_PROFILE", ""),
 			ContainerSlots:            getEnvInt("RUNTIME_CONTAINER_SLOTS", 0),
 			DeepSeekHarnessImage:      getEnv("DEEPSEEK_HARNESS_RUNTIME_IMAGE", "ghcr.io/yuan-lab-llm/agentsruntime/deepseek-harness-lite:latest"),
@@ -770,6 +772,7 @@ func applyEnvOverrides(config *Config) {
 	config.Runtime.ContainerSlots = getEnvInt("RUNTIME_CONTAINER_SLOTS", config.Runtime.ContainerSlots)
 	config.Runtime.LegacyAgentControlToken = getEnv("RUNTIME_LEGACY_AGENT_CONTROL_TOKEN", config.Runtime.LegacyAgentControlToken)
 	config.Runtime.SlotPoolPrefix = getEnv("RUNTIME_SLOT_POOL_PREFIX", config.Runtime.SlotPoolPrefix)
+	config.Runtime.SlotAppArmorProfile = getEnv("RUNTIME_SLOT_APPARMOR_PROFILE", config.Runtime.SlotAppArmorProfile)
 	config.Runtime.SandboxProfile = getEnv("RUNTIME_SANDBOX_PROFILE", config.Runtime.SandboxProfile)
 	config.Runtime.DeepSeekHarnessImage = getEnv("DEEPSEEK_HARNESS_RUNTIME_IMAGE", config.Runtime.DeepSeekHarnessImage)
 	config.Runtime.SlotResources.CPURequest = getEnv("RUNTIME_SLOT_CPU_REQUEST", config.Runtime.SlotResources.CPURequest)
