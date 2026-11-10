@@ -133,3 +133,14 @@ The Team is still being observed for whole-group readiness. Maintenance remains;
 no new model task was submitted. The four-member task/Stop/Start acceptance is
 not complete. Do not describe these changes as fully accepted or remove this
 remaining requirement after seeing a successful image push or one member start.
+
+At17:39:25 CST, owner API reports Team starting1/4: Hermes is idle/online;
+OpenCode605 generation2 failed workspace preparation. Native log at09:39:08 UTC:
+default project `starter` stat denied, followed by `workspace_helper_failed`.
+Exact failing sub-step is not yet proven. Leader603 and DSH606 have not started
+in this latest attempt. Next implementation must first reproduce OpenCode's
+actual helper command with its profile-generated environment, supplemental
+groups and legacy `starter` directory metadata; do not repeat the passed Hermes
+credential/namespace work. Verify equivalent group forwarding across all four
+profiles before the next consolidated candidate. Then perform the remaining
+four-member task/Stop/Start closure above. Maintenance is deliberately retained.
