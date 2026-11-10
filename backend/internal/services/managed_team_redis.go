@@ -100,7 +100,7 @@ func (m *ManagedTeamRedis) authorizeTeam(ctx context.Context, instance *models.I
 		return nil, errManagedRedis
 	}
 	if team.Status == models.TeamStatusCreating {
-		if team.PreviewSecurityProfile != models.TeamPreviewSecurityProfile || member.Status != models.TeamMemberStatusCreating || instance.Status != "creating" {
+		if team.PreviewSecurityProfile != models.TeamPreviewSecurityProfile || (member.Status != models.TeamMemberStatusCreating && member.Status != models.TeamMemberStatusIdle) || (instance.Status != "creating" && instance.Status != "running") {
 			return nil, errManagedRedis
 		}
 		return team, nil
@@ -113,7 +113,7 @@ func (m *ManagedTeamRedis) authorizeTeam(ctx context.Context, instance *models.I
 		admission, ok := m.teams.(interface {
 			AuthorizeTeamMemberStartup(context.Context, int, int, int) (bool, error)
 		})
-		if !ok || member.Status != models.TeamMemberStatusOffline || instance.Status != "creating" {
+		if !ok || member.Status != models.TeamMemberStatusOffline || (instance.Status != "creating" && instance.Status != "running") {
 			return nil, errManagedRedis
 		}
 		allowed, startErr := admission.AuthorizeTeamMemberStartup(ctx, id, member.ID, instance.ID)

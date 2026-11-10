@@ -243,9 +243,14 @@ func TestProtectedTeamOfflineMemberCanOnlyBootstrapWithinOwnedStart(t *testing.T
 		t.Fatal(err)
 	}
 	instance.Status = "running"
+	if _, err := m.authorizeTeam(context.Background(), instance, 12); err != nil {
+		t.Fatal("online handoff within original start rejected", err)
+	}
+	f.allowed = false
 	if _, err := m.authorizeTeam(context.Background(), instance, 12); err == nil {
 		t.Fatal("general offline access admitted")
 	}
+	f.allowed = true
 	instance.Status = "creating"
 	f.fail = errors.New("lookup failed")
 	if _, err := m.authorizeTeam(context.Background(), instance, 12); err == nil {
@@ -267,7 +272,13 @@ func TestNewProtectedTeamBootstrapDoesNotAuthorizeLegacyCreatingTeam(t *testing.
 		t.Fatal(err)
 	}
 	f.member.Status = models.TeamMemberStatusIdle
-	if _, err := m.authorizeTeam(context.Background(), instance, 12); err == nil {
-		t.Fatal("creation state bypassed")
+	instance.Status = "running"
+	if _, err := m.authorizeTeam(context.Background(), instance, 12); err != nil {
+		t.Fatal("new Team online handoff rejected", err)
 	}
+	f.member.Status = models.TeamMemberStatusBusy
+	if _, err := m.authorizeTeam(context.Background(), instance, 12); err == nil {
+		t.Fatal("execution during creation admitted")
+	}
+
 }
