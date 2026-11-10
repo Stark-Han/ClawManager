@@ -167,3 +167,18 @@ func TestTeamIdleMySQLAdoptsConfirmedColdTeamAndRetriesOriginalStart(t *testing.
 		t.Fatalf("retry replaced operation: %+v %v", retry, e)
 	}
 }
+
+func TestTeamIdleMySQLRetiredRequestsDoNotCountAsLiveExecution(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	for _, q := range []string{
+		`INSERT INTO instance_model_activity_requests(request_id,instance_id,generation,started_at) VALUES('retired',1,1,UTC_TIMESTAMP()-INTERVAL 3 DAY)`,
+		`INSERT INTO gateway_runtime_tasks(instance_id,generation,finished) VALUES(1,1,FALSE)`,
+	} {
+		if _, e := s.SQL().Exec(q); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e := r.Request(t.Context(), 9, "stopped", "idle_timeout", 1); e != nil {
+		t.Fatalf("retired generation blocked current idle Team: %v", e)
+	}
+}
