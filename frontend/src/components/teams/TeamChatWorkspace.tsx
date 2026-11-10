@@ -1,3 +1,4 @@
+import { teamPowerLabel } from './TeamPowerControl';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FolderOpen, PanelLeftClose, Settings2, X } from "lucide-react";
 import type { Team, TeamMember } from "../../types/team";

@@ -61,6 +61,11 @@ func ownerTeamSummary(team models.Team, members []models.TeamMember) map[string]
 	}
 	view["member_count"], view["available_count"] = total, available
 	view["confirming_count"], view["fault_count"] = confirming, faults
+	if team.RuntimeState != nil && team.RuntimeState.State == "stopped" {
+		view["fault_count"] = 0
+		view["confirming_count"] = 0
+		view["available_count"] = 0
+	}
 	return view
 }
 
