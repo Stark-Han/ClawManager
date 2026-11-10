@@ -270,7 +270,7 @@ func main() {
 				}
 				controlAddresses = append(controlAddresses, storageAddresses...)
 			}
-			runtimeInventory, watchErr = runtimeinventory.Start(context.Background(), watchKube, watchDynamic, watchMetadata, slotNamespace, cfg.Runtime.NetworkPodCIDRs, controlAddresses)
+			runtimeInventory, watchErr = runtimeinventory.Start(context.Background(), watchKube, watchDynamic, watchMetadata, slotNamespace, cfg.Runtime.NetworkPodCIDRs, controlAddresses, cfg.Runtime.LegacyServiceCIDRs)
 			if watchErr != nil {
 				log.Fatal("Failed to initialize protected runtime inventory")
 			}

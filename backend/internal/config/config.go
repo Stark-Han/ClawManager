@@ -259,6 +259,7 @@ type RuntimePoolConfig struct {
 	PodResources              RuntimeSlotResources `yaml:"podResources"`
 	PodUserNamespaces         bool                 `yaml:"podUserNamespaces"`
 	NetworkIsolation          bool                 `yaml:"networkIsolation"`
+	LegacyServiceCIDRs        []string             `yaml:"legacyServiceCIDRs"`
 	NetworkPodCIDRs           []string             `yaml:"networkPodCIDRs"`
 	DeepSeekHarnessImage      string               `yaml:"deepSeekHarnessImage"`
 	Namespace                 string               `yaml:"namespace"`
@@ -786,6 +787,14 @@ func applyEnvOverrides(config *Config) {
 		if strings.TrimSpace(value) != "" {
 			for _, cidr := range strings.Split(value, ",") {
 				config.Runtime.NetworkPodCIDRs = append(config.Runtime.NetworkPodCIDRs, strings.TrimSpace(cidr))
+			}
+		}
+	}
+	if value, present := os.LookupEnv("RUNTIME_LEGACY_SERVICE_CIDRS"); present {
+		config.Runtime.LegacyServiceCIDRs = nil
+		if strings.TrimSpace(value) != "" {
+			for _, v := range strings.Split(value, ",") {
+				config.Runtime.LegacyServiceCIDRs = append(config.Runtime.LegacyServiceCIDRs, strings.TrimSpace(v))
 			}
 		}
 	}
