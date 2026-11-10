@@ -172,6 +172,11 @@ func TestRestartInstanceAcceptsOptionalEnvironmentOverrides(t *testing.T) {
 			wantCalls:  1,
 		},
 		{
+			name:   "durable shutdown pending is accepted",
+			userID: 7, userRole: "user", wantStatus: http.StatusAccepted,
+			wantCalls: 1, restartErr: services.ErrInstanceRestartPending,
+		},
+		{
 			name:       "other user cannot restart",
 			body:       `{"environment_overrides":{"LOG_LEVEL":"debug"}}`,
 			userID:     8,
@@ -921,8 +926,6 @@ func TestProxyAccessTokenRejectsRuntimeQueryTokenWithoutCookie(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 }
-
-
 
 func TestBrowserAccessEntryURLBootstrapsDedicatedOrigin(t *testing.T) {
 	for _, tc := range []struct {

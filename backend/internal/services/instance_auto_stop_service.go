@@ -312,16 +312,27 @@ func (s *InstanceAutoStopService) withInstanceMutation(ctx context.Context, id i
 }
 
 func (s *InstanceAutoStopService) resumeGuarded(ctx context.Context, op models.InstanceIdleStopOperation) {
+	current, readErr := s.store.GetStopOperation(ctx, op.ID)
+	if readErr != nil || current == nil || current.Phase == "completed" {
+		return
+	}
+	op = *current
+	if op.Kind == "restart" && op.Phase == "restart_ready" {
+		_ = s.lifecycle.resumeRestartFollowup(ctx, op.InstanceID)
+		return
+	}
 	a, err := s.store.GetActivity(ctx, op.InstanceID)
 	if err != nil || a == nil || a.StopOperationID != op.ID {
 		return
 	}
 	// The pending snapshot may predate another controller's successful receipt.
 	op.Phase = a.StopPhase
-	if op.Kind == "manual" {
+	if op.Kind == "manual" || op.Kind == "restart" {
 		if err = s.lifecycle.resumeManualStop(ctx, op); err != nil {
 			op.ErrorMessage = err.Error()
 			_ = s.store.FailStop(ctx, op)
+		} else if op.Kind == "restart" {
+			_ = s.lifecycle.resumeRestartFollowup(ctx, op.InstanceID)
 		}
 		return
 	}
