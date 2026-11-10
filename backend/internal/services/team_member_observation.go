@@ -35,11 +35,15 @@ func observationFresh(t *time.Time, now time.Time, max time.Duration) bool {
 // Presence describes liveness only. Assignment IDs, availability and outcome
 // fields from old status records must never overwrite the current work ledger.
 func projectTeamMemberObservation(member models.TeamMember, instance models.Instance, gateway models.TeamMemberRuntimeObservation, raw string, now time.Time) models.TeamMember {
-	if instance.Status == "stopped" && instance.StoppedReason != "" {
+	if instance.Status == "stopped" {
 		member.RuntimeStatus = optionalString("stopped")
 		member.Availability = "offline"
 		member.BlockedReason = nil
-		member.RuntimeObservation = &models.TeamMemberRuntimeObservation{State: "offline", Reason: "intentionally_stopped"}
+		reason := "runtime_stopped"
+		if instance.StoppedReason != "" {
+			reason = "intentionally_stopped"
+		}
+		member.RuntimeObservation = &models.TeamMemberRuntimeObservation{State: "offline", Reason: reason}
 		return member
 	}
 	obs := gateway

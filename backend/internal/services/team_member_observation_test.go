@@ -259,3 +259,11 @@ func TestTeamObservationRedisBeforeAnyTaskAndIsolation(t *testing.T) {
 		t.Fatal("cross-owner instance accepted")
 	}
 }
+
+func TestStoppedTeamMemberWithoutLegacyReasonCannotReuseOldSuccessPresence(t *testing.T) {
+	member := models.TeamMember{RuntimeStatus: optionalString("succeeded"), Availability: "idle", BlockedReason: optionalString("runtime_unavailable")}
+	result := projectTeamMemberObservation(member, models.Instance{Status: "stopped"}, models.TeamMemberRuntimeObservation{State: "offline", Reason: "runtime_unavailable"}, `{"liveness":"online"}`, time.Now())
+	if result.RuntimeStatus == nil || *result.RuntimeStatus != "stopped" || result.Availability != "offline" || result.BlockedReason != nil || result.RuntimeObservation.Reason != "runtime_stopped" {
+		t.Fatalf("stopped state not preserved: %+v", result)
+	}
+}
