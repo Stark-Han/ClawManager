@@ -162,6 +162,10 @@ func TestTeamIdleMySQLAdoptsConfirmedColdTeamAndRetriesOriginalStart(t *testing.
 	if e = r.Result(t.Context(), op, 1, errors.New("capacity unavailable")); e != nil {
 		t.Fatal(e)
 	}
+	failed, readErr := r.Get(t.Context(), 9)
+	if readErr != nil || !failed.CanStart || !failed.CanStop {
+		t.Fatalf("failed startup cannot be recovered or cancelled: %+v %v", failed, readErr)
+	}
 	retry, e := r.Request(t.Context(), 9, "running", "manual", 0)
 	if e != nil || retry.OperationID != op.OperationID {
 		t.Fatalf("retry replaced operation: %+v %v", retry, e)

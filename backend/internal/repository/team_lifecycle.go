@@ -43,7 +43,7 @@ func readTeamLifecycle(ctx context.Context, s db.Session, id int, lock bool) (*m
 	}
 	v.Total = len(v.Members)
 	v.CanStart = v.State == "stopped" || v.State == "recovery_required"
-	v.CanStop = v.State == "running"
+	v.CanStop = v.State == "running" || v.State == "recovery_required"
 	return v, nil
 }
 func (r *TeamLifecycleRepository) Get(ctx context.Context, id int) (*models.TeamLifecycleOperation, error) {
