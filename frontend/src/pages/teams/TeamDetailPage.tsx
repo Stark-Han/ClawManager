@@ -1295,7 +1295,7 @@ const TeamDetailPage: React.FC = () => {
       titleAccessory={
         <div className="flex max-w-full flex-wrap items-center justify-end gap-2 rounded-2xl border border-[#f1e7e1] bg-white/80 px-3 py-2 shadow-[0_14px_34px_-30px_rgba(72,44,24,0.45)] backdrop-blur">
           <span
-            className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(details.team.status)}`}
+            className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${statusStyle(details.team.runtime_state?.state || details.team.status)}`}
           >
             {teamPowerLabel(details.team.runtime_state) || details.team.status}
           </span>
@@ -2352,7 +2352,7 @@ function CollaborationPanel({
           <div className="min-w-0 flex-1">
             <h2 className="team-chat-heading"><span><MessagesSquare size={18} /></span>团队对话</h2>
             <div className="team-chat-subtitle">
-              <span>Team #{team.id}</span><span className="team-chat-online"><i />{onlineCount} 人在线</span>{startingCount > 0 && <span>{startingCount} 人启动中</span>}<span>{team.status}</span>
+              <span>Team #{team.id}</span><span className="team-chat-online"><i />{onlineCount} 人在线</span>{startingCount > 0 && <span>{startingCount} 人启动中</span>}<span>{teamPowerLabel(team.runtime_state) || team.status}</span>
             </div>
           </div>
           {queryAnchors.length >= 2 && <TeamHistoryMenu
