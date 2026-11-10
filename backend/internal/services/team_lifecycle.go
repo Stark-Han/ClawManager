@@ -189,6 +189,14 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 }
 
 func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamLifecycleOperation) (int, error) {
+	if op.DesiredState == "running" {
+		if client, ok := c.instances.agentClient.(*slotRuntimeAgentClient); ok && client.security != nil {
+			if err := c.store.ProtectColdStart(ctx, op, RuntimeSecurityProfile); err != nil {
+				return 0, err
+			}
+		}
+	}
+
 	if op.DesiredState == "stopped" {
 		if err := c.preflight(ctx, op); err != nil {
 			if op.Attempts == 0 {
@@ -337,4 +345,15 @@ func withTeamIdleStop(ctx context.Context, id int) context.Context {
 // on a legacy Agent. Automatic idle stop must have positive execution proof.
 func legacyTeamManualStop(reason string, err error) bool {
 	return reason == "manual" && (errors.Is(err, ErrRuntimeAgentNotFound) || errors.Is(err, ErrRuntimeAgentUnsupported))
+}
+
+// New protected Teams have no legacy grants to migrate. The marker is written
+// at creation, before any native member is allowed to start.
+func (s *teamService) TeamPreviewProfileForCreation() string {
+	if instances, ok := s.instanceService.(*instanceService); ok {
+		if c, ok := instances.agentClient.(*slotRuntimeAgentClient); ok && c.security != nil {
+			return models.TeamPreviewSecurityProfile
+		}
+	}
+	return ""
 }

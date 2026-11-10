@@ -605,6 +605,7 @@ func (s *teamService) CreateTeam(userID int, req CreateTeamRequest) (*TeamDetail
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
+	team.PreviewSecurityProfile = s.TeamPreviewProfileForCreation()
 	if err := s.repo.CreateTeam(team); err != nil {
 		return nil, err
 	}

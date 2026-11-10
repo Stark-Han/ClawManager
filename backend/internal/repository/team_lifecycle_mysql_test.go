@@ -182,3 +182,60 @@ func TestTeamIdleMySQLRetiredRequestsDoNotCountAsLiveExecution(t *testing.T) {
 		t.Fatalf("retired generation blocked current idle Team: %v", e)
 	}
 }
+
+func TestTeamIdleMySQLColdProtectionIsAtomicAndCannotUpgradeLiveSources(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	for _, q := range []string{`DELETE FROM team_runtime_lifecycle`, `ALTER TABLE instances ADD runtime_security_profile VARCHAR(64) NOT NULL DEFAULT ''`, `ALTER TABLE teams ADD preview_security_profile VARCHAR(64) NOT NULL DEFAULT ''`, `DELETE FROM instance_runtime_bindings WHERE instance_id IN(1,2)`, `UPDATE instances SET status='stopped' WHERE id IN(1,2)`} {
+		if _, err := s.SQL().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	op, err := r.Request(ctx, 9, "running", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`UPDATE instances SET status='running' WHERE id=1`, `UPDATE instances SET status='stopped',runtime_security_profile='unknown' WHERE id=1`, `UPDATE instances SET runtime_security_profile='',instance_mode='pro' WHERE id=1`} {
+		if _, err = s.SQL().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+		if err = r.ProtectColdStart(ctx, op, "isolated-network-v1"); err == nil {
+			t.Fatal("unsafe protection admitted", q)
+		}
+		var n int
+		if err = teamQueryRow(ctx, s, `SELECT COUNT(*) FROM teams WHERE preview_security_profile<>''`).Scan(&n); err != nil || n != 0 {
+			t.Fatal("failed transition wrote marker", err, n)
+		}
+	}
+	if _, err = s.SQL().Exec(`UPDATE instances SET status='stopped',runtime_security_profile='',instance_mode='lite' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.ProtectColdStart(ctx, op, "isolated-network-v1"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err = teamQueryRow(ctx, s, `SELECT COUNT(*) FROM instances WHERE id IN(1,2) AND runtime_security_profile='isolated-network-v1'`).Scan(&n); err != nil || n != 2 {
+		t.Fatal(err, n)
+	}
+	repo := &teamRepository{sess: s}
+	if allowed, err := repo.AuthorizeTeamMemberStartup(ctx, 9, 90, 1); err != nil || !allowed {
+		t.Fatal("original startup rejected", err)
+	}
+	if allowed, err := repo.AuthorizeTeamMemberStartup(ctx, 9, 90, 2); err != nil || allowed {
+		t.Fatal("foreign startup admitted", err)
+	}
+	if _, err = s.SQL().Exec(`UPDATE instances SET status='creating' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.ProtectColdStart(ctx, op, "isolated-network-v1"); err != nil {
+		t.Fatal("safe same-operation resume rejected", err)
+	}
+	wrong := *op
+	wrong.OperationID = "stale"
+	if err = r.ProtectColdStart(ctx, &wrong, "isolated-network-v1"); err == nil {
+		t.Fatal("stale operation admitted")
+	}
+}

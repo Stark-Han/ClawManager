@@ -416,3 +416,97 @@ func (r *TeamLifecycleRepository) AbortUnstartedStop(ctx context.Context, op *mo
 	n64, err := res.RowsAffected()
 	return n64 == 1, err
 }
+
+// ProtectColdStart revokes legacy Team grants atomically while every original
+// member is stopped. Sticky instance profiles forbid a later legacy placement.
+// A partially started legacy Team must complete Stop before this transition.
+func (r *TeamLifecycleRepository) ProtectColdStart(ctx context.Context, op *models.TeamLifecycleOperation, profile string) error {
+	if profile != "isolated-network-v1" {
+		return fmt.Errorf("unsupported Team runtime protection")
+	}
+	return r.sess.Tx(func(s db.Session) error {
+		rows, err := s.SQL().QueryContext(ctx, `SELECT i.id,m.id,i.status,COALESCE(i.runtime_security_profile,''),COALESCE(i.instance_mode,''),COALESCE(i.type,''),COALESCE(b.gateway_id,'') FROM instances i JOIN team_members m ON m.instance_id=i.id LEFT JOIN instance_runtime_bindings b ON b.instance_id=i.id WHERE m.team_id=? AND m.status<>'deleted' ORDER BY i.id FOR UPDATE`, op.TeamID)
+		if err != nil {
+			return err
+		}
+		n := 0
+		allCold, allProtected := true, true
+		for rows.Next() {
+			var id, member int
+			var status, current, mode, kind, binding string
+			if err = rows.Scan(&id, &member, &status, &current, &mode, &kind, &binding); err != nil {
+				rows.Close()
+				return err
+			}
+			match := false
+			for _, m := range op.Members {
+				if m.InstanceID == id && m.MemberID == member {
+					match = true
+					break
+				}
+			}
+			if !match || mode != "lite" || (kind != "openclaw" && kind != "hermes" && kind != "opencode" && kind != "deepseek-harness") || (current != "" && current != profile) {
+				rows.Close()
+				return fmt.Errorf("Team protection member identity or mode changed")
+			}
+			allCold = allCold && status == "stopped" && binding == ""
+			allProtected = allProtected && current == profile
+			n++
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if n == 0 || n != len(op.Members) {
+			return fmt.Errorf("Team protection member set changed")
+		}
+		current, err := readTeamLifecycle(ctx, s, op.TeamID, true)
+		if err != nil {
+			return err
+		}
+		if current == nil || current.OperationID != op.OperationID || current.State != "starting" || current.DesiredState != "running" {
+			return ErrTeamNotRunning
+		}
+		var preview string
+		if err = teamQueryRow(ctx, s, `SELECT preview_security_profile FROM teams WHERE id=? AND status='running' FOR UPDATE`, op.TeamID).Scan(&preview); err != nil {
+			return err
+		}
+		if preview == models.TeamPreviewSecurityProfile && allProtected {
+			return nil
+		}
+		if preview != "" && preview != models.TeamPreviewSecurityProfile {
+			return fmt.Errorf("unknown Team preview protection")
+		}
+		if !allCold {
+			return fmt.Errorf("历史 Team 需先确认整队停止，再启用受保护的启动")
+		}
+		if err = teamHasOpenWork(ctx, s, op.TeamID); err != nil {
+			return err
+		}
+		if err = teamMembersNoRequests(ctx, s, op.TeamID); err != nil {
+			return err
+		}
+		if _, err = s.SQL().ExecContext(ctx, `UPDATE instances i JOIN team_members m ON m.instance_id=i.id SET i.runtime_security_profile=? WHERE m.team_id=? AND m.status<>'deleted'`, profile, op.TeamID); err != nil {
+			return err
+		}
+		_, err = s.SQL().ExecContext(ctx, `UPDATE teams SET preview_security_profile=? WHERE id=?`, models.TeamPreviewSecurityProfile, op.TeamID)
+		return err
+	})
+}
+
+func (r *teamRepository) AuthorizeTeamMemberStartup(ctx context.Context, teamID, memberID, instanceID int) (bool, error) {
+	op, err := NewTeamLifecycleRepository(r.sess).Get(ctx, teamID)
+	if err != nil {
+		return false, err
+	}
+	if op == nil || op.State != "starting" || op.DesiredState != "running" {
+		return false, nil
+	}
+	for _, m := range op.Members {
+		if m.MemberID == memberID && m.InstanceID == instanceID {
+			return true, ctx.Err()
+		}
+	}
+	return false, nil
+}

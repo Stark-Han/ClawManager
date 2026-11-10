@@ -183,6 +183,9 @@ func (a *OwnerTeamAPI) submitCreate(c *gin.Context, identity OwnerTeamIdentity) 
 	now := time.Now().UTC()
 	name := req.Name
 	team := &models.Team{ResourceScope: models.TeamScopeNorthbound, Owner: &identity.Owner, DisplayName: &name, Description: req.Description, Status: models.TeamStatusCreating, CommunicationMode: frozen.CommunicationMode, RedisEventsLastID: "0-0", SharedMountPath: "/team", CreatedAt: now, UpdatedAt: now}
+	if provider, ok := a.teams.(interface{ TeamPreviewProfileForCreation() string }); ok {
+		team.PreviewSecurityProfile = provider.TeamPreviewProfileForCreation()
+	}
 	stored.TeamRequest = &frozen
 	a.submit(c, identity, OwnerTeamRoute{Scope: ScopeTeamsCreate}, nil, team, stored)
 }
