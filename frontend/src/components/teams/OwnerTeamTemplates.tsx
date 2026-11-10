@@ -118,20 +118,25 @@ function OwnerTeamTemplatesContent({ owner, canGenerate, onOperation }: { owner:
   const member = selected?.spec.members.find(m => m.memberId === memberID) || selected?.spec.members[0];
   const memberFields = (title: string, items?: string[]) => items?.length ? <section className="ot-member-field"><h5>{title}</h5><ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul></section> : null;
   return <section className="ot-template-area ot-directory-template-area" aria-busy={loading} aria-label="团队模板管理">
-    <header className="ot-template-toolbar"><div><strong>我的模板</strong><span className="ot-muted">{templates.length} 个</span></div><div className="ot-actions">
-      <button type="button" className="ot-secondary" disabled={busy || loading} onClick={() => void run(async () => { await refresh(); setNotice('模板列表已刷新，编辑内容已保留。'); })}><RefreshCw size={15}/>刷新模板</button>
-      <button type="button" className="ot-secondary" disabled={busy || loading} onClick={() => choose(null)}><Plus size={15}/>自定义团队模板</button>
-    </div></header>
+    <header className="ot-template-toolbar">
+      <div className="ot-template-library-heading"><strong>我的模板</strong><span className="ot-muted">{templates.length} 个</span></div>
+      <div className="ot-template-selection-toolbar" aria-label="当前模板和操作">
+        <div className="ot-template-name"><h3 title={selected ? selected.name : '生成自定义团队模板'}>{loading ? '正在读取模板…' : selected ? selected.name : '生成自定义团队模板'}</h3>{selected && <button type="button" className="ot-icon" disabled={busy} aria-label="重命名模板" title="重命名模板" onClick={() => { setRenameDraft(draft.name || selected.name); setRenaming(true); }}><PencilLine size={15}/></button>}</div>
+        <div className="ot-actions">
+          <button type="button" className="ot-secondary" disabled={busy || loading} onClick={() => void run(async () => { await refresh(); setNotice('模板列表已刷新，编辑内容已保留。'); })}><RefreshCw size={15}/>刷新模板</button>
+          <button type="button" className="ot-secondary" disabled={busy || loading} onClick={() => choose(null)}><Plus size={15}/>新建模板</button>
+          {selected && <button type="button" className="ot-icon ot-danger-text" disabled={busy} aria-label="删除模板" title="删除模板" onClick={() => { if (window.confirm('只删除此模板，不会删除已创建的 Team，确认继续？')) void run(async () => { await ownerTeamService.deleteTemplate(selected.id); try { sessionStorage.removeItem(key(selected.id)); } catch { /* optional */ } await refresh(); choose(null); setNotice('模板已删除，已有团队保持不变。'); }); }}><Trash2 size={15}/></button>}
+        </div>
+      </div>
+    </header>
     <div className="ot-template-manager">
       <aside className="ot-template-list" aria-label="模板列表">{loading && <p role="status" className="ot-muted">正在读取模板…</p>}{templates.map(t => <button type="button" disabled={busy} className="ot-master-item" aria-pressed={selected?.id === t.id} key={t.id} onClick={() => choose(t)}><strong>{t.name}</strong><span>{t.resolved_member_count} 名成员</span></button>)}{!loading && !templates.length && <p className="ot-muted">还没有自定义模板，请描述目标生成。</p>}</aside>
       <section className="ot-template-editor ot-compact-editor ot-directory-editor" hidden={loading} aria-label="模板编辑区" data-pane={pane}>
-        <div className="ot-template-title"><div className="ot-template-name"><h3>{selected ? selected.name : '生成自定义团队模板'}</h3>{selected && <button type="button" className="ot-secondary" disabled={busy} aria-label="重命名模板" onClick={() => { setRenameDraft(draft.name || selected.name); setRenaming(true); }}><PencilLine size={14}/>重命名</button>}</div>{selected && <button type="button" className="ot-secondary ot-danger-text" disabled={busy} onClick={() => { if (window.confirm('只删除此模板，不会删除已创建的 Team，确认继续？')) void run(async () => { await ownerTeamService.deleteTemplate(selected.id); try { sessionStorage.removeItem(key(selected.id)); } catch { /* optional */ } await refresh(); choose(null); setNotice('模板已删除，已有团队保持不变。'); }); }}><Trash2 size={14}/>删除模板</button>}</div>
         <div className="ot-compact-tabs" role="tablist" aria-label="模板编辑内容"><button type="button" role="tab" aria-selected={pane === 'info'} onClick={() => setPane('info')}>团队信息</button><button type="button" role="tab" aria-selected={pane === 'members'} onClick={() => setPane('members')}>成员与分工</button></div>
         <div className="ot-editor-columns">
           <section className="ot-template-information" aria-label="团队信息">
-            <div className="ot-editor-section-heading"><h4><NotebookPen size={15}/>团队信息</h4></div>
+            <div className="ot-editor-section-heading"><h4><NotebookPen size={15}/>团队信息</h4><label className="ot-count-field">成员<select form="ot-template-form" aria-label="模板成员数量" disabled={busy} value={draft.count} onChange={e => setDraft(v => ({ ...v, count: Number(e.target.value) }))}>{[2,3,4,5,6].map(n => <option key={n} value={n}>{n} 人</option>)}</select></label></div>
             <div className="ot-information-scroll"><form ref={form} id="ot-template-form" onSubmit={event => { event.preventDefault(); void run(() => generate(selected ? 'revise' : '', { intent: draft.intent, member_count: draft.count, ...(selected ? { name: selected.name, expected_revision: draft.revision ?? selected.revision } : {}) })); }}>
-              <label className="ot-count-field">成员数量<select aria-label="模板成员数量" disabled={busy} value={draft.count} onChange={e => setDraft(v => ({ ...v, count: Number(e.target.value) }))}>{[2,3,4,5,6].map(n => <option key={n} value={n}>{n} 人</option>)}</select></label>
               <label>团队目标与分工<textarea aria-label="团队目标与分工" required maxLength={4000} rows={8} disabled={busy} value={draft.intent} onChange={e => setDraft(v => ({ ...v, intent: e.target.value }))} placeholder="描述团队目标、成员分工与交付要求…"/></label>
             </form>
             {!!selected && draft.count !== selected.spec.members.length && <p className="ot-member-count-note">当前 {selected.spec.members.length} 人，更新成功后改为 {draft.count} 人。</p>}

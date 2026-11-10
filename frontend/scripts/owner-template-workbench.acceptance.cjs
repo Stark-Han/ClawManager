@@ -7,7 +7,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
   const page = await browser.newPage({ viewport: { width: 1760, height: 950 } });
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
   const member = i => ({memberId: 'member-'+i, displayName: i ? '论文精读成员'+i : '论文精读负责人', role: i ? 'worker' : 'leader', isLeader: !i, summary: '核对论文方法与原文依据。', mission: '形成可复核的精读笔记。', responsibilities: ['核对关键假设','逐项标明原文依据'], deliverables: ['精读笔记'], acceptanceCriteria: ['引用正确'], expectedInputs: ['论文原文'], collaborationNotes: ['正式提交给负责人'], boundaries: ['不编造实验结果'], capabilityTags: ['research']});
-  let template = {id: 1, name: '论文精读团队', intent: '精读论文并交叉核对方法与实验', resolved_member_count: 6, revision: 1, spec: {schemaVersion: 1, name: '论文精读团队', summary: '论文精读', members: Array.from({length: 6}, (_, i) => member(i))}};
+  let template = {id: 1, name: 'Attention Is All You Need 论文精读与实验依据核验团队（六人成员目录）', intent: '精读论文并交叉核对方法与实验', resolved_member_count: 6, revision: 1, spec: {schemaVersion: 1, name: '论文精读团队', summary: '论文精读', members: Array.from({length: 6}, (_, i) => member(i))}};
   let conflict = false;
   await page.route('**/api/v1/ieisystem/**', async route => {
     const req=route.request(),path=new URL(req.url()).pathname,method=req.method();
@@ -27,7 +27,13 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
   });
   await page.goto((process.env.UI_BASE_URL || 'http://127.0.0.1:9059')+'/scripts/fixtures/owner-template-workbench.html');
   const goal=page.getByRole('textbox',{name:'团队目标与分工'});
-  await goal.waitFor(); await goal.fill('尚未应用的目标草稿');
+  await goal.waitFor();
+  const toolbar=page.locator('.ot-template-selection-toolbar');
+  assert(await toolbar.evaluate(n=>{const nodes=[n.querySelector('h3'),...n.querySelectorAll('button')],centers=nodes.map(x=>{const r=x.getBoundingClientRect();return r.top+r.height/2});return Math.max(...centers)-Math.min(...centers)<1&&n.scrollWidth<=n.clientWidth}),'template title/actions must share one row');
+  assert.equal(await page.getByRole('combobox',{name:'模板成员数量'}).evaluate(n=>n.form?.id),'ot-template-form');
+  assert.equal(await page.locator('.ot-template-list button').first().evaluate(n=>getComputedStyle(n).boxShadow),'none');
+  if(process.env.UI_SCREENSHOT_PATH)await page.screenshot({path:process.env.UI_SCREENSHOT_PATH});
+  await goal.fill('尚未应用的目标草稿');
   await page.getByRole('button',{name:'重命名模板'}).click();
   await page.getByRole('textbox',{name:'模板名称',exact:true}).fill('论文精读新名称');
   await page.getByRole('button',{name:'保存名称',exact:true}).click();
@@ -46,10 +52,12 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
   assert(await page.locator('.ot-template-list button').first().evaluate(b=>{const p=b.parentElement.getBoundingClientRect(),r=b.getBoundingClientRect();return r.left-p.left>=5&&r.top-p.top>=5}),'template focus ring clipped');
   conflict=true;await page.getByRole('button',{name:'重命名模板'}).click();await page.getByRole('textbox',{name:'模板名称',exact:true}).fill('冲突名称');await page.getByRole('button',{name:'保存名称',exact:true}).click();await page.getByRole('alert').filter({hasText:'模板版本已变化'}).first().waitFor();assert.equal(await goal.inputValue(),'尚未应用的目标草稿');
   page.once('dialog',d=>d.accept());await page.getByRole('dialog',{name:'重命名模板'}).getByRole('button',{name:'取消',exact:true}).click();
-  for(const width of [1366,390]) {
+  await page.getByRole('button',{name:'关闭通知',exact:true}).click();
+  for(const width of [1366,1024,390]) {
     await page.setViewportSize({width,height:900});const paneTab=page.getByRole('tab',{name:'成员与分工',exact:true});if(await paneTab.isVisible())await paneTab.click();
     if(width===390)await page.getByRole('combobox',{name:'当前模板成员'}).selectOption('member-4');
     const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false,'horizontal overflow at '+width);
+    if(width>700)assert(await toolbar.evaluate(n=>{const a=n.querySelector('.ot-template-name').getBoundingClientRect(),b=n.querySelector('.ot-actions').getBoundingClientRect();return Math.abs(a.top+a.height/2-b.top-b.height/2)<1}),'toolbar wrapped at '+width);
   }
   await page.setViewportSize({width:1366,height:850});
   await page.goto((process.env.UI_BASE_URL || 'http://127.0.0.1:9059')+'/scripts/fixtures/owner-template-workbench.html?dashboard');
@@ -63,5 +71,5 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright-core')
   assert(await name.evaluate(b=>{const p=b.closest('.ot-form-scroll').getBoundingClientRect(),r=b.getBoundingClientRect();return r.left-p.left>=5&&r.right<=p.right-5}),'dialog field focus clipped');
   await create.getByRole('button',{name:'取消',exact:true}).click();
   await page.getByRole('button',{name:'操作记录',exact:true}).click();await page.getByRole('dialog',{name:'操作记录',exact:true}).waitFor();await page.getByRole('dialog',{name:'操作记录',exact:true}).getByRole('button',{name:'关闭',exact:true}).click();
-  assert.deepEqual(errors,[]);console.log('PASS: six-member directory, draft/conflict safety, responsive layout and shared dialogs/focus boundaries');await browser.close();
+  assert.deepEqual(errors,[]);console.log('PASS: single-row toolbar, six-member directory, draft/conflict safety, responsive layout and shared dialogs/focus boundaries');await browser.close();
 })().catch(error=>{console.error(error);process.exit(1)});
