@@ -1,6 +1,7 @@
 package services
 
 import (
+	"clawreef/internal/models"
 	"context"
 	"errors"
 	"io"
@@ -62,6 +63,13 @@ func TestSlotLegacyHTTPIsLimitedToExistingTenantPods(t *testing.T) {
 	}
 	c := client.(*slotRuntimeAgentClient)
 	u, _ := url.Parse("http://10.0.0.7:19090/readyz")
+	endpoint := u.String()
+	pid := "old-pod"
+	scheduler := &RuntimeScheduler{agentClient: client}
+	uid, gid, profile, err := scheduler.gatewayLinuxIDs(context.Background(), 7, nil, models.RuntimePod{PodUID: &pid, AgentEndpoint: &endpoint})
+	if err != nil || uid != 200007 || gid != 200007 || profile != "" {
+		t.Fatalf("legacy identity contract changed %d/%d %q %v", uid, gid, profile, err)
+	}
 	if !c.allowLegacyHTTPEndpoint(context.Background(), u) {
 		t.Fatal("legacy Pod refused")
 	}
