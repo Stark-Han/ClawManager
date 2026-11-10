@@ -181,7 +181,7 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 			}
 			return fmt.Errorf("成员 %d 空闲预检未通过: %w", i.ID, err)
 		}
-		if proof == nil || !proof.ExecutionProofSupported || proof.ExecutionState != "idle" {
+		if !teamStopPreflightAllows(op.Reason, i.Status, proof) {
 			return fmt.Errorf("成员 %d 仍在执行或执行状态未确认", i.ID)
 		}
 	}
@@ -356,4 +356,16 @@ func (s *teamService) TeamPreviewProfileForCreation() string {
 		}
 	}
 	return ""
+}
+
+func teamStopPreflightAllows(reason, instanceState string, proof *RuntimeIdlePreflight) bool {
+	if proof == nil {
+		return false
+	}
+	if proof.ExecutionProofSupported && proof.ExecutionState == "idle" {
+		return true
+	}
+	// Explicit cancellation of a failed/pending start uses the original confirmed
+	// lifecycle stop. No state is completed until that source teardown succeeds.
+	return reason == "manual" && (instanceState == "error" || instanceState == "creating") && (proof.ExecutionState == "unknown" || proof.ExecutionState == "unsupported")
 }
