@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const runtimeSlotSocketVolume = "runtime-slot-sockets"
@@ -350,7 +351,10 @@ func RuntimeSlotDeploymentSpecs(cfg config.RuntimePoolConfig, agentSecretName st
 		if strings.TrimSpace(runtime.image) == "" {
 			return nil, fmt.Errorf("container slots require %s image", runtime.kind)
 		}
-		specs = append(specs, RuntimeDeploymentSpec{Name: runtime.kind + "-runtime", Namespace: namespace, RuntimeType: runtime.kind, Image: runtime.image, Replicas: 1, WorkspacePVCClaimName: cfg.WorkspacePVCClaimName, WorkspaceMountPath: cfg.WorkspaceRoot, GatewayPortStart: cfg.GatewayPortStart, GatewayPortEnd: cfg.GatewayPortEnd, SlotCount: cfg.ContainerSlots, SlotResources: *resources.DeepCopy(), PodResources: podResources.DeepCopy(), PodUserNamespaces: cfg.PodUserNamespaces, SandboxProfile: cfg.SandboxProfile, NetworkIsolation: cfg.NetworkIsolation, AgentTokenSecretName: agentSecretName, HermesDesktopWeb: runtime.kind == "hermes"})
+		if problems := validation.IsDNS1123Label(cfg.SlotPoolPrefix + runtime.kind + "-runtime"); len(problems) != 0 {
+			return nil, fmt.Errorf("invalid slot pool prefix")
+		}
+		specs = append(specs, RuntimeDeploymentSpec{Name: cfg.SlotPoolPrefix + runtime.kind + "-runtime", Namespace: namespace, RuntimeType: runtime.kind, Image: runtime.image, Replicas: 1, WorkspacePVCClaimName: cfg.WorkspacePVCClaimName, WorkspaceMountPath: cfg.WorkspaceRoot, GatewayPortStart: cfg.GatewayPortStart, GatewayPortEnd: cfg.GatewayPortEnd, SlotCount: cfg.ContainerSlots, SlotResources: *resources.DeepCopy(), PodResources: podResources.DeepCopy(), PodUserNamespaces: cfg.PodUserNamespaces, SandboxProfile: cfg.SandboxProfile, NetworkIsolation: cfg.NetworkIsolation, AgentTokenSecretName: agentSecretName, HermesDesktopWeb: runtime.kind == "hermes"})
 	}
 	return specs, nil
 }

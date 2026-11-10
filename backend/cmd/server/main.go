@@ -168,6 +168,7 @@ func main() {
 	services.SetRuntimeImageSettingsProvider(systemImageSettingService)
 	services.SetOpenClawTransferRuntimeRepositories(instanceRepo, bindingRepo, runtimePodRepo)
 	runtimeAgentClient := services.NewRuntimeAgentClient(cfg.Runtime.AgentControlToken)
+	legacyRuntimeAgentClient := runtimeAgentClient
 	var runtimeSecurity *services.RuntimeSecurityAuthority
 	// The zero inventory fails closed for protected assignments when their
 	// cluster ranges have not been configured, while legacy runtimes still work.
@@ -213,6 +214,9 @@ func main() {
 			log.Fatalf("Failed to trust Lite container slot management TLS: %v", trustErr)
 		}
 		runtimeAgentClient = services.NewSlotRuntimeAgentClientWithHTTPClient(cfg.Runtime.AgentControlToken, slotKubeClient.Clientset, slotNamespace, &http.Client{Transport: &http.Transport{TLSClientConfig: slotTrust}, Timeout: 30 * time.Second})
+		if err := services.ConfigureSlotLegacyCoexistence(runtimeAgentClient, legacyRuntimeAgentClient, protectedRuntimeInstance); err != nil {
+			log.Fatal("Failed to configure existing runtime compatibility")
+		}
 		workspaceFences := repository.NewWorkspaceWriteFenceRepository(database)
 		if err := services.ConfigureSlotWorkspaceWriteFence(runtimeAgentClient, func(ctx context.Context, id runtimeauth.Identity) error {
 			return workspaceFences.Fence(ctx, id.InstanceID, id.UserID, id.Generation, id.PodUID)

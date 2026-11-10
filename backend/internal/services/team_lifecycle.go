@@ -336,5 +336,5 @@ func withTeamIdleStop(ctx context.Context, id int) context.Context {
 // Only an explicit manual operation can use the existing confirmed-stop path
 // on a legacy Agent. Automatic idle stop must have positive execution proof.
 func legacyTeamManualStop(reason string, err error) bool {
-	return reason == "manual" && errors.Is(err, ErrRuntimeAgentNotFound)
+	return reason == "manual" && (errors.Is(err, ErrRuntimeAgentNotFound) || errors.Is(err, ErrRuntimeAgentUnsupported))
 }
