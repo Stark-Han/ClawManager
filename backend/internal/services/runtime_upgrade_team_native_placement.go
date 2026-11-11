@@ -41,11 +41,13 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 	if err = json.Unmarshal([]byte(raw), &members); err != nil {
 		return nil, false, err
 	}
+	// Unbound retries keep the frozen whole-stop source. Any later stop or
+	// uncertain execution is rejected by confirmedColdTeamSourceAfterWholeStop.
 	frozen := false
 	var coldStop string
 	var coldAt *time.Time
 	for _, m := range members {
-		if m.InstanceID == id && m.Workspace == workspace && m.Generation == generation-1 {
+		if m.InstanceID == id && m.Workspace == workspace && (m.Generation == generation-1 || (m.Generation < generation-1 && m.ColdStopOperationID != "" && m.ColdStoppedAt != nil)) {
 			frozen = true
 			coldStop, coldAt = m.ColdStopOperationID, m.ColdStoppedAt
 		}

@@ -4,6 +4,7 @@ import (
 	"clawreef/internal/models"
 	"clawreef/internal/repository"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,22 @@ func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing
 		t.Fatalf("ordinary storage fence bypassed: pods=%v cold=%v err=%v", got, cold, err)
 	}
 	service.deployments = inventory
+	// A retry that never obtained a binding advances the instance generation,
+	// but remains under the original completed whole-Team stop provenance.
+	stamp := time.Now().UTC().Add(time.Second)
+	frozen, marshalErr := json.Marshal([]models.TeamLifecycleMember{{InstanceID: 7, MemberID: 8, Generation: 2, Workspace: workspace, ColdStopOperationID: "whole-stop", ColdStoppedAt: &stamp}})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	exec(`UPDATE team_runtime_lifecycle SET members_json=?`, string(frozen))
+	exec(`UPDATE instances SET runtime_generation=4 WHERE id=7`)
+	check(true)
+	exec(`INSERT INTO instance_idle_stop_operations(id,instance_id,user_id,generation,runtime_pod_id,gateway_id,pod_uid,endpoint,workspace_path,storage_identity,phase,created_at,updated_at) VALUES('later',7,2,3,42,'gw-7-3','later','http://10.0.0.1:19090',?,'','completed',?,NOW())`, workspace, stamp.Add(time.Second))
+	check(false)
+	exec(`DELETE FROM instance_idle_stop_operations WHERE id='later'`)
+	exec(`UPDATE team_runtime_lifecycle SET members_json=?`, `[{"instance_id":7,"member_id":8,"generation":2,"workspace":"`+workspace+`"}]`)
+	check(false)
+	exec(`UPDATE instances SET runtime_generation=3 WHERE id=7`)
 	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(3,'openclaw',?,'preflight_blocked','preflight',1,'blocked','{}')`, newImage)
 	exec(`INSERT INTO runtime_upgrade_items(rollout_id,instance_id,state,created_at,updated_at) VALUES(3,7,'pending',NOW(),NOW())`)
 	check(true)
