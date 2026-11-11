@@ -2162,34 +2162,21 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	}
 	pods = filterOpenCodeTeamPods(&instance, pods)
 
+	storage := ""
 	if s.autoStopRepo != nil {
-		storage, storageErr := s.autoStopRepo.PreviousIdleStorage(ctx, instance.ID)
-		if storageErr != nil {
-			return storageErr
-		}
-		if storage != "" {
-			matching := make([]models.RuntimePod, 0, len(pods))
-			for _, p := range pods {
-				if runtimeWorkspaceStorageCompatible(storage, p.WorkspaceStorageIdentity) {
-					matching = append(matching, p)
-				}
-			}
-			pods = matching
+		storage, err = s.autoStopRepo.PreviousIdleStorage(ctx, instance.ID)
+		if err != nil {
+			return err
 		}
 	}
+	verifiedCount := len(pods)
+	var coldNative bool
+	pods, coldNative, err = s.filterResumeWorkspace(ctx, instance, pods, storage, inspectOpenClawRegistryImage)
+	if err != nil {
+		return err
+	}
 	if runtimeType == RuntimeTypeOpenClaw && s.upgrade != nil {
-		verifiedCount := len(pods)
-		var native []models.RuntimePod
-		var coldNative bool
-		if instance.RuntimeSecurityProfile == RuntimeSecurityProfile {
-			native, coldNative, err = s.upgrade.coldTeamNativePlacement(ctx, instance.ID, pods, inspectOpenClawRegistryImage)
-			if err != nil {
-				return err
-			}
-		}
-		if coldNative {
-			pods = native
-		} else {
+		if !coldNative {
 			pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
 		}
 		if err != nil {

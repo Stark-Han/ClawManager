@@ -50,6 +50,17 @@ func TestWholeTeamStopCoversUnpublishedStartTimeoutWithoutInventingSource(t *tes
 	}
 }
 
+type verifiedColdNFSInventory struct {
+	recoveryInventory
+	allowed bool
+	calls   int
+}
+
+func (v *verifiedColdNFSInventory) ColdTeamNFSWorkspace(_ context.Context, _, _ models.RuntimePod, _ string) (bool, error) {
+	v.calls++
+	return v.allowed, nil
+}
+
 func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing.T) {
 	sess := upgradeFlowDB(t)
 	ctx := context.Background()
@@ -109,6 +120,36 @@ func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing
 		}
 	}
 	check(true)
+	// Exercise the production ordering: ordinary storage filtering would remove
+	// the inline-NFS candidate before its retained-PVC proof could run.
+	inline := target
+	inline.WorkspaceStorageIdentity = runtimeStorageIdentityForTest(2, "nfs:10.0.0.8:/export", "/data", "", false, false)
+	verifier := &verifiedColdNFSInventory{recoveryInventory: recoveryInventory{old, inline}, allowed: true}
+	service.deployments = verifier
+	scheduler := &RuntimeScheduler{upgrade: service}
+	instance := models.Instance{ID: 7, Type: RuntimeTypeOpenClaw, RuntimeSecurityProfile: RuntimeSecurityProfile}
+	got, cold, err := scheduler.filterResumeWorkspace(ctx, instance, []models.RuntimePod{inline}, old.WorkspaceStorageIdentity, inspect)
+	if err != nil || !cold || len(got) != 1 || verifier.calls != 1 {
+		t.Fatalf("retained NFS resume: pods=%v cold=%v calls=%d err=%v", got, cold, verifier.calls, err)
+	}
+	verifier.allowed = false
+	got, cold, err = scheduler.filterResumeWorkspace(ctx, instance, []models.RuntimePod{inline}, old.WorkspaceStorageIdentity, inspect)
+	if err != nil || cold || len(got) != 0 {
+		t.Fatalf("unproved NFS accepted: pods=%v cold=%v err=%v", got, cold, err)
+	}
+	verifier.allowed = true
+	version = "2026.11.1"
+	got, cold, err = scheduler.filterResumeWorkspace(ctx, instance, []models.RuntimePod{inline}, old.WorkspaceStorageIdentity, inspect)
+	if err != nil || cold || len(got) != 0 {
+		t.Fatalf("version fence bypassed: pods=%v cold=%v err=%v", got, cold, err)
+	}
+	version = "2026.10.2"
+	instance.RuntimeSecurityProfile = ""
+	got, cold, err = scheduler.filterResumeWorkspace(ctx, instance, []models.RuntimePod{inline}, old.WorkspaceStorageIdentity, inspect)
+	if err != nil || cold || len(got) != 0 {
+		t.Fatalf("ordinary storage fence bypassed: pods=%v cold=%v err=%v", got, cold, err)
+	}
+	service.deployments = inventory
 	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(3,'openclaw',?,'preflight_blocked','preflight',1,'blocked','{}')`, newImage)
 	exec(`INSERT INTO runtime_upgrade_items(rollout_id,instance_id,state,created_at,updated_at) VALUES(3,7,'pending',NOW(),NOW())`)
 	check(true)
