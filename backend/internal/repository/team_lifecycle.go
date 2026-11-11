@@ -218,6 +218,24 @@ func teamMembersNoRequests(ctx context.Context, s db.Session, id int) error {
 	return nil
 }
 
+// Manual stop first fences new model admission, then drains existing requests
+// in preflight. Commands, native tasks and writes must already be settled.
+// Automatic idle stop retains the stronger zero-request admission above.
+func teamMembersCanDrain(ctx context.Context, s db.Session, id int) error {
+	var n int
+	err := teamQueryRow(ctx, s, `SELECT
+ (SELECT COUNT(*) FROM gateway_runtime_tasks q JOIN team_members m ON m.instance_id=q.instance_id JOIN instances i ON i.id=q.instance_id WHERE m.team_id=? AND q.generation=i.runtime_generation AND q.finished=FALSE) +
+ (SELECT COUNT(*) FROM instance_commands q JOIN team_members m ON m.instance_id=q.instance_id WHERE m.team_id=? AND q.status IN ('pending','queued','accepted','batch_pending','dispatched','running')) +
+ (SELECT COUNT(*) FROM instance_workspace_write_intents q JOIN team_members m ON m.instance_id=q.instance_id WHERE m.team_id=?)`, id, id, id).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("成员仍有工具命令或未确认写入")
+	}
+	return nil
+}
+
 func (r *TeamLifecycleRepository) Request(ctx context.Context, id int, target, reason string, days int) (*models.TeamLifecycleOperation, error) {
 	return r.RequestForTimeout(ctx, id, target, reason, models.InstanceAutoStopIdleTimeout(days))
 }
@@ -297,7 +315,12 @@ func (r *TeamLifecycleRepository) RequestForTimeout(ctx context.Context, id int,
 			if e = teamHasOpenWork(ctx, s, id); e != nil {
 				return e
 			}
-			if e = teamMembersNoRequests(ctx, s, id); e != nil {
+			if reason == "manual" {
+				e = teamMembersCanDrain(ctx, s, id)
+			} else {
+				e = teamMembersNoRequests(ctx, s, id)
+			}
+			if e != nil {
 				return e
 			}
 			if reason == "idle_timeout" {

@@ -142,6 +142,9 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 		if err != nil {
 			return err
 		}
+		if a != nil && a.ActiveRequests > 0 && op.Reason == "manual" {
+			return fmt.Errorf("%w: 等待已发出的模型请求结束，尚未发送停止指令", models.ErrInstanceStopping)
+		}
 		if a != nil && (a.ActiveRequests > 0 || a.StartDeadlineAt != nil) {
 			return fmt.Errorf("成员仍有模型请求或启动操作")
 		}
@@ -182,6 +185,9 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 			return fmt.Errorf("成员 %d 空闲预检未通过: %w", i.ID, err)
 		}
 		if !teamStopPreflightAllows(op.Reason, i.Status, proof) {
+			if op.Reason == "manual" && proof != nil && proof.ExecutionProofSupported && proof.ExecutionState == "busy" {
+				return fmt.Errorf("%w: 成员 %d 正在完成已有执行，尚未发送停止指令", models.ErrInstanceStopping, i.ID)
+			}
 			return fmt.Errorf("成员 %d 仍在执行或执行状态未确认", i.ID)
 		}
 	}
@@ -199,7 +205,7 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 
 	if op.DesiredState == "stopped" {
 		if err := c.preflight(ctx, op); err != nil {
-			if op.Attempts == 0 {
+			if op.Attempts == 0 && op.Reason != "manual" {
 				if aborted, _ := c.store.AbortUnstartedStop(ctx, op); aborted {
 					return 0, err
 				}

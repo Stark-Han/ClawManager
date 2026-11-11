@@ -62,6 +62,72 @@ func TestTeamLifecycleReadinessProjectionOffersRepairWithoutRewritingLedgerMySQL
 	}
 }
 
+func TestTeamManualStopFencesNewInferenceBeforeDrainingExistingRequestMySQL(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	a := NewInstanceAutoStopRepository(s)
+	key, err := a.BeginModelActivity(ctx, 7, 1, 2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.Request(ctx, 9, "stopped", "idle_timeout", 1); err == nil {
+		t.Fatal("automatic stop admitted active inference")
+	}
+	op, err := r.Request(ctx, 9, "stopped", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.State != "stopping" {
+		t.Fatalf("stop intent not fenced: %+v", op)
+	}
+	if _, err = a.BeginModelActivity(ctx, 7, 1, 2, ""); !errors.Is(err, models.ErrInstanceStopping) {
+		t.Fatalf("new inference entered stopping Team: %v", err)
+	}
+	active, err := a.GetActivity(ctx, 1)
+	if err != nil || active.ActiveRequests != 1 {
+		t.Fatalf("current request was cancelled or erased: %+v %v", active, err)
+	}
+	if err = r.Result(ctx, op, 0, models.ErrInstanceStopping); err != nil {
+		t.Fatal(err)
+	}
+	wait, err := r.Get(ctx, 9)
+	if err != nil || wait.State != "stopping" || wait.Progress != 0 {
+		t.Fatalf("draining reported stopped: %+v %v", wait, err)
+	}
+	var running int
+	if err = teamQueryRow(ctx, s, `SELECT COUNT(*) FROM instances i JOIN team_members m ON m.instance_id=i.id WHERE m.team_id=9 AND i.status='running'`).Scan(&running); err != nil || running != 2 {
+		t.Fatalf("drain prematurely changed members: %d %v", running, err)
+	}
+	if err = a.FinishModelActivity(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	if err = teamMembersNoRequests(ctx, s, 9); err != nil {
+		t.Fatalf("completed request did not drain: %v", err)
+	}
+	again, err := r.Request(ctx, 9, "stopped", "manual", 0)
+	if err != nil || again.OperationID != op.OperationID {
+		t.Fatalf("retry replaced the stop: %+v %v", again, err)
+	}
+}
+
+func TestTeamManualDrainStillRejectsBusinessTasksAndUnconfirmedWritesMySQL(t *testing.T) {
+	for _, tc := range []struct{ name, query string }{
+		{"active_task", `UPDATE team_tasks SET status='running' WHERE id=100`},
+		{"native_task", `INSERT INTO gateway_runtime_tasks(instance_id,generation,finished) VALUES(1,2,FALSE)`},
+		{"workspace_write", `INSERT INTO instance_workspace_write_intents(instance_id) VALUES(1)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, r := teamIdleFixture(t)
+			if _, err := s.SQL().Exec(tc.query); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Request(t.Context(), 9, "stopped", "manual", 0); err == nil {
+				t.Fatal("manual drain bypassed an active task or unconfirmed write")
+			}
+		})
+	}
+}
+
 func TestTeamIdleMySQLTerminalParentDoesNotInventCompletionOrBlockManualMaintenance(t *testing.T) {
 	s, r := teamIdleFixture(t)
 	for _, q := range []string{
