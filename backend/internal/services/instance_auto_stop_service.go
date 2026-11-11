@@ -465,6 +465,10 @@ func (s *InstanceAutoStopService) expireStarts(ctx context.Context) error {
 		}
 		func() {
 			defer release()
+			activity, e := s.store.GetActivity(ctx, id)
+			if e != nil || activity == nil || activity.StartDeadlineAt == nil {
+				return
+			}
 			changed, e := s.store.FenceExpiredStart(ctx, id)
 			if e != nil || !changed {
 				return
@@ -475,11 +479,32 @@ func (s *InstanceAutoStopService) expireStarts(ctx context.Context) error {
 			}
 			// An explicit Start already authorizes cancellation of its unpublished
 			// reservation. Keep the deadline/fence if teardown cannot be confirmed.
-			if e = s.lifecycle.cleanupV2GatewayBinding(ctx, i); e != nil {
+			if s.lifecycle.bindingRepo == nil {
+				return
+			}
+			b, e := s.lifecycle.bindingRepo.GetByInstanceID(ctx, id)
+			if e != nil {
+				return
+			}
+			if verifier, ok := s.lifecycle.agentClient.(interface {
+				VerifyFailedStartCleanup(context.Context, *models.Instance) error
+			}); b == nil && ok {
+				// Current-generation stop proof is sufficient to withdraw Start;
+				// unrelated historical delete protection must remain untouched.
+				e = verifier.VerifyFailedStartCleanup(ctx, i)
+				if e != nil {
+					e = s.lifecycle.cleanupV2GatewayBinding(ctx, i)
+				}
+			} else {
+				e = s.lifecycle.cleanupV2GatewayBinding(ctx, i)
+			}
+			if e != nil {
 				_ = s.store.RecordBlocker(ctx, id, e.Error())
 				return
 			}
-			_ = s.store.ClearStartDeadline(ctx, id)
+			if e = s.store.ClearExpiredStartDeadline(ctx, id, i.RuntimeGeneration, *activity.StartDeadlineAt); e != nil {
+				return
+			}
 			GetHub().BroadcastInstanceStatus(i.UserID, i)
 		}()
 	}

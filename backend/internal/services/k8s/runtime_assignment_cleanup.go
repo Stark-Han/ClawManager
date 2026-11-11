@@ -16,6 +16,34 @@ import (
 
 const RuntimeStoppedSourceAnnotationPrefix = "clawmanager.io/stopped-source-"
 
+// CheckFailedStartStopped only retires the current Start deadline. It grants no
+// authority to delete a workspace or retire older publication credentials; those
+// operations still require CheckUnboundInstanceStopped's complete history.
+func (s *RuntimeAssignmentService) CheckFailedStartStopped(ctx context.Context, id, user, generation int, kind, workspace string) error {
+	if err := s.validService(); err != nil {
+		return err
+	}
+	cm, err := s.client.CoreV1().ConfigMaps(s.namespace).Get(ctx, runtimeAssignmentName(id), metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	a, state, err := storedRuntimeAssignment(cm)
+	if err != nil {
+		return err
+	}
+	proof := RuntimeStoppedSourceAudit{InstanceID: a.InstanceID, UserID: a.UserID, Generation: a.Generation, RuntimeType: a.RuntimeType, PodUID: a.PodUID, Endpoint: a.Endpoint, GatewayID: a.GatewayID, WorkspacePath: assignmentWorkspace(a), Stopped: state == "stopped"}
+	if err := ValidateRuntimeStoppedSourceAudit(proof, id, user, generation, kind); err != nil {
+		return err
+	}
+	if a.Generation != generation || workspace == "" || proof.WorkspacePath != workspace || cm.DeletionTimestamp != nil {
+		return fmt.Errorf("failed Start source identity changed")
+	}
+	if (cm.Data["container_stop_intent"] != "" || cm.Data["container_termination_proof"] != "") && (cm.Data["container_termination_proof"] == "" || cm.Data["container_stop_released"] != "true") {
+		return fmt.Errorf("failed Start container teardown is unconfirmed")
+	}
+	return nil
+}
+
 // RuntimeStoppedSourceAudit preserves existing controller-confirmed stop
 // authority before EnsureDesired replaces a generation's current assignment.
 // It contains no credentials, request environment, or synthetic Agent ACK.

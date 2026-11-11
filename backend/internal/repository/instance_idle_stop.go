@@ -306,6 +306,45 @@ func (r *InstanceAutoStopRepository) ClearStartDeadline(ctx context.Context, id 
 	}, nil)
 }
 
+// The caller has confirmed the original failed Start's native teardown under
+// the lifecycle operation lock. Recheck its identity and admission atomically;
+// late proof must never clear a subsequent Start or an in-progress Stop.
+func (r *InstanceAutoStopRepository) ClearExpiredStartDeadline(ctx context.Context, id, generation int, deadline time.Time) error {
+	return r.sess.TxContext(ctx, func(s db.Session) error {
+		i, err := lockActivityInstance(ctx, s, id)
+		if err != nil {
+			return err
+		}
+		a, err := readActivity(ctx, s, id, true)
+		if err != nil {
+			return err
+		}
+		if a == nil || a.StartDeadlineAt == nil {
+			return nil
+		}
+		now := time.Now().UTC()
+		if i.mode != "lite" || i.status != "stopped" || i.generation != generation || a.StopOperationID != "" || !a.StartDeadlineAt.Equal(deadline) || deadline.After(now) {
+			return models.ErrAutoStopConflict
+		}
+		row, err := s.SQL().QueryRowContext(ctx, `SELECT
+		 (SELECT COUNT(*) FROM instance_runtime_bindings WHERE instance_id=?)+
+		 (SELECT COUNT(*) FROM instance_model_activity_requests WHERE instance_id=? AND finished_at IS NULL AND (lease_expires_at IS NULL OR lease_expires_at>UTC_TIMESTAMP(6)))+
+		 (SELECT COUNT(*) FROM gateway_runtime_tasks WHERE instance_id=? AND generation=? AND finished=FALSE)`, id, id, id, generation)
+		if err != nil {
+			return err
+		}
+		var active int
+		if err = row.Scan(&active); err != nil {
+			return err
+		}
+		if active != 0 {
+			return models.ErrModelActivityInProgress
+		}
+		_, err = s.SQL().ExecContext(ctx, `UPDATE instance_model_activity SET generation=?,start_deadline_at=NULL,blocker='',activity_version=activity_version+1,updated_at=? WHERE instance_id=?`, generation, now, id)
+		return err
+	}, nil)
+}
+
 // Preserve proof before releasing a binding: recovery must not contact a slot
 // that may already have been assigned to a different instance.
 func (r *InstanceAutoStopRepository) ConfirmTeardown(ctx context.Context, op models.InstanceIdleStopOperation) error {
