@@ -57,6 +57,16 @@ type verifiedColdNFSInventory struct {
 	calls   int
 }
 
+type retainedColdSourceInventory struct {
+	recoveryInventory
+	source models.InstanceIdleStopOperation
+	err    error
+}
+
+func (v *retainedColdSourceInventory) ConfirmedTeamStoppedSource(context.Context, int, int, int, string) (models.InstanceIdleStopOperation, error) {
+	return v.source, v.err
+}
+
 func (v *verifiedColdNFSInventory) ColdTeamNFSWorkspace(_ context.Context, _, _ models.RuntimePod, _ string) (bool, error) {
 	v.calls++
 	return v.allowed, nil
@@ -166,6 +176,21 @@ func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing
 	exec(`DELETE FROM instance_idle_stop_operations WHERE id='later'`)
 	exec(`UPDATE team_runtime_lifecycle SET members_json=?`, `[{"instance_id":7,"member_id":8,"generation":2,"workspace":"`+workspace+`"}]`)
 	check(false)
+	// A finalized container stop is independent evidence when failure cleanup
+	// bypassed idle-stop SQL. It grants no version, owner or storage override.
+	retained := &retainedColdSourceInventory{recoveryInventory: inventory, source: models.InstanceIdleStopOperation{InstanceID: 7, UserID: 2, Generation: 2, RuntimePodID: 42, GatewayID: "gw-7-2", PodUID: "source", Endpoint: "http://10.0.0.1:19090", WorkspacePath: workspace, Phase: "completed", StorageIdentity: old.WorkspaceStorageIdentity}}
+	service.deployments = retained
+	check(true)
+	retained.source.UserID = 3
+	check(false)
+	retained.source.UserID = 2
+	retained.source.Phase = "stopping"
+	check(false)
+	retained.source.Phase = "completed"
+	version = "2026.11.1"
+	check(false)
+	version = "2026.10.2"
+	service.deployments = inventory
 	exec(`UPDATE instances SET runtime_generation=3 WHERE id=7`)
 	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(3,'openclaw',?,'preflight_blocked','preflight',1,'blocked','{}')`, newImage)
 	exec(`INSERT INTO runtime_upgrade_items(rollout_id,instance_id,state,created_at,updated_at) VALUES(3,7,'pending',NOW(),NOW())`)

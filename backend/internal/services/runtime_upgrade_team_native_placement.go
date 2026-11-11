@@ -34,7 +34,8 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 	if err != nil {
 		return nil, false, err
 	}
-	if profile != RuntimeSecurityProfile || teamProfile != models.TeamPreviewSecurityProfile || status != "creating" || desired != "running" || (state != "starting" && state != "recovery_required") {
+	recoveryPod, _ := runtimeRecoverySource(ctx)
+	if profile != RuntimeSecurityProfile || teamProfile != models.TeamPreviewSecurityProfile || status != "creating" || desired != "running" || (state != "starting" && state != "recovery_required" && !(state == "running" && recoveryPod > 0)) {
 		return nil, false, nil
 	}
 	var members []models.TeamLifecycleMember
@@ -46,10 +47,21 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 	frozen := false
 	var coldStop string
 	var coldAt *time.Time
+	var retainedGeneration int
 	for _, m := range members {
+		if m.InstanceID == id && m.Workspace == workspace && m.Generation < generation {
+			retainedGeneration = m.Generation
+		}
 		if m.InstanceID == id && m.Workspace == workspace && (m.Generation == generation-1 || (m.Generation < generation-1 && m.ColdStopOperationID != "" && m.ColdStoppedAt != nil)) {
 			frozen = true
 			coldStop, coldAt = m.ColdStopOperationID, m.ColdStoppedAt
+		}
+	}
+	var retained *models.InstanceIdleStopOperation
+	if reader, hasReader := s.deployments.(teamStoppedSourceReader); hasReader && retainedGeneration > 0 {
+		if source, readErr := reader.ConfirmedTeamStoppedSource(ctx, id, user, generation, workspace); readErr == nil && source.InstanceID == id && source.UserID == user && source.WorkspacePath == workspace && source.Phase == "completed" && (source.Generation == retainedGeneration || recoveryPod > 0 && source.RuntimePodID == recoveryPod && source.Generation == generation-1) {
+			retained = &source
+			frozen = true
 		}
 	}
 	if !frozen {
@@ -76,6 +88,9 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 	source, ok := confirmedColdTeamSource(id, user, generation, workspace, stops)
 	if !ok && coldStop != "" && coldAt != nil {
 		source, ok = confirmedColdTeamSourceAfterWholeStop(id, user, generation, workspace, *coldAt, stops)
+	}
+	if !ok && retained != nil {
+		source, ok = *retained, true
 	}
 	if !ok {
 		return nil, false, nil

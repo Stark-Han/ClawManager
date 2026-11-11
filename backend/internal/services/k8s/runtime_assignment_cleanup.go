@@ -19,6 +19,26 @@ const RuntimeStoppedSourceAnnotationPrefix = "clawmanager.io/stopped-source-"
 
 var ErrCurrentStartPublicationUnavailable = errors.New("current Start publication is unavailable")
 
+// RetainedStoppedAssignment reads the existing controller-confirmed source;
+// it never synthesizes a stop or permits an unpublished successor to run.
+func (s *RuntimeAssignmentService) RetainedStoppedAssignment(ctx context.Context, id, user, generation int, kind, workspace string) (RuntimeAssignment, error) {
+	if err := s.CheckUnboundInstanceStopped(ctx, id, user, generation, kind, nil); err != nil {
+		return RuntimeAssignment{}, err
+	}
+	cm, err := s.client.CoreV1().ConfigMaps(s.namespace).Get(ctx, runtimeAssignmentName(id), metav1.GetOptions{})
+	if err != nil {
+		return RuntimeAssignment{}, err
+	}
+	a, state, err := storedRuntimeAssignment(cm)
+	if err != nil {
+		return RuntimeAssignment{}, err
+	}
+	if cm.DeletionTimestamp != nil || state != "stopped" || a.InstanceID != id || a.UserID != user || a.RuntimeType != kind || a.Generation >= generation || workspace == "" || assignmentWorkspace(a) != workspace || cm.Data["container_stop_released"] != "true" || cm.Data["container_termination_proof"] == "" {
+		return RuntimeAssignment{}, fmt.Errorf("retained source is not a finalized predecessor")
+	}
+	return a, nil
+}
+
 // CheckFailedStartStopped only retires the current Start deadline. It grants no
 // authority to delete a workspace or retire older publication credentials; those
 // operations still require CheckUnboundInstanceStopped's complete history.
