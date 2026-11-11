@@ -44,7 +44,7 @@ func (s *InstanceAutoStopService) Run(ctx context.Context) {
 	if models.AutoStopTestTiming {
 		log.Print("automatic Lite stop: TEST BUILD; legacy defaults: scan interval=1m, idle timeout=5m; explicitly configured seconds take precedence")
 	}
-	// Capacity deadlines are control-plane recovery, independent of the
+	// Capacity deadlines and expired model leases are control-plane recovery, independent of the
 	// administrator's idle scan and potentially slow native stops.
 	deadlineCtx, deadlineCancel := context.WithCancel(ctx)
 	defer deadlineCancel()
@@ -59,6 +59,9 @@ func (s *InstanceAutoStopService) Run(ctx context.Context) {
 				release, err := backupgate.HoldWorkUnit(deadlineCtx, "instance.start-deadline")
 				if err != nil {
 					continue
+				}
+				if err := s.store.ReconcileModelActivities(deadlineCtx, nil); err != nil {
+					log.Printf("model activity lease recovery: %v", err)
 				}
 				_ = s.expireStarts(deadlineCtx)
 				release()
@@ -101,6 +104,12 @@ func (s *InstanceAutoStopService) Tick(ctx context.Context) error {
 		}
 		s.initialized.Store(true)
 		initializedNow = true
+	}
+	// Expired leases must not wait for the administrator's daily idle scan,
+	// or for a potentially slow Team/native stop below. Legacy scopes still
+	// require the independent application-exit proof collected by the idle scan.
+	if err = s.store.ReconcileModelActivities(ctx, nil); err != nil {
+		return err
 	}
 	if s.teamPower != nil {
 		if err := s.teamPower.reconcile(ctx); err != nil {
