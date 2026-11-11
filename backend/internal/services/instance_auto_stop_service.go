@@ -492,7 +492,7 @@ func (s *InstanceAutoStopService) expireStarts(ctx context.Context) error {
 				// Current-generation stop proof is sufficient to withdraw Start;
 				// unrelated historical delete protection must remain untouched.
 				e = verifier.VerifyFailedStartCleanup(ctx, i)
-				if e != nil {
+				if errors.Is(e, k8sservice.ErrCurrentStartPublicationUnavailable) {
 					e = s.lifecycle.cleanupV2GatewayBinding(ctx, i)
 				}
 			} else {

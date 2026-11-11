@@ -4,6 +4,7 @@ import (
 	"clawreef/internal/models"
 	"context"
 	"encoding/json"
+	"errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"testing"
@@ -70,5 +71,13 @@ func TestFailedStartRetiresOnlyCurrentDeadlineNotHistoricalDeleteProtection(t *t
 	}
 	if err := check(); err == nil {
 		t.Fatal("unconfirmed native exit released Start")
+	} else if errors.Is(err, ErrCurrentStartPublicationUnavailable) {
+		t.Fatal("unconfirmed teardown incorrectly allowed legacy fallback")
+	}
+	if err := client.CoreV1().ConfigMaps("tenant").Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := check(); !errors.Is(err, ErrCurrentStartPublicationUnavailable) {
+		t.Fatalf("unpublished Start cannot use full historical verifier: %v", err)
 	}
 }

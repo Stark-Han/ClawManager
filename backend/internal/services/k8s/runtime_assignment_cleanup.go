@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 
 const RuntimeStoppedSourceAnnotationPrefix = "clawmanager.io/stopped-source-"
 
+var ErrCurrentStartPublicationUnavailable = errors.New("current Start publication is unavailable")
+
 // CheckFailedStartStopped only retires the current Start deadline. It grants no
 // authority to delete a workspace or retire older publication credentials; those
 // operations still require CheckUnboundInstanceStopped's complete history.
@@ -24,12 +27,18 @@ func (s *RuntimeAssignmentService) CheckFailedStartStopped(ctx context.Context, 
 		return err
 	}
 	cm, err := s.client.CoreV1().ConfigMaps(s.namespace).Get(ctx, runtimeAssignmentName(id), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return ErrCurrentStartPublicationUnavailable
+	}
 	if err != nil {
 		return err
 	}
 	a, state, err := storedRuntimeAssignment(cm)
 	if err != nil {
 		return err
+	}
+	if a.InstanceID == id && a.UserID == user && a.RuntimeType == kind && a.Generation < generation && state == "stopped" {
+		return ErrCurrentStartPublicationUnavailable
 	}
 	proof := RuntimeStoppedSourceAudit{InstanceID: a.InstanceID, UserID: a.UserID, Generation: a.Generation, RuntimeType: a.RuntimeType, PodUID: a.PodUID, Endpoint: a.Endpoint, GatewayID: a.GatewayID, WorkspacePath: assignmentWorkspace(a), Stopped: state == "stopped"}
 	if err := ValidateRuntimeStoppedSourceAudit(proof, id, user, generation, kind); err != nil {
