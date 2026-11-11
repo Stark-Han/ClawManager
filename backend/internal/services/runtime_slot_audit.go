@@ -239,7 +239,7 @@ func (c *slotRuntimeAgentClient) observeRuntimeSlot(ctx context.Context, pod mod
 		o.Err = fmt.Errorf("runtime slot exit proof is unavailable or belongs to another Pod")
 		o.Diagnostic = "runtime slot exit proof unavailable or Pod identity differs"
 	}
-	if a := s.Assignment; a != nil && (a.PodUID != *pod.PodUID || a.InstanceID < 1 || a.UserID < 1 || a.Generation < 1 || a.GatewayID != fmt.Sprintf("gw-%d-%d", a.InstanceID, a.Generation) || !stopTokenValid(a.WorkerEpoch) || a.WorkerEpoch != s.WorkerEpoch) {
+	if a := s.Assignment; a != nil && (a.PodUID != *pod.PodUID || a.InstanceID < 1 || a.UserID < 1 || a.Generation < 1 || a.GatewayID != fmt.Sprintf("gw-%d-%d", a.InstanceID, a.Generation) || !stopTokenValid(a.WorkerEpoch) || !runtimeSlotOwnerEpochConfirmed(s)) {
 		o.Err = fmt.Errorf("runtime slot owner identity is invalid")
 		o.Diagnostic = "runtime slot owner identity invalid"
 	}
@@ -247,6 +247,17 @@ func (c *slotRuntimeAgentClient) observeRuntimeSlot(ctx context.Context, pod mod
 		o.Err = fmt.Errorf("runtime slot gateway ownership is ambiguous")
 		o.Diagnostic = "runtime slot gateway ownership ambiguous"
 	}
+}
+
+func runtimeSlotOwnerEpochConfirmed(s runtimeSlotAuditSnapshot) bool {
+	if s.Assignment == nil || s.Assignment.WorkerEpoch == s.WorkerEpoch {
+		return true
+	}
+	// A confirmed container stop replaces the worker epoch but keeps its stopped
+	// assignment as history. Only the fresh worker's complete empty proof can
+	// retire that historical owner; a running or uncertain owner still blocks.
+	return s.Assignment.State == "stopped" && s.IdleConfirmed != nil && *s.IdleConfirmed &&
+		s.Quarantined != nil && !*s.Quarantined && s.MaintenanceOperationID == "" && s.Gateways != nil && len(s.Gateways) == 0
 }
 
 func runtimeSlotGatewayOwnershipAmbiguous(s runtimeSlotAuditSnapshot) bool {
