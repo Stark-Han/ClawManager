@@ -39,6 +39,70 @@ func teamIdleFixture(t *testing.T) (db.Session, *TeamLifecycleRepository) {
 	return s, r
 }
 
+func TestTeamIdleMySQLTerminalParentDoesNotInventCompletionOrBlockManualMaintenance(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	for _, q := range []string{
+		`UPDATE team_tasks SET status='failed',finished_at=UTC_TIMESTAMP()-INTERVAL 3 DAY WHERE id=100`,
+		`INSERT INTO team_work_items(team_id,status,root_task_id) VALUES(9,'running',100)`,
+	} {
+		if _, err := s.SQL().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.Request(t.Context(), 9, "stopped", "idle_timeout", 1); err == nil {
+		t.Fatal("failed latest user task admitted automatic stop")
+	}
+	if _, err := r.Request(t.Context(), 9, "stopped", "manual", 0); err != nil {
+		t.Fatalf("terminal parent permanently blocked safe maintenance: %v", err)
+	}
+	var status string
+	if err := teamQueryRow(t.Context(), s, `SELECT status FROM team_work_items WHERE team_id=9`).Scan(&status); err != nil || status != "running" {
+		t.Fatalf("lifecycle rewrote business receipt: %s %v", status, err)
+	}
+}
+
+func TestTeamIdleMySQLTerminalParentRetainsExecutionAndUnknownParentProtection(t *testing.T) {
+	for _, tc := range []struct {
+		name, parent, blocker string
+		allowed               bool
+	}{
+		{"retired_failure_after_new_success", "failed", "", true},
+		{"active_parent", "running", "", false},
+		{"success_with_inconsistent_work", "succeeded", "", false},
+		{"missing_parent", "missing", "", false},
+		{"different_team_parent", "foreign", "", false},
+		{"unfinished_model", "failed", `INSERT INTO instance_model_activity_requests(request_id,instance_id,generation,started_at) VALUES('live',2,1,UTC_TIMESTAMP())`, false},
+		{"unfinished_command", "failed", `INSERT INTO instance_commands VALUES(2,'running')`, false},
+		{"pending_notification", "failed", `INSERT INTO team_event_outbox VALUES(9,'pending')`, false},
+		{"pending_write", "failed", `INSERT INTO team_workspace_write_intents VALUES(9)`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, r := teamIdleFixture(t)
+			parentTeam, parentStatus := 9, tc.parent
+			if tc.parent == "foreign" {
+				parentTeam, parentStatus = 10, "failed"
+			}
+			if tc.parent != "missing" {
+				if _, err := s.SQL().Exec(`INSERT INTO team_tasks VALUES(99,?,7,?,UTC_TIMESTAMP()-INTERVAL 4 DAY,NULL)`, parentTeam, parentStatus); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.SQL().Exec(`INSERT INTO team_work_items(team_id,status,root_task_id) VALUES(9,'running',99)`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.blocker != "" {
+				if _, err := s.SQL().Exec(tc.blocker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := r.Request(t.Context(), 9, "stopped", "idle_timeout", 1)
+			if (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v error=%v", tc.allowed, err)
+			}
+		})
+	}
+}
+
 func TestTeamIdleMySQLWholeTeamAdmission(t *testing.T) {
 	s, r := teamIdleFixture(t)
 	ctx := t.Context()
@@ -167,7 +231,7 @@ func TestTeamIdleMySQLBusinessBlockers(t *testing.T) {
 		{"last_user_failed", `UPDATE team_tasks SET status='failed'`},
 		{"fresh_business_activity", `UPDATE instance_model_activity SET last_gateway_activity_at=UTC_TIMESTAMP() WHERE instance_id=2`},
 		{"unfinished_request", `INSERT INTO instance_model_activity_requests(request_id,instance_id,generation,started_at) VALUES('active',2,1,UTC_TIMESTAMP()-INTERVAL 3 DAY)`},
-		{"waiting_review", `INSERT INTO team_work_items VALUES(9,'awaiting_review',NULL)`},
+		{"waiting_review", `INSERT INTO team_work_items(team_id,status,superseded_by) VALUES(9,'awaiting_review',NULL)`},
 		{"pending_notification", `INSERT INTO team_event_outbox VALUES(9,'pending')`},
 		{"unknown_status", `UPDATE team_tasks SET status='unrecognized'`},
 		{"new_observation_grace", `UPDATE team_runtime_lifecycle SET observed_since=UTC_TIMESTAMP()`},

@@ -78,7 +78,7 @@ func idleStopMySQL(t *testing.T) db.Session {
 		`CREATE TABLE teams (id INT PRIMARY KEY,status VARCHAR(32),resource_scope VARCHAR(32))`,
 		`CREATE TABLE team_members (id INT PRIMARY KEY,team_id INT,instance_id INT NULL,member_key VARCHAR(64),role VARCHAR(32),status VARCHAR(32))`,
 		`CREATE TABLE team_tasks (id INT PRIMARY KEY,team_id INT,created_by INT NULL,status VARCHAR(32),finished_at DATETIME(6) NULL,payload_json LONGTEXT NULL)`,
-		`CREATE TABLE team_work_items (team_id INT,status VARCHAR(32),superseded_by VARCHAR(255) NULL)`,
+		`CREATE TABLE team_work_items (team_id INT,status VARCHAR(32),superseded_by VARCHAR(255) NULL,root_task_id INT NULL)`,
 		`CREATE TABLE team_event_outbox (team_id INT,status VARCHAR(32))`,
 		`CREATE TABLE team_workspace_write_intents (team_id INT)`,
 	} {

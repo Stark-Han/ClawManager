@@ -99,10 +99,15 @@ func (r *TeamLifecycleRepository) InstanceTeam(ctx context.Context, id int) (int
 }
 
 func teamHasOpenWork(ctx context.Context, s db.Session, id int) error {
+	// Adapters retire execution for terminal unsuccessful roots, but their old
+	// child ledger may retain a nonterminal status. Do not rewrite that history
+	// or let it prevent maintenance forever. Missing/foreign/successful parents
+	// still block. Runtime execution/write proofs remain mandatory, and automatic
+	// stop separately requires the latest user task to have formally succeeded.
 	var n int
 	err := teamQueryRow(ctx, s, `SELECT
  (SELECT COUNT(*) FROM team_tasks WHERE team_id=? AND status NOT IN ('succeeded','failed','cancelled','skipped','superseded')) +
- (SELECT COUNT(*) FROM team_work_items WHERE team_id=? AND superseded_by IS NULL AND status NOT IN ('succeeded','failed','cancelled','skipped','superseded')) +
+ (SELECT COUNT(*) FROM team_work_items w WHERE w.team_id=? AND w.superseded_by IS NULL AND w.status NOT IN ('succeeded','failed','cancelled','skipped','superseded') AND NOT EXISTS (SELECT 1 FROM team_tasks t WHERE t.id=w.root_task_id AND t.team_id=w.team_id AND t.status IN ('failed','cancelled','skipped','superseded'))) +
  (SELECT COUNT(*) FROM team_event_outbox WHERE team_id=? AND status<>'delivered') +
  (SELECT COUNT(*) FROM team_workspace_write_intents WHERE team_id=?)`, id, id, id, id).Scan(&n)
 	if err != nil {
