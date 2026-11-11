@@ -95,7 +95,7 @@ const (
 	teamCompletionDecisionDeferred          = "deferred"
 	teamCompletionDecisionNeedsConfirmation = "needs_confirmation"
 	teamCompletionDecisionRejected          = "rejected"
-	teamCompletionEvaluationVersion         = 2
+	teamCompletionEvaluationVersion         = 3
 )
 
 var (
@@ -7021,6 +7021,40 @@ func structuredTeamPhaseDispositions(payload map[string]interface{}) map[string]
 	return result
 }
 
+// A Leader may copy the diagnostic suffix instead of the actual phase ID.
+// Resolve only this exact, known alias in the current plan. An actual phase ID
+// always wins; unknown IDs and conflicting explicit decisions are not guessed.
+func canonicalTeamPhaseDispositionIDs(dispositions map[string]teamPhaseDisposition, phases []models.TeamWorkflowPhase, version int64) (map[string]teamPhaseDisposition, bool) {
+	known := map[string]bool{}
+	for _, phase := range phases {
+		if phase.PlanVersion == version {
+			known[phase.PhaseID] = true
+		}
+	}
+	result := make(map[string]teamPhaseDisposition, len(dispositions))
+	for id, d := range dispositions {
+		result[id] = d
+	}
+	changed := false
+	for id, d := range dispositions {
+		if known[id] || !strings.HasSuffix(id, ":leader_review") {
+			continue
+		}
+		base := strings.TrimSuffix(id, ":leader_review")
+		if !known[base] {
+			continue
+		}
+		if _, exists := dispositions[base]; exists {
+			continue
+		}
+		d.PhaseID = base
+		result[base] = d
+		delete(result, id)
+		changed = true
+	}
+	return result, changed
+}
+
 func teamPhaseDispositionPayloads(dispositions map[string]teamPhaseDisposition) []interface{} {
 	phaseIDs := make([]string, 0, len(dispositions))
 	for phaseID := range dispositions {
@@ -7248,6 +7282,14 @@ func (s *teamService) evaluateLeaderRootCompletion(team *models.Team, task *mode
 	finalAnswerReady := eventBool(payload, "finalAnswerReady", "final_answer_ready")
 	remainingActions := normalizeContextRefs(firstTeamValue(payload, "remainingActions", "remaining_actions", "nextActions", "next_actions"))
 	phaseDispositions := structuredTeamPhaseDispositions(payload)
+	if canonical, changed := canonicalTeamPhaseDispositionIDs(phaseDispositions, phases, latestPlanVersion); changed {
+		if payload["reportedPhaseDispositions"] == nil {
+			payload["reportedPhaseDispositions"] = firstTeamValue(payload, "phaseDispositions", "phase_dispositions")
+		}
+		payload["phaseDispositionIdentityNormalized"] = true
+		payload["phaseDispositions"] = teamPhaseDispositionPayloads(canonical)
+		phaseDispositions = canonical
+	}
 	ignoredPhaseDispositions := make([]interface{}, 0)
 	for idx := range phases {
 		phase := phases[idx]
@@ -7826,6 +7868,7 @@ func (s *teamService) reconcileTeamWorkflowLedgerWithDispositions(
 	if latestPlanVersion <= 0 {
 		return false, nil
 	}
+	dispositions, _ = canonicalTeamPhaseDispositionIDs(dispositions, phases, latestPlanVersion)
 
 	latestItems := map[string]models.TeamWorkItem{}
 	for _, item := range items {
