@@ -44,6 +44,7 @@ type workspaceNFSRequest struct {
 }
 type workspaceNFSResponse struct {
 	HistorySnapshot json.RawMessage
+	GitData         []byte
 	Questions       []ownerrecords.NativeQuestion
 	Fingerprint     string
 	UploadIdentity  string

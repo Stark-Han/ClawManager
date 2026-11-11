@@ -146,7 +146,7 @@ func frozenTeamMembers(ctx context.Context, s db.Session, id int) ([]models.Team
 
 // Eligibility uses accepted terminal business facts and Gateway requests, never
 // Team/member updated_at, Redis keepalives, LastSeenAt or polling timestamps.
-func teamIdle(ctx context.Context, s db.Session, id int, days int) error {
+func teamIdle(ctx context.Context, s db.Session, id int, timeout time.Duration) error {
 	if err := teamHasOpenWork(ctx, s, id); err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func teamIdle(ctx context.Context, s db.Session, id int, days int) error {
 	if status != "succeeded" || !finished.Valid {
 		return fmt.Errorf("上一条用户任务尚未正式成功完成")
 	}
-	cutoff := time.Now().UTC().Add(-models.InstanceAutoStopIdleTimeout(days))
+	cutoff := time.Now().UTC().Add(-timeout)
 	if finished.Time.After(cutoff) {
 		return fmt.Errorf("用户任务完成后尚未达到空闲期限")
 	}
@@ -197,6 +197,15 @@ func teamMembersNoRequests(ctx context.Context, s db.Session, id int) error {
 }
 
 func (r *TeamLifecycleRepository) Request(ctx context.Context, id int, target, reason string, days int) (*models.TeamLifecycleOperation, error) {
+	return r.RequestForTimeout(ctx, id, target, reason, models.InstanceAutoStopIdleTimeout(days))
+}
+
+// RequestForTimeout preserves the ordinary-instance seconds setting without
+// treating a member heartbeat as business activity.
+func (r *TeamLifecycleRepository) RequestForTimeout(ctx context.Context, id int, target, reason string, timeout time.Duration) (*models.TeamLifecycleOperation, error) {
+	if reason == "idle_timeout" && timeout < time.Second {
+		return nil, fmt.Errorf("idle timeout must be at least one second")
+	}
 	err := r.sess.Tx(func(s db.Session) error {
 		// Lock instance rows first, matching model admission's lock order.
 		rows, e := s.SQL().QueryContext(ctx, `SELECT i.id FROM instances i JOIN team_members m ON m.instance_id=i.id WHERE m.team_id=? ORDER BY i.id FOR UPDATE`, id)
@@ -270,7 +279,7 @@ func (r *TeamLifecycleRepository) Request(ctx context.Context, id int, target, r
 				return e
 			}
 			if reason == "idle_timeout" {
-				if e = teamIdle(ctx, s, id, days); e != nil {
+				if e = teamIdle(ctx, s, id, timeout); e != nil {
 					return e
 				}
 			}

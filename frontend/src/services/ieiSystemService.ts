@@ -1,3 +1,4 @@
+import type { BrowserOriginMetadata } from "../lib/browserOrigin";
 import axios from "axios";
 import {isOwnerSessionEndpoint,isOwnerSessionFailure,OWNER_SESSION_INVALID} from "../lib/ownerReadNotice";
 import type { WorkspaceFileOperations } from "../components/WorkspaceFileManager";
@@ -56,7 +57,7 @@ export interface IEISystemInstanceList {
   limit: number;
 }
 
-export interface IEISystemInstanceAccess {
+export interface IEISystemInstanceAccess extends BrowserOriginMetadata {
   access_url: string;
   expires_at: string;
   desktop_proxy_mode?: "control-plane" | "fallback" | "direct";

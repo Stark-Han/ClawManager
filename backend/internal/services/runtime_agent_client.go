@@ -17,6 +17,7 @@ var (
 	ErrRuntimeAgentConflict    = errors.New("runtime agent conflict")
 	ErrRuntimeAgentNotFound    = errors.New("runtime agent resource not found")
 	ErrRuntimeAgentUnsupported = errors.New("runtime agent operation unsupported")
+	ErrRuntimeAgentUnavailable = errors.New("runtime agent temporarily unavailable")
 	ErrRuntimeUpgradeBusy      = errors.New("runtime upgrade operation is still in flight")
 )
 
@@ -158,6 +159,25 @@ type RuntimeAgentGatewayState struct {
 	InstanceID int    `json:"instance_id"`
 	Generation int    `json:"generation"`
 	State      string `json:"state"`
+
+	// Runtime errors may include credentials. Decode only the classification;
+	// neither raw details nor the private verdict can enter inspection JSON.
+	recoveryFailureBlocked bool
+}
+
+func (state *RuntimeAgentGatewayState) UnmarshalJSON(data []byte) error {
+	type identity RuntimeAgentGatewayState
+	var wire struct {
+		identity
+		ErrorCode    string `json:"error_code"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*state = RuntimeAgentGatewayState(wire.identity)
+	state.recoveryFailureBlocked = runtimeRecoveryFreshFailureBlocked(wire.ErrorCode, wire.ErrorMessage)
+	return nil
 }
 
 type RuntimeAgentPortRange struct {
@@ -412,6 +432,9 @@ func (c *runtimeAgentHTTPClient) doWithClient(ctx context.Context, httpClient *h
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: %s", ErrRuntimeAgentNotFound, string(msg))
+		}
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+			return fmt.Errorf("%w: runtime agent status %d: %s", ErrRuntimeAgentUnavailable, resp.StatusCode, string(msg))
 		}
 		return fmt.Errorf("runtime agent status %d: %s", resp.StatusCode, string(msg))
 	}

@@ -117,7 +117,7 @@ func (c *teamLifecycleCoordinator) scan(ctx context.Context, cfg models.Instance
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_, _ = c.store.Request(ctx, id, "stopped", "idle_timeout", cfg.IdleTimeoutDays)
+		_, _ = c.store.RequestForTimeout(ctx, id, "stopped", "idle_timeout", cfg.IdleTimeout())
 	}
 	return nil
 }

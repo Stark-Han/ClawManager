@@ -422,3 +422,17 @@ func TestTeamIdleMySQLColdProtectionIsAtomicAndCannotUpgradeLiveSources(t *testi
 		t.Fatal("stale operation admitted")
 	}
 }
+
+func TestTeamIdleMySQLUsesSharedSecondsTimeout(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	if _, err := s.SQL().Exec(`UPDATE team_tasks SET finished_at=UTC_TIMESTAMP()-INTERVAL 5 MINUTE WHERE id=100`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RequestForTimeout(t.Context(), 9, "stopped", "idle_timeout", time.Hour); err == nil {
+		t.Fatal("stopped before configured idle timeout")
+	}
+	op, err := r.RequestForTimeout(t.Context(), 9, "stopped", "idle_timeout", 2*time.Minute)
+	if err != nil || op.State != "stopping" || len(op.Members) != 2 {
+		t.Fatalf("seconds setting did not admit the whole Team: %+v %v", op, err)
+	}
+}
