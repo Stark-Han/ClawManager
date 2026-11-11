@@ -227,6 +227,9 @@ func (r *InstanceAutoStopRepository) BeginManualStart(ctx context.Context, id in
 		if err != nil {
 			return err
 		}
+		if i.status == "deleting" {
+			return models.ErrInstanceStopping
+		}
 		if i.mode != "lite" {
 			return nil
 		}
@@ -438,6 +441,9 @@ func (r *InstanceAutoStopRepository) BeginManualStop(ctx context.Context, input 
 		i, err := lockActivityInstance(ctx, s, input.InstanceID)
 		if err != nil {
 			return err
+		}
+		if i.status == "deleting" {
+			return models.ErrInstanceStopping
 		}
 		if i.mode != "lite" || i.generation != input.Generation || i.userID != input.UserID {
 			return models.ErrAutoStopConflict

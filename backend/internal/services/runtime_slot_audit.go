@@ -239,6 +239,8 @@ func (c *slotRuntimeAgentClient) observeRuntimeSlot(ctx context.Context, pod mod
 		o.Err = fmt.Errorf("runtime slot exit proof is unavailable or belongs to another Pod")
 		o.Diagnostic = "runtime slot exit proof unavailable or Pod identity differs"
 	}
+	// Preserve upstream's stopped-owner handling, with the full current-worker
+	// empty proof required before accepting a changed historical owner epoch.
 	if a := s.Assignment; a != nil && (a.PodUID != *pod.PodUID || a.InstanceID < 1 || a.UserID < 1 || a.Generation < 1 || a.GatewayID != fmt.Sprintf("gw-%d-%d", a.InstanceID, a.Generation) || !stopTokenValid(a.WorkerEpoch) || !runtimeSlotOwnerEpochConfirmed(s)) {
 		o.Err = fmt.Errorf("runtime slot owner identity is invalid")
 		o.Diagnostic = "runtime slot owner identity invalid"
@@ -429,13 +431,9 @@ func (a *runtimeSlotAuditor) Reconcile(ctx context.Context, s *RuntimeScheduler)
 	// Historical, paused and stale reports cannot receive ordinary placements.
 	// Leave their durable quarantine untouched and spend this pass's bounded
 	// requests on current candidates. Allocation still inspects the exact live UID.
-	timeout := s.heartbeatTimeout
-	if timeout <= 0 {
-		timeout = heartbeat.Timeout
-	}
 	eligible := make([]models.RuntimePod, 0, len(pods))
 	for _, pod := range pods {
-		if pod.State != "ready" || pod.Draining || pod.SchedulingPaused || !runtimePodEligibleForOrdinaryScheduling(pod) || pod.Capacity < 1 || pod.PodUID == nil || strings.TrimSpace(*pod.PodUID) == "" || pod.AgentEndpoint == nil || strings.TrimSpace(*pod.AgentEndpoint) == "" || pod.LastSeenAt == nil || now.Sub(*pod.LastSeenAt) > 3*timeout || pod.LastSeenAt.After(now.Add(time.Minute)) {
+		if !s.runtimePodEligibleForSlotAudit(pod, now) {
 			continue
 		}
 		eligible = append(eligible, pod)
@@ -482,6 +480,14 @@ dispatch:
 	close(jobs)
 	wg.Wait()
 	return errors.Join(append(failures, passCtx.Err())...)
+}
+
+func (s *RuntimeScheduler) runtimePodEligibleForSlotAudit(pod models.RuntimePod, now time.Time) bool {
+	timeout := s.heartbeatTimeout
+	if timeout <= 0 {
+		timeout = heartbeat.Timeout
+	}
+	return pod.State == "ready" && !pod.Draining && !pod.SchedulingPaused && runtimePodEligibleForOrdinaryScheduling(pod) && pod.Capacity > 0 && pod.PodUID != nil && strings.TrimSpace(*pod.PodUID) != "" && pod.AgentEndpoint != nil && strings.TrimSpace(*pod.AgentEndpoint) != "" && pod.LastSeenAt != nil && now.Sub(*pod.LastSeenAt) <= 3*timeout && !pod.LastSeenAt.After(now.Add(time.Minute))
 }
 
 // Match the assignment reservations used by admission. A Runtime exit proof
@@ -586,6 +592,7 @@ func (s *RuntimeScheduler) auditRuntimePodSlots(ctx context.Context, c *slotRunt
 	if record.PodError != "" {
 		observation.Error = "runtime slot inventory or quarantine unresolved"
 	}
+	releasePending := false
 	for _, o := range observations {
 		slot := runtimeSlotInventoryObservation(o, *pod.PodUID)
 		reason := record.Ports[o.Port]
@@ -594,7 +601,8 @@ func (s *RuntimeScheduler) auditRuntimePodSlots(ctx context.Context, c *slotRunt
 		} else if slot.State == "free" && reason == "" && (quarantine.PodError != "" || quarantine.Ports[o.Port] != "") {
 			// The pending ConfigMap CAS may fail. A following fresh scan can
 			// publish free only after it observes that this exclusion is gone.
-			reason = "runtime slot quarantine release pending"
+			reason = models.RuntimeSlotReleasePendingMessage
+			releasePending = true
 		}
 		if reason != "" {
 			if slot.State == "free" {
@@ -624,6 +632,10 @@ func (s *RuntimeScheduler) auditRuntimePodSlots(ctx context.Context, c *slotRunt
 	writeErr := c.writeSlotAudit(ctx, pod, prior, record)
 	if inspectErr != nil || bindingsErr != nil || reservationsErr != nil || writeErr != nil {
 		return errors.Join(append(failures, inspectErr, bindingsErr, reservationsErr, writeErr)...)
+	}
+	if releasePending {
+		// Only a successful CAS can request the following independent fresh scan.
+		s.RequestSlotAudit(pod.ID)
 	}
 	for _, action := range cleanup {
 		if err := action(); err != nil {
@@ -679,6 +691,7 @@ func (s *RuntimeScheduler) auditFreeStoppedRuntimeSlot(ctx context.Context, c *s
 	if !deleted {
 		return fmt.Errorf("stopped slot binding or instance changed after fresh exit proof")
 	}
+	s.RequestSlotAudit(pod.ID)
 	return nil
 }
 
@@ -745,5 +758,6 @@ func (s *RuntimeScheduler) auditStoppedRuntimeSlot(ctx context.Context, c *slotR
 	if !deleted {
 		return fmt.Errorf("stopped slot binding or instance changed after confirmed teardown")
 	}
+	s.RequestSlotAudit(pod.ID)
 	return nil
 }
