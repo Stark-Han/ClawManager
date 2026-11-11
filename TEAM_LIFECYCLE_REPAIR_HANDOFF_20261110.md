@@ -1,88 +1,131 @@
-# Team 整队启停修复交接（2026-11-11）
+# Team 整队启停、容器恢复与上游合并交接
 
-本文件替代此前的限时交接结论。最终现场验收结果在文末；不能用镜像 Ready 代替任务成功。
+更新时间：2026-11-11。此文替代之前过时的阶段结论；以本文件的现场证据及最终验收表为准。
 
-## 代码范围和合并方式
+**当前状态：计划内代码、上游合并、必要回归与32543发布完成。最终镜像上的四引擎任务402正式成功，原Team182整队停止及再次启动4/4通过，历史文件摘要一致。交接提交仅更新文档，不改变已验收业务二进制。**
+
+## 仓库和合并方式
 
 - App：`D:/test/ClawManager-team-upstream-merge`；Runtime：`D:/test/AgentsRuntime`。
-- 两个仓库均为 `codex/team-personal-integration`。个人项目未修改。
-- 保留上游普通实例自动休眠、沙箱/NFS 配置及已合并更新；Team 通过现有生命周期服务协调整队启停，不恢复旧调度器。
-- Team 成员不进入普通实例独立自动停机队列。只有整队没有未完成任务、审核、通知、模型请求、工具命令及未确认写入，并且最后一条用户任务正式成功完成、超过既有空闲期限，才允许自动停机。心跳、在线回报和轮询时间不延长业务空闲时间。
-- 保留 Leader/Worker 派发、串行执行、依赖、正式交付、Leader 关闭根任务的既有机制；没有增加 Worker 必填字段。
-- CM 与北向共用整队状态、启动/停止接口和按钮组件。停止后保留历史和文件，发送任务在启动完成前被拒绝。
+- 两仓库均为团队项目 `codex/team-personal-integration`。个人项目业务代码未修改。
+- App origin：`https://github.com/Stark-Han/ClawManager.git`；Runtime origin：`https://github.com/Stark-Han/AgentsRuntime.git`。
+- App 最终合并基线：`upstream/main@646833710b3fed1a1dbc3b89436a744db3445b1c`，合并提交 `4eee25fa`。
+- Runtime 最终合并基线：`upstream/main@3f1cd721cee1880849cd9abc26771c0cc476ac29`，合并提交 `5fbe896`。
+- 逐项解决冲突，保留双方功能，没有整体使用 ours/theirs 覆盖。App 的槽位审计冲突保留上游逻辑，同时保留当前 worker 空闲证明要求，历史 epoch 不单独授权槽位复用。
+- 既有迁移按完整文件名记账；未删除、重命名或修改已发布 SQL。本轮没有新增 schema。
 
-## 本次提交及根因
+## 已实现能力与边界
 
-App：
+1. CM 和北向共用整队启动/停止接口与状态；原 Team、owner、模板、四种 Lite Runtime、普通实例 Pro 保留。
+2. Team 成员不进入普通实例单独自动停机。整队自动休眠要求最新用户任务正式成功、无未结束工作/审核/通知/模型请求/命令/写入，且达到上游空闲期限。心跳、在线回报、页面查询不延长业务空闲。
+3. 停止/启动使用原实例和成员，保留工作区、会话、文件和关联。Worker 先启动、Leader 后启动；启停本身不派发任务。
+4. 故障恢复替换运行载体，不调用恢复出厂、不创建同角色新实例、不重复占用用户配额。
+5. 槽位容器停止按实际容器退出证明完成；404、Pod Ready、租约到期、SQL 显示 stopped 均不能单独代替退出证明。
+6. 运行中成员明确出错或停止时，接口显示需恢复并提供启动动作；不因心跳暂时 unknown 改写团队状态，也不修改业务任务回执。
+7. 保留 Leader/Worker 原调度、工作项、依赖、正式回执及根任务最终完成规则，没有增加 Worker 必填参数。
+8. 沿用上游 NFS、沙箱和权限配置，没有批量改目录权限或放宽隔离。
 
-- `fab27c52`：整队启动期间给已启动成员续租；停止时等待原实例的持久化退出证明，沿用同一个整队操作有限续查。
-- `e6c707a1`、`ea4f46bb`、`e1cd3d7a`：冷启动沿用原工作区，仅接受同版本、完成整队停止、实际保留 PVC/NFS 来源的可信证明。失败或仅预检的升级记录不冒充已执行迁移；已确认迁移和排除规则仍有效。
-- `fb31655f`：显式整队启动重新检查已报错的成员，健康成员保留；存在活跃模型/命令/写入则拒绝恢复转换，原业务任务不改写。
-- `f9993de9`、`373ffe5f`：先核实冷启动保留的 PVC/内联 NFS 等价关系，再执行普通存储筛选；同一整队操作未取得绑定的重试沿用原停止来源，任何后续执行/停止记录仍阻止沿用。真实 MySQL 覆盖来源不明、版本不同、普通实例及后续停止记录拒绝。
-- `4a15d945`：人工 Lite 停止也在原生退出前读取实际 Pod/保留卷并持久化存储身份。真实 MySQL 验证退出失败时该来源已经保存，原重启恢复回归通过。
-- `74dcae84`：真实 MySQL 中复现任务授权检查的 1213 死锁。实例/任务锁顺序统一到同一事务，只对确定回滚的 1213 有限重试，权限撤销、停机与代数检查保留。旧代码并发用例失败，修复后包含原撤销生命周期断言的真实测试通过。
-- `dd886db4`：后端单文件镜像覆盖入口，保留已验证的前端和原生资源，避免重复叠加无关镜像层。
+## 本次修复点与代码入口
 
-Runtime：
-
-- `c8a481c`：OpenCode 原生辅助进程按原目录路径/device/inode 验证 Team 授权，而非依赖子命名空间中不可映射的组号。
-- `9fb94d3`：保留可信镜像的 Team/模型治理能力声明，防止实例请求伪造或清除这些能力。
-- `f272f82`：OpenClaw 10.2 默认阻止固定沙箱模型中继的私网地址。仅对隔离模式、确切的管理模型中继和相应版本增加 provider 请求策略，并同步现存模型缓存；外部 provider 不放宽。
-- `03d4508`：10.2 配置重载校验也使用有效期内的管理代理租约，原始配置不持久化临时信任；过期/缺失继续拒绝。
-- `33d0282`：Redis 租约到期会关闭既有连接；旧客户端对已销毁 socket 的后续命令会永久等待。现在新命令写入前合并重连、重新认证/选择数据库；丢失响应的写入不自动重放；显式关闭会拒绝所有等待者。
-- `52e3379`：OpenCode 和 DeepSeek Harness 复用同一协议，也发布重连修复。没有分叉业务协议。
-- `03eb18d`：固定模型中继原先删除所有 X-ClawManager 请求头，导致已协商治理的 OpenCode 请求丢失任务身份并持续 409。只在固定模型入口保留完整、唯一且与租约代数一致的三个任务坐标；控制/实例身份、公共网络、文件服务及响应仍过滤。旧代码真实 HTTP 中继用例失败，修复后整个 netbroker 包通过。四种 Lite 管理器重新构建；原生模型二进制和功能未更换。
-
-## 必要验收证据
-
-已通过的检查不因每次打包重复运行：
-
-- 真实临时 MySQL：整队空闲/心跳无关、活跃任务和请求拒绝、任务与停止竞争、启动续租、部分恢复、迟到证明、冷启动来源与版本/迁移保护；新增显式整队启动恢复用例通过。
-- 实际服务器无业务卷的 rootless 原生辅助进程复现及修复后检查通过；原目录和内容保留。
-- 普通非 Team Hermes #608 从 generation 1 重启到 2，实际原生状态 running，随后通过正常停止释放绑定，数据保留。
-- 实际 Redis TCP 断线及真实 Redis CLIENT KILL：有界失败、合并重连、重新 AUTH/SELECT、下一条消息只到一次、停止可退出；原忙时上下文/通知串行测试通过。
-- 安装后的 10.2 重载校验实际通过，过期/缺失策略拒绝；安装后的 OpenCode/DSH 协议均包含同一重连实现。
-- Team #182 原实例仍为 603/604/605/606，分别为 OpenClaw/Hermes/OpenCode/DeepSeek Harness。
-- 原任务 #395 最终报告仍为 3541 bytes，SHA256 `3309f56d5edf73193021c62ce9e2685ca51d55c8f3f844497cd16984ad72cd17`。
-- #396 是现场发现模型中继和旧 Redis 连接问题的失败验收任务；没有 Worker 派发。操作员用已有 Runtime `failActiveTask` 上报真实失败并保留诊断文件，未把它改成成功、未直接修改 SQL 状态。这不作为自主模型验收通过证据。
-- 忙时停止真实 API 返回 409，原任务和成员未被停止。
-- 整队停止操作 `43d10cdd-e418-4151-b0cc-997fdf199131` 于 `2026-11-11T02:17:18.571767Z` 完成 4/4，所有原绑定释放。接口返回 stopped、can_start=true；四成员显示已停止。
-
-## 实际发布与构建
-
-App 已更新至 `team-lifecycle-20261111-v8`，digest `sha256:0a1c7420f08eab24f0123aa6d597554f0674b449ac990b80606bae397508320b`，业务二进制来源 `74dcae84`。Core/Gateway 实际 Ready，用户指定 apply 命令 exit=0。此前中间镜像不作为最终验收。
-
-已执行用户指定的 `/home/hxc/clawmanager-apply.sh`：APP_IMAGE 为上述 App，TENANT_SUFFIX=-hxc-peer，NODE_PORT=32543。Core/Gateway Ready；最终 apply exit=0。首次切换期间 challenge 端口临时不可达，待两个服务 Ready 后串行重跑成功，未并行发布。
-
-最终 Lite 镜像固定为：
-
-| Runtime | 镜像与 digest |
+| 提交 | 内容 |
 | --- | --- |
-| OpenClaw | `10.130.14.23:5000/agentsruntime/openclaw-lite@sha256:5a4dfd45c579a89916d3e482d04598b7dfcdabd1e7cd92c26799aec6e910e477` |
-| Hermes | `10.130.14.23:5000/agentsruntime/hermes-lite@sha256:a428a39f803619ec5793cd69947bd51acbdfccfff591fd6a080c40e5df163771` |
-| OpenCode | `10.130.14.23:5000/agentsruntime/opencode-lite@sha256:a44c2e261a8aeeb653bdd2ce2665ce21378b47aa600c580a77ae3c936aed3641` |
-| DeepSeek Harness | `10.130.14.23:5000/agentsruntime/deepseek-harness-lite@sha256:0470e202435e067e3ff6ebb60c5909cc542993b6928a5637a94f11c57b455ff3` |
+| `5a585600` App | 过期模型请求租约独立于每日停机扫描清理；短周期控制循环也处理，不撤销有效续租或无退出证明的 legacy 请求。 |
+| `a689bf9` Runtime | 区分纯容器重建要求和真实停止失败；与真实错误组合时继续保守失败，不释放旧 writer。 |
+| `ffd8e431` App | 明确的 `container_reset_required` 接入既有故障恢复；通用 `gateway_stop_failed` 不整体开放自动重试。 |
+| `27a91196` App | 团队就绪状态读取结合实际故障成员，提供恢复入口，历史启动操作记录不被读取操作改写。 |
+| `f1b2bdd5` App | 已确认的容器停止来源接入既有冷启动校验，补上错误清理未经过 idle-stop SQL 账本的衔接。 |
+| `6def1685` App | 非破坏性续启验证当前停止来源及后续未确认发布；删除仍走完整历史证明，不因旧凭据放松删除保护。 |
+| `4daa919e` App | 手动整队停止先阻止新推理，再等现有请求结束；无实际执行空闲证明时不发停止指令。自动休眠继续要求零请求。 |
+| `e1a4d89` Runtime | 更新主/恢复管理器时重新生成并验证 Hermes release inventory，原生版本保持0.22.5。 |
 
-仅在停止 4/4 且实际绑定为零后更新受影响的保护池。Core 批准镜像、站点覆盖配置、runtime-images.json 和 Lite 目录同步；Pro 目录完整身份比对不变。
+主要入口：
 
-构建入口：App `Dockerfile.team-server-overlay`；Claw `openclaw/Dockerfile.team-model-relay-overlay`；Code/DSH 各自 `Dockerfile.team-transport-overlay`。Code/DSH 的 `team-protocol` 构建上下文必须先用同一提交的 `opencode/team/build-protocol.mjs`、`deepseek-harness/team/build.mjs` 生成，不复用旧生成文件。正式重建可以使用各自完整 Dockerfile，无需保留测试 overlay 链。
+- `backend/internal/repository/team_lifecycle.go`：事务准入、整队操作、进度与状态。
+- `backend/internal/services/team_lifecycle.go`：复用普通实例启停、原生空闲预检、成员恢复。
+- `backend/internal/services/instance_auto_stop_service.go`：独立请求租约清理与已有停止续做。
+- `backend/internal/services/runtime_team_stopped_source.go`：读取真实停止来源，保持存储和原生版本约束。
+- `backend/internal/services/k8s/runtime_assignment_cleanup.go`：续启与删除的不同证明范围。
+- `clawmanager-agent/gateway/container_reset.go`、`isolated_lifecycle.go`：容器重建语义及原始故障保留。
 
-## 数据、回退和运行前提
+## 请求与 fallback
 
-- 私密备份、原始镜像/配置、迁移日志、停机证明保存在服务器 `/home/hxc/team-lifecycle-20261110/`。不得提交凭据或备份正文。
-- 原实例、Team、任务历史和工作区保留；没有清库、删除绑定冒充停机、chmod777 或递归改写目录权限。
-- 保留上游命名空间、安全和 NFS 设置。当前节点原生 user namespace 前提已验证；只使用已部署对应 Localhost AppArmor profile 的 node1，集群全局限制未关闭。
-- 不在保护沙箱内直接发 Gateway 自重启信号：旧 10.2 自重启可能离开原进程组，管理端会保守报 gateway_stop_failed。此次最终恢复使用正式整队退出证明，不把信号当成停机证明。
-- 旧人工停止遗漏的存储字段曾导致旧 Pod 替换后缺失来源。此次针对 #603 generation 4 的一条已完成停止记录，仅修复空的 `storage_identity`：核对原数据库 Pod UID、该 UID 的集群退出事件、部署前快照与保留 ReplicaSet 完整 spec 一致、同一 Deployment UID、早于停止创建的 Bound PVC/Retain RWX PV。证据及条件更新结果保存在服务器 `openclaw-stop-storage-repair-{evidence,result}-20261111.json`；未修改任务、整队状态、绑定或停止结果。未来停止由正式代码保存，不依赖此一次性修复。
-- 临时的旧 Gateway 重载配置和内存/容器插件过渡不属于最终方案：停止后已删除临时 loopback trustedProxies/managerUrl，正式镜像包含完整修复。
-- 回退必须使用认识 Team 生命周期和原生停止证明的兼容 App/Runtime。先核实原操作，停止确认后切镜像；不回滚覆盖新产生的数据库和文件，不清除证明或重新执行旧任务。
+- 自动停机：先验证业务与实际执行都空闲，再冻结整队状态、停止并验证全部成员。
+- 手动停止：业务任务、工具命令和写入必须已结束；可以先记录停止意图阻止新推理，等待当前模型请求自然结束，之后才发原生停止。超限显示需恢复并保留原操作，不无限 running。
+- 当前容器需重建：继续已有容器终止协议；必须按原 Pod、容器、generation 和操作确认退出。
+- 真正无法正常停止：现有受控管理员容器隔离/终止能力可以作为 fallback；作用于准确的故障执行，不删工作区。不能以通用错误直接无限重试，不能只删 Pod 记录当作旧执行已死。
+- desired=stopped 时，完成清理后保持停止；desired=running 时，确认旧执行退出后才让原实例接管存储。
+- 新容器可以提前准备，禁止与未确认退出的旧执行同时写原存储。
+- 已完成的工作项和正式回执保留；外部工具副作用不确定时先核实，不直接重放。
 
-## 操作诊断与补偿审计
+## 当前发布
 
-- #397 在模型中继缺失任务头、持续 409 后，通过现有 Runtime 失败报告保留失败诊断；原生 OpenCode 已中断并读回实际 idle，再受控停止整队。它不作为成功验收。
-- 操作员选择根任务诊断上下文时误取了 Leader 收件箱中的 A1 结果，导致 #497 的 owner/显示结果被诊断投影覆盖。我已核对数据库中原始 `completion_proposed`（成员 575、原 completion ID、原 revision）并仅恢复这条已成功工作项的投影；未改变根 #397 的 failed 或制造新完成。原 Worker 正文、产物和正式回执均保留。条件更新只命中 1 行；服务器审计 `diagnostic-projection397-before-and-repair.txt` SHA256 `cd7fb5709d280572fa6e7d9b40f90f30a5387cdee49120ab96fdb300867d6da1`。以后诊断必须定位根任务原始派发上下文，不能取收件箱首条 taskId 匹配。
-- 整队停止 `e284097f-3056-483b-b698-91b95658a1aa` 于 `2026-11-11T03:02:45.26388Z` 确认 4/4，四原实例 603/604/605/606 的新停止记录均完成且 `storage_identity` 为 252 bytes；没有再补写存储字段。仅在实际绑定数为 0 后更换四个 Lite 管理器。
+环境：`10.130.14.23:32543`，namespace `clawmanager-hxc-peer-system`。
 
-## 最终现场闭环
+按用户命令执行：
 
-正在执行：原四成员启动、全新四引擎短任务、正式回执和最终文件、跨 Redis 租约边界在线状态、再一次整队停止/启动。该段完成后写入实际任务、操作和时间；当前不能把这部分标成通过。
+```sh
+APP_IMAGE=10.130.14.23:5000/clawmanager-hxc-app:team-lifecycle-20261111-resume-v13
+TENANT_SUFFIX=-hxc-peer
+NODE_PORT=32543
+bash ./clawmanager-apply.sh
+```
+
+App digest：`sha256:d36d210ea6555ff6b0c93be6e1232c6433c05a35f5e401df7b0e5902bb819dd7`，业务源码 `4daa919e`。
+
+四种 Lite Runtime 使用 `team-lifecycle-20261111-resume-v8`，管理器源码 `e1a4d89`：
+
+| Runtime | 镜像仓库 | digest |
+| --- | --- | --- |
+| OpenClaw | `10.130.14.23:5000/agentsruntime/openclaw-lite` | `sha256:4fa6efccc7987d2d63074c62240a27f232950e0217caf1534fdb9a57b10bf7cd` |
+| Hermes | `10.130.14.23:5000/agentsruntime/hermes-lite` | `sha256:f3c280bfcaebafb2a5daff6d26043b5d5bdcaa1e8a89b32c8c252c275eaf7694` |
+| OpenCode | `10.130.14.23:5000/agentsruntime/opencode-lite` | `sha256:3351b922756bcad78085f112b1963572c59256d36fcdce6d6221f4a0cc798e99` |
+| DeepSeek Harness | `10.130.14.23:5000/agentsruntime/deepseek-harness-lite` | `sha256:6881eca847fcbfd03f89d985fd20e792b3aaa9268a33758b1c12418c52b88e41` |
+
+Runtime 主二进制及恢复助手均与本地构建SHA256匹配。原生程序版本分别保持 OpenClaw2026.10.2、Hermes0.22.5、OpenCode2.0.27、DSH0.2.1rc3。池、Core镜像配置、持久化overlay、镜像目录同步到相同digest；普通Pro目录保留。
+
+## 已有现场证据
+
+- Team182 原实例603/604/605/606，成员574/575/576/577，全部保留。
+- 原故障Leader603第11代真实容器终止于 `2026-11-11T08:24:10Z`；没有写SQL伪造退出或任务完成。
+- 原团队恢复操作 `6736a005-28df-471e-80ca-7ce005edaae1` 于 `2026-11-11T09:01:02.521511Z` 完成4/4；Leader保留原实例进入第17代。
+- 原任务401于 `2026-11-11T09:03:32Z` 正式 succeeded/completed，回执 `completion:182:team-182-task-401:leader:root:1`。三个Worker正式结果仍为revision1，没有新增重复工作项。
+- 整队停止操作 `c7bd25d6-f3de-400d-8834-1cc741a77717` 于 `2026-11-11T09:21:43.171524Z` 完成4/4，四成员实际stopped；绑定归零后才更新Runtime。
+- 普通Hermes609在0.22.5上已实际启动、重启并停止，第5代无绑定；这与更早旧版本608的验收区分记录。
+- 395最终文件、397两份Worker产物的字节数及SHA256再次读回保持一致。旧399正式完成及文件证据仍保留，不把旧验收冒充最终镜像验收。
+
+## 最终镜像真实验收
+
+- 发布后原团队启动：操作 `38b88386-d129-430a-bf69-d215ee14135e`，`2026-11-11T09:34:10.41022Z` 达到4/4；原实例603/604/605/606运行代数为18/23/12/10。
+- 四引擎短任务402：`2026-11-11T09:44:18Z` 正式 succeeded/completed，根回执 `completion:182:team-182-task-402:leader:root:1`。Hermes、OpenCode、DSH三个工作项 E1/E2/E3 均 succeeded、revision1，分别交付2/4/6；Leader正式汇总，无重复派发或代交完成。
+- 任务完成后的整队停止：操作 `d84fc5c4-11b3-4a31-b1f5-a3365e6c84c2`，`2026-11-11T09:45:20.358804Z` 达到 stopped4/4；四成员均 offline/stopped，接口 can_start=true。
+- 最终再次启动：操作 `d3eba716-9eeb-4a27-b390-1c857f660b09`，`2026-11-11T09:48:18.600233Z` 达到 running4/4；原四实例全部 idle，can_stop=true。Team及成员ID、owner、存储关联均保留。
+- 停启后文件复核：任务395最终文件3541字节、SHA256 `3309f56d5edf73193021c62ce9e2685ca51d55c8f3f844497cd16984ad72cd17`；任务397两份产物894/1087字节、SHA256分别为 `f658c2c4a32bc9df26f207bebd5d150a073dcd75ea754118a8ac8980c07efb87` / `bf4b342f4dcaa86bdb89f25b48c5536c9c3f6cb02025141749e43a0edce07485`，均与停启前一致。
+
+自动空闲准入已用真实MySQL及关键并发/失败用例验证；未缩短发布镜像的一天空闲期限，也不声称现场等待一天的自动触发已完成。现场完整停止/启动验证使用正式手动入口及相同成员执行链。
+
+## 必要验证
+
+- 真实MySQL：关闭/未到期的空闲扫描不阻断过期请求清理；有效租约、legacy请求保持保护。
+- 真实MySQL：整队故障显示不重写操作；手动停止冻结新推理、等待旧请求结束；活动业务任务、原生任务、写入仍拒绝；自动停止仍拒绝活跃推理。
+- 真实MySQL：容器停止来源续启保留owner、工作区、原生版本及升级围栏。
+- K8s控制边界：当前停止来源与删除历史分开；新代数未确认发布、错误owner/工作区、未完成容器释放均拒绝；旧凭据不授权删除。
+- Runtime：纯重建要求可接续，组合真实错误继续失败；保留旧writer/端口，不能提前启动后继；既有槽位、空闲停止及隔离回归通过。
+- 本轮未改前端源码，不重复构建前端；沿用已通过的原前端构建和页面验证。
+
+## 数据、证据与回退
+
+- 本机私有证据：`D:/test/ClawManager-2/team-optimization-docs/team-lifecycle-build/`；服务器：`/home/hxc/team-lifecycle-20261110/`。不提交凭据、token、配置正文或数据库dump。
+- 最新上线前部署及配置快照：服务器 `resume-before-*.json`，保留原PVC、NFS设置和旧镜像。回退前先核实并收尾已接受的启停操作，不能让旧执行与新执行同时写存储。
+- App兼容回退候选v12 digest `sha256:7515e00a8e36adb0144b9a284d4284059ad58f9760d6fb994f8280766a407fe9`；不回退schema或覆盖业务数据库。
+- Hermes604旧0.21工作区已在停稳、备份和原生迁移验证后升级0.22.5；3个会话、37条消息迁移前后关键字段哈希一致，之后产生的新业务数据继续保留。禁止直接换回0.21。
+- 原Hermes完整备份：服务器 `team-182-before-hermes-0225-20261111.tar.gz`，SHA256 `09b9b85400fb415ff31d85d218a56dae793b1a07f311ff10245f7bd26ee6372c`。
+- 已存在的显式管理员kernel容器隔离证明不等于graceful退出，不用于自动休眠，不放宽给owner或Worker。
+- 旧历史任务失败、旧工作项仍显示running的历史保留，不被改成成功；只有生命周期准入识别已终结失败父任务，不改业务账本。
+
+## 复盘
+
+- 必须区分代码完成、正常路径通过和最终镜像现场闭环。进度按具体证据报告，不再使用无统一口径的百分比。
+- 之前把模块构建、版本迁移、上游更新及业务内容验收混在一起，导致交付链路过晚暴露问题。
+- 本轮恢复来源最初误用了删除用的全历史校验，增加了无效阻塞；应一开始区分续启和删除的权限范围。缺少诊断又增加了一轮部署。
+- 有效措施：固定upstream基线；复用原生层和测试环境；只补当前边界测试；保留原团队做真实恢复；不新增复杂业务任务、不重写调度；在安全停止及绑定释放后才更新池。
+- C盘Docker清理及压缩已完成：数据盘100.44GiB降至40.89GiB，释放约59.55GiB。保留现用/回退镜像及测试数据，Docker和三个测试容器已恢复。
