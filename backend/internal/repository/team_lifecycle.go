@@ -233,7 +233,23 @@ func (r *TeamLifecycleRepository) Request(ctx context.Context, id int, target, r
 			return fmt.Errorf("团队创建、删除或修复尚未完成")
 		}
 		if v.DesiredState == target && (v.State == target || v.State == "starting" || v.State == "stopping") {
-			return nil
+			// An accepted running projection is not permanent readiness evidence.
+			// An explicit whole-Team Start may recover an errored member through
+			// the existing confirmed cleanup/start path. Healthy members are kept;
+			// active model requests prohibit this maintenance transition.
+			if target != "running" || v.State != "running" || reason != "manual" {
+				return nil
+			}
+			var failed int
+			if e = teamQueryRow(ctx, s, `SELECT COUNT(*) FROM team_members m JOIN instances i ON i.id=m.instance_id WHERE m.team_id=? AND m.status<>'deleted' AND i.status='error'`, id).Scan(&failed); e != nil {
+				return e
+			}
+			if failed == 0 {
+				return nil
+			}
+			if e = teamMembersNoRequests(ctx, s, id); e != nil {
+				return e
+			}
 		}
 		if v.State == "recovery_required" && v.DesiredState == target {
 			phase := "starting"

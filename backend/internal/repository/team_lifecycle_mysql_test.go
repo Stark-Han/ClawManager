@@ -80,6 +80,41 @@ func TestTeamIdleMySQLWholeTeamAdmission(t *testing.T) {
 	}
 }
 
+func TestTeamIdleMySQLExplicitStartRepairsFailedMemberWithoutClosingTask(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	initial, e := r.Request(ctx, 9, "running", "manual", 0)
+	if e != nil || initial.State != "running" {
+		t.Fatalf("healthy replay: %+v %v", initial, e)
+	}
+	for _, q := range []string{`UPDATE instances SET status='error' WHERE id=1`, `UPDATE team_tasks SET status='running',finished_at=NULL WHERE id=100`, `INSERT INTO instance_commands(instance_id,status) VALUES(2,'running')`} {
+		if _, e = s.SQL().Exec(q); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = r.Request(ctx, 9, "running", "manual", 0); e == nil {
+		t.Fatal("repair admitted during another member's command")
+	}
+	if _, e = s.SQL().Exec(`DELETE FROM instance_commands`); e != nil {
+		t.Fatal(e)
+	}
+	op, e := r.Request(ctx, 9, "running", "manual", 0)
+	if e != nil || op.State != "starting" || len(op.Members) != 2 || op.OperationID == "" {
+		t.Fatalf("repair not frozen as one Team start: %+v %v", op, e)
+	}
+	same, e := r.Request(ctx, 9, "running", "manual", 0)
+	if e != nil || same.OperationID != op.OperationID {
+		t.Fatalf("duplicate repair: %+v %v", same, e)
+	}
+	var status string
+	if e = teamQueryRow(ctx, s, `SELECT status FROM team_tasks WHERE id=100`).Scan(&status); e != nil || status != "running" {
+		t.Fatalf("repair rewrote business outcome: %s %v", status, e)
+	}
+	if _, e = r.Request(ctx, 9, "stopped", "manual", 0); e == nil {
+		t.Fatal("repair allowed busy Team to stop")
+	}
+}
+
 func TestTeamColdStartSnapshotOnlyInheritsConfirmedWholeStop(t *testing.T) {
 	s, r := teamIdleFixture(t)
 	ctx := t.Context()
