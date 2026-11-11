@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -59,7 +60,11 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 	}
 	var retained *models.InstanceIdleStopOperation
 	if reader, hasReader := s.deployments.(teamStoppedSourceReader); hasReader && retainedGeneration > 0 {
-		if source, readErr := reader.ConfirmedTeamStoppedSource(ctx, id, user, generation, workspace); readErr == nil && source.InstanceID == id && source.UserID == user && source.WorkspacePath == workspace && source.Phase == "completed" && (source.Generation == retainedGeneration || recoveryPod > 0 && source.RuntimePodID == recoveryPod && source.Generation == generation-1) {
+		source, readErr := reader.ConfirmedTeamStoppedSource(ctx, id, user, generation, workspace)
+		if readErr != nil {
+			log.Printf("Team retained source unavailable: instance=%d generation=%d error=%v", id, generation, readErr)
+		}
+		if readErr == nil && source.InstanceID == id && source.UserID == user && source.WorkspacePath == workspace && source.Phase == "completed" && (source.Generation == retainedGeneration || recoveryPod > 0 && source.RuntimePodID == recoveryPod && source.Generation == generation-1) {
 			retained = &source
 			frozen = true
 		}
@@ -179,6 +184,7 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 			result = append(result, p)
 		}
 	}
+	log.Printf("Team cold resume placement: instance=%d generation=%d source_generation=%d candidates=%d matched=%d version=%s", id, generation, source.Generation, len(pods), len(result), before.RuntimeVersion)
 	return result, len(result) > 0, nil
 }
 
