@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfirmedColdTeamSourceRequiresCompleteGenerationChain(t *testing.T) {
@@ -33,6 +34,19 @@ func TestConfirmedColdTeamSourceRequiresCompleteGenerationChain(t *testing.T) {
 				t.Fatalf("accepted=%v", ok)
 			}
 		})
+	}
+}
+
+func TestWholeTeamStopCoversUnpublishedStartTimeoutWithoutInventingSource(t *testing.T) {
+	now := time.Now().UTC()
+	s := models.InstanceIdleStopOperation{InstanceID: 7, UserID: 2, Generation: 1, WorkspacePath: "/workspace", Phase: "completed", RuntimePodID: 42, PodUID: "pod", GatewayID: "gw-7-1", Endpoint: "http://10.0.0.1:19090", CreatedAt: now.Add(-time.Hour)}
+	if _, ok := confirmedColdTeamSourceAfterWholeStop(7, 2, 4, "/workspace", now, []models.InstanceIdleStopOperation{s}); !ok {
+		t.Fatal("real whole-Team stop lost")
+	}
+	for _, bad := range []models.InstanceIdleStopOperation{func() models.InstanceIdleStopOperation { v := s; v.Phase = "stopping"; return v }(), func() models.InstanceIdleStopOperation { v := s; v.CreatedAt = now.Add(time.Minute); return v }(), func() models.InstanceIdleStopOperation { v := s; v.UserID++; return v }()} {
+		if _, ok := confirmedColdTeamSourceAfterWholeStop(7, 2, 4, "/workspace", now, []models.InstanceIdleStopOperation{bad}); ok {
+			t.Fatal("uncertain source accepted")
+		}
 	}
 }
 
@@ -95,6 +109,16 @@ func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing
 		}
 	}
 	check(true)
+	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(3,'openclaw',?,'preflight_blocked','preflight',1,'blocked','{}')`, newImage)
+	exec(`INSERT INTO runtime_upgrade_items(rollout_id,instance_id,state,created_at,updated_at) VALUES(3,7,'pending',NOW(),NOW())`)
+	check(true)
+	// A real native stop/scale-in receipt must survive removal of the source Pod.
+	exec(`UPDATE instance_idle_stop_operations SET storage_identity=? WHERE id='source'`, old.WorkspaceStorageIdentity)
+	service.deployments = recoveryInventory{target}
+	check(true)
+	exec(`UPDATE instance_idle_stop_operations SET storage_identity='' WHERE id='source'`)
+	check(false)
+	service.deployments = inventory
 	version = "2026.11.1"
 	check(false)
 	version = "2026.10.2"
@@ -112,7 +136,7 @@ func TestColdTeamNativePlacementMySQLPreservesVersionAndUpgradeFences(t *testing
 	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(2,'openclaw',?,'finished','completed',1,'excluded','{"exclude_instance_ids":[7]}')`, newImage)
 	check(false)
 	exec(`DELETE FROM runtime_rollouts WHERE id=2`)
-	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size) VALUES(1,'openclaw',?,'finished','completed',1)`, newImage)
+	exec(`INSERT INTO runtime_rollouts(id,runtime_type,target_image_ref,status,phase,batch_size,preflight_id,preflight_json) VALUES(1,'openclaw',?,'finished','completed',1,'committed','{}')`, newImage)
 	exec(`INSERT INTO runtime_upgrade_items(rollout_id,instance_id,state,created_at,updated_at) VALUES(1,7,'verified',NOW(),NOW())`)
 	check(false)
 }

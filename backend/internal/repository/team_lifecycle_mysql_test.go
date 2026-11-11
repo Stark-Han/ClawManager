@@ -80,6 +80,52 @@ func TestTeamIdleMySQLWholeTeamAdmission(t *testing.T) {
 	}
 }
 
+func TestTeamColdStartSnapshotOnlyInheritsConfirmedWholeStop(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	op, e := r.Request(ctx, 9, "stopped", "manual", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.SQL().Exec(`UPDATE instances SET status='stopped'`); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.SQL().Exec(`DELETE FROM instance_runtime_bindings`); e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Result(ctx, op, len(op.Members), nil); e != nil {
+		t.Fatal(e)
+	}
+	start, e := r.Request(ctx, 9, "running", "manual", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, m := range start.Members {
+		if m.ColdStopOperationID != op.OperationID || m.ColdStoppedAt == nil {
+			t.Fatalf("confirmed unit stop not inherited: %+v", m)
+		}
+	}
+	if e = r.Result(ctx, start, 1, errors.New("start failed")); e != nil {
+		t.Fatal(e)
+	}
+	stop, e := r.Request(ctx, 9, "stopped", "manual", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = r.Result(ctx, stop, 1, errors.New("source stop uncertain")); e != nil {
+		t.Fatal(e)
+	}
+	start, e = r.Request(ctx, 9, "running", "manual", 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, m := range start.Members {
+		if m.ColdStopOperationID != "" || m.ColdStoppedAt != nil {
+			t.Fatal("partial stop granted a cold proof")
+		}
+	}
+}
+
 func TestTeamIdleMySQLBusinessBlockers(t *testing.T) {
 	for _, test := range []struct{ name, q string }{
 		{"last_user_not_complete", `UPDATE team_tasks SET status='waiting',finished_at=NULL`},

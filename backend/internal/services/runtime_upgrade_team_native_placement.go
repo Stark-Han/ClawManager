@@ -2,10 +2,12 @@ package services
 
 import (
 	"clawreef/internal/models"
+	"clawreef/internal/repository"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type nativePlacementInspector func(context.Context, string, map[string]string, bool) (*OpenClawTargetClassification, error)
@@ -21,7 +23,7 @@ type coldTeamNFSVerifier interface {
 func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id int, pods []models.RuntimePod, inspect nativePlacementInspector) ([]models.RuntimePod, bool, error) {
 	var user, generation int
 	var workspace, profile, status, teamProfile, state, desired, raw string
-	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT i.user_id,i.runtime_generation,COALESCE(i.workspace_path,''),i.runtime_security_profile,i.status,t.preview_security_profile,l.state,l.desired_state,l.members_json FROM instances i JOIN team_members m ON m.instance_id=i.id JOIN teams t ON t.id=m.team_id JOIN team_runtime_lifecycle l ON l.team_id=t.id WHERE i.id=? AND m.status NOT IN ('deleted','deleting') AND (SELECT COUNT(*) FROM team_members own WHERE own.instance_id=i.id AND own.status NOT IN ('deleted','deleting'))=1 AND NOT EXISTS (SELECT 1 FROM runtime_upgrade_items ui WHERE ui.instance_id=i.id) AND NOT EXISTS (SELECT 1 FROM runtime_rollouts r WHERE r.preflight_id IS NOT NULL AND JSON_CONTAINS(JSON_EXTRACT(r.preflight_json,'$.exclude_instance_ids'),JSON_ARRAY(i.id)))`, id)
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT i.user_id,i.runtime_generation,COALESCE(i.workspace_path,''),i.runtime_security_profile,i.status,t.preview_security_profile,l.state,l.desired_state,l.members_json FROM instances i JOIN team_members m ON m.instance_id=i.id JOIN teams t ON t.id=m.team_id JOIN team_runtime_lifecycle l ON l.team_id=t.id WHERE i.id=? AND m.status NOT IN ('deleted','deleting') AND (SELECT COUNT(*) FROM team_members own WHERE own.instance_id=i.id AND own.status NOT IN ('deleted','deleting'))=1 AND NOT EXISTS (SELECT 1 FROM runtime_upgrade_items ui JOIN runtime_rollouts ur ON ur.id=ui.rollout_id WHERE ui.instance_id=i.id AND ur.preflight_id IS NOT NULL AND ur.status IN ('pending','running','finished','error')) AND NOT EXISTS (SELECT 1 FROM runtime_rollouts r WHERE r.preflight_id IS NOT NULL AND r.status IN ('pending','running','finished','error') AND JSON_CONTAINS(JSON_EXTRACT(r.preflight_json,'$.exclude_instance_ids'),JSON_ARRAY(i.id)))`, id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -40,22 +42,25 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 		return nil, false, err
 	}
 	frozen := false
+	var coldStop string
+	var coldAt *time.Time
 	for _, m := range members {
 		if m.InstanceID == id && m.Workspace == workspace && m.Generation == generation-1 {
 			frozen = true
+			coldStop, coldAt = m.ColdStopOperationID, m.ColdStoppedAt
 		}
 	}
 	if !frozen {
 		return nil, false, nil
 	}
-	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT instance_id,user_id,generation,runtime_pod_id,gateway_id,pod_uid,endpoint,workspace_path,phase FROM instance_idle_stop_operations WHERE instance_id=? ORDER BY created_at DESC LIMIT 64`, id)
+	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT instance_id,user_id,generation,runtime_pod_id,gateway_id,pod_uid,endpoint,workspace_path,storage_identity,phase,created_at FROM instance_idle_stop_operations WHERE instance_id=? ORDER BY created_at DESC LIMIT 64`, id)
 	if err != nil {
 		return nil, false, err
 	}
 	var stops []models.InstanceIdleStopOperation
 	for rows.Next() {
 		var v models.InstanceIdleStopOperation
-		if err = rows.Scan(&v.InstanceID, &v.UserID, &v.Generation, &v.RuntimePodID, &v.GatewayID, &v.PodUID, &v.Endpoint, &v.WorkspacePath, &v.Phase); err != nil {
+		if err = rows.Scan(&v.InstanceID, &v.UserID, &v.Generation, &v.RuntimePodID, &v.GatewayID, &v.PodUID, &v.Endpoint, &v.WorkspacePath, &v.StorageIdentity, &v.Phase, &v.CreatedAt); err != nil {
 			rows.Close()
 			return nil, false, err
 		}
@@ -67,6 +72,9 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 		return nil, false, err
 	}
 	source, ok := confirmedColdTeamSource(id, user, generation, workspace, stops)
+	if !ok && coldStop != "" && coldAt != nil {
+		source, ok = confirmedColdTeamSourceAfterWholeStop(id, user, generation, workspace, *coldAt, stops)
+	}
 	if !ok {
 		return nil, false, nil
 	}
@@ -89,9 +97,24 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 		return nil, false, err
 	}
 	var old *models.RuntimePod
+	// A completed native stop may already have released/scaled in its old Pod.
+	// The existing durable idle/scale-in receipt retains its exact PVC identity;
+	// never require a terminated Pod to become a live witness again.
+	storage := source.StorageIdentity
+	if storage == "" {
+		storage, err = repository.NewInstanceAutoStopRepository(s.sess).PreviousIdleStorage(ctx, id)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	if storage != "" {
+		copy := *history
+		copy.WorkspaceStorageIdentity = storage
+		old = &copy
+	}
 	for n := range live {
 		p := &live[n]
-		if p.ID == history.ID && stringValue(p.PodUID) == source.PodUID && p.KubernetesReady && stringValue(p.RegisteredPodUID) == source.PodUID && stringValue(p.KubernetesPodUID) == source.PodUID && runtimePodMatchesImage(*p, oldImage) {
+		if old == nil && p.ID == history.ID && stringValue(p.PodUID) == source.PodUID && p.KubernetesReady && stringValue(p.RegisteredPodUID) == source.PodUID && stringValue(p.KubernetesPodUID) == source.PodUID && runtimePodMatchesImage(*p, oldImage) {
 			old = p
 		}
 	}
@@ -140,6 +163,24 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 		}
 	}
 	return result, len(result) > 0, nil
+}
+
+func confirmedColdTeamSourceAfterWholeStop(id, user, generation int, workspace string, stoppedAt time.Time, stops []models.InstanceIdleStopOperation) (models.InstanceIdleStopOperation, bool) {
+	if stoppedAt.IsZero() {
+		return models.InstanceIdleStopOperation{}, false
+	}
+	for _, s := range stops {
+		if s.InstanceID != id || s.UserID != user || s.WorkspacePath != workspace || s.Phase != "completed" || s.Generation >= generation || s.CreatedAt.IsZero() || s.CreatedAt.After(stoppedAt) {
+			return s, false
+		}
+		if s.RuntimePodID > 0 {
+			return s, s.PodUID != "" && s.GatewayID != "" && s.Endpoint != ""
+		}
+		if s.PodUID != "" || s.GatewayID != "" || s.Endpoint != "" {
+			return s, false
+		}
+	}
+	return models.InstanceIdleStopOperation{}, false
 }
 
 // An unbound failed start is not a new source. Every intervening generation

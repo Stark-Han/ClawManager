@@ -18,11 +18,13 @@ type TeamRuntimeState struct {
 
 // Frozen by the server; never accepted from model or browser input.
 type TeamLifecycleMember struct {
-	InstanceID int    `json:"instance_id"`
-	MemberID   int    `json:"member_id"`
-	Generation int    `json:"generation"`
-	Role       string `json:"role"`
-	Workspace  string `json:"workspace"`
+	InstanceID          int        `json:"instance_id"`
+	MemberID            int        `json:"member_id"`
+	Generation          int        `json:"generation"`
+	Role                string     `json:"role"`
+	Workspace           string     `json:"workspace"`
+	ColdStopOperationID string     `json:"cold_stop_operation_id,omitempty"`
+	ColdStoppedAt       *time.Time `json:"cold_stopped_at,omitempty"`
 }
 
 type TeamLifecycleOperation struct {

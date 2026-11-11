@@ -263,6 +263,22 @@ func (r *TeamLifecycleRepository) Request(ctx context.Context, id int, target, r
 		if e != nil {
 			return e
 		}
+		// Reuse the coordinator's completed whole-Team stop as durable provenance
+		// for unbound start timeouts, which upstream does not log as per-gateway
+		// stops. These fields are server-owned; a partial stop never grants them.
+		if target == "running" && v.State == "stopped" && v.DesiredState == "stopped" && v.Progress == len(v.Members) && v.StoppedAt != nil && v.OperationID != "" {
+			var unconfirmed int
+			e = teamQueryRow(ctx, s, `SELECT COUNT(*) FROM team_members m JOIN instances i ON i.id=m.instance_id LEFT JOIN instance_model_activity a ON a.instance_id=i.id WHERE m.team_id=? AND m.status<>'deleted' AND (i.status<>'stopped' OR COALESCE(a.stop_operation_id,'')<>'' OR EXISTS(SELECT 1 FROM instance_runtime_bindings b WHERE b.instance_id=i.id))`, id).Scan(&unconfirmed)
+			if e != nil {
+				return e
+			}
+			if unconfirmed == 0 {
+				for n := range members {
+					members[n].ColdStopOperationID = v.OperationID
+					members[n].ColdStoppedAt = v.StoppedAt
+				}
+			}
+		}
 		raw, e := json.Marshal(members)
 		if e != nil {
 			return e
