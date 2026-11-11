@@ -156,7 +156,7 @@ func (c *teamLifecycleCoordinator) preflight(ctx context.Context, op *models.Tea
 			return fmt.Errorf("成员停止绑定仍未释放")
 		}
 		if a != nil && a.StopOperationID != "" {
-			return fmt.Errorf("成员停止结果仍在核实，请待核实后继续原团队操作")
+			return c.memberStopWait(ctx, i, a, fmt.Errorf("成员停止结果仍在核实"))
 		}
 		b, err := c.instances.bindingRepo.GetByInstanceID(ctx, i.ID)
 		if err != nil {
@@ -204,7 +204,7 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 					return 0, err
 				}
 			}
-			return 0, err
+			return op.Progress, err
 		}
 	}
 	members := append([]models.TeamLifecycleMember(nil), op.Members...)
@@ -237,6 +237,9 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 				return e
 			}
 			if a != nil && a.StopOperationID != "" {
+				if op.DesiredState == "stopped" {
+					return c.memberStopWait(ctx, i, a, fmt.Errorf("成员停止尚未确认"))
+				}
 				return fmt.Errorf("成员停止尚未确认")
 			}
 			if op.DesiredState == "stopped" {
@@ -253,6 +256,7 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 					}
 					return nil
 				}
+				var stopErr error
 				if op.Reason == "idle_timeout" {
 					cfg, e := c.auto.store.Settings(ctx)
 					if e != nil {
@@ -265,9 +269,17 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 					if activity == nil {
 						return fmt.Errorf("成员活动记录缺失")
 					}
-					return c.auto.tryStopGuarded(repository.WithTeamStopAuthority(withTeamIdleStop(ctx, op.TeamID), op.TeamID, op.OperationID), *cfg, *activity)
+					stopErr = c.auto.tryStopGuarded(repository.WithTeamStopAuthority(withTeamIdleStop(ctx, op.TeamID), op.TeamID, op.OperationID), *cfg, *activity)
+				} else {
+					stopErr = c.instances.stopInstance(i.ID)
 				}
-				return c.instances.stopInstance(i.ID)
+				if stopErr != nil {
+					activity, readErr := c.auto.store.GetActivity(ctx, i.ID)
+					if readErr == nil {
+						return c.memberStopWait(ctx, i, activity, stopErr)
+					}
+				}
+				return stopErr
 			}
 			b, e := c.instances.bindingRepo.GetByInstanceID(ctx, i.ID)
 			if e != nil {
@@ -333,6 +345,21 @@ func (c *teamLifecycleCoordinator) execute(ctx context.Context, op *models.TeamL
 		}
 	}
 	return complete, nil
+}
+
+// Only an existing original-source durable stop can keep the Team operation
+// pending. The existing instance controller owns teardown and its proof; this
+// does not replay stop requests or infer success from a stopped-looking row.
+func (c *teamLifecycleCoordinator) memberStopWait(ctx context.Context, i *models.Instance, a *models.InstanceModelActivity, cause error) error {
+	if a == nil || a.StopOperationID == "" {
+		return cause
+	}
+	stop, err := c.auto.store.GetStopOperation(ctx, a.StopOperationID)
+	if err == nil && stop != nil && stop.InstanceID == i.ID && stop.Generation == i.RuntimeGeneration &&
+		(stop.Kind == "manual" || stop.Kind == "idle") {
+		return fmt.Errorf("%w: %v", models.ErrInstanceStopping, cause)
+	}
+	return cause
 }
 
 type teamIdleStopContextKey struct{}

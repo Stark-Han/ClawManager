@@ -187,6 +187,104 @@ func TestTeamIdleMySQLRetiredRequestsDoNotCountAsLiveExecution(t *testing.T) {
 	}
 }
 
+func TestTeamStartLeaseSurvivesPartialRecoveryWithoutGrantingTasks(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	for _, q := range []string{`DELETE FROM team_runtime_lifecycle`, `UPDATE instances SET status='stopped' WHERE id IN (1,2)`, `DELETE FROM instance_runtime_bindings`} {
+		if _, err := s.SQL().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	op, err := r.Request(ctx, 9, "running", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &teamRepository{sess: s}
+	check := func(want bool) {
+		t.Helper()
+		allowed, err := repo.AuthorizeTeamMemberStartup(ctx, 9, 90, 1)
+		if err != nil || allowed != want {
+			t.Fatalf("member lease admission=%v want=%v err=%v", allowed, want, err)
+		}
+		if foreign, err := repo.AuthorizeTeamMemberStartup(ctx, 9, 90, 2); err != nil || foreign {
+			t.Fatal("foreign member admitted", err)
+		}
+	}
+	check(true)
+	if err := r.Result(ctx, op, 1, errors.New("other member unavailable")); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	if err := s.Tx(func(tx db.Session) error { return RequireTeamRunning(ctx, tx, 9) }); !errors.Is(err, ErrTeamNotRunning) {
+		t.Fatalf("partial recovery admitted task: %v", err)
+	}
+	op, err = r.Request(ctx, 9, "running", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Result(ctx, op, len(op.Members), nil); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+	if _, err := r.Request(ctx, 9, "stopped", "manual", 0); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	if _, err := s.SQL().Exec(`UPDATE team_runtime_lifecycle SET state='recovery_required' WHERE team_id=9`); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+}
+
+func TestTeamDurableStopWaitRemainsPendingAndIsBounded(t *testing.T) {
+	_, r := teamIdleFixture(t)
+	ctx := t.Context()
+	op, err := r.Request(ctx, 9, "stopped", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Result(ctx, op, 1, models.ErrInstanceStopping); err != nil {
+		t.Fatal(err)
+	}
+	current, err := r.Get(ctx, 9)
+	if err != nil || current.State != "stopping" || current.OperationID != op.OperationID || current.Progress != 1 {
+		t.Fatalf("async stop lost operation: %+v %v", current, err)
+	}
+	// Late output from a different operation cannot overwrite pending progress.
+	stale := *op
+	stale.OperationID = "stale"
+	if err := r.Result(ctx, &stale, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	current, err = r.Get(ctx, 9)
+	if err != nil || current.State != "stopping" {
+		t.Fatal("stale stop completed current operation", err)
+	}
+	op.Attempts = 6
+	if err := r.Result(ctx, op, 1, models.ErrInstanceStopping); err != nil {
+		t.Fatal(err)
+	}
+	current, err = r.Get(ctx, 9)
+	if err != nil || current.State != "recovery_required" || current.Progress != 1 {
+		t.Fatalf("unconfirmed stop retried without limit: %+v %v", current, err)
+	}
+	// A manual retry resumes the same frozen operation and completes only on proof.
+	op, err = r.Request(ctx, 9, "stopped", "manual", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Result(ctx, op, len(op.Members), nil); err != nil {
+		t.Fatal(err)
+	}
+	current, err = r.Get(ctx, 9)
+	if err != nil || current.State != "stopped" {
+		t.Fatal("confirmed stop not completed", err)
+	}
+}
+
 func TestTeamIdleMySQLColdProtectionIsAtomicAndCannotUpgradeLiveSources(t *testing.T) {
 	s, r := teamIdleFixture(t)
 	ctx := t.Context()

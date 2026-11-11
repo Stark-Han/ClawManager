@@ -323,14 +323,19 @@ func (r *TeamLifecycleRepository) Claim(ctx context.Context, op *models.TeamLife
 func (r *TeamLifecycleRepository) Result(ctx context.Context, op *models.TeamLifecycleOperation, progress int, failure error) error {
 	phase := op.DesiredState
 	message := ""
+	waiting := failure != nil && errors.Is(failure, models.ErrInstanceStopping) && op.DesiredState == "stopped" && op.Attempts < max(6, 3*len(op.Members))
 	if failure != nil {
 		phase = "recovery_required"
 		message = failure.Error()
+		if waiting {
+			phase = "stopping"
+			message = "正在确认成员停止，保留原团队操作"
+		}
 		if text := []rune(message); len(text) > 160 {
 			message = string(text[:160])
 		}
 	}
-	_, err := r.sess.SQL().ExecContext(ctx, `UPDATE team_runtime_lifecycle SET state=?,progress=?,error_message=?,started_at=IF(?='running',UTC_TIMESTAMP(6),started_at),stopped_at=IF(?='stopped',UTC_TIMESTAMP(6),stopped_at),updated_at=UTC_TIMESTAMP(6) WHERE team_id=? AND operation_id=? AND state IN ('starting','stopping')`, phase, progress, message, phase, phase, op.TeamID, op.OperationID)
+	_, err := r.sess.SQL().ExecContext(ctx, `UPDATE team_runtime_lifecycle SET state=?,progress=?,error_message=?,next_attempt_at=IF(?,DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 5 SECOND),next_attempt_at),started_at=IF(?='running',UTC_TIMESTAMP(6),started_at),stopped_at=IF(?='stopped',UTC_TIMESTAMP(6),stopped_at),updated_at=UTC_TIMESTAMP(6) WHERE team_id=? AND operation_id=? AND state IN ('starting','stopping')`, phase, progress, message, waiting, phase, phase, op.TeamID, op.OperationID)
 	return err
 }
 func (r *TeamLifecycleRepository) ValidateStopMember(ctx context.Context, team, id, generation int) error {
@@ -500,7 +505,17 @@ func (r *teamRepository) AuthorizeTeamMemberStartup(ctx context.Context, teamID,
 	if err != nil {
 		return false, err
 	}
-	if op == nil || op.State != "starting" || op.DesiredState != "running" {
+	// An already-started member must retain its collaboration connection while
+	// another frozen member is recovering, and during the online projection handoff.
+	// This is only lease admission: task/model admission still requires the whole
+	// Team to be running, and the security authority checks the current generation,
+	// assignment and Pod independently. A stop intent revokes admission immediately.
+	if op == nil || op.DesiredState != "running" {
+		return false, nil
+	}
+	switch op.State {
+	case "starting", "running", "recovery_required":
+	default:
 		return false, nil
 	}
 	for _, m := range op.Members {
