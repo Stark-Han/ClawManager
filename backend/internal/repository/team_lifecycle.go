@@ -47,7 +47,24 @@ func readTeamLifecycle(ctx context.Context, s db.Session, id int, lock bool) (*m
 	return v, nil
 }
 func (r *TeamLifecycleRepository) Get(ctx context.Context, id int) (*models.TeamLifecycleOperation, error) {
-	return readTeamLifecycle(ctx, r.sess, id, false)
+	v, err := readTeamLifecycle(ctx, r.sess, id, false)
+	if err != nil || v == nil || v.State != "running" {
+		return v, err
+	}
+	// Completed Start is historical evidence, not permanent member readiness.
+	// Keep the operation ledger unchanged; expose a repair action for explicit
+	// failed/stopped members, never for transient heartbeat uncertainty.
+	var failed int
+	err = teamQueryRow(ctx, r.sess, `SELECT COUNT(*) FROM team_members m JOIN instances i ON i.id=m.instance_id WHERE m.team_id=? AND m.status<>'deleted' AND i.status IN ('error','stopped')`, id).Scan(&failed)
+	if err != nil {
+		return nil, err
+	}
+	if failed > 0 {
+		v.State = "recovery_required"
+		v.Error = fmt.Sprintf("%d 个成员未运行，请继续原团队启动操作", failed)
+		v.CanStart, v.CanStop = true, true
+	}
+	return v, nil
 }
 
 // Same Team row lock is used by dispatch and model admission. Heartbeats never

@@ -39,6 +39,29 @@ func teamIdleFixture(t *testing.T) (db.Session, *TeamLifecycleRepository) {
 	return s, r
 }
 
+func TestTeamLifecycleReadinessProjectionOffersRepairWithoutRewritingLedgerMySQL(t *testing.T) {
+	s, r := teamIdleFixture(t)
+	ctx := t.Context()
+	if _, err := s.SQL().Exec(`UPDATE instances SET status='error' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	v, err := r.Get(ctx, 9)
+	if err != nil || v.State != "recovery_required" || !v.CanStart {
+		t.Fatalf("failed member hidden: %+v %v", v, err)
+	}
+	var state string
+	if err = teamQueryRow(ctx, s, `SELECT state FROM team_runtime_lifecycle WHERE team_id=9`).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("read rewrote operation: %q %v", state, err)
+	}
+	if _, err = s.SQL().Exec(`UPDATE instances SET status='running' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	v, err = r.Get(ctx, 9)
+	if err != nil || v.State != "running" || v.CanStart {
+		t.Fatalf("healthy team remains in repair: %+v %v", v, err)
+	}
+}
+
 func TestTeamIdleMySQLTerminalParentDoesNotInventCompletionOrBlockManualMaintenance(t *testing.T) {
 	s, r := teamIdleFixture(t)
 	for _, q := range []string{
