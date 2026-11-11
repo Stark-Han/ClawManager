@@ -2299,6 +2299,14 @@ func (s *instanceService) stopV2InstanceForKind(ctx context.Context, instance *m
 			input.GatewayID = b.GatewayID
 			input.PodUID = *pod.PodUID
 			input.Endpoint = *pod.AgentEndpoint
+			if client, ok := s.agentClient.(*slotRuntimeAgentClient); ok && client.kube != nil {
+				input.StorageIdentity, err = k8s.ResolveRuntimePersistentStorage(ctx, client.kube, pod.Namespace, pod.PodName, *pod.PodUID, b.WorkspacePath)
+				if err != nil {
+					return fmt.Errorf("verify manual stop persistent workspace: %w", err)
+				}
+			} else if instance.RuntimeSecurityProfile == RuntimeSecurityProfile {
+				return fmt.Errorf("protected manual stop persistent storage verifier unavailable")
+			}
 		}
 		op, err := s.autoStopRepo.BeginManualStop(ctx, input)
 		if err != nil {
