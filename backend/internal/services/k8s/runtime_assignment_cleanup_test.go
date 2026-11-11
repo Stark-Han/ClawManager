@@ -57,6 +57,35 @@ func TestRetainedStoppedAssignmentRequiresFinalizedOwnerAndWorkspace(t *testing.
 	if err := check(4, workspace); err != nil {
 		t.Fatal(err)
 	}
+	old, err := client.CoreV1().Secrets("tenant").Get(ctx, "lite-instance-7-g3", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Name = "lite-instance-7-g1"
+	old.ResourceVersion = ""
+	old.Annotations = nil
+	old.Labels["clawmanager.io/generation"] = "1"
+	if _, err = client.CoreV1().Secrets("tenant").Create(ctx, old, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err = check(4, workspace); err != nil {
+		t.Fatalf("old credential blocked nondestructive resume: %v", err)
+	}
+	if err = s.CheckUnboundInstanceStopped(ctx, 7, 4, 4, "openclaw", nil); err == nil {
+		t.Fatal("resume relaxed destructive history protection")
+	}
+	newer := old.DeepCopy()
+	newer.Name = "lite-instance-7-g4"
+	newer.Labels["clawmanager.io/generation"] = "4"
+	if _, err = client.CoreV1().Secrets("tenant").Create(ctx, newer, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if check(4, workspace) == nil {
+		t.Fatal("newer uncertain publication allowed resume")
+	}
+	if err = client.CoreV1().Secrets("tenant").Delete(ctx, newer.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	if check(5, workspace) == nil || check(4, "/other") == nil {
 		t.Fatal("owner/workspace change accepted")
 	}
