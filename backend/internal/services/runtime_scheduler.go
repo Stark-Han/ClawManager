@@ -2179,7 +2179,19 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 	}
 	if runtimeType == RuntimeTypeOpenClaw && s.upgrade != nil {
 		verifiedCount := len(pods)
-		pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
+		var native []models.RuntimePod
+		var coldNative bool
+		if instance.RuntimeSecurityProfile == RuntimeSecurityProfile {
+			native, coldNative, err = s.upgrade.coldTeamNativePlacement(ctx, instance.ID, pods, inspectOpenClawRegistryImage)
+			if err != nil {
+				return err
+			}
+		}
+		if coldNative {
+			pods = native
+		} else {
+			pods, err = s.upgrade.filterUpgradePlacement(ctx, instance.ID, pods)
+		}
 		if err != nil {
 			return err
 		}
