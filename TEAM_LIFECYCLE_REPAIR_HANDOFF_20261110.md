@@ -1,146 +1,88 @@
-# Team lifecycle repair: timed follow-up, 2026-11-10
+# Team 整队启停修复交接（2026-11-11）
 
-## Scope and source
+本文件替代此前的限时交接结论。最终现场验收结果在文末；不能用镜像 Ready 代替任务成功。
 
-Team repositories only, branch `codex/team-personal-integration`.
-App: `D:/test/ClawManager-team-upstream-merge`; Runtime: `D:/test/AgentsRuntime`.
-Personal repositories were read-only. Existing Team dispatch, serial execution,
-dependencies, explicit receipts and Leader closure are unchanged. No Worker
-required parameters were added. This is **not a completed Team acceptance**.
+## 代码范围和合并方式
 
-## Completed changes and evidence
+- App：`D:/test/ClawManager-team-upstream-merge`；Runtime：`D:/test/AgentsRuntime`。
+- 两个仓库均为 `codex/team-personal-integration`。个人项目未修改。
+- 保留上游普通实例自动休眠、沙箱/NFS 配置及已合并更新；Team 通过现有生命周期服务协调整队启停，不恢复旧调度器。
+- Team 成员不进入普通实例独立自动停机队列。只有整队没有未完成任务、审核、通知、模型请求、工具命令及未确认写入，并且最后一条用户任务正式成功完成、超过既有空闲期限，才允许自动停机。心跳、在线回报和轮询时间不延长业务空闲时间。
+- 保留 Leader/Worker 派发、串行执行、依赖、正式交付、Leader 关闭根任务的既有机制；没有增加 Worker 必填字段。
+- CM 与北向共用整队状态、启动/停止接口和按钮组件。停止后保留历史和文件，发送任务在启动完成前被拒绝。
 
-* Runtime `ab1f414`: management verifies the real authorized Team group and pins
-  path/device/inode across the helper's user namespace. The helper rechecks that
-  exact directory rather than trusting an unmapped GID. Replaced directories,
-  other Team paths/groups and missing proofs are rejected. NFS config writers
-  preserve management-owned shared metadata instead of trying to chgrp it.
-* Runtime `2013b58`: Hermes Desktop Web's reviewed Team environment omitted
-  `CLAWMANAGER_TEAM_SHARED_GID`. Therefore actual native commands received no
-  supplemental group: preparation could read the shared directory but config
-  writes failed with EACCES. Forward this existing field; existing sandbox
-  admission still validates it against the actual authorized directory.
-* App `d923625c`: durable Lite restart reuses `instance_idle_stop_operations`
-  and the existing controller. Keep the old generation until confirmed teardown,
-  persist a restart follow-up, start once, and recover lost responses by observing
-  the next generation. Explicit Stop cancels unstarted follow-ups; stale scans
-  reload the operation. Start refusal is blocked rather than replayed forever.
-  CM reports pending shutdown as accepted; northbound keeps its operation pending.
-  Normal Pro/legacy paths retain their existing implementation.
-* Real disposable MySQL tests passed: original source fencing, failed teardown,
-  controller handoff, one new generation, lost final progress write, cancellation
-  and stale snapshots. Affected services/repository/handlers/northbound tests pass.
-* Linux gateway/slots/managedconfig/app checks and affected Hermes/OpenClaw/
-  OpenCode/DSH Team tests pass. Rootless namespace tests ran on the HXC server:
-  no proof rejects the unmapped group; valid pinned proof permits config writing.
-* Real server permission probe: shared inode114442151 has GID1000 outside and
-  GID65534 inside the child namespace. Supplemental group1000 permits temporary
-  create/write/rename; clearing groups reproduces EACCES. Probe files were removed.
-* Ordinary non-Team Hermes608 restarted on32543: old generation1 restart intent
-  completed, generation2 binding `gw-608-2` running. A direct authenticated Unix
-  slot-state query confirmed the native gateway itself running. Workspace remains
-  `/workspaces/hermes/user-1/instance-608`.
-* Original Team182 task395 report remains3541bytes, SHA256
-  `3309f56d5edf73193021c62ce9e2685ca51d55c8f3f844497cd16984ad72cd17`.
+## 本次提交及根因
 
-## Deployment and operational findings
+App：
 
-App v13 (`d923625c`) is deployed; Core and northbound Gateway are Ready. The exact
-`/home/hxc/clawmanager-apply.sh` invocation with APP_IMAGE v13,
-TENANT_SUFFIX=-hxc-peer and NODE_PORT32543 completed with exit0.
-App digest: `8d53d1c79b2146f2c91e6e7299d408adc7bbb6d3c845b154c1bf802bed256078`.
+- `fab27c52`：整队启动期间给已启动成员续租；停止时等待原实例的持久化退出证明，沿用同一个整队操作有限续查。
+- `e6c707a1`、`ea4f46bb`、`e1cd3d7a`：冷启动沿用原工作区，仅接受同版本、完成整队停止、实际保留 PVC/NFS 来源的可信证明。失败或仅预检的升级记录不冒充已执行迁移；已确认迁移和排除规则仍有效。
+- `fb31655f`：显式整队启动重新检查已报错的成员，健康成员保留；存在活跃模型/命令/写入则拒绝恢复转换，原业务任务不改写。
+- `f9993de9`、`373ffe5f`：先核实冷启动保留的 PVC/内联 NFS 等价关系，再执行普通存储筛选；同一整队操作未取得绑定的重试沿用原停止来源，任何后续执行/停止记录仍阻止沿用。真实 MySQL 覆盖来源不明、版本不同、普通实例及后续停止记录拒绝。
+- `4a15d945`：人工 Lite 停止也在原生退出前读取实际 Pod/保留卷并持久化存储身份。真实 MySQL 验证退出失败时该来源已经保存，原重启恢复回归通过。
+- `74dcae84`：真实 MySQL 中复现任务授权检查的 1213 死锁。实例/任务锁顺序统一到同一事务，只对确定回滚的 1213 有限重试，权限撤销、停机与代数检查保留。旧代码并发用例失败，修复后包含原撤销生命周期断言的真实测试通过。
+- `dd886db4`：后端单文件镜像覆盖入口，保留已验证的前端和原生资源，避免重复叠加无关镜像层。
 
-OpenClaw/OpenCode/DSH v8 protected pools are Ready. Hermes v10 from2013b58 was
-published and its previously occupied pool was updated only after ordinary608's
-real Stop released the binding. Hermes v10 digest:
-`12fca8230f5a98ae609da404573a12a6edd44d7b9e6e93427c49851ebfe4e3ff`.
-Check the final status appended below before deciding what is actually serving.
+Runtime：
 
-One OpenCode replacement landed on k8s-master, whose kubelet rejects HostUsers
-because UserNamespacesSupport is disabled. The owned OpenCode pool was constrained
-to verified node1. No cluster-wide feature gate or security default was changed.
-Retain this node eligibility requirement for future pool reconciliation.
+- `c8a481c`：OpenCode 原生辅助进程按原目录路径/device/inode 验证 Team 授权，而非依赖子命名空间中不可映射的组号。
+- `9fb94d3`：保留可信镜像的 Team/模型治理能力声明，防止实例请求伪造或清除这些能力。
+- `f272f82`：OpenClaw 10.2 默认阻止固定沙箱模型中继的私网地址。仅对隔离模式、确切的管理模型中继和相应版本增加 provider 请求策略，并同步现存模型缓存；外部 provider 不放宽。
+- `03d4508`：10.2 配置重载校验也使用有效期内的管理代理租约，原始配置不持久化临时信任；过期/缺失继续拒绝。
+- `33d0282`：Redis 租约到期会关闭既有连接；旧客户端对已销毁 socket 的后续命令会永久等待。现在新命令写入前合并重连、重新认证/选择数据库；丢失响应的写入不自动重放；显式关闭会拒绝所有等待者。
+- `52e3379`：OpenCode 和 DeepSeek Harness 复用同一协议，也发布重连修复。没有分叉业务协议。
+- `03eb18d`：固定模型中继原先删除所有 X-ClawManager 请求头，导致已协商治理的 OpenCode 请求丢失任务身份并持续 409。只在固定模型入口保留完整、唯一且与租约代数一致的三个任务坐标；控制/实例身份、公共网络、文件服务及响应仍过滤。旧代码真实 HTTP 中继用例失败，修复后整个 netbroker 包通过。四种 Lite 管理器重新构建；原生模型二进制和功能未更换。
 
-The first Hermes v8 packaging was overwritten by a concurrent Pro-agent build;
-it failed startup, while the old healthy pool remained. Corrected Lite entrypoint
-is in v9. App v12 was dynamically linked for an Alpine base and could not launch;
-v13 is CGO_ENABLED=0 and its executable was launch-checked in the final image.
-Do not use v8 Hermes or App v12. Superseded apply was terminated; final v13 apply
-was rerun successfully. Do not run competing apply commands in future releases.
+## 必要验收证据
 
-The catalog Pro-preservation assertion initially used only id as identity; built-in
-default rows share id0. Corrected comparison uses id/type/backend/variant and
-passes. Only four Lite catalog entries were updated; ordinary serving pools and
-Pro catalog entries were retained.
+已通过的检查不因每次打包重复运行：
 
-## Still required; execute once, in this order
+- 真实临时 MySQL：整队空闲/心跳无关、活跃任务和请求拒绝、任务与停止竞争、启动续租、部分恢复、迟到证明、冷启动来源与版本/迁移保护；新增显式整队启动恢复用例通过。
+- 实际服务器无业务卷的 rootless 原生辅助进程复现及修复后检查通过；原目录和内容保留。
+- 普通非 Team Hermes #608 从 generation 1 重启到 2，实际原生状态 running，随后通过正常停止释放绑定，数据保留。
+- 实际 Redis TCP 断线及真实 Redis CLIENT KILL：有界失败、合并重连、重新 AUTH/SELECT、下一条消息只到一次、停止可退出；原忙时上下文/通知串行测试通过。
+- 安装后的 10.2 重载校验实际通过，过期/缺失策略拒绝；安装后的 OpenCode/DSH 协议均包含同一重连实现。
+- Team #182 原实例仍为 603/604/605/606，分别为 OpenClaw/Hermes/OpenCode/DeepSeek Harness。
+- 原任务 #395 最终报告仍为 3541 bytes，SHA256 `3309f56d5edf73193021c62ce9e2685ca51d55c8f3f844497cd16984ad72cd17`。
+- #396 是现场发现模型中继和旧 Redis 连接问题的失败验收任务；没有 Worker 派发。操作员用已有 Runtime `failActiveTask` 上报真实失败并保留诊断文件，未把它改成成功、未直接修改 SQL 状态。这不作为自主模型验收通过证据。
+- 忙时停止真实 API 返回 409，原任务和成员未被停止。
+- 整队停止操作 `43d10cdd-e418-4151-b0cc-997fdf199131` 于 `2026-11-11T02:17:18.571767Z` 完成 4/4，所有原绑定释放。接口返回 stopped、can_start=true；四成员显示已停止。
 
-1. Verify Hermes v10 is Ready and the correct Lite entrypoint/digest is serving.
-   Ordinary608 was stopped using the real API to permit the unbound pool update;
-   its workspace remains. Do not patch SQL state or force a bound Pod.
-2. Confirm the pool, App approved-image pin, site overlay and Lite catalog use
-   the same immutable Hermes digest. Preserve the other three pins and Pro rows.
-3. Retry the existing Team182 start operation, retaining IDs603/604/605/606 and
-   its maintenance marker. Require native and Team readiness for all four. Do not
-   release maintenance or dispatch a task merely because Pods are Ready.
-4. After all members are ready, release only the migration's own maintenance
-   marker by compare-and-delete. Submit one small four-runtime real task using
-   existing tools; inspect work-item count, explicit receipts, Leader final
-   completion and actual final file. No extra Worker fields or forced success.
-5. Complete whole-Team Stop -> confirmed4/4 stopped -> Start original4/4 ready.
-   Recheck original task395 report and new task history/files. Existing MySQL
-   tests cover idle boundary/heartbeats; do not wait a real day or shorten the
-   release timeout for acceptance.
-6. Record exact IDs, native observations, operation results, commits and image
-   digests. Update this document and the detailed lifecycle report. Only then
-   mark the feature fully accepted. No fresh task has passed in this follow-up.
+## 实际发布与构建
 
-If a new failure appears, run the exact failing helper entry with matching
-identity/groups/mounts against disposable copies before building another image.
-The earlier credential-only copy test and owner-group fixture did not reproduce
-the full Hermes command environment; do not repeat those as sufficient evidence.
+App 已更新至 `team-lifecycle-20261111-v8`，digest `sha256:0a1c7420f08eab24f0123aa6d597554f0674b449ac990b80606bae397508320b`，业务二进制来源 `74dcae84`。Core/Gateway 实际 Ready，用户指定 apply 命令 exit=0。此前中间镜像不作为最终验收。
 
-## Retrospective and rollback
+已执行用户指定的 `/home/hxc/clawmanager-apply.sh`：APP_IMAGE 为上述 App，TENANT_SUFFIX=-hxc-peer，NODE_PORT=32543。Core/Gateway Ready；最终 apply exit=0。首次切换期间 challenge 端口临时不可达，待两个服务 Ready 后串行重跑成功，未并行发布。
 
-The initial estimate missed two independent group contracts: namespace-visible
-identity and forwarding of the existing supplemental-group field. Packaging
-mistakes and overlapping release attempts then consumed avoidable time. Future
-candidate builds must use unique output paths, explicit Lite entrypoints and
-CGO settings, and launch checks in the actual final base before pushing. Resolve
-one precise reproduction first; serialize deployment and verify readiness before
-starting acceptance. Reuse passed checks, not their incomplete fixtures.
+最终 Lite 镜像固定为：
 
-Private snapshots, migration journals, original image/configuration snapshots and
-native stop proofs remain under `/home/hxc/team-lifecycle-20261110/`. Keep schema
-and persisted lifecycle metadata. Do not roll back to code unaware of intentional
-Team stops, delete bindings/proofs, or restart old tasks. Keep maintenance while
-readiness is unconfirmed. An image rollback must still use confirmed-stop rules;
-it must not revert live database/workspace contents.
+| Runtime | 镜像与 digest |
+| --- | --- |
+| OpenClaw | `10.130.14.23:5000/agentsruntime/openclaw-lite@sha256:5a4dfd45c579a89916d3e482d04598b7dfcdabd1e7cd92c26799aec6e910e477` |
+| Hermes | `10.130.14.23:5000/agentsruntime/hermes-lite@sha256:a428a39f803619ec5793cd69947bd51acbdfccfff591fd6a080c40e5df163771` |
+| OpenCode | `10.130.14.23:5000/agentsruntime/opencode-lite@sha256:a44c2e261a8aeeb653bdd2ce2665ce21378b47aa600c580a77ae3c936aed3641` |
+| DeepSeek Harness | `10.130.14.23:5000/agentsruntime/deepseek-harness-lite@sha256:0470e202435e067e3ff6ebb60c5909cc542993b6928a5637a94f11c57b455ff3` |
 
-## Final observation before17:40 deadline
+仅在停止 4/4 且实际绑定为零后更新受影响的保护池。Core 批准镜像、站点覆盖配置、runtime-images.json 和 Lite 目录同步；Pro 目录完整身份比对不变。
 
-At17:38-17:39 CST, App/Core and northbound Gateway v13 and all four Runtime
-deployments were Ready; final v13 apply exit0 was read back. Hermes v10 digest
-above is actually serving and all four Lite catalogs are synchronized. Pro
-catalog preservation passes with the corrected complete row identity.
-Ordinary608's real Stop completed and its binding is absent, data retained.
+构建入口：App `Dockerfile.team-server-overlay`；Claw `openclaw/Dockerfile.team-model-relay-overlay`；Code/DSH 各自 `Dockerfile.team-transport-overlay`。Code/DSH 的 `team-protocol` 构建上下文必须先用同一提交的 `opencode/team/build-protocol.mjs`、`deepseek-harness/team/build.mjs` 生成，不复用旧生成文件。正式重建可以使用各自完整 Dockerfile，无需保留测试 overlay 链。
 
-The original Team182 start was retried only after Hermes/Core rollout readiness.
-Hermes604 generation12 reached native `running` (`gw-604-12`), confirmed through
-the authenticated Unix slot-state endpoint. This proves the previously failing
-directory preparation and config write passed in the real protected instance.
-The Team is still being observed for whole-group readiness. Maintenance remains;
-no new model task was submitted. The four-member task/Stop/Start acceptance is
-not complete. Do not describe these changes as fully accepted or remove this
-remaining requirement after seeing a successful image push or one member start.
+## 数据、回退和运行前提
 
-At17:39:25 CST, owner API reports Team starting1/4: Hermes is idle/online;
-OpenCode605 generation2 failed workspace preparation. Native log at09:39:08 UTC:
-default project `starter` stat denied, followed by `workspace_helper_failed`.
-Exact failing sub-step is not yet proven. Leader603 and DSH606 have not started
-in this latest attempt. Next implementation must first reproduce OpenCode's
-actual helper command with its profile-generated environment, supplemental
-groups and legacy `starter` directory metadata; do not repeat the passed Hermes
-credential/namespace work. Verify equivalent group forwarding across all four
-profiles before the next consolidated candidate. Then perform the remaining
-four-member task/Stop/Start closure above. Maintenance is deliberately retained.
+- 私密备份、原始镜像/配置、迁移日志、停机证明保存在服务器 `/home/hxc/team-lifecycle-20261110/`。不得提交凭据或备份正文。
+- 原实例、Team、任务历史和工作区保留；没有清库、删除绑定冒充停机、chmod777 或递归改写目录权限。
+- 保留上游命名空间、安全和 NFS 设置。当前节点原生 user namespace 前提已验证；只使用已部署对应 Localhost AppArmor profile 的 node1，集群全局限制未关闭。
+- 不在保护沙箱内直接发 Gateway 自重启信号：旧 10.2 自重启可能离开原进程组，管理端会保守报 gateway_stop_failed。此次最终恢复使用正式整队退出证明，不把信号当成停机证明。
+- 旧人工停止遗漏的存储字段曾导致旧 Pod 替换后缺失来源。此次针对 #603 generation 4 的一条已完成停止记录，仅修复空的 `storage_identity`：核对原数据库 Pod UID、该 UID 的集群退出事件、部署前快照与保留 ReplicaSet 完整 spec 一致、同一 Deployment UID、早于停止创建的 Bound PVC/Retain RWX PV。证据及条件更新结果保存在服务器 `openclaw-stop-storage-repair-{evidence,result}-20261111.json`；未修改任务、整队状态、绑定或停止结果。未来停止由正式代码保存，不依赖此一次性修复。
+- 临时的旧 Gateway 重载配置和内存/容器插件过渡不属于最终方案：停止后已删除临时 loopback trustedProxies/managerUrl，正式镜像包含完整修复。
+- 回退必须使用认识 Team 生命周期和原生停止证明的兼容 App/Runtime。先核实原操作，停止确认后切镜像；不回滚覆盖新产生的数据库和文件，不清除证明或重新执行旧任务。
+
+## 操作诊断与补偿审计
+
+- #397 在模型中继缺失任务头、持续 409 后，通过现有 Runtime 失败报告保留失败诊断；原生 OpenCode 已中断并读回实际 idle，再受控停止整队。它不作为成功验收。
+- 操作员选择根任务诊断上下文时误取了 Leader 收件箱中的 A1 结果，导致 #497 的 owner/显示结果被诊断投影覆盖。我已核对数据库中原始 `completion_proposed`（成员 575、原 completion ID、原 revision）并仅恢复这条已成功工作项的投影；未改变根 #397 的 failed 或制造新完成。原 Worker 正文、产物和正式回执均保留。条件更新只命中 1 行；服务器审计 `diagnostic-projection397-before-and-repair.txt` SHA256 `cd7fb5709d280572fa6e7d9b40f90f30a5387cdee49120ab96fdb300867d6da1`。以后诊断必须定位根任务原始派发上下文，不能取收件箱首条 taskId 匹配。
+- 整队停止 `e284097f-3056-483b-b698-91b95658a1aa` 于 `2026-11-11T03:02:45.26388Z` 确认 4/4，四原实例 603/604/605/606 的新停止记录均完成且 `storage_identity` 为 252 bytes；没有再补写存储字段。仅在实际绑定数为 0 后更换四个 Lite 管理器。
+
+## 最终现场闭环
+
+正在执行：原四成员启动、全新四引擎短任务、正式回执和最终文件、跨 Redis 租约边界在线状态、再一次整队停止/启动。该段完成后写入实际任务、操作和时间；当前不能把这部分标成通过。
