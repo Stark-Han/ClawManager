@@ -10,6 +10,10 @@ import (
 
 type nativePlacementInspector func(context.Context, string, map[string]string, bool) (*OpenClawTargetClassification, error)
 
+type coldTeamNFSVerifier interface {
+	ColdTeamNFSWorkspace(context.Context, models.RuntimePod, models.RuntimePod, string) (bool, error)
+}
+
 // This is continuation of a confirmed whole-Team cold adoption, not permission
 // to upgrade application data. The old global legacy-pool default is superseded
 // only by actual stop provenance, an exact frozen member and the SAME immutable
@@ -107,8 +111,17 @@ func (s *RuntimeUpgradeService) coldTeamNativePlacement(ctx context.Context, id 
 		uid := stringValue(p.PodUID)
 		matched := false
 		for _, v := range live {
-			if v.ID == p.ID && len(v.Slots) > 0 && v.KubernetesReady && uid != "" && stringValue(v.PodUID) == uid && stringValue(v.RegisteredPodUID) == uid && stringValue(v.KubernetesPodUID) == uid && runtimeWorkspaceStorageCompatible(old.WorkspaceStorageIdentity, v.WorkspaceStorageIdentity) {
-				matched = true
+			if v.ID != p.ID || len(v.Slots) == 0 || !v.KubernetesReady || uid == "" || stringValue(v.PodUID) != uid || stringValue(v.RegisteredPodUID) != uid || stringValue(v.KubernetesPodUID) != uid {
+				continue
+			}
+			matched = runtimeWorkspaceStorageCompatible(old.WorkspaceStorageIdentity, v.WorkspaceStorageIdentity)
+			if !matched {
+				if verifier, ok := s.deployments.(coldTeamNFSVerifier); ok {
+					matched, err = verifier.ColdTeamNFSWorkspace(ctx, *old, v, workspace)
+					if err != nil {
+						return nil, false, err
+					}
+				}
 			}
 		}
 		if !matched {
