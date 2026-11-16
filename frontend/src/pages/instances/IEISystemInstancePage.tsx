@@ -2,7 +2,8 @@ import { allowBrowserInstance } from "../../lib/browserOrigin";
 import axios from "axios";
 import { ArrowLeft, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { connectOwnerInstance } from "../../lib/ownerInstanceStart";
 import { ownerOverviewURL, ownerTeamOverviewURL } from "../../lib/ownerPortalNavigation";
 import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
 import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
@@ -56,6 +57,11 @@ export default function IEISystemInstancePage() {
   const { id = "" } = useParams<{ id: string }>();
   const instanceID = Number(id);
   const location = useLocation();
+  const navigate = useNavigate();
+  const startIntentRef = useRef(location.state?.startStopped === true);
+  const clearStartIntentRef = useRef(() => {});
+  clearStartIntentRef.current = () => navigate(location.pathname + location.search, { replace: true, state: { ...location.state, startStopped: false } });
+  const [startInProgress, setStartInProgress] = useState(false);
   const returnSearch = location.state?.portalReturnSearch;
   const returnTeamID = Number(location.state?.portalReturnTeamID);
   const listReturnURL = Number.isSafeInteger(returnTeamID) && returnTeamID>0 ? ownerTeamOverviewURL(returnTeamID,typeof returnSearch==='string'?returnSearch:'') : ownerOverviewURL(instanceID,typeof returnSearch==='string'?returnSearch:'');
@@ -78,7 +84,7 @@ export default function IEISystemInstancePage() {
   const [restartNotice, setRestartNotice] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
   const mountedRef = useRef(true);
-  const {onFrameLoad,activityNote}=useOwnerActivity(instanceID,instance?.status==='running'&&!restartInProgress);
+  const {onFrameLoad,activityNote}=useOwnerActivity(instanceID,instance?.status==='running'&&!restartInProgress&&!startInProgress);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -109,8 +115,14 @@ export default function IEISystemInstancePage() {
       if (request !== requestRef.current || !mountedRef.current) return;
       setInstance(nextInstance);
       setAccess(null);
+      const requestStart = startIntentRef.current;
       try {
-        const nextAccess = await ieiSystemService.generateAccess(instanceID);
+        startIntentRef.current = false;
+        if (requestStart) clearStartIntentRef.current();
+        setStartInProgress(requestStart || nextInstance.status === 'creating');
+        const nextAccess = await connectOwnerInstance(nextInstance, requestStart, ieiSystemService,
+          observed => setInstance(observed),
+          () => request === requestRef.current && mountedRef.current);
         if (request !== requestRef.current || !mountedRef.current) return;
         setAccess(nextAccess);
         setFrameVersion((version) => version + 1);
@@ -123,7 +135,7 @@ export default function IEISystemInstancePage() {
           const accessCode = axios.isAxiosError(accessError) ? accessError.response?.data?.error_code : undefined;
           setRuntimeError(accessCode === "runtime_access_not_configured"
             ? "OpenCode 访问入口尚未正确配置，请联系管理员。无需重启实例。"
-            : nextInstance.status === "stopped" ? "实例已停止，运行界面暂不可用。" : nextInstance.status === "error" ? "实例运行异常，暂时无法连接运行界面。" : "暂时无法连接运行界面，请稍后重新连接。");
+            : requestStart || nextInstance.status === 'creating' ? errorMessage(accessError, '实例启动未完成，请稍后刷新查看。') : nextInstance.status === "stopped" ? "实例已停止，可点击“启动实例”恢复使用，原会话和文件已保留。" : nextInstance.status === "error" ? "实例运行异常，暂时无法连接运行界面。" : "暂时无法连接运行界面，请稍后重新连接。");
         }
       }
     } catch (openError) {
@@ -132,7 +144,7 @@ export default function IEISystemInstancePage() {
       setAccess(null);
       setError(errorMessage(openError));
     } finally {
-      if (request === requestRef.current && mountedRef.current) setLoading(false);
+      if (request === requestRef.current && mountedRef.current) { setLoading(false); setStartInProgress(false); }
     }
   }, [instanceID]);
 
@@ -392,7 +404,7 @@ export default function IEISystemInstancePage() {
               <button type="button" className="cm-icon-button" title={workspaceVisible ? '收起文件区' : '展开文件区'} aria-expanded={workspaceVisible} aria-controls="iei-instance-workspace" onClick={() => setWorkspaceVisible(value => !value)}>
                 {workspaceVisible ? <PanelRightClose className="h-4 w-4"/> : <PanelRightOpen className="h-4 w-4"/>}
               </button>
-              <button type="button" className="cm-icon-button" title="刷新访问" onClick={() => void openInstance()}>
+              <button type="button" className="cm-icon-button" title="刷新访问" disabled={startInProgress} onClick={() => void openInstance()}>
                 <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               </button>
               <button type="button" className="cm-icon-button" title={isFullscreen ? "退出全屏" : "全屏"} onClick={handleFullscreen}>
@@ -409,11 +421,18 @@ export default function IEISystemInstancePage() {
               </div>
             </div>
           )}
-          {runtimeError ? (
+          {startInProgress ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center" role="status">
+              <RefreshCw className="h-8 w-8 animate-spin text-blue-600" />
+              <p className="font-semibold">实例正在启动…</p>
+              <p className="text-sm text-slate-600">就绪后会自动连接，原会话和文件保留。</p>
+            </div>
+          ) : runtimeError ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center" role="status">
               <ShieldAlert className="h-9 w-9 text-amber-500" />
               <p className="text-base font-semibold text-slate-900">{runtimeError}</p>
               <p className="max-w-md text-sm leading-6 text-slate-600">工作区独立于运行界面加载。可在右侧检查并修改文件；保存后如需生效，请确认配置并手动重启。</p>
+              {instance.status === 'stopped' && !(Number.isSafeInteger(returnTeamID) && returnTeamID > 0) && <button className="app-button-primary" disabled={loading || startInProgress} onClick={() => { startIntentRef.current = true; void openInstance(); }}>启动实例</button>}
               <button className="app-button-secondary" disabled={loading} onClick={() => void openInstance()}>重新连接</button>
             </div>
           ) : frameSrc && allowBrowserInstance(instanceID, access ?? undefined) ? (

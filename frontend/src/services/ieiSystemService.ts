@@ -148,6 +148,10 @@ export const ieiSystemService = {
     return response.data.data.operation;
   },
 
+  async startInstance(id: number): Promise<void> {
+    await ieiAPI.post(`/instances/${id}/start`, {}, { headers: { 'X-Owner-Action': '1' } });
+  },
+
   async resetInstance(id: number, idempotencyKey = lifecycleIdempotencyKey()): Promise<IEISystemLifecycleOperation> {
     const response = await ieiAPI.post(
       `/instances/${id}/reset`,
