@@ -1277,6 +1277,24 @@ body[data-northbound-portal] .ot-team-card[data-expanded=true] {
   background: #fdfaff;
 }
 
+/* Keep the three dashboard card surfaces white, including their selected/hover states. */
+body[data-northbound-portal] .owner-continue-list>button,
+body[data-northbound-portal] .owner-continue-list>button:hover,
+body[data-northbound-portal] .owner-work-question,
+body[data-northbound-portal] .ot-team-card,
+body[data-northbound-portal] .ot-team-card.is-selected,
+body[data-northbound-portal] .ot-team-card[data-expanded=true],
+body[data-northbound-portal] .owner-growth-path,
+body[data-northbound-portal] .owner-path-stage.current {
+  background: var(--cm-surface);
+  box-shadow: none;
+}
+
+body[data-northbound-portal] .owner-growth-path .owner-path-axis::before,
+body[data-northbound-portal] .owner-growth-path .owner-path-locate {
+  box-shadow: none;
+}
+
 @media(forced-colors:active) {
 
   body[data-northbound-portal] {
