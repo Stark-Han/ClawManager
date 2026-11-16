@@ -64,6 +64,7 @@ import CreateTeamPage from '../pages/teams/CreateTeamPage';
 import CustomTeamTemplatesPage from '../pages/teams/CustomTeamTemplatesPage';
 import TeamDetailPage from '../pages/teams/TeamDetailPage';
 import IEISystemTeamPage from '../pages/teams/IEISystemTeamPage';
+import NorthboundPortalTheme from '../components/NorthboundPortalTheme';
 import SkillHubPage from '../pages/skill-hub/SkillHubPage';
 
 // Protected Route Component
@@ -174,9 +175,11 @@ function AppRoutes() {
         }
       />
       <Route path="/share/:code" element={<SharedInstancePage />} />
-      <Route path="/ieisystem/list-instances" element={<IEISystemListInstancesPage />} />
-      <Route path="/ieisystem/instances/:id" element={<IEISystemInstancePage />} />
-      <Route path="/ieisystem/teams/:id" element={<IEISystemTeamPage />} />
+      <Route element={<NorthboundPortalTheme />}>
+        <Route path="/ieisystem/list-instances" element={<IEISystemListInstancesPage />} />
+        <Route path="/ieisystem/instances/:id" element={<IEISystemInstancePage />} />
+        <Route path="/ieisystem/teams/:id" element={<IEISystemTeamPage />} />
+      </Route>
 
       {/* User Routes */}
       <Route
