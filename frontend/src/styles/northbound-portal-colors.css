@@ -327,6 +327,7 @@ body[data-northbound-portal] .owner-path-axis button.current>span {
 
 body[data-northbound-portal] .owner-path-axis .owner-path-locate {
   background: #2563eb;
+  color: #fff;
 }
 
 body[data-northbound-portal] .owner-path-locate::after {
