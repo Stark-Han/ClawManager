@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"clawreef/internal/models"
@@ -123,5 +124,49 @@ func TestExplicitStartDoesNotResumeUnprovenPendingReservation(t *testing.T) {
 			}
 			f.assertReservationUnchanged(t)
 		})
+	}
+}
+
+func TestTeamContinuationResumesFailedNativeReservationWithoutNewGeneration(t *testing.T) {
+	for _, state := range []string{"error", "stopped", "creating", "running"} {
+		for _, slotReady := range []bool{true, false} {
+			t.Run(state+fmt.Sprint(slotReady), func(t *testing.T) {
+				f := newPendingSlotReplayFixture(t)
+				f.seed(t, 1, "stopped")
+				ctx := context.Background()
+				pod, _ := f.kube.CoreV1().Pods("runtime").Get(ctx, "pool", metav1.GetOptions{})
+				pod.Labels["clawmanager.io/sandbox-profile"] = "nfs-rootless-v1"
+				pod.Spec.Containers = []corev1.Container{
+					{Name: "coordinator", Env: []corev1.EnvVar{{Name: "RUNTIME_AGENT_ROLE", Value: "pool"}}},
+					{Name: "slot", Env: []corev1.EnvVar{{Name: "RUNTIME_AGENT_ROLE", Value: "slot"}, {Name: "RUNTIME_GATEWAY_PORT_START", Value: "20003"}, {Name: "RUNTIME_GATEWAY_PORT_END", Value: "20005"}}},
+				}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{Name: "coordinator", Ready: true, ContainerID: "containerd://coordinator", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}},
+					{Name: "slot", Ready: slotReady, ContainerID: "containerd://slot", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}},
+				}
+				if _, err := f.kube.CoreV1().Pods("runtime").Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				f.instance.Status = state
+				repo := &pendingStartInstanceRepo{fakeRuntimeInstanceRepo: newFakeRuntimeInstanceRepo()}
+				repo.byID[7] = &f.instance
+				s := &instanceService{instanceRepo: repo, bindingRepo: f.bindings, runtimePodRepo: f.pods, agentClient: f.client}
+				configureLifecycleModels(t, s)
+				c := &teamLifecycleCoordinator{instances: s}
+				err := c.startMember(&f.instance, f.binding)
+				failed := state == "error" || state == "stopped"
+				if failed && slotReady {
+					if err != nil || repo.runtimeStates[7].status != "creating" || repo.runtimeStates[7].generation != 2 {
+						t.Fatalf("Team lost its safe continuation: state=%+v err=%v", repo.runtimeStates, err)
+					}
+				} else if len(repo.runtimeStates) != 0 || (failed && err == nil) {
+					t.Fatalf("live or unready reservation was restarted: states=%+v err=%v", repo.runtimeStates, err)
+				}
+				if len(f.requests) != 0 || f.envCalls != 0 {
+					t.Fatal("Team continuation launched or republished a gateway")
+				}
+				f.assertReservationUnchanged(t)
+			})
+		}
 	}
 }
