@@ -72,11 +72,17 @@ func (m *ManagedTeamRedis) authorize(ctx context.Context, expected runtimeauth.I
 		return nil, errManagedRedis
 	}
 	current, err := m.current(ctx, expected.InstanceID)
+	if runtimeauth.IsUnavailable(err) {
+		return nil, err
+	}
 	if err != nil || current != expected {
 		return nil, errManagedRedis
 	}
 	instance, err := m.instances.GetByIDContext(ctx, expected.InstanceID)
-	if err != nil || instance == nil || instance.ID != expected.InstanceID || instance.UserID != expected.UserID || instance.EnvironmentOverridesJSON == nil {
+	if err != nil {
+		return nil, runtimeAuthorityDependency(ctx, err)
+	}
+	if instance == nil || instance.ID != expected.InstanceID || instance.UserID != expected.UserID || instance.EnvironmentOverridesJSON == nil {
 		return nil, errManagedRedis
 	}
 	return m.authorizeTeam(ctx, instance, teamID)
