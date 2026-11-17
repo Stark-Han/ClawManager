@@ -168,8 +168,17 @@ func managedRedisProtectedTarget(ctx context.Context, client kubernetes.Interfac
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
-	if !address.IsValid() || address.Zone() != "" || deny(ctx, address) != nil || ctx.Err() != nil {
+	if !address.IsValid() || address.Zone() != "" {
 		return "", errManagedRedis
+	}
+	if err := deny(ctx, address); err != nil {
+		if runtimeauth.IsUnavailable(err) {
+			return "", err
+		}
+		return "", errManagedRedis
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	return net.JoinHostPort(address.String(), port), nil
 }

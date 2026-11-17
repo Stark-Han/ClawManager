@@ -565,7 +565,10 @@ func main() {
 		}
 		managedRedis, err := services.NewManagedTeamRedis(teamService, contextInstances, runtimeSecurity.CurrentIdentity, func(ctx context.Context, address netip.Addr) error {
 			denied, err := runtimeInventory.Deny(ctx, address)
-			if err != nil || !denied {
+			if err != nil {
+				return runtimeauth.Unavailable(err)
+			}
+			if !denied {
 				return services.ErrInstanceGatewayUnavailable
 			}
 			return nil
