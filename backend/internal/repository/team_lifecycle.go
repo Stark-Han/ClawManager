@@ -246,7 +246,12 @@ func (r *TeamLifecycleRepository) RequestForTimeout(ctx context.Context, id int,
 	if reason == "idle_timeout" && timeout < time.Second {
 		return nil, fmt.Errorf("idle timeout must be at least one second")
 	}
-	err := r.sess.Tx(func(s db.Session) error {
+	err := r.sess.Tx(func(s db.Session) (requestErr error) {
+		defer func() {
+			if requestErr == nil && target == "running" && reason == "manual" {
+				requestErr = publishExplicitTeamStartIntent(ctx, s, id)
+			}
+		}()
 		// Lock instance rows first, matching model admission's lock order.
 		rows, e := s.SQL().QueryContext(ctx, `SELECT i.id FROM instances i JOIN team_members m ON m.instance_id=i.id WHERE m.team_id=? ORDER BY i.id FOR UPDATE`, id)
 		if e != nil {

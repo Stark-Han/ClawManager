@@ -8,7 +8,7 @@ import (
 )
 
 func TestUpgradeMySQLPreviewApprovesOnlyFrozenMigratedSuccessor(t *testing.T) {
-	for _, name := range []string{"reserved-target", "wrong-user", "wrong-pod", "wrong-generation", "not-activated", "failed", "isolated", "bad-receipt", "wrong-migration-owner", "wrong-digest"} {
+	for _, name := range []string{"reserved-target", "retrying", "held", "wrong-user", "wrong-pod", "wrong-generation", "not-activated", "failed", "isolated", "bad-receipt", "wrong-migration-owner", "wrong-digest"} {
 		t.Run(name, func(t *testing.T) {
 			sess, u, target := recoveryActionsDB(t)
 			ctx := context.Background()
@@ -29,6 +29,10 @@ func TestUpgradeMySQLPreviewApprovesOnlyFrozenMigratedSuccessor(t *testing.T) {
 			exec(`UPDATE instance_runtime_bindings SET generation=9,gateway_id='pending-481-9' WHERE instance_id=481`)
 			id := runtimeauth.Identity{InstanceID: 481, UserID: 1, Generation: 9, PodUID: "target-uid"}
 			switch name {
+			case "retrying":
+				exec(`UPDATE runtime_upgrade_items SET recovery_status='retrying' WHERE rollout_id=?`, p.Rollout.ID)
+			case "held":
+				exec(`UPDATE runtime_upgrade_items SET recovery_status='needs_attention' WHERE rollout_id=?`, p.Rollout.ID)
 			case "wrong-user":
 				id.UserID++
 			case "wrong-pod":
@@ -49,7 +53,7 @@ func TestUpgradeMySQLPreviewApprovesOnlyFrozenMigratedSuccessor(t *testing.T) {
 				exec(`UPDATE runtime_rollouts SET target_image_digest='sha256:wrong' WHERE id=?`, p.Rollout.ID)
 			}
 			image, err := u.ManagedPreviewUpgradeImage(ctx, id)
-			if name == "reserved-target" {
+			if name == "reserved-target" || name == "retrying" {
 				if err != nil || image != p.Rollout.TargetImageRef {
 					t.Fatalf("admitted successor not approved: %q %v", image, err)
 				}
