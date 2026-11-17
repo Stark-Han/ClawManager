@@ -20,7 +20,7 @@ const browser = await chromium.launch({ headless: true, channel: process.env.PLA
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 const errors = [];
 page.on('pageerror', error => errors.push(String(error)));
-await page.addInitScript(() => { localStorage.setItem('access_token', 'local-fixture-only'); localStorage.setItem('clawmanager_locale', 'zh'); });
+await page.addInitScript(() => { localStorage.setItem('access_token', 'local-fixture-only'); if (!localStorage.getItem('clawmanager_locale')) localStorage.setItem('clawmanager_locale', 'zh'); });
 const now = new Date().toISOString();
 const members = ['leader', 'developer', 'reviewer'].map((key, i) => ({ id: i + 1, team_id: 144, user_id: 1, instance_id: 477 + i, member_key: key, display_name: key, role: key, runtime_type: i ? 'hermes' : 'openclaw', instance_mode: 'lite', status: i === 1 ? 'busy' : 'idle', availability: i === 1 ? 'busy' : 'idle', progress: 0, description: '成员职责与完整说明', last_seen_at: now, created_at: now, updated_at: now }));
 const tasks = Array.from({ length: 8 }, (_, i) => ({ id: 300 + i, team_id: 144, target_member_id: 1, created_by: 1, message_id: `team-144-task-${300 + i}`, status: i === 7 ? 'running' : 'succeeded', workflow_state: i === 7 ? 'executing' : 'completed', payload: { title: `测试问题 ${i + 1}`, prompt: `测试问题 ${i + 1}：请协作开发并验收。\n${'长消息用于验证滚动定位和自动换行。'.repeat(20)}` }, result: i === 7 ? {} : { result: `已完成第 ${i + 1} 次任务。 /team/report.md` }, created_at: new Date(Date.now() - (8 - i) * 60000).toISOString(), updated_at: now }));
@@ -491,7 +491,7 @@ try {
   assert.ok(await workspace().locator('.team-roster-rail-heading').evaluate(el => {
     const label = el.querySelector('span'), count = label.querySelector('small');
     const a = label.getBoundingClientRect(), b = count.getBoundingClientRect(), r = el.getBoundingClientRect();
-    return a.height <= 22 && b.top < a.top + 8 && a.right <= r.right && a.left >= r.left;
+    return label.textContent.includes('Members') && a.height <= 22 && b.top < a.top + 8 && a.right <= r.right && a.left >= r.left;
   }), 'English Members and its count fit together on one line');
   await page.evaluate(() => localStorage.setItem('clawmanager_locale', 'zh'));
   await page.goto(`${origin}/teams/144`); await workspace().waitFor();
