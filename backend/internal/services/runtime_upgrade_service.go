@@ -2632,6 +2632,9 @@ func (s *RuntimeUpgradeService) inspectTeamConsistency(ctx context.Context, team
 // fails: that instance must be recreated, while an unconfirmed stop must not
 // risk a second writer.
 func (s *RuntimeUpgradeService) stopCandidateGateway(ctx context.Context, candidate runtimeUpgradeCandidate) (bool, error) {
+	if requiresConfirmedGatewayStop(s.agent) && candidate.GatewayID == fmt.Sprintf("pending-%d-%d", candidate.InstanceID, candidate.Generation) {
+		return s.retireUnpublishedUpgradeReservation(ctx, candidate)
+	}
 	if candidate.GatewayID == "" {
 		if requiresConfirmedGatewayStop(s.agent) && (candidate.RuntimePodID != nil || strings.TrimSpace(candidate.BindingState) != "") {
 			return false, fmt.Errorf("bound runtime gateway identity is required to confirm source stop")
