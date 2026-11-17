@@ -1286,7 +1286,7 @@ func (s *RuntimeUpgradeService) migrateUpgradeItem(ctx context.Context, rollout 
 		state = "quiescing"
 	}
 	if state == "quiescing" {
-		stopped, stopErr := s.stopCandidateGateway(ctx, candidate)
+		stopped, stopErr := s.stopUpgradeMigrationSource(ctx, rollout, candidate)
 		if stopErr != nil {
 			retryState := "compatibility_checked"
 			if stopped {
