@@ -17,7 +17,7 @@ import './owner-team-workspace.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败';
 const teamURL = (id: number) => `/ieisystem/teams/${id}`;
-const teamLabel = (team: OwnerTeamSummary) => teamPowerLabel(team.runtime_state) || (team.status === 'creating' ? '创建中' : team.status !== 'running' || (team.fault_count ?? team.members.filter(m => m.status === 'failed' || m.availability === 'blocked' || m.availability === 'offline').length) > 0 ? '需处理' : team.available_count < team.member_count ? '待确认' : team.members.some(m => m.status === 'busy' || m.availability === 'busy') ? '执行中' : '空闲');
+const teamLabel = (team: OwnerTeamSummary) => teamPowerLabel(team.runtime_state) || (team.status === 'creating' ? '创建中' : team.status !== 'running' || (team.fault_count ?? team.members.filter(m => m.status === 'failed' || m.availability === 'blocked' || m.availability === 'offline').length) > 0 ? '需处理' : team.available_count < team.member_count ? '待确认' : team.members.some(m => m.status === 'busy' || m.availability === 'busy') ? '执行中' : '在线');
 const memberState = (m: TeamMember) => memberRailState(m);
 
 function MemberRow({ member, ownerTeamID }: { member: TeamMember; ownerTeamID: number }) {

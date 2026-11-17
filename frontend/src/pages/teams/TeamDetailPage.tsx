@@ -2349,9 +2349,6 @@ function CollaborationPanel({
   const presentedMessages = messages.map(message => ({...message,
     authorType: message.authorType || (message.kind === 'system' ? 'system' : memberByKey.has(message.senderKey) ? 'member' : message.senderKey === currentUserKey || /^user(?:-\d+)?$/.test(message.senderKey) ? 'user' : ['system','ClawManager','clawmanager'].includes(message.senderKey) ? 'system' : 'unknown') as ChatAuthorType,
   }));
-  const onlineCount = members.filter(
-    (member) => !memberIsStarting(member) && ["idle", "busy"].includes(member.availability || ""),
-  ).length;
   const startingCount = members.filter(memberIsStarting).length;
   const chatEnvironment = useTeamPageEnvironment();
   const { feedRef, capture, unread, jumpToLatest } = useChatReadingPosition(messages.at(-1)?.id, chatEnvironment.owner ? `owner-team-reading:${chatEnvironment.owner}:${team.id}` : undefined);
@@ -2388,7 +2385,7 @@ function CollaborationPanel({
           <div className="team-chat-identity min-w-0 flex-1">
             <h2 className="team-chat-heading" title={team.name}><span className="team-chat-heading-icon"><MessagesSquare size={18} /></span><span className="team-chat-title-text">{team.name}</span></h2>
             <div className="team-chat-subtitle">
-              <span>Team #{team.id}</span><span className="team-chat-online"><i />{t("teams.online", { count: onlineCount })}</span>{startingCount > 0 && <span>{t("teams.starting", { count: startingCount })}</span>}<span className="cm-team-status" data-status={team.runtime_state?.state || team.status}>{teamPowerLabel(team.runtime_state) || teamStatusLabel(locale, team.status)}</span>
+              <span>Team #{team.id}</span>{startingCount > 0 && <span>{t("teams.starting", { count: startingCount })}</span>}{(team.runtime_state?.state || team.status) !== 'running' && <span className="cm-team-status" data-status={team.runtime_state?.state || team.status}>{teamPowerLabel(team.runtime_state) || teamStatusLabel(locale, team.status)}</span>}
             </div>
           </div>
           <div className="team-chat-header-actions">
@@ -2835,7 +2832,7 @@ function InteractionProcessPanel({
               </div>
             ) : (
               <div className="text-xs leading-5 text-slate-500">
-                当前空闲。新的团队任务出现后，这里会自动切换到执行过程。
+                当前暂无任务。新的团队任务出现后，这里会自动切换到执行过程。
               </div>
             )}
           </div>
@@ -3587,7 +3584,7 @@ function buildPeerCollaborationModel(
       label: displayMemberName(normalized, memberByKey, leaderMemberId),
       role: member?.role || "",
       status: member?.status === "busy" ? "working" : "idle",
-      statusLabel: member?.status === "busy" ? "执行中" : "空闲",
+      statusLabel: member?.status === "busy" ? "执行中" : "待命",
       summary: member?.last_summary || "等待协作任务。",
       currentTask: member?.last_summary || "",
       deliverable: "",
@@ -4260,7 +4257,7 @@ function isDispatchOnlyResult(value: string) {
 function processStatusText(status: string) {
   switch (status) {
     case "idle":
-      return "空闲";
+      return "待命";
     case "pending":
       return "等待调度";
     case "dispatched":
@@ -4398,7 +4395,7 @@ function PeerCollaborationMatrix({
                 <div className="min-w-0">
                   <div className="text-xs font-medium text-slate-400">当前任务</div>
                   <div className="mt-0.5 line-clamp-1 text-xs leading-4 text-slate-600">
-                    {lane.currentTask || lane.summary || "空闲，等待任务。"}
+                    {lane.currentTask || lane.summary || "等待任务。"}
                   </div>
                   {(lane.waitingOn || lane.dependencies.length > 0) && (
                     <div className="mt-1 flex flex-wrap gap-1">

@@ -69,6 +69,7 @@ try {
     return ['--cm-primary', '--cm-radius-panel'].map(key => style.getPropertyValue(key));
   });
   assert.equal(await workspace().locator('.team-chat-topbar .team-header-files-trigger').count(), 1, 'the file entry belongs to the object header, not across its bottom divider');
+  assert.equal(await workspace().locator('.team-chat-topbar .team-chat-online, .team-chat-topbar .cm-team-status').count(), 0, 'do not repeat the online count and normal running status in the title');
   assert.equal(await workspace().locator('.team-workflow-mini').count(), 1);
   assert.equal(calls.filter(c => c[1].endsWith('/workspace/files')).length, 0, 'collapsed files must not fetch');
   // Member entry is available in both states, without reparenting/remounting chat.
@@ -484,6 +485,14 @@ try {
     await page.reload(); await workspace().waitFor();
     await assertHeader();
   }
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.evaluate(() => localStorage.setItem('clawmanager_locale', 'en'));
+  await page.reload(); await workspace().waitFor();
+  assert.ok(await workspace().locator('.team-roster-rail-heading').evaluate(el => {
+    const label = el.querySelector('span'), count = label.querySelector('small');
+    const a = label.getBoundingClientRect(), b = count.getBoundingClientRect(), r = el.getBoundingClientRect();
+    return a.height <= 22 && b.top < a.top + 8 && a.right <= r.right && a.left >= r.left;
+  }), 'English Members and its count fit together on one line');
   await page.evaluate(() => localStorage.setItem('clawmanager_locale', 'zh'));
   await page.goto(`${origin}/teams/144`); await workspace().waitFor();
   assert.equal(await page.locator('body').getAttribute('data-northbound-portal'), null);

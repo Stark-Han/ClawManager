@@ -70,6 +70,10 @@
 }
 .team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-card {border-radius:12px}
 .team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-quick-entry {border-radius:6px}
+.team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-rail-heading {gap:4px;font-size:var(--cm-font-label);white-space:nowrap}
+.team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-rail-heading>svg {flex:none}
+.team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-rail-heading>span {display:inline-flex;align-items:baseline;gap:3px;flex:none;white-space:nowrap}
+.team-chat-workspace[data-team-presentation=classic][data-mode] .team-roster-rail-heading small {margin-left:0}
 .team-chat-workspace[data-team-presentation=classic][data-mode] .team-tools-panel {
   top:76px;border-radius:18px;background:var(--cm-surface);border-color:var(--cm-border);box-shadow:var(--cm-shadow-8);
 }
