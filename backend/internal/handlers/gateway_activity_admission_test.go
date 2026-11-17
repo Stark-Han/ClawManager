@@ -112,7 +112,7 @@ func TestGatewayActivityPublicProtocolsRejectStoppedAndStaleMySQL(t *testing.T) 
 			t.Fatal("localhost port required")
 		}
 	}
-	url := mysql.ConnectionURL{Host: "127.0.0.1:" + port, User: "root", Database: "mysql", Options: map[string]string{"parseTime": "true"}}
+	url := mysql.ConnectionURL{Host: "127.0.0.1:" + port, User: "root", Password: os.Getenv("TEST_IDLE_MYSQL_PASSWORD"), Database: "mysql", Options: map[string]string{"parseTime": "true"}}
 	root, err := mysql.Open(url)
 	if err != nil {
 		t.Fatal(err)
@@ -132,14 +132,16 @@ func TestGatewayActivityPublicProtocolsRejectStoppedAndStaleMySQL(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	raw, err := os.ReadFile("../db/migrations/096_add_instance_auto_stop.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range strings.Split(string(raw), ";") {
-		if strings.TrimSpace(q) != "" {
-			if _, err = s.SQL().Exec(q); err != nil {
-				t.Fatal(err)
+	for _, migration := range []string{"096_add_instance_auto_stop.sql", "109_add_model_activity_leases.sql"} {
+		raw, err := os.ReadFile("../db/migrations/" + migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range strings.Split(string(raw), ";") {
+			if strings.TrimSpace(q) != "" {
+				if _, err = s.SQL().Exec(q); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}
