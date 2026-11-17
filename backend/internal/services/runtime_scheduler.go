@@ -1747,14 +1747,14 @@ func (s *RuntimeScheduler) retryUnpublishedPendingSlot(ctx context.Context, clie
 	if err := client.canRetryPendingGateway(ctx, endpoint, RuntimeAgentCreateGatewayRequest{
 		InstanceID: instance.ID, UserID: instance.UserID, Generation: instance.RuntimeGeneration, AgentType: runtimeType, PodUID: *pod.PodUID, GatewayPort: binding.GatewayPort,
 	}); err != nil {
-		return err
+		return fmt.Errorf("pending_authority: %w", err)
 	}
 	if err := s.verifyOrdinaryRuntimePod(ctx, *pod); err != nil {
-		return err
+		return fmt.Errorf("pending_placement: %w", err)
 	}
 	start, err := s.prepareGatewayStartParameters(ctx, instance, runtimeType, *pod)
 	if err != nil {
-		return err
+		return fmt.Errorf("pending_parameters: %w", err)
 	}
 	start.reservedBinding = binding
 	return s.createGatewayOnPod(ctx, instance, runtimeType, *pod, start)
@@ -3030,6 +3030,9 @@ func (s *RuntimeScheduler) preservePendingGatewayStart(ctx context.Context, inst
 	if cause == nil {
 		cause = errors.New("runtime gateway start outcome is unknown")
 	}
+	// Do not expose arbitrary upstream text or renew the reservation's timeout.
+	// The original cause used to disappear once a binding was already creating.
+	log.Printf("runtime pending start: instance_id=%d generation=%d reason=%s", instanceID, generation, pendingStartReason(cause))
 	message := cause.Error()
 	if s != nil && s.bindingRepo != nil && generation > 0 {
 		binding, readErr := s.bindingRepo.GetByInstanceID(ctx, instanceID)
