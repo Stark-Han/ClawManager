@@ -23,6 +23,11 @@ func (s *RuntimeUpgradeService) retireUnpublishedUpgradeReservation(ctx context.
 	if b == nil || b.RuntimePodID != *c.RuntimePodID || b.Generation != c.Generation || b.GatewayID != c.GatewayID || b.WorkspacePath != c.WorkspacePath {
 		return false, ErrUpgradeSourceState
 	}
+	if verifier, published := s.agent.(publishedUpgradeReservationVerifier); published {
+		if _, verified := verifier.verifyPublishedUpgradeReservation(ctx, c, *b); verified == nil {
+			return s.retireConfirmedPublishedUpgradeReservation(ctx, c, *b, claim)
+		}
+	}
 	return store.RetireUnpublishedUpgradeReservation(ctx, *b, claim, func(ctx context.Context, user int, workspace string) error {
 		proof, err := reader.ConfirmedTeamStoppedSource(ctx, c.InstanceID, user, c.Generation, workspace)
 		if err != nil {

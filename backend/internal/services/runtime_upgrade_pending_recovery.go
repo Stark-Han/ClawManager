@@ -9,11 +9,22 @@ import (
 	"clawreef/internal/models"
 )
 
-// A terminal upgrade can retain a creating SQL reservation without ever
-// publishing its successor. Expose explicit recovery only after independently
-// checking the finalized source and every later publication, never from age or
-// a creating/error label. Execution remains in the ordinary scoped child rollout.
-func (s *RuntimeUpgradeService) verifiedUnpublishedUpgradeRecovery(ctx context.Context, d *RuntimeUpgradeDetails, id, generation int, b *models.InstanceRuntimeBinding) error {
+func (s *RuntimeUpgradeService) verifiedPendingUpgradeRecoveryScope(ctx context.Context, scope runtimeUpgradeScope, id, generation int, binding *models.InstanceRuntimeBinding) error {
+	if !scope.allowsRecovery(id) || scope.RecoveryParentID <= 0 {
+		return ErrUpgradeSourceState
+	}
+	parent, err := s.Details(ctx, scope.RecoveryParentID)
+	if err != nil {
+		return err
+	}
+	return s.verifiedPendingUpgradeRecovery(ctx, parent, id, generation, binding)
+}
+
+// A terminal upgrade can retain a creating SQL reservation. Expose a child
+// retry only for a verified unpublished successor or an exact published launch;
+// neither age nor a creating/error label proves termination. The child uses
+// native teardown for published launches before it may release the reservation.
+func (s *RuntimeUpgradeService) verifiedPendingUpgradeRecovery(ctx context.Context, d *RuntimeUpgradeDetails, id, generation int, b *models.InstanceRuntimeBinding) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	denied := fmt.Errorf("%w: pending upgrade successor is unconfirmed", ErrUpgradeSourceState)
@@ -57,6 +68,15 @@ func (s *RuntimeUpgradeService) verifiedUnpublishedUpgradeRecovery(ctx context.C
 	}
 	if workspace == "" || workspace != b.WorkspacePath {
 		return denied
+	}
+	// Offering an explicit child retry does not claim the current generation
+	// stopped. Published pending successors are cancelled by the child through
+	// the existing native teardown protocol before migration/SQL retirement.
+	if verifier, ok := s.agent.(publishedUpgradeReservationVerifier); ok {
+		c := runtimeUpgradeCandidate{InstanceID: id, UserID: user, Generation: generation, RuntimePodID: &b.RuntimePodID, GatewayID: b.GatewayID, WorkspacePath: workspace, SourcePodUID: stringValue(pod.PodUID), AgentEndpoint: stringValue(pod.AgentEndpoint)}
+		if _, verified := verifier.verifyPublishedUpgradeReservation(ctx, c, *b); verified == nil {
+			return nil
+		}
 	}
 	proof, err := reader.ConfirmedTeamStoppedSource(ctx, id, user, generation, workspace)
 	if err != nil {

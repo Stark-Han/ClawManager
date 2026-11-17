@@ -1427,7 +1427,8 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItemMode(ctx context.Context,
 	}
 	if binding == nil {
 		recoveryStopped := false
-		if instanceStatus != "stopped" {
+		ownStoppedGeneration := item.SourceGeneration != nil && *item.SourceGeneration == generation && upgradeItemOwnsConfirmedStoppedGateway(item)
+		if instanceStatus != "stopped" && !ownStoppedGeneration {
 			scope := s.upgradeItemRecovery(ctx, item)
 			if scope.allowsRecovery(item.InstanceID) && scope.RecoveryParentID > 0 {
 				prior, err := s.recoveryStoppedSource(ctx, scope.RecoveryParentID, item.InstanceID, generation)
@@ -1475,7 +1476,8 @@ func (s *RuntimeUpgradeService) candidateForUpgradeItemMode(ctx context.Context,
 		}
 		return candidate, nil
 	}
-	if requireStable && instanceStatus != "running" && instanceStatus != "stopped" && !(instanceStatus == "error" && s.upgradeItemRecovery(ctx, item).allowsRecovery(item.InstanceID)) {
+	stablePendingRecovery := instanceStatus == "creating" && s.verifiedPendingUpgradeRecoveryScope(ctx, s.upgradeItemRecovery(ctx, item), item.InstanceID, generation, binding) == nil
+	if requireStable && instanceStatus != "running" && instanceStatus != "stopped" && !(instanceStatus == "error" && s.upgradeItemRecovery(ctx, item).allowsRecovery(item.InstanceID)) && !stablePendingRecovery {
 		return runtimeUpgradeCandidate{}, fmt.Errorf("instance %d runtime state %s is not stable for migration", item.InstanceID, instanceStatus)
 	}
 	candidate.RuntimePodID = &binding.RuntimePodID
@@ -2387,7 +2389,15 @@ func (s *RuntimeUpgradeService) inspectCandidates(ctx context.Context, scope run
 				}
 			}
 		}
-		if podID.Valid && candidate.InstanceStatus != "running" && candidate.InstanceStatus != "stopped" && !(candidate.InstanceStatus == "error" && scope.allowsRecovery(instanceID)) {
+		stablePendingRecovery := false
+		if podID.Valid && candidate.InstanceStatus == "creating" && scope.allowsRecovery(instanceID) && scope.RecoveryParentID > 0 {
+			binding, e := s.bindings.GetByInstanceID(ctx, instanceID)
+			if e != nil {
+				return nil, nil, nil, nil, e
+			}
+			stablePendingRecovery = s.verifiedPendingUpgradeRecoveryScope(ctx, scope, instanceID, runtimeGeneration, binding) == nil
+		}
+		if podID.Valid && candidate.InstanceStatus != "running" && candidate.InstanceStatus != "stopped" && !(candidate.InstanceStatus == "error" && scope.allowsRecovery(instanceID)) && !stablePendingRecovery {
 			blockers = append(blockers, fmt.Sprintf("instance %d runtime state %s is not stable for upgrade", instanceID, candidate.InstanceStatus))
 		}
 		if memberID.Valid {

@@ -12,7 +12,7 @@ import (
 )
 
 func TestUpgradeMySQLUnpublishedReservationRetiresOnlyUnderClaimAndPublicationFence(t *testing.T) {
-	for _, name := range []string{"retire", "low-counter", "publication-race", "missing-proof", "wrong-owner", "missing-storage", "missing-claim", "expired-claim", "native-pid", "changed-binding"} {
+	for _, name := range []string{"retire", "low-counter", "publication-race", "missing-proof", "wrong-owner", "missing-storage", "missing-claim", "expired-claim", "native-pid", "changed-binding", "published-confirmed", "published-uncertain", "published-normal", "published-expired", "published-lost-claim", "published-not-durable"} {
 		t.Run(name, func(t *testing.T) {
 			sess, u, target := recoveryActionsDB(t)
 			ctx := context.Background()
@@ -40,6 +40,25 @@ func TestUpgradeMySQLUnpublishedReservationRetiresOnlyUnderClaimAndPublicationFe
 			u.deployments = proof
 			u.agent = &slotRuntimeAgentClient{}
 			c := runtimeUpgradeCandidate{InstanceID: 481, UserID: 1, RuntimePodID: &b.RuntimePodID, Generation: 8, GatewayID: b.GatewayID, WorkspacePath: b.WorkspacePath, BindingState: "creating"}
+			var published *publishedRecoveryAgent
+			if strings.HasPrefix(name, "published-") {
+				published = &publishedRecoveryAgent{}
+				u.agent = published
+				c.AgentEndpoint = "http://10.1.2.2:19090"
+				proof.err = errors.New("current successor published; predecessor cannot prove its stop")
+				if name != "published-normal" {
+					exec(`UPDATE runtime_rollouts SET recovery_key='explicit-child-retry' WHERE id=?`, p.Rollout.ID)
+				}
+				if name == "published-uncertain" {
+					published.deleteErr = errors.New("native cancellation result is unconfirmed")
+				}
+				if name == "published-lost-claim" {
+					published.afterDelete = func() {
+						exec(`UPDATE runtime_upgrade_items SET operation_deadline_at=NOW()-INTERVAL 1 SECOND WHERE rollout_id=?`, p.Rollout.ID)
+					}
+				}
+				published.keepRunning = name == "published-not-durable"
+			}
 			switch name {
 			case "missing-proof":
 				proof.err = errors.New("finalized source unavailable")
@@ -54,7 +73,7 @@ func TestUpgradeMySQLUnpublishedReservationRetiresOnlyUnderClaimAndPublicationFe
 			}
 			var stopped bool
 			run := func(ctx context.Context) error {
-				if name == "expired-claim" {
+				if name == "expired-claim" || name == "published-expired" {
 					exec(`UPDATE runtime_upgrade_items SET operation_deadline_at=NOW()-INTERVAL 1 SECOND WHERE rollout_id=?`, p.Rollout.ID)
 				}
 				var e error
@@ -95,11 +114,20 @@ func TestUpgradeMySQLUnpublishedReservationRetiresOnlyUnderClaimAndPublicationFe
 			} else {
 				err = u.withUpgradeClaim(ctx, p.Rollout.ID, 481, "session_migration", run)
 			}
-			want := name == "retire" || name == "low-counter" || name == "publication-race"
+			want := name == "retire" || name == "low-counter" || name == "publication-race" || name == "published-confirmed"
 			after, _ := u.bindings.GetByInstanceID(ctx, 481)
 			pod, _ := u.pods.GetByID(ctx, 319)
 			if want && (err != nil || !stopped || after != nil || pod.UsedSlots != 2) || !want && (err == nil || stopped || after == nil || pod.UsedSlots != 3) {
 				t.Fatalf("retirement=%v binding=%+v slots=%d err=%v", stopped, after, pod.UsedSlots, err)
+			}
+			if published != nil {
+				calls := 0
+				if name == "published-confirmed" || name == "published-uncertain" || name == "published-lost-claim" || name == "published-not-durable" {
+					calls = 1
+				}
+				if published.deletes != calls {
+					t.Fatalf("native deletes=%d want=%d", published.deletes, calls)
+				}
 			}
 		})
 	}

@@ -106,7 +106,7 @@ func (s *RuntimeUpgradeService) RecoveryInfo(ctx context.Context, id int) (*Runt
 			if proofErr == nil && s.verifyRecoverySourceStopped(ctx, prior) == nil {
 				recoveredCreating = true
 			}
-		} else if s.verifiedUnpublishedUpgradeRecovery(ctx, details, id, info.Generation, binding) == nil {
+		} else if s.verifiedPendingUpgradeRecovery(ctx, details, id, info.Generation, binding) == nil {
 			recoveredCreating = true
 		}
 	}

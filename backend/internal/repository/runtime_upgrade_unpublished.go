@@ -10,9 +10,11 @@ import (
 )
 
 // RetireUnpublishedUpgradeReservation retires only an SQL reservation owned by
-// the current upgrade claim. The independent finalized-source verifier runs
-// inside the SAME admission fence as publication. It never acknowledges a new
-// process stop, deletes credentials or changes the instance generation.
+// the current upgrade claim. The verifier must establish either an unpublished
+// successor and finalized predecessor, or a real native teardown of the exact
+// published successor. It runs inside the SAME admission fence as publication.
+// This SQL method never acknowledges a process stop, deletes credentials or
+// changes the instance generation.
 func (r *instanceRuntimeBindingRepository) RetireUnpublishedUpgradeReservation(ctx context.Context, b models.InstanceRuntimeBinding, claim string, verify func(context.Context, int, string) error) (bool, error) {
 	if claim == "" || verify == nil || b.ID <= 0 || b.RuntimeType != "openclaw" || b.Generation <= 1 || b.State != "creating" || b.GatewayPID != nil || b.GatewayID != fmt.Sprintf("pending-%d-%d", b.InstanceID, b.Generation) {
 		return false, fmt.Errorf("exact claimed unpublished upgrade reservation required")
