@@ -6,6 +6,7 @@ import { MemberCards, MemberInfoDialog, MemberPager, MemberRail } from "./TeamMe
 import { memberPageSize } from "./teamMemberPresentation";
 import "./team-chat-workspace.css";
 import "./team-continuous-chat.css";
+import "./team-classic-presentation.css";
 
 export type TeamWorkspacePanel = "closed" | "kanban" | "files";
 
@@ -19,7 +20,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
   team: Team;
   leaderKey?: string;
   renderMemberDetails: (member: TeamMember) => ReactNode;
-  chat: ReactNode;
+  chat: (headerTools: ReactNode) => ReactNode;
   renderKanban: (mini: boolean, open: () => void) => ReactNode;
   files: ReactNode | ((active: boolean) => ReactNode);
 }) {
@@ -29,6 +30,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
   const rightPanel = useRef<HTMLElement>(null);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const membersPanelId = useId();
+  const toolsPanelId = useId();
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(0);
   const [memberPage, setMemberPage] = useState(0);
@@ -96,7 +98,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
     return () => document.removeEventListener("keydown", onKey);
   }, [drawerOpen, left, right]);
 
-  return <div ref={root} className="team-chat-workspace" data-mode={mode} data-left={left} data-right={right}>
+  return <div ref={root} className="team-chat-workspace" data-team-presentation="classic" data-mode={mode} data-left={left} data-right={right}>
     <div className="team-member-rail" inert={drawerOpen}>
       <MemberRail members={pageMembers} start={start} leaderKey={leaderKey} total={members.length} expanded={left} panelId={membersPanelId} onDetails={setMemberInfo} onOpen={() => {
         rememberTrigger(); setLastSide("left"); setLeft(value => !value); if (mode !== "dual") setRight("closed");
@@ -107,9 +109,11 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
       <div className="team-members-body"><MemberCards members={pageMembers} start={start} leaderKey={leaderKey} onDetails={setMemberInfo} /></div>
       <MemberPager page={page} pages={pages} onPage={setMemberPage} />
     </aside>
-    <main className="team-chat-main" inert={drawerOpen}>{chat}</main>
-    <aside ref={rightPanel} className="team-tools-panel" role={drawerOpen && right !== "closed" ? "dialog" : undefined} aria-modal={drawerOpen && right !== "closed" ? true : undefined} aria-label={t("teams.toolsLabel")} inert={drawerOpen && left}>
-      <header className="team-tools-toolbar">
+    <main className="team-chat-main" inert={drawerOpen}>{chat(
+      <button type="button" className="team-header-files-trigger" onClick={() => openRight("files")} aria-expanded={right === "files"} aria-controls={toolsPanelId}><FolderOpen size={17} /><span>{t("teams.files")}</span></button>
+    )}</main>
+    <aside id={toolsPanelId} ref={rightPanel} className="team-tools-panel" role={drawerOpen && right !== "closed" ? "dialog" : undefined} aria-modal={drawerOpen && right !== "closed" ? true : undefined} aria-label={t("teams.toolsLabel")} inert={drawerOpen && left}>
+      <header className="team-tools-toolbar" hidden={right === "closed"}>
         {right !== "closed" && <strong>{t(right === "kanban" ? "teams.board" : "teams.sharedFiles")}</strong>}
         {right !== "closed" && <button type="button" onClick={() => openRight("kanban")} aria-pressed={right === "kanban"}>{t("teams.boardTab")}</button>}
         <button type="button" onClick={() => openRight("files")} aria-expanded={right === "files"}><FolderOpen size={17} /><span>{t("teams.files")}</span></button>

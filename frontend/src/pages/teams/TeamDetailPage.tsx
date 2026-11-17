@@ -1356,7 +1356,8 @@ const TeamDetailPage: React.FC = () => {
           <section><h3>职责</h3><DescriptionPreview text={getTeamMemberDisplayDescription(member.description)} /></section>
           <section><h3>运行详情</h3><dl><dt>运行状态</dt><dd>{member.runtime_status || "-"}</dd><dt>意图</dt><dd>{member.runtime_intent || "-"}</dd><dt>任务</dt><dd>{member.runtime_task_id || "-"}</dd><dt>最后在线</dt><dd>{formatDateTime(member.last_seen_at)}</dd></dl></section>
         </>}
-        chat={<CollaborationPanel
+        chat={headerTools => <CollaborationPanel
+          headerTools={headerTools}
           team={details.team}
           groups={collaborationGroups}
           members={details.members}
@@ -2286,6 +2287,7 @@ function DescriptionPreview({ text }: { text?: string }) {
 }
 
 function CollaborationPanel({
+  headerTools,
   team,
   groups,
   members,
@@ -2310,6 +2312,7 @@ function CollaborationPanel({
   onSelectGroup,
   onWorkspaceFileOpen,
 }: {
+  headerTools?: React.ReactNode;
   team: TeamDetails["team"];
   groups: CollaborationGroup[];
   members: TeamMember[];
@@ -2382,17 +2385,20 @@ function CollaborationPanel({
     <section className="team-chat-transcript">
       <div className="team-chat-topbar">
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h2 className="team-chat-heading" title={team.name}><span><MessagesSquare size={18} /></span>{team.name}</h2>
+          <div className="team-chat-identity min-w-0 flex-1">
+            <h2 className="team-chat-heading" title={team.name}><span className="team-chat-heading-icon"><MessagesSquare size={18} /></span><span className="team-chat-title-text">{team.name}</span></h2>
             <div className="team-chat-subtitle">
               <span>Team #{team.id}</span><span className="team-chat-online"><i />{t("teams.online", { count: onlineCount })}</span>{startingCount > 0 && <span>{t("teams.starting", { count: startingCount })}</span>}<span className="cm-team-status" data-status={team.runtime_state?.state || team.status}>{teamPowerLabel(team.runtime_state) || teamStatusLabel(locale, team.status)}</span>
             </div>
           </div>
-          {queryAnchors.length >= 2 && <TeamHistoryMenu
-            items={queryAnchors.map(group => ({ key: group.key, title: `${group.task?.payload?.executionType === 'single_member' ? `单成员 · @${memberById.get(group.task.target_member_id)?.display_name || 'Worker'} · ` : ''}${groupQueryText(group)}`, time: formatDateTime(group.task?.created_at) }))}
-            activeKey={activeGroupKey}
-            onSelect={handleSelectAnchor}
-          />}
+          <div className="team-chat-header-actions">
+            {queryAnchors.length >= 2 && <TeamHistoryMenu
+              items={queryAnchors.map(group => ({ key: group.key, title: `${group.task?.payload?.executionType === 'single_member' ? `单成员 · @${memberById.get(group.task.target_member_id)?.display_name || 'Worker'} · ` : ''}${groupQueryText(group)}`, time: formatDateTime(group.task?.created_at) }))}
+              activeKey={activeGroupKey}
+              onSelect={handleSelectAnchor}
+            />}
+            {headerTools}
+          </div>
         </div>
       </div>
 

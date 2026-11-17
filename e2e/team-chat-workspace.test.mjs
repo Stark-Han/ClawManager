@@ -15,7 +15,7 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-const origin = `http://127.0.0.1:${server.address().port}`;
+const origin = process.env.TEAM_WORKSPACE_ORIGIN || `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome', executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 const errors = [];
@@ -44,11 +44,13 @@ await page.route('**/api/v1/**', async route => {
   const request = route.request(), url = new URL(request.url()); calls.push([request.method(), url.pathname, url.search]);
   const send = value => route.fulfill({ json: { data: value } });
   if (url.pathname.endsWith('/auth/me')) return send({ id: 1, username: 'admin', role: 'user', status: 'active' });
+  if (url.pathname === '/api/v1/ieisystem/session') return send({ owner: 'portal-accept-20260923@example.com' });
   if (url.pathname.endsWith('/version')) return send({ version: 'ui-acceptance' });
   if (url.pathname.endsWith('/workspace/preview')) return send({ path: 'report.md', name: 'report.md', content: '# 验收报告\n可点击链接仍可打开预览。\n' + '## 验收章节\n预览长文档正文，确保标题与操作按钮始终可见。\n'.repeat(35) });
   if (url.pathname.endsWith('/workspace/download')) return route.fulfill({ body: 'test download', contentType: 'application/octet-stream' });
   if (url.pathname.endsWith('/workspace/files') && request.method() === 'GET') return send({ entries: url.searchParams.get('path') ? [{ name: 'report.md', path: 'artifacts/report.md', type: 'file', previewable: true, size: 123, modified_at: now }] : [{ name: 'artifacts', path: 'artifacts', type: 'directory', size: 0, modified_at: now }, { name: 'report.md', path: 'report.md', type: 'file', previewable: true, size: 123, modified_at: now }] });
   if (url.pathname === '/api/v1/teams/144') return failRefresh ? route.fulfill({ status: 503, json: { error: 'fixture transient failure' } }) : send(data);
+  if (url.pathname === '/api/v1/ieisystem/teams/144') return send(data);
   return send({});
 });
 const updateTeam = async (event = 'focus') => {
@@ -62,6 +64,12 @@ try {
   await workspace().waitFor();
   await page.waitForFunction(() => document.querySelector('.team-chat-workspace[data-mode=dual]'));
   assert.equal(await workspace().getAttribute('data-right'), 'closed');
+  const publicTheme = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return ['--cm-primary', '--cm-radius-panel'].map(key => style.getPropertyValue(key));
+  });
+  assert.equal(await workspace().locator('.team-chat-topbar .team-header-files-trigger').count(), 1, 'the file entry belongs to the object header, not across its bottom divider');
+  assert.equal(await workspace().locator('.team-workflow-mini').count(), 1);
   assert.equal(calls.filter(c => c[1].endsWith('/workspace/files')).length, 0, 'collapsed files must not fetch');
   // Member entry is available in both states, without reparenting/remounting chat.
   assert.equal(await workspace().locator('.team-roster-mini').count(), 3);
@@ -233,8 +241,10 @@ try {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await workflowNode.click();
   assert.equal(await workspace().getAttribute('data-right'), 'kanban');
+  assert.equal(await workspace().locator('.team-workflow-mini').count(), 0, 'expanded Kanban replaces the mini workflow rather than duplicating it');
+  assert.equal(await workspace().locator('.team-docked-kanban').count(), 1, 'keep the existing complete Kanban');
   await workspace().getByRole('button', { name: '收起右侧面板' }).click();
-  await workspace().locator('.team-tools-toolbar').getByRole('button', { name: '文件', exact: true }).click();
+  await workspace().locator('.team-header-files-trigger').click();
   assert.equal(await workspace().getAttribute('data-right'), 'files');
   await workspace().getByRole('button', { name: '收起右侧面板' }).click();
   const feed = workspace().locator('.team-chat-feed');
@@ -302,7 +312,7 @@ try {
     }
     await shot(String(width));
     if (width === 390) {
-      await workspace().locator('.team-tools-toolbar').getByRole('button', { name: '文件', exact: true }).click();
+      await workspace().locator('.team-header-files-trigger').click();
       await workspace().getByRole('button', { name: 'report.md', exact: true }).click();
       const mobilePreview = page.locator('[data-workspace-preview]:visible');
       await mobilePreview.waitFor();
@@ -419,6 +429,68 @@ try {
   await updateTeam('online');
   await page.getByRole('alert').filter({ visible: true }).waitFor();
   assert.equal(await workspace().locator('textarea').inputValue(), '保留未发送的草稿');
+  // The northbound route uses the same complete workspace and keeps its owner
+  // API boundary. Team styling must not rewrite the CM document's theme.
+  failRefresh = false;
+  data.team.name = '论文精读与复现评估团队';
+  await page.goto(`${origin}/ieisystem/teams/144`);
+  await workspace().waitFor();
+  assert.equal(await page.locator('body').getAttribute('data-northbound-portal'), 'true');
+  assert.equal(await workspace().locator('.team-workflow-mini').count(), 1);
+  const fileTrigger = workspace().locator('.team-header-files-trigger');
+  const assertHeader = async () => {
+    assert.ok(await fileTrigger.evaluate(button => {
+      const r = button.getBoundingClientRect(), h = button.closest('.team-chat-topbar').getBoundingClientRect();
+      return r.top >= h.top + 2 && r.bottom <= h.bottom - 2 && r.right <= h.right - 2 && button.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));
+    }), 'file entry and its focus clearance fit inside the title bar');
+    assert.ok(await workspace().locator('.team-chat-heading-icon').isVisible(), 'keep the old title icon');
+    assert.ok(await workspace().locator('.team-chat-subtitle').evaluate(el => {
+      const r = el.getBoundingClientRect(), h = el.closest('.team-chat-topbar').getBoundingClientRect();
+      return r.bottom <= h.bottom && r.right <= h.right;
+    }), 'all metadata remains inside the header');
+    assert.ok(await workspace().locator('.team-chat-header-actions').evaluate(el => {
+      const [a, b] = [...el.children].map(n => n.getBoundingClientRect());
+      return !b || Math.abs(a.top + a.height / 2 - b.top - b.height / 2) <= 2;
+    }), 'history and file actions share one row, including compact mode');
+  };
+  for (const width of [1440, 1280, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(120);
+    await assertHeader();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `northbound overflows at ${width}`);
+    await fileTrigger.click();
+    assert.equal(await workspace().locator('.team-workflow-mini:visible').count(), 0);
+    assert.equal(await workspace().locator('.team-files-host').isVisible(), true);
+    if (width === 1440 || width === 390) {
+      const row = workspace().locator('.team-file-row').first();
+      for (const action of ['重命名', '删除']) {
+        await row.getByRole('button', { name: action, exact: true }).click();
+        const dialog = page.locator('[data-team-file-dialog][open]');
+        assert.ok(await dialog.evaluate(el => {
+          const r = el.getBoundingClientRect();
+          return el.matches(':modal') && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight;
+        }), `${action} uses the existing reachable confirmation form`);
+        await dialog.getByRole('button', { name: '取消', exact: true }).click();
+        assert.equal(await workspace().getAttribute('data-right'), 'files', 'canceling a file action keeps the workspace open');
+      }
+      await shot('northbound-classic-files-' + width);
+    }
+    await workspace().getByRole('button', { name: '收起右侧面板' }).click();
+    assert.equal(await workspace().locator('.team-workflow-mini').count(), 1);
+    await shot('northbound-classic-' + width);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  for (const locale of ['en', 'ja', 'ko', 'de']) {
+    await page.evaluate(locale => localStorage.setItem('clawmanager_locale', locale), locale);
+    await page.reload(); await workspace().waitFor();
+    await assertHeader();
+  }
+  await page.evaluate(() => localStorage.setItem('clawmanager_locale', 'zh'));
+  await page.goto(`${origin}/teams/144`); await workspace().waitFor();
+  assert.equal(await page.locator('body').getAttribute('data-northbound-portal'), null);
+  assert.deepEqual(await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return ['--cm-primary', '--cm-radius-panel'].map(key => style.getPropertyValue(key));
+  }), publicTheme, 'CM public theme stays unchanged after visiting Team and northbound');
   assert.deepEqual(errors, []);
-  console.log('PASS: floating workspace, table widths/collapse/links, native preview layering and mobile controls, reading anchor, panel state, transfer/terminal animation, responsive widths and transient refresh.');
+  console.log('PASS: CM and northbound classic Team presentation, inline header/file entry, single full/mini Kanban, member details/pagination, file confirmation/preview/download, draft and reading anchors, five locales, responsive widths, unchanged public theme and transient refresh.');
 } finally { await browser.close(); server.close(); }
