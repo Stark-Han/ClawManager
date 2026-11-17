@@ -61,7 +61,7 @@ func (h *RuntimeSecurityLeaseHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		fail(http.StatusUnauthorized)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(runtimeauth.WithDiagnostics(r.Context()), 2*time.Second)
 	defer cancel()
 	// Bound stalled uploads as well as issuance; canceling a request context
 	// alone does not interrupt reads from the incoming server request body.
@@ -88,9 +88,19 @@ func (h *RuntimeSecurityLeaseHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		return
 	}
 	identity := runtimeauth.Identity{InstanceID: request.InstanceID, UserID: request.UserID, Generation: request.Generation, PodUID: request.PodUID}
+	started := time.Now()
 	lease, err := h.issuer.IssueLease(ctx, identity, peer)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	runtimeauth.LogDiagnostics(ctx, identity.InstanceID, identity.Generation, started, err)
 	if err != nil || ctx.Err() != nil {
-		fail(http.StatusForbidden)
+		status := http.StatusForbidden
+		if runtimeauth.IsUnavailable(err) {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "1")
+		}
+		fail(status)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

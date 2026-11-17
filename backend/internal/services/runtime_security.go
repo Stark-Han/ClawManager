@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"time"
 
 	"clawreef/internal/models"
 	"clawreef/internal/runtimeauth"
@@ -118,27 +119,40 @@ func (a *RuntimeSecurityAuthority) validatedSnapshot(ctx context.Context, id int
 	if err := ctx.Err(); err != nil {
 		return runtimeSecuritySnapshot{}, err
 	}
+	started := time.Now()
 	instance, err := a.instances.GetByIDContext(ctx, id)
-	if err != nil || instance == nil {
+	runtimeauth.RecordStage(ctx, "instance_lookup", started, err)
+	if err != nil {
+		return runtimeSecuritySnapshot{}, runtimeAuthorityDependency(ctx, err)
+	}
+	if instance == nil {
 		return runtimeSecuritySnapshot{}, errRuntimeSecurity
 	}
 	instanceCopy := *instance
-	if a.checkTeamNetwork(ctx, &instanceCopy) != nil {
-		return runtimeSecuritySnapshot{}, errRuntimeSecurity
+	started = time.Now()
+	err = a.checkTeamNetwork(ctx, &instanceCopy)
+	runtimeauth.RecordStage(ctx, "team_network", started, err)
+	if err != nil {
+		return runtimeSecuritySnapshot{}, err
 	}
 	if a.assignments != nil {
+		started = time.Now()
 		cm, pods, err := a.assignments.Assignment(ctx, id)
+		runtimeauth.RecordStage(ctx, "assignment_observation", started, err)
 		if err != nil {
-			return runtimeSecuritySnapshot{}, errRuntimeSecurity
+			return runtimeSecuritySnapshot{}, runtimeAuthorityDependency(ctx, err)
 		}
 		return validateRuntimeSecuritySnapshot(ctx, id, &instanceCopy, cm, pods)
 	}
 	cm, err := a.kube.CoreV1().ConfigMaps(a.namespace).Get(ctx, fmt.Sprintf("lite-instance-%d", id), metav1.GetOptions{})
 	if err != nil {
-		return runtimeSecuritySnapshot{}, errRuntimeSecurity
+		return runtimeSecuritySnapshot{}, runtimeAuthorityDependency(ctx, err)
 	}
 	pods, err := a.kube.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "clawmanager.io/runtime-protocol=container-slots-v1"})
-	if err != nil || pods == nil {
+	if err != nil {
+		return runtimeSecuritySnapshot{}, runtimeAuthorityDependency(ctx, err)
+	}
+	if pods == nil {
 		return runtimeSecuritySnapshot{}, errRuntimeSecurity
 	}
 	return validateRuntimeSecuritySnapshot(ctx, id, &instanceCopy, cm, pods.Items)

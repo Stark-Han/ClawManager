@@ -34,19 +34,20 @@ func (a *RuntimeSecurityAuthority) IssueLease(ctx context.Context, expected runt
 	var empty RuntimeSecurityLease
 	snapshot, err := a.validatedSnapshot(ctx, expected.InstanceID)
 	identity := snapshot.identity
-	if err != nil || identity != expected || !peer.IsValid() || peer.Zone() != "" || snapshot.address.Unmap() != peer.Unmap() {
+	if err != nil {
+		return empty, err
+	}
+	if identity != expected || !peer.IsValid() || peer.Zone() != "" || snapshot.address.Unmap() != peer.Unmap() {
 		return empty, errRuntimeSecurity
 	}
 	lease := RuntimeSecurityLease{InstanceID: identity.InstanceID, UserID: identity.UserID, Generation: identity.Generation, PodUID: identity.PodUID, ExpiresAt: time.Now().UTC().Truncate(time.Second).Add(15 * time.Minute)}
-	for _, entry := range []struct {
-		audience string
-		token    *string
-	}{{runtimeauth.AudienceModel, &lease.ModelToken}, {runtimeauth.AudienceEgress, &lease.EgressToken}, {runtimeauth.AudienceServices, &lease.ServicesToken}} {
-		*entry.token, err = a.capabilities.Issue(ctx, identity, entry.audience)
-		if err != nil {
-			return empty, errRuntimeSecurity
-		}
+	started := time.Now()
+	tokens, err := a.capabilities.IssueAll(ctx, identity)
+	runtimeauth.RecordStage(ctx, "capability_sign", started, err)
+	if err != nil {
+		return empty, err
 	}
+	lease.ModelToken, lease.EgressToken, lease.ServicesToken = tokens[0], tokens[1], tokens[2]
 	if ctx.Err() != nil {
 		return empty, ctx.Err()
 	}

@@ -19,6 +19,10 @@ import (
 
 var errUnavailable = errors.New("protected runtime inventory is unavailable")
 
+// ErrAssignmentAbsent is an authoritative absence in a fresh observation,
+// unlike an unavailable/stale watch. Both deny access, but only the latter retries.
+var ErrAssignmentAbsent = errors.New("protected runtime assignment is absent")
+
 const maxObservationAge = 3 * time.Second
 
 type objectStore struct {
@@ -53,8 +57,11 @@ func (s *objectStore) unhealthy() { s.mu.Lock(); s.available = false; s.mu.Unloc
 func (s *objectStore) get(name string) (runtime.Object, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !s.available || time.Since(s.observed) > maxObservationAge || s.objects[name] == nil {
+	if !s.available || time.Since(s.observed) > maxObservationAge {
 		return nil, errUnavailable
+	}
+	if s.objects[name] == nil {
+		return nil, ErrAssignmentAbsent
 	}
 	return s.objects[name].DeepCopyObject(), nil
 }

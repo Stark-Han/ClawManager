@@ -91,12 +91,22 @@ func (m *ManagedTeamRedis) authorizeTeam(ctx context.Context, instance *models.I
 	if err != nil || id < 1 || (teamID != 0 && id != teamID) {
 		return nil, errManagedRedis
 	}
+	started := time.Now()
 	team, err := m.teams.GetTeamByIDContext(ctx, id)
-	if err != nil || team == nil || team.ID != id || team.UserID != instance.UserID || (team.Status != models.TeamStatusRunning && team.Status != models.TeamStatusCreating) {
+	runtimeauth.RecordStage(ctx, "team_lookup", started, err)
+	if err != nil {
+		return nil, runtimeAuthorityDependency(ctx, err)
+	}
+	if team == nil || team.ID != id || team.UserID != instance.UserID || (team.Status != models.TeamStatusRunning && team.Status != models.TeamStatusCreating) {
 		return nil, errManagedRedis
 	}
+	started = time.Now()
 	member, err := m.teams.GetMemberByTeamInstanceContext(ctx, id, instance.ID)
-	if err != nil || member == nil || member.TeamID != id || member.UserID != instance.UserID || member.InstanceID == nil || *member.InstanceID != instance.ID {
+	runtimeauth.RecordStage(ctx, "member_lookup", started, err)
+	if err != nil {
+		return nil, runtimeAuthorityDependency(ctx, err)
+	}
+	if member == nil || member.TeamID != id || member.UserID != instance.UserID || member.InstanceID == nil || *member.InstanceID != instance.ID {
 		return nil, errManagedRedis
 	}
 	if team.Status == models.TeamStatusCreating {
@@ -117,7 +127,10 @@ func (m *ManagedTeamRedis) authorizeTeam(ctx context.Context, instance *models.I
 			return nil, errManagedRedis
 		}
 		allowed, startErr := admission.AuthorizeTeamMemberStartup(ctx, id, member.ID, instance.ID)
-		if startErr != nil || !allowed {
+		if startErr != nil {
+			return nil, runtimeAuthorityDependency(ctx, startErr)
+		}
+		if !allowed {
 			return nil, errManagedRedis
 		}
 	}
