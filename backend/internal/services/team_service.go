@@ -6116,7 +6116,7 @@ func (s *teamService) redisBusForTeam(ctx context.Context, team *models.Team) (*
 		}
 		value, err := s.secretService.GetSecretValue(ctx, client.GetNamespace(team.UserID), *team.RedisURLSecretName, *team.RedisURLSecretKey)
 		if err != nil {
-			return nil, err
+			return nil, runtimeAuthorityDependency(ctx, err)
 		}
 		redisURL = strings.TrimSpace(value)
 	}

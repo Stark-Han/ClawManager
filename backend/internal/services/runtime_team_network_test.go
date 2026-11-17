@@ -35,7 +35,7 @@ func (f *protectedTeamFixture) GetRuntimeMemberByInstanceContext(ctx context.Con
 }
 
 func TestProtectedTeamNetworkAuthorityAndBindingCannotDowngrade(t *testing.T) {
-	for _, scenario := range []string{"allowed", "missing-env", "changed-env", "public-literal", "public-dns", "lost-network-proof", "inventory-unavailable", "lost-sql", "foreign-member", "no-member", "no-team"} {
+	for _, scenario := range []string{"allowed", "missing-env", "changed-env", "public-literal", "public-dns", "lost-network-proof", "inventory-unavailable", "redis-secret-unavailable", "lost-sql", "foreign-member", "no-member", "no-team"} {
 		t.Run(scenario, func(t *testing.T) {
 			a, instances, kube, _, _ := securityFixture(t)
 			env := `{"CLAWMANAGER_TEAM_ID":"12"}`
@@ -85,6 +85,10 @@ func TestProtectedTeamNetworkAuthorityAndBindingCannotDowngrade(t *testing.T) {
 				proof = false
 			case "inventory-unavailable":
 				inventoryUnavailable = true
+			case "redis-secret-unavailable":
+				m.resolve = func(context.Context, *models.Team) (*redisBus, error) {
+					return nil, runtimeauth.Unavailable(errors.New("secret lookup unavailable"))
+				}
 			case "lost-sql":
 				teams.associationErr = errors.New("SQL unavailable")
 			case "foreign-member":
@@ -104,7 +108,7 @@ func TestProtectedTeamNetworkAuthorityAndBindingCannotDowngrade(t *testing.T) {
 			if (err == nil) != allowed {
 				t.Fatalf("authority after %s: %v", scenario, err)
 			}
-			if (scenario == "inventory-unavailable" || scenario == "lost-sql") && !runtimeauth.IsUnavailable(err) {
+			if (scenario == "inventory-unavailable" || scenario == "redis-secret-unavailable" || scenario == "lost-sql") && !runtimeauth.IsUnavailable(err) {
 				t.Fatalf("dependency failure became revocation: %v", err)
 			}
 			if scenario == "lost-network-proof" && runtimeauth.IsUnavailable(err) {
