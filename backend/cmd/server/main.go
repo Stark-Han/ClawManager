@@ -580,10 +580,18 @@ func main() {
 			log.Fatal("Failed to configure protected Team network admission")
 		}
 		managedPreview, err := services.NewManagedTeamPreview(managedRedis, runtimeSecurity, cfg.Runtime.WorkspaceRoot, teamPreviewOrigin, func(ctx context.Context, identity runtimeauth.Identity) error {
-			return runtimeSecurity.VerifyManagedPreviewImage(ctx, identity, map[string]string{
+			images := map[string]string{
 				"openclaw": cfg.Runtime.OpenClawImage, "hermes": cfg.Runtime.HermesImage,
 				"opencode": cfg.Runtime.OpenCodeImage, "deepseek-harness": cfg.Runtime.DeepSeekHarnessImage,
-			})
+			}
+			upgradeImage, err := runtimeUpgradeService.ManagedPreviewUpgradeImage(ctx, identity)
+			if err != nil {
+				return err
+			}
+			if upgradeImage != "" {
+				images["openclaw"] = upgradeImage
+			}
+			return runtimeSecurity.VerifyManagedPreviewImage(ctx, identity, images)
 		})
 		if err != nil {
 			log.Fatal("Failed to configure managed Team preview")
