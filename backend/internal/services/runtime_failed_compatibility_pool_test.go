@@ -30,9 +30,23 @@ func TestFailedCompatibilityPoolRequiresExitAndReleasedOwner(t *testing.T) {
 			owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "lite-maint-owner-7", Namespace: "runtime", Labels: map[string]string{"clawmanager.io/purpose": "lite-native-maintenance-owner"}}, Data: map[string]string{"state": tc.owner, "operation_id": intent.OperationID}}
 			kube := fake.NewSimpleClientset(record, owner)
 			client := NewSlotRuntimeAgentClientWithHTTPClient("token", kube, "runtime", nil).(*slotRuntimeAgentClient)
-			if err := client.verifyFailedCompatibilityReleases(t.Context(), []k8s.RuntimePodScaleInIdentity{{PodUID: intent.PodUID}}); (err == nil) != tc.allowed {
+			if _, err := client.failedCompatibilityReleases(t.Context(), []k8s.RuntimePodScaleInIdentity{{PodUID: intent.PodUID}}); (err == nil) != tc.allowed {
 				t.Fatalf("expected allowed=%v, got %v", tc.allowed, err)
 			}
 		})
+	}
+}
+
+func TestFailedCompatibilityPoolDoesNotTreatReleasedTombstoneAsFreeCapacity(t *testing.T) {
+	intent := runtimeSlotStopIntent{OperationID: strings.Repeat("a", 32), PodUID: "old-pod", Slot: "slot-7", WorkerEpoch: strings.Repeat("b", 32), AssignmentDigest: strings.Repeat("c", 64), GatewayID: "gw-7-3", InstanceID: 7, UserID: 2, Generation: 3}
+	proof := runtimeSlotContainerProof{runtimeSlotTerminationMessage: runtimeSlotTerminationMessage{runtimeSlotStopIntent: intent}}
+	no := false
+	slot := runtimeSlotAuditObservation{Name: "slot-7", ReadOK: true, Snapshot: runtimeSlotAuditSnapshot{PodUID: intent.PodUID, WorkerEpoch: strings.Repeat("d", 32), Digest: intent.AssignmentDigest, IdleConfirmed: &no, Quarantined: &no, MaintenanceOperationID: intent.OperationID, Assignment: &runtimeSlotAuditOwner{PodUID: intent.PodUID, GatewayID: intent.GatewayID, InstanceID: 7, UserID: 2, Generation: 3, State: "stopped"}}}
+	if slot.free() || !releasedMaintenanceSlot(slot, proof) {
+		t.Fatal("released tombstone is safe only for retiring its exact pool")
+	}
+	slot.Snapshot.Assignment.State = "running"
+	if releasedMaintenanceSlot(slot, proof) {
+		t.Fatal("a running assignment would be retired")
 	}
 }

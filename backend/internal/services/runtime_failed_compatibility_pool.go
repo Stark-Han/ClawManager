@@ -94,6 +94,7 @@ func (s *RuntimeUpgradeService) RetireFailedCompatibilityPool(ctx context.Contex
 			return fmt.Errorf("failed compatibility controller has unsettled replicas")
 		}
 		ids := make([]k8s.RuntimePodScaleInIdentity, 0, len(pods.Items))
+		var slots []runtimeSlotAuditObservation
 		for _, pod := range pods.Items {
 			uid := string(pod.UID)
 			identity, err := resolver.ResolveRuntimePodController(ctx, c.namespace, pod.Name, uid)
@@ -111,15 +112,17 @@ func (s *RuntimeUpgradeService) RetireFailedCompatibilityPool(ctx context.Contex
 			if err != nil || len(observations) != registered.Capacity {
 				return fmt.Errorf("failed compatibility Pod slot observation is incomplete")
 			}
-			for _, observation := range observations {
-				if !observation.free() {
-					return fmt.Errorf("failed compatibility Pod has an occupied or unverified slot")
-				}
-			}
+			slots = append(slots, observations...)
 			ids = append(ids, k8s.RuntimePodScaleInIdentity{PodName: pod.Name, PodUID: uid})
 		}
-		if err := c.verifyFailedCompatibilityReleases(ctx, ids); err != nil {
+		releases, err := c.failedCompatibilityReleases(ctx, ids)
+		if err != nil {
 			return err
+		}
+		for _, slot := range slots {
+			if !slot.free() && !releasedMaintenanceSlot(slot, releases[slot.Snapshot.MaintenanceOperationID]) {
+				return fmt.Errorf("failed compatibility Pod has an occupied or unverified slot")
+			}
 		}
 		return assignments.ConfirmRuntimeScaleInAssignmentsEmpty(ctx, c.namespace, ids)
 	}
@@ -184,32 +187,44 @@ func failedCompatibilityControllerMatches(d *appsv1.Deployment, rollout *models.
 	return true
 }
 
-func (c *slotRuntimeAgentClient) verifyFailedCompatibilityReleases(ctx context.Context, ids []k8s.RuntimePodScaleInIdentity) error {
+func (c *slotRuntimeAgentClient) failedCompatibilityReleases(ctx context.Context, ids []k8s.RuntimePodScaleInIdentity) (map[string]runtimeSlotContainerProof, error) {
 	pods := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		pods[id.PodUID] = true
 	}
 	maps, err := c.kube.CoreV1().ConfigMaps(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: "clawmanager.io/purpose=lite-native-maintenance"})
 	if err != nil {
-		return err
+		return nil, err
 	}
+	releases := map[string]runtimeSlotContainerProof{}
 	for _, record := range maps.Items {
 		if !pods[record.Data["pod_uid"]] {
 			continue
 		}
-		if !nativeMaintenanceReleaseConfirmed(record) {
-			return fmt.Errorf("failed compatibility pool has a reservation without container exit proof")
+		proof, confirmed := nativeMaintenanceReleasedProof(record)
+		if !confirmed {
+			return nil, fmt.Errorf("failed compatibility pool has a reservation without container exit proof")
 		}
 		owner, err := c.kube.CoreV1().ConfigMaps(c.namespace).Get(ctx, "lite-maint-owner-"+record.Data["instance_id"], metav1.GetOptions{})
 		if err != nil || owner.Labels["clawmanager.io/purpose"] != "lite-native-maintenance-owner" || owner.Data["operation_id"] == record.Data["operation_id"] && owner.Data["state"] != "released" {
-			return fmt.Errorf("failed compatibility reservation owner has not been safely released")
+			return nil, fmt.Errorf("failed compatibility reservation owner has not been safely released")
 		}
+		releases[proof.OperationID] = proof
 	}
-	return nil
+	return releases, nil
 }
 
-func nativeMaintenanceReleaseConfirmed(record corev1.ConfigMap) bool {
+func nativeMaintenanceReleasedProof(record corev1.ConfigMap) (runtimeSlotContainerProof, bool) {
 	var intent runtimeSlotStopIntent
 	var proof runtimeSlotContainerProof
-	return record.Data["state"] == "released" && record.Data["result_secret"] != "" && decodeContainerProof([]byte(record.Data["intent"]), &intent) == nil && validContainerIntent(intent) && intent.Kind == "maintenance" && intent.PodUID == record.Data["pod_uid"] && intent.OperationID == record.Data["operation_id"] && decodeContainerProof([]byte(record.Data["termination_proof"]), &proof) == nil && proof.runtimeSlotStopIntent == intent && proof.CleanupConfirmed && proof.ContainerID != "" && !proof.FinishedAt.IsZero()
+	confirmed := record.Data["state"] == "released" && record.Data["result_secret"] != "" && decodeContainerProof([]byte(record.Data["intent"]), &intent) == nil && validContainerIntent(intent) && intent.Kind == "maintenance" && intent.PodUID == record.Data["pod_uid"] && intent.OperationID == record.Data["operation_id"] && decodeContainerProof([]byte(record.Data["termination_proof"]), &proof) == nil && proof.runtimeSlotStopIntent == intent && proof.CleanupConfirmed && proof.ContainerID != "" && !proof.FinishedAt.IsZero()
+	return proof, confirmed
+}
+
+// Some agents retain the stopped maintenance assignment as a tombstone. Its
+// exact released proof can authorize retirement, never another slot claim.
+func releasedMaintenanceSlot(slot runtimeSlotAuditObservation, proof runtimeSlotContainerProof) bool {
+	snapshot := slot.Snapshot
+	assignment := snapshot.Assignment
+	return slot.Err == nil && slot.ReadOK && proof.OperationID != "" && snapshot.MaintenanceOperationID == proof.OperationID && snapshot.PodUID == proof.PodUID && slot.Name == proof.Slot && snapshot.Digest == proof.AssignmentDigest && stopTokenValid(snapshot.WorkerEpoch) && snapshot.WorkerEpoch != proof.WorkerEpoch && snapshot.Quarantined != nil && !*snapshot.Quarantined && len(snapshot.Gateways) == 0 && assignment != nil && assignment.State == "stopped" && assignment.PodUID == proof.PodUID && assignment.GatewayID == proof.GatewayID && assignment.InstanceID == proof.InstanceID && assignment.UserID == proof.UserID && assignment.Generation == proof.Generation
 }
