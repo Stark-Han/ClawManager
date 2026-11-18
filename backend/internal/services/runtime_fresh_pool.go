@@ -111,6 +111,21 @@ func (s *RuntimeScheduler) FreshRuntimeCapacity(ctx context.Context, id int, req
 	if err = kube.ActivateFreshRuntimePool(ctx, scope, result.DeploymentUID); err != nil {
 		return nil, err
 	}
+	if instance.Status == "error" && stringValue(instance.RuntimeErrorCode) == "RUNTIME_POOL_UNAVAILABLE" {
+		retrier, ok := s.instanceRepo.(interface {
+			RetryRuntimeSchedulingError(context.Context, models.Instance) (bool, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("initial Runtime placement retry is unavailable")
+		}
+		changed, retryErr := retrier.RetryRuntimeSchedulingError(ctx, *instance)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		if !changed {
+			return nil, fmt.Errorf("initial Runtime placement intent changed")
+		}
+	}
 	result.Active = true
 	return result, nil
 }
