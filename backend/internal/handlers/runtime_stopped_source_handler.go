@@ -72,6 +72,37 @@ func (h *RuntimePoolHandler) RetireFailedCompatibilityPool(c *gin.Context) {
 	utils.Success(c, http.StatusAccepted, "Empty failed compatibility pool retirement accepted", gin.H{"rollout_id": id, "deployment_name": req.DeploymentName})
 }
 
+func (h *RuntimePoolHandler) FreshRuntimeCapacity(c *gin.Context) {
+	if !runtimeMaintenanceAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		utils.Error(c, http.StatusBadRequest, "invalid instance id")
+		return
+	}
+	var req services.FreshRuntimeCapacityRequest
+	if err = runtimeMaintenanceJSON(c, &req); err != nil {
+		utils.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	actor := currentUserIDPtr(c)
+	if actor == nil || *actor < 1 {
+		utils.Error(c, http.StatusForbidden, "Admin actor identity required")
+		return
+	}
+	if h == nil || h.scheduler == nil {
+		utils.Error(c, http.StatusConflict, "fresh Runtime admission is unavailable")
+		return
+	}
+	result, err := h.scheduler.FreshRuntimeCapacity(c.Request.Context(), id, req, *actor)
+	if err != nil {
+		utils.Error(c, http.StatusConflict, err.Error())
+		return
+	}
+	utils.Success(c, http.StatusOK, "Fresh Runtime capacity inspected", result)
+}
+
 func (h *RuntimePoolHandler) RecoverStoppedSource(c *gin.Context) {
 	if !runtimeMaintenanceAdmin(c) {
 		return

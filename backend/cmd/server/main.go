@@ -1150,6 +1150,7 @@ func main() {
 			adminRuntime.PUT("/runtime-auto-stop", autoStopHandler.Update)
 			adminRuntime.PUT("/instances/:id/auto-stop", autoStopHandler.SetDisabled)
 			adminRuntime.POST("/instances/:id/recover-stopped-source", runtimePoolHandler.RecoverStoppedSource)
+			adminRuntime.POST("/instances/:id/fresh-runtime-capacity", runtimePoolHandler.FreshRuntimeCapacity)
 			adminRuntime.GET("/instances/:id/runtime-recovery", runtimePoolHandler.InspectInstanceRecovery)
 			adminRuntime.POST("/instances/:id/runtime-recovery", runtimePoolHandler.RetryInstanceRecovery)
 			adminRuntime.POST("/runtime-pods/:id/recheck", runtimePoolHandler.RecheckPod)

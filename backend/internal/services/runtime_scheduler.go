@@ -942,7 +942,7 @@ func runtimePodIsUpgradeLab(pod models.RuntimePod) bool {
 }
 
 func runtimePodEligibleForOrdinaryScheduling(pod models.RuntimePod) bool {
-	if runtimePodIsUpgradeLab(pod) {
+	if runtimePodIsUpgradeLab(pod) || isFreshRuntimePool(pod) {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(pod.PoolRole), "upgrade-target") {
@@ -1758,7 +1758,7 @@ func (s *RuntimeScheduler) retryUnpublishedPendingSlot(ctx context.Context, clie
 	}); err != nil {
 		return fmt.Errorf("pending_authority: %w", err)
 	}
-	if err := s.verifyOrdinaryRuntimePod(ctx, *pod); err != nil {
+	if err := s.verifyRuntimePodForInstance(ctx, *pod, instance.ID); err != nil {
 		return fmt.Errorf("pending_placement: %w", err)
 	}
 	start, err := s.prepareGatewayStartParameters(ctx, instance, runtimeType, *pod)
@@ -2130,7 +2130,7 @@ func (s *RuntimeScheduler) assignInstance(ctx context.Context, instance models.I
 		}
 		return err
 	}
-	pods, err = s.verifiedOrdinaryRuntimePods(ctx, runtimeType, pods)
+	pods, err = s.verifiedRuntimePodsForInstance(ctx, runtimeType, pods, instance.ID)
 	if err != nil {
 		if runtimeUpgradeInfrastructureRetryable(err) {
 			return fmt.Errorf("%w: classify schedulable runtime pods: %v", errRuntimeControlPlanePending, err)
@@ -2636,7 +2636,7 @@ func (s *RuntimeScheduler) prepareGatewayStartParameters(ctx context.Context, in
 
 func (s *RuntimeScheduler) prepareGatewayStartOwned(ctx context.Context, instance models.Instance, runtimeType string, pod models.RuntimePod, excludedPorts map[int]struct{}, rollout *models.RuntimeRollout) (*runtimeGatewayStart, error) {
 	if rollout == nil {
-		if err := s.verifyOrdinaryRuntimePod(ctx, pod); err != nil {
+		if err := s.verifyRuntimePodForInstance(ctx, pod, instance.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -2676,7 +2676,7 @@ func (s *RuntimeScheduler) createGatewayOnPod(ctx context.Context, instance mode
 		}
 	}
 	if start.upgradeID == "" {
-		if err := s.verifyOrdinaryRuntimePod(ctx, pod); err != nil {
+		if err := s.verifyRuntimePodForInstance(ctx, pod, instance.ID); err != nil {
 			// A reservation exists: preserve it for authoritative reconciliation,
 			// never try another Pod after an uncertain start boundary.
 			return s.preservePendingGatewayStart(ctx, instance.ID, instance.RuntimeGeneration, err)

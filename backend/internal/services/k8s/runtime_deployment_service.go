@@ -1015,6 +1015,12 @@ func (s *runtimeDeploymentService) renderDeploymentPods(ctx context.Context, dep
 			schedulingEnabled = &parsed
 		}
 	}
+	if strings.HasPrefix(deployment.Labels[upgradeLabPurposeLabel], RuntimeFreshPoolPurposePrefix) {
+		// A site may reconcile the general scheduling label during app rollout.
+		// Only an explicit activation bound to this controller admits fresh work.
+		active := deployment.UID != "" && deployment.Annotations[freshPoolActivationUID] == string(deployment.UID) && schedulingEnabled != nil && *schedulingEnabled
+		schedulingEnabled = &active
+	}
 	result := make([]RuntimeDeploymentPod, 0, len(pods))
 	desiredReplicas := int32(0)
 	if deployment.Spec.Replicas != nil {
