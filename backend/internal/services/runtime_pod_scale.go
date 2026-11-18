@@ -43,11 +43,7 @@ func (s *RuntimePodMaintenanceService) scaleKube() (k8s.RuntimePodScaleDeploymen
 // OpenClaw retains serving old pools after scoped upgrades. Only committed,
 // approved source inventories establish which descendants are current defaults.
 // Registration order, replicas and names alone never select an upgrade pool.
-func runtimeDefaultScaleTargets(namespace, runtimeType string, rollouts []models.RuntimeRollout) ([]k8s.RuntimePodScaleTarget, error) {
-	base := runtimeType + "-runtime"
-	if runtimeType == "deepseek-harness" {
-		base = "deepseek-harness-runtime"
-	}
+func runtimeDefaultScaleTargets(namespace, runtimeType, base string, rollouts []models.RuntimeRollout) ([]k8s.RuntimePodScaleTarget, error) {
 	targets := []k8s.RuntimePodScaleTarget{{RuntimeType: runtimeType, Namespace: namespace, DeploymentName: base}}
 	if runtimeType != "openclaw" {
 		return targets, nil
@@ -110,7 +106,7 @@ func (s *RuntimePodMaintenanceService) defaultScaleSnapshot(ctx context.Context,
 			return k8s.RuntimePodScaleTarget{}, nil, err
 		}
 	}
-	targets, err := runtimeDefaultScaleTargets(s.scheduler.runtimeNamespace, runtimeType, rollouts)
+	targets, err := runtimeDefaultScaleTargets(s.scheduler.runtimeNamespace, runtimeType, s.scheduler.DefaultRuntimePoolName(runtimeType), rollouts)
 	if err != nil {
 		return k8s.RuntimePodScaleTarget{}, nil, err
 	}

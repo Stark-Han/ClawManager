@@ -42,6 +42,7 @@ type RuntimeScheduler struct {
 
 	workspaceRoot             string
 	runtimeNamespace          string
+	runtimeSlotPoolPrefix     string
 	gatewayPortStart          int
 	gatewayPortEnd            int
 	heartbeatTimeout          time.Duration
@@ -117,6 +118,14 @@ func WithRuntimeSchedulerNamespace(namespace string) RuntimeSchedulerOption {
 			s.runtimeNamespace = strings.TrimSpace(namespace)
 		}
 	}
+}
+
+func WithRuntimeSchedulerPoolPrefix(prefix string) RuntimeSchedulerOption {
+	return func(s *RuntimeScheduler) { s.runtimeSlotPoolPrefix = prefix }
+}
+
+func (s *RuntimeScheduler) DefaultRuntimePoolName(runtimeType string) string {
+	return k8s.RuntimeSlotPoolName(s.runtimeSlotPoolPrefix, runtimeType)
 }
 
 func WithRuntimeSchedulerMaxGatewaysPerPod(capacity int) RuntimeSchedulerOption {

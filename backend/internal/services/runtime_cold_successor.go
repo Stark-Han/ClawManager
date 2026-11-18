@@ -96,7 +96,11 @@ func (s *RuntimeUpgradeService) coldDefaultSource(ctx context.Context) (*models.
 	if err = s.sess.Collection("runtime_rollouts").Find(db.Cond{"runtime_type": "openclaw", "status": "finished"}).OrderBy("id").All(&finished); err != nil {
 		return nil, k8s.RuntimePodScaleTarget{}, err
 	}
-	targets, err := runtimeDefaultScaleTargets(ns, RuntimeTypeOpenClaw, finished)
+	base := k8s.RuntimeSlotPoolName("", RuntimeTypeOpenClaw)
+	if naming, ok := s.deployments.(interface{ DefaultRuntimePoolName(string) string }); ok {
+		base = naming.DefaultRuntimePoolName(RuntimeTypeOpenClaw)
+	}
+	targets, err := runtimeDefaultScaleTargets(ns, RuntimeTypeOpenClaw, base, finished)
 	if err != nil {
 		return nil, k8s.RuntimePodScaleTarget{}, err
 	}

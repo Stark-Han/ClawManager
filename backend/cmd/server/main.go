@@ -736,6 +736,7 @@ func main() {
 				services.WithRuntimeSchedulerWorkspaceRoot(cfg.Runtime.WorkspaceRoot),
 				services.WithRuntimeSchedulerAutoStopRepository(autoStopRepo),
 				services.WithRuntimeSchedulerNamespace(cfg.Runtime.Namespace),
+				services.WithRuntimeSchedulerPoolPrefix(cfg.Runtime.SlotPoolPrefix),
 				services.WithRuntimeSchedulerGatewayPortRange(cfg.Runtime.GatewayPortStart, cfg.Runtime.GatewayPortEnd),
 				services.WithRuntimeSchedulerHeartbeatTimeout(cfg.Runtime.HeartbeatTimeout),
 				services.WithRuntimeSchedulerMaxGatewaysPerPod(cfg.Runtime.MaxGatewaysPerPod),

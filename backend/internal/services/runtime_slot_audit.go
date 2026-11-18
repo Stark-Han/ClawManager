@@ -209,9 +209,7 @@ func (c *slotRuntimeAgentClient) observeRuntimeSlotsForAudit(ctx context.Context
 			}
 		}
 		if err == nil {
-			for i := range slots {
-				c.observeRuntimeSlot(ctx, pod, &slots[i])
-			}
+			c.observeRuntimeSlotBatch(ctx, pod, slots)
 		}
 	}
 
@@ -224,6 +222,22 @@ func (c *slotRuntimeAgentClient) observeRuntimeSlotsForAudit(ctx context.Context
 		return nil, err, true
 	}
 	return slots, nil, true
+}
+
+func (c *slotRuntimeAgentClient) observeRuntimeSlotBatch(ctx context.Context, pod models.RuntimePod, slots []runtimeSlotAuditObservation) {
+	// Reserve time for the post-probe Pod identity and admission checks. Slow
+	// workers should not consume the whole per-Pod audit budget sequentially.
+	probes, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var group sync.WaitGroup
+	for worker := 0; worker < min(4, len(slots)); worker++ {
+		group.Go(func() {
+			for i := worker; i < len(slots); i += min(4, len(slots)) {
+				c.observeRuntimeSlot(probes, pod, &slots[i])
+			}
+		})
+	}
+	group.Wait()
 }
 
 func (c *slotRuntimeAgentClient) observeRuntimeSlot(ctx context.Context, pod models.RuntimePod, o *runtimeSlotAuditObservation) {

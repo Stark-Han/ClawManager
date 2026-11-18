@@ -14,7 +14,7 @@ func TestDefaultRuntimeScaleCanonicalRolloutLineage(t *testing.T) {
 		approved(5, `{"ns/openclaw-runtime":"old","ns/runtime-openclaw-custom":"other"}`),
 		approved(6, `{"ns/openclaw-runtime":"old","ns/openclaw-runtime-u5":"previous","ns/runtime-openclaw-custom":"custom"}`),
 	}
-	targets, err := runtimeDefaultScaleTargets("ns", "openclaw", rollouts)
+	targets, err := runtimeDefaultScaleTargets("ns", "openclaw", "openclaw-runtime", rollouts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,12 +25,27 @@ func TestDefaultRuntimeScaleCanonicalRolloutLineage(t *testing.T) {
 		{ID: 7, RuntimeType: "openclaw", Status: "finished", TargetImageRef: "image"},
 		approved(7, `{"ns/runtime-openclaw-custom":"custom"}`),
 	} {
-		if _, err := runtimeDefaultScaleTargets("ns", "openclaw", append(rollouts, r)); err == nil {
+		if _, err := runtimeDefaultScaleTargets("ns", "openclaw", "openclaw-runtime", append(rollouts, r)); err == nil {
 			t.Fatal("fell back to retained/default pool without latest canonical proof")
 		}
 	}
-	defaults, err := runtimeDefaultScaleTargets("ns", "openclaw", nil)
+	defaults, err := runtimeDefaultScaleTargets("ns", "openclaw", "openclaw-runtime", nil)
 	if err != nil || len(defaults) != 1 || defaults[0].DeploymentName != "openclaw-runtime" {
 		t.Fatalf("initial default unavailable: %+v %v", defaults, err)
+	}
+}
+
+func TestDefaultRuntimeScaleUsesConfiguredPoolRoot(t *testing.T) {
+	scheduler := &RuntimeScheduler{}
+	WithRuntimeSchedulerPoolPrefix("site-")(scheduler)
+	source, preflight, fingerprint := `{"tenant/site-openclaw-runtime":"old"}`, "approved", "fingerprint"
+	history := []models.RuntimeRollout{{ID: 9, RuntimeType: "openclaw", Status: "finished", SourceImagesJSON: &source, PreflightID: &preflight, PlanFingerprint: &fingerprint, TargetImageRef: "new"}}
+	targets, err := runtimeDefaultScaleTargets("tenant", RuntimeTypeOpenClaw, scheduler.DefaultRuntimePoolName(RuntimeTypeOpenClaw), history)
+	if err != nil || len(targets) != 1 || targets[0].DeploymentName != "site-openclaw-runtime-u9" {
+		t.Fatalf("configured OpenClaw lineage was not found: %+v %v", targets, err)
+	}
+	targets, err = runtimeDefaultScaleTargets("tenant", RuntimeTypeOpenCode, scheduler.DefaultRuntimePoolName(RuntimeTypeOpenCode), nil)
+	if err != nil || len(targets) != 1 || targets[0].DeploymentName != "site-opencode-runtime" {
+		t.Fatalf("configured OpenCode default was not found: %+v %v", targets, err)
 	}
 }
