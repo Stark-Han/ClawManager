@@ -60,6 +60,19 @@ func (a *OwnerTeamAPI) GuardInstanceMutation(instanceID int, action string, team
 	return nil
 }
 
+// Resolve membership from the same ledger used by lifecycle admission. Never
+// infer it from client navigation state, instance names or model arguments.
+func (a *OwnerTeamAPI) InstanceTeamForOwner(instanceID int, owner string) (int, error) {
+	team, err := a.store.InstanceTeam(instanceID)
+	if err != nil || team == nil {
+		return 0, err
+	}
+	if team.ResourceScope != models.TeamScopeNorthbound || team.Owner == nil || !strings.EqualFold(strings.TrimSpace(*team.Owner), strings.TrimSpace(owner)) {
+		return 0, fmt.Errorf("instance Team owner mismatch")
+	}
+	return team.ID, nil
+}
+
 type ownerTeamStoredRequest struct {
 	TeamID           int                         `json:"team_id,omitempty"`
 	Action           string                      `json:"action"`

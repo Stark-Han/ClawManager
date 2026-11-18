@@ -939,6 +939,7 @@ func main() {
 
 		ieiSystem := api.Group("/ieisystem")
 		ieiSystemHandler.RegisterOwnerTeamRoutes(ieiSystem)
+		ieiSystemHandler.RegisterWorkbenchRoutes(ieiSystem, instanceWorkbenchService)
 		{
 			ieiSystem.POST("/session", ieiSystemHandler.ExchangeSession)
 			ieiSystem.GET("/session", ieiSystemHandler.GetSession)

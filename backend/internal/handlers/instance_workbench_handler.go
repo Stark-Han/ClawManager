@@ -22,6 +22,7 @@ type instanceWorkbench interface {
 }
 type InstanceWorkbenchHandler struct {
 	service         instanceWorkbench
+	resolveIdentity func(*gin.Context, bool) (int, int, bool, bool)
 	sharedInstances sharedWorkspaceInstances
 	sharedExternal  services.InstanceExternalAccessService
 	sharedTokens    *services.InstanceAccessService
@@ -33,6 +34,9 @@ func NewSharedInstanceWorkbenchHandler(service instanceWorkbench, instances shar
 	return &InstanceWorkbenchHandler{service: service, sharedInstances: instances, sharedExternal: external, sharedTokens: tokens}
 }
 func (h *InstanceWorkbenchHandler) identity(c *gin.Context, requireWrite bool) (userID, instanceID int, admin, ok bool) {
+	if h.resolveIdentity != nil {
+		return h.resolveIdentity(c, requireWrite)
+	}
 	if h.sharedInstances == nil {
 		return workbenchIdentity(c)
 	}
