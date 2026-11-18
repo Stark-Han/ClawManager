@@ -373,7 +373,7 @@ export default function IEISystemInstancePage() {
             <RotateCw className={`h-4 w-4 ${restartInProgress ? "animate-spin" : ""}`} />
             {restartInProgress ? "正在重启" : "重启实例"}
           </button>
-          <OwnerInstanceSwitcher current={instance} />
+          <OwnerInstanceSwitcher current={{ owner: instance.owner, instanceId: instance.id, teamId: instance.team_id }} />
         </div>
       </header>
 

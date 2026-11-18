@@ -1352,6 +1352,7 @@ const TeamDetailPage: React.FC = () => {
         key={details.team.id}
         members={details.members}
         team={details.team}
+        owner={environment.owner}
         leaderKey={details.leader_member_id}
         renderMemberDetails={member => <>
           <section><h3>职责</h3><DescriptionPreview text={getTeamMemberDisplayDescription(member.description)} /></section>
@@ -1393,7 +1394,7 @@ const TeamDetailPage: React.FC = () => {
           mini={mini} onOpen={open}
           onWorkspaceFileOpen={handleOpenWorkspacePath}
         />}
-        files={(active, tool) => <TeamWorkspaceTools key={`${environment.owner || user?.id}:${details.team.id}`} teamId={details.team.id} members={details.members} leaderKey={details.leader_member_id} active={active} tool={tool} files={filesActive => <TeamWorkspaceBrowser key={details.team.id} teamId={details.team.id} rootPath={details.team.shared_mount_path} heightClass="h-full" active={filesActive} refreshKey={workspaceRefreshKey} onMutation={workspaceChanged} />} />}
+        files={(active, tool, onProgramChange) => <TeamWorkspaceTools key={`${environment.owner || user?.id}:${details.team.id}`} teamId={details.team.id} members={details.members} leaderKey={details.leader_member_id} active={active} tool={tool} onProgramChange={onProgramChange} files={filesActive => <TeamWorkspaceBrowser key={details.team.id} teamId={details.team.id} rootPath={details.team.shared_mount_path} heightClass="h-full" active={filesActive} refreshKey={workspaceRefreshKey} onMutation={workspaceChanged} />} />}
       />
     </TeamPageLayout>
       {workspacePreview && (
@@ -4496,7 +4497,7 @@ function KanbanColumn({
 }) {
   const style = kanbanColumnStyle(tone);
   return (
-    <div className={`min-h-[138px] rounded-xl border p-1.5 shadow-sm transition-all duration-300 hover:shadow-sm ${style.shell}`}>
+    <div className={`min-h-[138px] rounded-xl border p-1.5 shadow-sm transition-all duration-300 hover:shadow-sm ${style.shell}`} data-lane-empty={cards.length === 0}>
       <div className="mb-1 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
