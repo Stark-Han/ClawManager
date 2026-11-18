@@ -44,8 +44,9 @@ type runtimeSlotAuditSnapshot struct {
 	MaintenanceOperationID string                 `json:"maintenance_operation_id"`
 	Assignment             *runtimeSlotAuditOwner `json:"assignment"`
 	Gateways               []struct {
-		GatewayID string `json:"gateway_id"`
-		State     string `json:"state"`
+		GatewayID    string `json:"gateway_id"`
+		State        string `json:"state"`
+		ErrorMessage string `json:"error_message"`
 	} `json:"gateways"`
 }
 type runtimeSlotAuditObservation struct {

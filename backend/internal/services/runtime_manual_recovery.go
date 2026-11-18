@@ -150,6 +150,15 @@ func (s *RuntimeScheduler) RetryInstanceRecovery(ctx context.Context, id, genera
 	continuation := state != nil && state.Generation == generation && (state.Phase == "source_stopped" || state.Phase == "placing")
 	if !continuation {
 		reason, failed := runtimeRecoveryFailureReason(*instance, binding)
+		if pendingPublishedStart(*instance, binding) {
+			verified, verifyErr := s.verifyPendingPublishedFailure(ctx, *instance, *binding, ownsPendingStartRecovery(*instance, *binding, state))
+			if verifyErr != nil {
+				return nil, verifyErr
+			}
+			if verified {
+				reason, failed = repository.PendingPublishedStartRecoveryReason, true
+			}
+		}
 		if !failed {
 			return nil, fmt.Errorf("no verified failed source is available; pending starts must reconcile without clearing their reservation")
 		}
