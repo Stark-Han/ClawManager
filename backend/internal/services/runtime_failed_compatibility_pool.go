@@ -226,5 +226,11 @@ func nativeMaintenanceReleasedProof(record corev1.ConfigMap) (runtimeSlotContain
 func releasedMaintenanceSlot(slot runtimeSlotAuditObservation, proof runtimeSlotContainerProof) bool {
 	snapshot := slot.Snapshot
 	assignment := snapshot.Assignment
-	return slot.Err == nil && slot.ReadOK && proof.OperationID != "" && snapshot.MaintenanceOperationID == proof.OperationID && snapshot.PodUID == proof.PodUID && slot.Name == proof.Slot && snapshot.Digest == proof.AssignmentDigest && stopTokenValid(snapshot.WorkerEpoch) && snapshot.WorkerEpoch != proof.WorkerEpoch && snapshot.Quarantined != nil && !*snapshot.Quarantined && len(snapshot.Gateways) == 0 && assignment != nil && assignment.State == "stopped" && assignment.PodUID == proof.PodUID && assignment.GatewayID == proof.GatewayID && assignment.InstanceID == proof.InstanceID && assignment.UserID == proof.UserID && assignment.Generation == proof.Generation
+	if !slot.ReadOK || slot.Err != nil && slot.Err != errRuntimeSlotOwnerIdentity || proof.OperationID == "" || snapshot.MaintenanceOperationID != proof.OperationID || snapshot.PodUID != proof.PodUID || slot.Name != proof.Slot || snapshot.Digest != proof.AssignmentDigest {
+		return false
+	}
+	if !stopTokenValid(snapshot.WorkerEpoch) || snapshot.WorkerEpoch == proof.WorkerEpoch || snapshot.IdleConfirmed == nil || snapshot.Quarantined == nil || *snapshot.Quarantined || snapshot.Gateways == nil || len(snapshot.Gateways) != 0 {
+		return false
+	}
+	return assignment != nil && assignment.State == "stopped" && assignment.PodUID == proof.PodUID && assignment.WorkerEpoch == proof.WorkerEpoch && assignment.GatewayID == proof.GatewayID && assignment.InstanceID == proof.InstanceID && assignment.UserID == proof.UserID && assignment.Generation == proof.Generation
 }

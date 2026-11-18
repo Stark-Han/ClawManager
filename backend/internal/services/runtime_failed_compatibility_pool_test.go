@@ -41,7 +41,14 @@ func TestFailedCompatibilityPoolDoesNotTreatReleasedTombstoneAsFreeCapacity(t *t
 	intent := runtimeSlotStopIntent{OperationID: strings.Repeat("a", 32), PodUID: "old-pod", Slot: "slot-7", WorkerEpoch: strings.Repeat("b", 32), AssignmentDigest: strings.Repeat("c", 64), GatewayID: "gw-7-3", InstanceID: 7, UserID: 2, Generation: 3}
 	proof := runtimeSlotContainerProof{runtimeSlotTerminationMessage: runtimeSlotTerminationMessage{runtimeSlotStopIntent: intent}}
 	no := false
-	slot := runtimeSlotAuditObservation{Name: "slot-7", ReadOK: true, Snapshot: runtimeSlotAuditSnapshot{PodUID: intent.PodUID, WorkerEpoch: strings.Repeat("d", 32), Digest: intent.AssignmentDigest, IdleConfirmed: &no, Quarantined: &no, MaintenanceOperationID: intent.OperationID, Assignment: &runtimeSlotAuditOwner{PodUID: intent.PodUID, GatewayID: intent.GatewayID, InstanceID: 7, UserID: 2, Generation: 3, State: "stopped"}}}
+	var snapshot runtimeSlotAuditSnapshot
+	if err := json.Unmarshal([]byte(`{"gateways":[]}`), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PodUID, snapshot.WorkerEpoch, snapshot.Digest = intent.PodUID, strings.Repeat("d", 32), intent.AssignmentDigest
+	snapshot.IdleConfirmed, snapshot.Quarantined, snapshot.MaintenanceOperationID = &no, &no, intent.OperationID
+	snapshot.Assignment = &runtimeSlotAuditOwner{PodUID: intent.PodUID, WorkerEpoch: intent.WorkerEpoch, GatewayID: intent.GatewayID, InstanceID: 7, UserID: 2, Generation: 3, State: "stopped"}
+	slot := runtimeSlotAuditObservation{Name: "slot-7", ReadOK: true, Err: errRuntimeSlotOwnerIdentity, Snapshot: snapshot}
 	if slot.free() || !releasedMaintenanceSlot(slot, proof) {
 		t.Fatal("released tombstone is safe only for retiring its exact pool")
 	}
