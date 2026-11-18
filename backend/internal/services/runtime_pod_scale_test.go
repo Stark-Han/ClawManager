@@ -49,3 +49,28 @@ func TestDefaultRuntimeScaleUsesConfiguredPoolRoot(t *testing.T) {
 		t.Fatalf("configured OpenCode default was not found: %+v %v", targets, err)
 	}
 }
+
+func TestDefaultRuntimeScaleIgnoresRecoveryAndLabRollouts(t *testing.T) {
+	base := "team-openclaw-runtime"
+	preflight, fingerprint := "approved", "fingerprint"
+	ordinarySource := `{"tenant/team-openclaw-runtime":"old"}`
+	ordinary := models.RuntimeRollout{ID: 10, RuntimeType: RuntimeTypeOpenClaw, Status: "finished", SourceImagesJSON: &ordinarySource, PreflightID: &preflight, PlanFingerprint: &fingerprint, TargetImageRef: "new"}
+	for _, scope := range []string{`{"recovery_mode":"retry"}`, `{"recovery_mode":"rebuild"}`, `{"upgrade_lab_run_id":42}`} {
+		t.Run(scope, func(t *testing.T) {
+			unrelatedSource := `{"tenant/other-runtime":"old"}`
+			recovery := models.RuntimeRollout{ID: 11, RuntimeType: RuntimeTypeOpenClaw, Status: "finished", SourceImagesJSON: &unrelatedSource, PreflightJSON: &scope, PreflightID: &preflight, PlanFingerprint: &fingerprint, TargetImageRef: "recovery-image"}
+			for _, test := range []struct {
+				history []models.RuntimeRollout
+				want    string
+			}{
+				{[]models.RuntimeRollout{recovery}, base},
+				{[]models.RuntimeRollout{ordinary, recovery}, base + "-u10"},
+			} {
+				targets, err := runtimeDefaultScaleTargets("tenant", RuntimeTypeOpenClaw, base, test.history)
+				if err != nil || len(targets) != 1 || targets[0].DeploymentName != test.want {
+					t.Fatalf("scoped rollout changed the ordinary default: got %+v, %v; want %s", targets, err, test.want)
+				}
+			}
+		})
+	}
+}

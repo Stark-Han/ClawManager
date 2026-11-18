@@ -55,6 +55,21 @@ func runtimeDefaultScaleTargets(namespace, runtimeType, base string, rollouts []
 		if rollout.RuntimeType != "openclaw" || rollout.Status != "finished" {
 			continue
 		}
+		// Keep the expansion lineage on the same ordinary releases as
+		// defaultPlacementRollout. Recovery and lab results only govern their
+		// own instances, even when they used an ordinary pool as a source.
+		if rollout.PreflightJSON != nil {
+			var scope struct {
+				RecoveryMode    string `json:"recovery_mode"`
+				UpgradeLabRunID *int64 `json:"upgrade_lab_run_id"`
+			}
+			if err := json.Unmarshal([]byte(*rollout.PreflightJSON), &scope); err != nil {
+				return nil, fmt.Errorf("finished OpenClaw rollout %d has invalid scope: %w", rollout.ID, err)
+			}
+			if scope.RecoveryMode != "" || scope.UpgradeLabRunID != nil {
+				continue
+			}
+		}
 		proof, proofErr := coldSuccessorProof(&rollout)
 		if proofErr != nil {
 			return nil, proofErr
