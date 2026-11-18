@@ -66,3 +66,28 @@ OpenCode 的进一步只读对照：
 - Runtime 部署与绑定的发布前后快照相同；未升级、重启或删除 Runtime，未修改个人项目、32443 或正式环境。
 - 本环境未启用 `CLAWMANAGER_BROWSER_ORIGIN` / `CLAWMANAGER_BROWSER_PORT_RANGE`，没有新建或变更 8444 浏览器入口。
 - 发布中首次最终探测遇到临时 NodePort 连接失败，已按回退流程恢复；重试发布时只对该临时连接探测做有限重试，之后 challenge 返回 201。没有略过授权检查或修改仓库发布脚本。
+
+## 槽位存储探测修复与复验
+
+- 在同一受影响槽位、相同管理身份下，共享根目录探测耗时 1.78–2.49 秒，同一挂载的独立子目录耗时 2–35 毫秒。旧版本注入存储阻塞后，两路槽位状态请求同时停在探测上。新版本的状态查询读取有期限的后台采样，每槽最多一个探测在途，未知状态不构成空闲或准入证明。
+- AgentsRuntime 提交 `35c92ff` 将探测移出状态请求和槽位锁，限制工作台准入耗时。`450089e` 补齐候选池首次健康采样与待命登记之间的门槛。定向 Linux 测试覆盖槽位、Gateway、管理 API、工作台和文件边界。四种候选镜像的独立 NFS 槽位检查通过，临时 Job 和目录已清理。
+- CM 提交 `1c4addbf` 将能力查询限制为 4 秒，并区分运行环境超时、状态未知、实例停止与代数过期。真实 CM 和北向对 Team184 的四种旧绑定均在约 4.1 秒内返回 `runtime_timeout`。未缩短已准入的终端和网页执行期限。
+- CM App/Gateway 已用 `clawmanager-apply.sh` 更新 32543。应用镜像为 `10.130.14.23:5000/clawmanager-hxc-app@sha256:c835af311c466e701308fc4bb9728cead4de693193ff437eab18ed18db698bae`。旧应用镜像回退点为 `sha256:4cc42587a578d83a70405160cd29859d9df091bedf2117285bf8cfea34a9c4cf`。
+- CM 和北向 Team 的共享文件、看板、成员与实例切换通过真实页面复验。四种实例文件读写均已通过，OpenCode 首轮出现一次 rename 409，独立目录的复验通过，原因未确认。
+
+32543 开启已有 Chrome 隔离来源模式，使用 `31600–31727`，避免远程用户收到 `*.localhost`。现有 Service 模板映射到 TLS 8444，另为本租户补充 [8444 入站规则](../deployments/k8s/sites/server23-team/browser-origins-ingress.yaml)。已核对 128 个端口、就绪 EndpointSlice、分配端口启用以及未分配端口拒绝访问。DeepSeek Harness 的真实原生页面已加载。OpenCode 618 的入口握手通过，原生会话重定向后返回 404，仍需修复。该验收使用测试浏览器忽略证书错误，未验收 Chrome 单次证书确认流程。
+
+本轮实际创建的验收实例 624（Hermes）和 625（DeepSeek Harness）运行在新镜像上。两者的 CM 和北向终端真实命令均有输出，北向网页以浏览器隔离 iframe 加载了实例本地测试内容。最终网页测试使用的终端已关闭。验收实例与预览端口分配记录保留供核验。
+
+Runtime 最终候选制品与存量状态：
+
+| Runtime | 镜像 digest | CM 实际结果 |
+| --- | --- | --- |
+| OpenClaw | `sha256:2cdce84502da50e15465e2a797b6f4d8f227abf40f88efc8d12cc624d378a901` | 预检 197 因普通实例 623 的错误状态阻止。排除 623 后，198 因待命池启动窗口没有可用空闲槽位而隔离。修订镜像的单实例重试 199 进入兼容性检查，原生维护保持 `reserved`，616 未换代。 |
+| Hermes | `sha256:bfe2c97be22455d2b569b70efd4b3c24901c242a9415b09931fd78edeb8e599c` | 200 标记完成，新池就绪。609、617 仍绑定已退出的旧 Pod，工作台复验未通过。 |
+| DeepSeek Harness | `sha256:5ca978055c40da1cdeefe63bcf28f1fb17a686089ecd0a861c301cf9b0a0fbfc` | 201 标记完成，新池就绪。619、622 仍绑定已退出的旧 Pod，工作台复验未通过。 |
+| OpenCode | `sha256:4e3175a83247af5adf785c09dfc3a6206385f5ef1f13a43966971a5737789a13` | 官方准备入口返回 409，要求逐实例排空、备份和经验证的迁移。保留现有运行池。 |
+
+Hermes 和 DeepSeek Harness 的旧实例仍显示运行中。管理员安全复查返回 `container stop Pod identity is unavailable`。镜像上线与实际绑定迁移需要分别验收。没有删除实例、清除保护记录或强制重绑。完整存量 Team 的网页和终端验收尚未完成。
+
+回退独立网页入口时，先移除 32543 App 的 `CLAWMANAGER_BROWSER_ORIGIN` 和 `CLAWMANAGER_BROWSER_PORT_RANGE` 并等待部署就绪，再撤下本次建立的 Service 和 8444 入站规则。保留永久端口分配表，避免复用已有预览来源。部署快照和验收服务端记录位于 `/home/hxc/owner-workbench-20261118/`。
