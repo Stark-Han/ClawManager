@@ -309,3 +309,63 @@ func TestNativeMaintenanceOwnerBlocksUnknownOldActionAndPod(t *testing.T) {
 		t.Fatal("Pod replacement bypassed old native writer uncertainty")
 	}
 }
+
+func TestNativeMaintenanceOwnerRequiresExactPrelaunchCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		wrong  bool
+		pass   bool
+	}{
+		{name: "old runtime", status: 404},
+		{name: "identity mismatch", status: 200, wrong: true},
+		{name: "durable cancellation", status: 200, pass: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := slotTestPod()
+			pod.Labels["clawmanager.io/sandbox-profile"] = "nfs-rootless-v1"
+			kube := fake.NewSimpleClientset(pod)
+			calls := 0
+			httpClient := &http.Client{Transport: slotRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/v1/native-upgrades/cancel-unstarted" {
+					t.Fatalf("unexpected dispatch: %s", r.URL.Path)
+				}
+				calls++
+				var id nativeReservationIdentity
+				if err := json.NewDecoder(r.Body).Decode(&id); err != nil {
+					t.Fatal(err)
+				}
+				if tc.wrong {
+					id.Generation++
+				}
+				raw, _ := json.Marshal(nativeReservationCancellation{Version: 1, nativeReservationIdentity: id})
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
+			})}
+			c := NewSlotRuntimeAgentClientWithHTTPClient("token", kube, "runtime", httpClient).(*slotRuntimeAgentClient)
+			old := RuntimeAgentWorkspaceRequest{RolloutID: "old", InstanceID: 7, UserID: 2, Generation: 1}
+			endpoint := "https://10.0.0.2:19090"
+			cm, _, err := c.ensureNativeMaintenance(t.Context(), endpoint, pod, "compatibility", old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := old
+			next.RolloutID = "next"
+			_, _, err = c.ensureNativeMaintenance(t.Context(), endpoint, pod, "compatibility", next)
+			if (err == nil) != tc.pass || calls != 1 {
+				t.Fatalf("unexpected acquisition: %v, calls %d", err, calls)
+			}
+			saved, err := kube.CoreV1().ConfigMaps("runtime").Get(t.Context(), cm.Name, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (saved.Data["state"] == "cancelled") != tc.pass || saved.Data["termination_proof"] != "" {
+				t.Fatal("cancellation was recorded as execution or falsely confirmed")
+			}
+			if tc.pass {
+				if _, _, err := c.ensureNativeMaintenance(t.Context(), endpoint, pod, "compatibility", old); err == nil {
+					t.Fatal("cancelled operation was reacquired")
+				}
+			}
+		})
+	}
+}

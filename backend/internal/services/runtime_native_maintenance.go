@@ -98,6 +98,9 @@ func (c *slotRuntimeAgentClient) ensureNativeMaintenance(ctx context.Context, en
 	if cm.Labels["clawmanager.io/purpose"] != "lite-native-maintenance" || cm.Data["request_digest"] != identity || cm.Data["endpoint"] != endpoint || cm.Data["pod_uid"] != string(pod.UID) || cm.Data["action"] != action || !stopTokenValid(cm.Data["operation_id"]) {
 		return nil, empty, fmt.Errorf("native maintenance request changed")
 	}
+	if cm.Data["state"] == "cancelled" {
+		return nil, empty, fmt.Errorf("native maintenance reservation was cancelled before launch")
+	}
 	if cm.Data["state"] != "released" {
 		if err = c.acquireNativeMaintenanceOwner(ctx, cm, req.InstanceID); err != nil {
 			return nil, empty, err
@@ -128,8 +131,14 @@ func (c *slotRuntimeAgentClient) acquireNativeMaintenanceOwner(ctx context.Conte
 			}
 			if owner.Data["state"] != "released" {
 				previous, readErr := c.kube.CoreV1().ConfigMaps(c.namespace).Get(ctx, owner.Data["record_name"], metav1.GetOptions{})
-				if readErr != nil || previous.Data["state"] != "released" || previous.Data["operation_id"] != owner.Data["operation_id"] || previous.Data["termination_proof"] == "" || previous.Data["result_secret"] == "" {
-					return fmt.Errorf("%w: previous native maintenance termination is unconfirmed", ErrRuntimeUpgradeBusy)
+				if readErr != nil || previous.Data["operation_id"] != owner.Data["operation_id"] {
+					return fmt.Errorf("%w: previous native maintenance authority is unconfirmed", ErrRuntimeUpgradeBusy)
+				}
+				released := previous.Data["state"] == "released" && previous.Data["termination_proof"] != "" && previous.Data["result_secret"] != ""
+				if !released {
+					if err := c.cancelUnstartedNativeReservation(ctx, previous, instanceID); err != nil {
+						return fmt.Errorf("%w: previous native maintenance termination is unconfirmed: %w", ErrRuntimeUpgradeBusy, err)
+					}
 				}
 			}
 		}
@@ -144,6 +153,69 @@ func (c *slotRuntimeAgentClient) acquireNativeMaintenanceOwner(ctx context.Conte
 		_, err = c.kube.CoreV1().ConfigMaps(c.namespace).Update(ctx, owner, metav1.UpdateOptions{})
 		return err
 	})
+}
+
+type nativeReservationIdentity struct {
+	OperationID string `json:"operation_id"`
+	PodUID      string `json:"pod_uid"`
+	Action      string `json:"action"`
+	InstanceID  int    `json:"instance_id"`
+	UserID      int    `json:"user_id"`
+	Generation  int    `json:"generation"`
+}
+
+type nativeReservationCancellation struct {
+	Version int `json:"version"`
+	nativeReservationIdentity
+}
+
+func (c *slotRuntimeAgentClient) cancelUnstartedNativeReservation(ctx context.Context, cm *corev1.ConfigMap, instanceID int) error {
+	userID, _ := strconv.Atoi(cm.Data["user_id"])
+	generation, _ := strconv.Atoi(cm.Data["generation"])
+	id := nativeReservationIdentity{
+		OperationID: cm.Data["operation_id"], PodUID: cm.Data["pod_uid"], Action: cm.Data["action"],
+		InstanceID: instanceID, UserID: userID, Generation: generation,
+	}
+	state := cm.Data["state"]
+	if cm.Labels["clawmanager.io/purpose"] != "lite-native-maintenance" || (state != "reserved" && state != "cancelled") ||
+		cm.Data["instance_id"] != strconv.Itoa(instanceID) || instanceID < 1 || userID < 1 || generation < 1 ||
+		!stopTokenValid(id.OperationID) || id.PodUID == "" || id.Action != "compatibility" ||
+		cm.Data["intent"] != "" || cm.Data["termination_proof"] != "" || cm.Data["result_secret"] != "" {
+		return fmt.Errorf("reservation is not eligible for pre-launch cancellation")
+	}
+	var receipt nativeReservationCancellation
+	if state == "cancelled" {
+		if json.Unmarshal([]byte(cm.Data["prelaunch_cancellation"]), &receipt) != nil || receipt.Version != 1 || receipt.nativeReservationIdentity != id {
+			return fmt.Errorf("persisted native reservation cancellation is invalid")
+		}
+		return nil
+	}
+	endpoint := cm.Data["endpoint"]
+	pod, err := c.containerStopPod(ctx, endpoint, id.PodUID)
+	if err != nil {
+		return err
+	}
+	if pod.Labels["clawmanager.io/sandbox-profile"] != "nfs-rootless-v1" {
+		return fmt.Errorf("reservation target does not support pre-launch cancellation")
+	}
+	if err = c.doUpgrade(ctx, http.MethodPost, endpoint, "/v1/native-upgrades/cancel-unstarted", id, &receipt); err != nil {
+		return err
+	}
+	if receipt.Version != 1 || receipt.nativeReservationIdentity != id {
+		return fmt.Errorf("native reservation cancellation identity mismatch")
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	// The resource version pins the empty reservation that was actually checked.
+	// A conflicting journal transition must be re-read by the owner transaction.
+	cancelled := cm.DeepCopy()
+	cancelled.Data["state"] = "cancelled"
+	cancelled.Data["prelaunch_cancellation"] = string(raw)
+	cancelled.Labels["clawmanager.io/needs-reconcile"] = "false"
+	_, err = c.kube.CoreV1().ConfigMaps(c.namespace).Update(ctx, cancelled, metav1.UpdateOptions{})
+	return err
 }
 
 func (c *slotRuntimeAgentClient) releaseNativeMaintenanceOwner(ctx context.Context, operation *corev1.ConfigMap, instanceID int) error {
