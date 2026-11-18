@@ -12,11 +12,55 @@ import (
 	"testing"
 	"time"
 
+	"clawreef/internal/models"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestRecordedNativeCompatibilityCannotCreateOrReleaseWithoutProof(t *testing.T) {
+	pod := slotTestPod()
+	pod.Labels["clawmanager.io/sandbox-profile"] = "nfs-rootless-v1"
+	kube := fake.NewSimpleClientset(pod)
+	endpoint, uid := "https://10.0.0.2:19090", string(pod.UID)
+	target := models.RuntimePod{PodName: pod.Name, PodUID: &uid, AgentEndpoint: &endpoint}
+	request := RuntimeAgentWorkspaceRequest{RolloutID: "old-compatibility", InstanceID: 7, UserID: 2, Generation: 3}
+	calls := 0
+	var observed runtimeNativeUpgradeOperation
+	c := NewSlotRuntimeAgentClientWithHTTPClient("token", kube, "runtime", &http.Client{Transport: slotRoundTripper(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Path != "/v1/native-upgrades/start" || json.NewDecoder(r.Body).Decode(&observed) != nil {
+			t.Fatalf("unexpected recovery request %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: 409, Body: io.NopCloser(strings.NewReader("still uncertain"))}, nil
+	})}).(*slotRuntimeAgentClient)
+	ctx := t.Context()
+	if err := c.recoverRecordedNativeCompatibility(ctx, target, request, strings.Repeat("a", 32)); err == nil || calls != 0 {
+		t.Fatalf("missing record was allowed to dispatch: %v", err)
+	}
+	cm, operation, err := c.ensureNativeMaintenance(ctx, endpoint, pod, "compatibility", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := request
+	changed.Generation++
+	if err := c.recoverRecordedNativeCompatibility(ctx, target, changed, operation.OperationID); err == nil || calls != 0 {
+		t.Fatalf("wrong generation was allowed to dispatch: %v", err)
+	}
+	if err := c.recoverRecordedNativeCompatibility(ctx, target, request, operation.OperationID); err == nil || calls != 1 || observed != operation {
+		t.Fatalf("recovery changed the operation or accepted uncertainty: %+v, %v", observed, err)
+	}
+	ms := kube.CoreV1().ConfigMaps("runtime")
+	cm, err = ms.Get(ctx, cm.Name, metav1.GetOptions{})
+	if err != nil || cm.Data["state"] != "reserved" || cm.Data["termination_proof"] != "" {
+		t.Fatalf("unproved cleanup modified the reservation: %v", err)
+	}
+	owner, err := ms.Get(ctx, "lite-maint-owner-7", metav1.GetOptions{})
+	if err != nil || owner.Data["state"] != "active" || owner.Data["operation_id"] != operation.OperationID {
+		t.Fatalf("unproved cleanup released the owner: %v", err)
+	}
+}
 
 func TestNFSNativePreflightRequiresTerminatedMaintenanceContainer(t *testing.T) {
 	pod := slotTestPod()

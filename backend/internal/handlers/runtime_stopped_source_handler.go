@@ -8,6 +8,40 @@ import (
 	"strconv"
 )
 
+func (h *RuntimePoolHandler) RecoverCompatibilityReservation(c *gin.Context) {
+	if !runtimeMaintenanceAdmin(c) {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id < 1 {
+		utils.Error(c, http.StatusBadRequest, "invalid rollout id")
+		return
+	}
+	var req services.CompatibilityReservationRequest
+	if err = runtimeMaintenanceJSON(c, &req); err != nil {
+		utils.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err = req.Validate(); err != nil {
+		utils.Error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	actor := currentUserIDPtr(c)
+	if actor == nil || *actor < 1 {
+		utils.Error(c, http.StatusForbidden, "Admin actor identity required")
+		return
+	}
+	if h == nil || h.upgrade == nil {
+		utils.Error(c, http.StatusConflict, "compatibility recovery is unavailable")
+		return
+	}
+	if err = h.upgrade.RecoverCompatibilityReservation(c.Request.Context(), id, req, *actor); err != nil {
+		utils.Error(c, http.StatusConflict, err.Error())
+		return
+	}
+	utils.Success(c, http.StatusOK, "Confirmed native compatibility execution exited", gin.H{"rollout_id": id, "operation_id": req.OperationID})
+}
+
 func (h *RuntimePoolHandler) RecoverStoppedSource(c *gin.Context) {
 	if !runtimeMaintenanceAdmin(c) {
 		return

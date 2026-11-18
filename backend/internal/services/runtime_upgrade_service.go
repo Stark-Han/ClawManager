@@ -751,7 +751,7 @@ func (s *RuntimeUpgradeService) ValidateTargetRuntime(ctx context.Context, rollo
 				return err
 			}
 			endpoint := stringValue(targetPods[index%len(targetPods)].AgentEndpoint)
-			request := RuntimeAgentWorkspaceRequest{RolloutID: strconv.FormatInt(rollout.ID, 10), UserID: candidate.UserID, InstanceID: item.InstanceID, Generation: candidate.Generation, UID: RuntimeLinuxID(item.InstanceID), GID: RuntimeLinuxID(item.InstanceID), RecoveryMode: runtimeUpgradeScopeFromRollout(rollout).RecoveryMode}
+			request := runtimeCompatibilityRequest(rollout, item.InstanceID, candidate.UserID, candidate.Generation)
 			compatibility, err := upgradeAgent.PreflightUpgradeCompatibility(ctx, endpoint, request)
 			if err != nil {
 				return fmt.Errorf("compatibility preflight instance %d: %w", item.InstanceID, err)

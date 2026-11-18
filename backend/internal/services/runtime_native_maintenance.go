@@ -66,22 +66,29 @@ func (c *slotRuntimeAgentClient) nativeMaintenanceProfile(ctx context.Context, e
 	return pod, nil
 }
 
-func (c *slotRuntimeAgentClient) ensureNativeMaintenance(ctx context.Context, endpoint string, pod *corev1.Pod, action string, req RuntimeAgentWorkspaceRequest) (*corev1.ConfigMap, runtimeNativeUpgradeOperation, error) {
-	var empty runtimeNativeUpgradeOperation
+func nativeMaintenanceRequest(endpoint string, pod *corev1.Pod, action string, req RuntimeAgentWorkspaceRequest) (RuntimeAgentWorkspaceRequest, string, error) {
 	if req.InstanceID < 1 || req.UserID < 1 || req.Generation < 1 || req.RolloutID == "" {
-		return nil, empty, fmt.Errorf("native maintenance identity is incomplete")
+		return req, "", fmt.Errorf("native maintenance identity is incomplete")
 	}
 	uid, _ := runtimeGatewayLinuxIDs(req.InstanceID, nil)
 	if req.UID != 0 && req.UID != uid || req.GID != 0 && req.GID != uid {
-		return nil, empty, fmt.Errorf("native maintenance requires the derived instance identity")
+		return req, "", fmt.Errorf("native maintenance requires the derived instance identity")
 	}
 	req.UID, req.GID = uid, uid
 	material, err := canonicalNativeMaintenance(map[string]any{"endpoint": endpoint, "pod_uid": string(pod.UID), "action": action, "request": req})
 	if err != nil {
-		return nil, empty, err
+		return req, "", err
 	}
 	digest := sha256.Sum256(material)
-	identity := hex.EncodeToString(digest[:])
+	return req, hex.EncodeToString(digest[:]), nil
+}
+
+func (c *slotRuntimeAgentClient) ensureNativeMaintenance(ctx context.Context, endpoint string, pod *corev1.Pod, action string, req RuntimeAgentWorkspaceRequest) (*corev1.ConfigMap, runtimeNativeUpgradeOperation, error) {
+	var empty runtimeNativeUpgradeOperation
+	req, identity, err := nativeMaintenanceRequest(endpoint, pod, action, req)
+	if err != nil {
+		return nil, empty, err
+	}
 	name := "lite-maint-" + identity[:40]
 	var token [16]byte
 	if _, err = rand.Read(token[:]); err != nil {
@@ -312,8 +319,12 @@ func (c *slotRuntimeAgentClient) runNativeMaintenance(ctx context.Context, endpo
 	if err != nil {
 		return err
 	}
+	return c.finishNativeMaintenanceExecution(ctx, endpoint, pod, cm, operation, out)
+}
+
+func (c *slotRuntimeAgentClient) finishNativeMaintenanceExecution(ctx context.Context, endpoint string, pod *corev1.Pod, cm *corev1.ConfigMap, operation runtimeNativeUpgradeOperation, out any) (err error) {
 	identity := runtimeauth.Identity{InstanceID: operation.Request.InstanceID, UserID: operation.Request.UserID, Generation: operation.Request.Generation, PodUID: string(pod.UID)}
-	mutates := action == "migrate" || action == "restore"
+	mutates := operation.Action == "migrate" || operation.Action == "restore"
 	if mutates {
 		if err = c.requireWorkspaceWriteFence(ctx, identity); err != nil {
 			return err
@@ -467,6 +478,10 @@ func (c *slotRuntimeAgentClient) runNativeMaintenance(ctx context.Context, endpo
 	}
 	if err = c.releaseNativeMaintenanceOwner(ctx, cm, operation.Request.InstanceID); err != nil {
 		return err
+	}
+	if out == nil {
+		// A cleanup caller needs the validated exit, regardless of the command result.
+		return nil
 	}
 	if result.Error != "" {
 		return errors.New(result.Error)
