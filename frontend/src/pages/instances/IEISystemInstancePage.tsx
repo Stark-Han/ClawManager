@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { connectOwnerInstance } from "../../lib/ownerInstanceStart";
 import { ownerOverviewURL, ownerTeamOverviewURL } from "../../lib/ownerPortalNavigation";
-import { WorkspaceFileManager } from "../../components/WorkspaceFileManager";
+import OwnerInstanceSwitcher from "../../components/OwnerInstanceSwitcher";
+import { ScopedInstanceWorkbench } from "../../components/workbench/ScopedInstanceWorkbench";
+import "../../components/teams/team-workspace-tools.css";
 import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
 import { useOwnerActivity } from "../../hooks/useOwnerActivity";
 import { useRuntimeCertificateTrust } from "../../hooks/useRuntimeCertificateTrust";
@@ -15,6 +17,7 @@ import { prepareOpenClawControlUIStorage } from "../../lib/openclawControlStorag
 import {
   ieiSystemService,
   ieiSystemWorkspaceService,
+  ownerWorkbenchService,
   type IEISystemInstance,
   type IEISystemInstanceAccess,
 } from "../../services/ieiSystemService";
@@ -195,10 +198,11 @@ export default function IEISystemInstancePage() {
   }, [openInstance]);
 
   const renewAccess = useCallback(async () => {
+    const request = requestRef.current;
     await ieiSystemService.refreshSession();
     const nextAccess = await ieiSystemService.generateAccess(instanceID);
     await refreshDedicatedRuntimeCookie(resolveEmbedUrl(nextAccess.access_url));
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || request !== requestRef.current) return;
     // Updating the iframe URL would reload the running agent UI. The fresh
     // cookie is installed in the background, so keep the existing src while
     // advancing the local expiry and access metadata.
@@ -369,10 +373,7 @@ export default function IEISystemInstancePage() {
             <RotateCw className={`h-4 w-4 ${restartInProgress ? "animate-spin" : ""}`} />
             {restartInProgress ? "正在重启" : "重启实例"}
           </button>
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-            已验证
-          </span>
+          <OwnerInstanceSwitcher current={instance} />
         </div>
       </header>
 
@@ -392,7 +393,7 @@ export default function IEISystemInstancePage() {
         </div>
       )}
 
-      <section className={`grid min-h-0 flex-1 gap-4 p-4 ${workspaceVisible ? 'max-xl:grid-rows-[minmax(420px,1fr)_minmax(360px,0.8fr)] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]' : 'grid-cols-1'}`}>
+      <section className={`grid min-h-0 flex-1 gap-4 p-4 max-xl:overflow-y-auto ${workspaceVisible ? 'max-xl:grid-rows-[minmax(420px,1fr)_minmax(460px,0.8fr)] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]' : 'grid-cols-1'}`}>
         <section
           ref={frameContainerRef}
           className="cm-surface relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
@@ -432,7 +433,7 @@ export default function IEISystemInstancePage() {
               <ShieldAlert className="h-9 w-9 text-amber-500" />
               <p className="text-base font-semibold text-slate-900">{runtimeError}</p>
               <p className="max-w-md text-sm leading-6 text-slate-600">工作区独立于运行界面加载。可在右侧检查并修改文件；保存后如需生效，请确认配置并手动重启。</p>
-              {instance.status === 'stopped' && !(Number.isSafeInteger(returnTeamID) && returnTeamID > 0) && <button className="app-button-primary" disabled={loading || startInProgress} onClick={() => { startIntentRef.current = true; void openInstance(); }}>启动实例</button>}
+              {instance.status === 'stopped' && !instance.team_id && <button className="app-button-primary" disabled={loading || startInProgress} onClick={() => { startIntentRef.current = true; void openInstance(); }}>启动实例</button>}
               <button className="app-button-secondary" disabled={loading} onClick={() => void openInstance()}>重新连接</button>
             </div>
           ) : frameSrc && allowBrowserInstance(instanceID, access ?? undefined) ? (
@@ -475,15 +476,19 @@ export default function IEISystemInstancePage() {
 
         <div id="iei-instance-workspace" className={workspaceVisible ? 'min-h-0 min-w-0' : 'hidden'}>
         {canShowWorkspace ? (
-          <div className="min-h-0 min-w-0">
-            <WorkspaceFileManager
+          <div className="owner-instance-workbench h-full min-h-[360px] min-w-0">
+            <ScopedInstanceWorkbench
               instanceId={instance.id}
-              key={instance.id}
+              key={`iei:${instance.owner}:${instance.id}`}
+              scope={`iei:${instance.owner}`}
+              runtimeGeneration={instance.runtime_generation ?? 0}
+              isRunning={instance.status === "running" && !restartInProgress && !startInProgress}
+              visible={workspaceVisible}
+              presentation="portal"
               initialPath={isWorkBuddyLite ? "/home" : (instance.workspace_root ?? access?.workspace_root) === "/config" ? "/config" : undefined}
-              service={isWorkBuddyLite ? workBuddyWorkspaceService : ieiSystemWorkspaceService}
-              workspaceKey={`iei:${instance.owner}:${instance.id}`}
+              workspace={isWorkBuddyLite ? workBuddyWorkspaceService : ieiSystemWorkspaceService}
+              service={ownerWorkbenchService}
               canWrite={!restartInProgress && !["creating", "deleting"].includes(instance.status)}
-              localeOverride="zh"
             />
           </div>
         ) : (
