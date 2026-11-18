@@ -72,13 +72,14 @@ type RuntimeManagementOperation struct {
 }
 
 type RuntimeManagementService struct {
-	processMu        sync.Mutex
-	sess             db.Session
-	scheduler        *RuntimeScheduler
-	guards           *repository.NorthboundRepository
-	token            string
-	idlePodSince     map[string]time.Time
-	lastIdlePoolScan time.Time
+	processMu                     sync.Mutex
+	sess                          db.Session
+	scheduler                     *RuntimeScheduler
+	guards                        *repository.NorthboundRepository
+	token                         string
+	idlePodSince                  map[string]time.Time
+	lastIdlePoolScan              time.Time
+	verifiedFaultRecoveryOverlays sync.Map
 }
 
 func NewRuntimeManagementService(sess db.Session, scheduler *RuntimeScheduler, guards *repository.NorthboundRepository) *RuntimeManagementService {
