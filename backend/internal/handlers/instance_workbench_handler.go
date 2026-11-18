@@ -117,8 +117,13 @@ func workbenchFailure(c *gin.Context, err error) {
 		status = 409
 		code = "stale_generation"
 		message = "实例运行环境已变更，请刷新工作台"
-	case errors.Is(err, services.ErrWorkbenchUnavailable):
+	case errors.Is(err, services.ErrWorkbenchStopped):
+		code = "instance_stopped"
 		message = "请先启动实例，再使用工作台"
+	case errors.Is(err, services.ErrWorkbenchTimeout):
+		status = http.StatusGatewayTimeout
+		code = "runtime_timeout"
+		message = "运行环境响应超时，请稍后重试"
 	case errors.Is(err, services.ErrRuntimeAgentUnsupported):
 		status = 501
 		code = "upgrade_required"
@@ -144,6 +149,9 @@ func workbenchFailure(c *gin.Context, err error) {
 				status = http.StatusConflict
 			case "timeout":
 				status = http.StatusGatewayTimeout
+			case "slot_state_unavailable":
+				status = http.StatusServiceUnavailable
+				message = "暂时无法确认运行环境状态，请稍后重试"
 			}
 		}
 	}
