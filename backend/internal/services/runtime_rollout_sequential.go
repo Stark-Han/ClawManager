@@ -70,9 +70,6 @@ func (s *RuntimeScheduler) startPoolRollout(ctx context.Context, r *models.Runti
 	}
 	inventory, ok := s.deployments.(k8s.RuntimeRolloutInventory)
 	if !ok {
-		if r.RuntimeType == RuntimeTypeHermes || r.RuntimeType == RuntimeTypeDeepSeekHarness {
-			return true, fmt.Errorf("Runtime source deployment inventory unavailable")
-		}
 		return false, nil
 	}
 	if _, ok := s.rolloutRepo.(rolloutCheckpointStore); !ok {
