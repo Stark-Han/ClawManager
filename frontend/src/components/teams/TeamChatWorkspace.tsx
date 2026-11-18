@@ -9,6 +9,7 @@ import "./team-continuous-chat.css";
 import "./team-classic-presentation.css";
 
 export type TeamWorkspacePanel = "closed" | "kanban" | "files";
+export type TeamWorkspaceTool = "files" | "browser" | "terminal";
 
 // Width is the workspace's usable width, not the browser viewport.
 export function workspaceMode(width: number) {
@@ -22,7 +23,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
   renderMemberDetails: (member: TeamMember) => ReactNode;
   chat: (headerTools: ReactNode) => ReactNode;
   renderKanban: (mini: boolean, open: () => void) => ReactNode;
-  files: ReactNode | ((active: boolean) => ReactNode);
+  files: ReactNode | ((active: boolean, tool: TeamWorkspaceTool) => ReactNode);
 }) {
   const { t } = useI18n();
   const root = useRef<HTMLDivElement>(null);
@@ -38,6 +39,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
   const [left, setLeft] = useState(false);
   const [right, setRight] = useState<TeamWorkspacePanel>("closed");
   const [filesVisited, setFilesVisited] = useState(false);
+  const [tool, setTool] = useState<TeamWorkspaceTool>("files");
   const [lastSide, setLastSide] = useState<"left" | "right">("right");
   const mode = workspaceMode(width);
   // Leave space for the rail too, so both states can always show the same page.
@@ -76,7 +78,7 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
     setLastSide("right");
     if (mode !== "dual") setLeft(false);
     setRight(current => current === panel ? "closed" : panel);
-    if (panel === "files") setFilesVisited(true);
+    if (panel === "files") { setFilesVisited(true); setTool("files"); }
   };
   const drawerOpen = mode === "drawer" && (left || right !== "closed");
   useEffect(() => {
@@ -114,13 +116,12 @@ export default function TeamChatWorkspace({ members, team, leaderKey, renderMemb
     )}</main>
     <aside id={toolsPanelId} ref={rightPanel} className="team-tools-panel" role={drawerOpen && right !== "closed" ? "dialog" : undefined} aria-modal={drawerOpen && right !== "closed" ? true : undefined} aria-label={t("teams.toolsLabel")} inert={drawerOpen && left}>
       <header className="team-tools-toolbar" hidden={right === "closed"}>
-        {right !== "closed" && <strong>{t(right === "kanban" ? "teams.board" : "teams.sharedFiles")}</strong>}
         {right !== "closed" && <button type="button" onClick={() => openRight("kanban")} aria-pressed={right === "kanban"}>{t("teams.boardTab")}</button>}
-        <button type="button" onClick={() => openRight("files")} aria-expanded={right === "files"}><FolderOpen size={17} /><span>{t("teams.files")}</span></button>
+        {(["files", "browser", "terminal"] as const).map(kind => <button type="button" key={kind} onClick={() => { if (right !== "files") openRight("files"); setTool(kind); }} aria-pressed={right === "files" && tool === kind}>{t(`workbench.${kind === "browser" ? "web" : kind}`)}</button>)}
         {right !== "closed" && <button type="button" aria-label={t("teams.collapseTools")} onClick={() => { setRight("closed"); restoreFocus(); }}><X size={18} /></button>}
       </header>
       <div className="team-kanban-host" hidden={right === "files"}>{renderKanban(right === "closed", () => openRight("kanban"))}</div>
-      <div className="team-files-host" hidden={right !== "files"}>{filesVisited && (typeof files === "function" ? files(right === "files" && width > 0) : files)}</div>
+      <div className="team-files-host" hidden={right !== "files"}>{filesVisited && (typeof files === "function" ? files(right === "files" && width > 0, tool) : files)}</div>
     </aside>
     {drawerOpen && <button type="button" className="team-drawer-backdrop" aria-label={t("teams.closeDrawer")} onClick={close} />}
     {(memberInfo === "team" || inspectedMember) && <MemberInfoDialog member={inspectedMember} team={team} renderDetails={renderMemberDetails} onClose={() => setMemberInfo(null)} />}

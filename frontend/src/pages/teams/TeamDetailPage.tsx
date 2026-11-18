@@ -11,6 +11,7 @@ import TeamBadge from '../../components/teams/TeamBadge';
 import { memberIcon } from '../../lib/teamIcons';
 import { chatAuthorType, chatPresentationContext, buildCollaborationPresentation, type ChatAuthorType, type ChatPresentationContext } from '../../components/teams/teamChatPresentation';
 import TeamChatWorkspace from "../../components/teams/TeamChatWorkspace";
+import TeamWorkspaceTools from "../../components/teams/TeamWorkspaceTools";
 import TeamTaskComposer from "../../components/teams/TeamTaskComposer";
 import { memberIsStarting } from '../../components/teams/teamMemberPresentation';
 import { createPortal } from "react-dom";
@@ -1392,7 +1393,7 @@ const TeamDetailPage: React.FC = () => {
           mini={mini} onOpen={open}
           onWorkspaceFileOpen={handleOpenWorkspacePath}
         />}
-        files={active => <TeamWorkspaceBrowser key={details.team.id} teamId={details.team.id} rootPath={details.team.shared_mount_path} heightClass="h-full" active={active} refreshKey={workspaceRefreshKey} onMutation={workspaceChanged} />}
+        files={(active, tool) => <TeamWorkspaceTools key={`${environment.owner || user?.id}:${details.team.id}`} teamId={details.team.id} members={details.members} leaderKey={details.leader_member_id} active={active} tool={tool} files={filesActive => <TeamWorkspaceBrowser key={details.team.id} teamId={details.team.id} rootPath={details.team.shared_mount_path} heightClass="h-full" active={filesActive} refreshKey={workspaceRefreshKey} onMutation={workspaceChanged} />} />}
       />
     </TeamPageLayout>
       {workspacePreview && (
