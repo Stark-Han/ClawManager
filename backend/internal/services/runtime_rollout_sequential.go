@@ -3,12 +3,15 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"clawreef/internal/models"
 	"clawreef/internal/services/k8s"
 )
+
+var errRuntimePoolOccupied = errors.New("in-place Runtime replacement requires an empty pool")
 
 type rolloutCheckpointStore interface {
 	LoadRolloutCheckpoint(context.Context, int64) (string, error)
@@ -100,10 +103,9 @@ func (s *RuntimeScheduler) startPoolRollout(ctx context.Context, r *models.Runti
 			if source.Image == r.TargetImageRef {
 				continue
 			}
-			if err := s.requireEmptyPoolRolloutSource(ctx, *r, source); err != nil {
-				if ctx.Err() != nil {
-					return true, err
-				}
+			// A known occupied source is an immediate rejection. A failed read
+			// must be retried under the checkpointed apply deadline and guard.
+			if err := s.requireEmptyPoolRolloutSource(ctx, *r, source, false); errors.Is(err, errRuntimePoolOccupied) {
 				now, message := time.Now().UTC(), err.Error()
 				return true, s.rolloutRepo.UpdateStatus(ctx, r.ID, "error", r.StartedAt, &now, &message)
 			}
@@ -157,24 +159,32 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 		if s.leader != nil && !s.leader.IsLeader(ctx) {
 			return fmt.Errorf("runtime rollout leadership lost before mutation")
 		}
-		if target.Image != r.TargetImageRef {
-			if err := s.requireEmptyPoolRolloutSource(ctx, r, source); err != nil {
-				if ctx.Err() != nil {
-					return err
+		hermesWeb := r.RuntimeType == RuntimeTypeHermes && r.Phase == k8s.HermesWebRolloutPhase
+		guard := func(ctx context.Context) error {
+			if s.leader != nil && !s.leader.IsLeader(ctx) {
+				return fmt.Errorf("runtime rollout leadership lost before mutation")
+			}
+			return s.requireEmptyPoolRolloutSource(ctx, r, source, true)
+		}
+		if guarded, ok := s.deployments.(k8s.GuardedRuntimePoolRollout); ok {
+			err = guarded.RolloutGuardedPoolImage(ctx, source, r.RuntimeType, r.TargetImageRef, hermesWeb, guard)
+		} else {
+			// Legacy deployment adapters cannot compare templates. Treat any
+			// write as a possible replacement for the protected Runtime types.
+			if err = guard(ctx); err == nil {
+				if hermesWeb {
+					web, ok := s.deployments.(k8s.HermesWebDeploymentService)
+					if !ok {
+						return fail(fmt.Errorf("Hermes Web deployment configuration unavailable"))
+					}
+					err = web.RolloutHermesWebImage(ctx, source.Namespace, source.Name, r.TargetImageRef, 0, 1)
+				} else {
+					err = s.deployments.RolloutImage(ctx, source.Namespace, source.Name, r.TargetImageRef, "", 0, 1)
 				}
-				return fail(err)
 			}
 		}
-		// A crash between mutation and checkpoint is recovered by an idempotent
-		// update of the same frozen UID/image target, never by widening the plan.
-		if r.RuntimeType == RuntimeTypeHermes && r.Phase == k8s.HermesWebRolloutPhase {
-			web, ok := s.deployments.(k8s.HermesWebDeploymentService)
-			if !ok {
-				return fail(fmt.Errorf("Hermes Web deployment configuration unavailable"))
-			}
-			err = web.RolloutHermesWebImage(ctx, source.Namespace, source.Name, r.TargetImageRef, 0, 1)
-		} else {
-			err = s.deployments.RolloutImage(ctx, source.Namespace, source.Name, r.TargetImageRef, "", 0, 1)
+		if errors.Is(err, errRuntimePoolOccupied) {
+			return fail(err)
 		}
 		if err != nil {
 			return err
@@ -196,7 +206,7 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 	return s.savePoolProgress(ctx, r.ID, p)
 }
 
-func (s *RuntimeScheduler) requireEmptyPoolRolloutSource(ctx context.Context, r models.RuntimeRollout, source k8s.RuntimeRolloutTarget) error {
+func (s *RuntimeScheduler) requireEmptyPoolRolloutSource(ctx context.Context, r models.RuntimeRollout, source k8s.RuntimeRolloutTarget, verifyPhysical bool) error {
 	if r.RuntimeType != RuntimeTypeHermes && r.RuntimeType != RuntimeTypeDeepSeekHarness {
 		return nil
 	}
@@ -216,7 +226,7 @@ func (s *RuntimeScheduler) requireEmptyPoolRolloutSource(ctx context.Context, r 
 			return err
 		}
 		if len(bindings) > 0 || pod.UsedSlots > 0 {
-			return fmt.Errorf("Runtime pool %s has bindings or slot claims; in-place image replacement requires an empty pool", source.Name)
+			return fmt.Errorf("Runtime pool %s has bindings or slot claims: %w", source.Name, errRuntimePoolOccupied)
 		}
 	}
 	live, err := s.deployments.ListDeploymentPods(ctx, []k8s.RuntimeDeploymentRef{{Namespace: source.Namespace, Name: source.Name}})
@@ -227,15 +237,45 @@ func (s *RuntimeScheduler) requireEmptyPoolRolloutSource(ctx context.Context, r 
 		return fmt.Errorf("Runtime pool %s has no verifiable source Pods", source.Name)
 	}
 	for _, livePod := range live {
-		var matches int
-		for _, pod := range pods {
+		var agent *models.RuntimePod
+		for i := range pods {
+			pod := &pods[i]
 			if livePod.Namespace == source.Namespace && livePod.DeploymentName == source.Name &&
-				runtimeRolloutAgentMatchesPod(pod, livePod) && pod.ID > 0 && pod.PodUID != nil && *pod.PodUID != "" {
-				matches++
+				runtimeRolloutAgentMatchesPod(*pod, livePod) && pod.ID > 0 && pod.PodUID != nil && *pod.PodUID != "" {
+				if agent != nil {
+					return fmt.Errorf("Runtime pool %s source Pod %s registration is ambiguous", source.Name, livePod.PodName)
+				}
+				agent = pod
 			}
 		}
-		if matches != 1 {
-			return fmt.Errorf("Runtime pool %s source Pod %s has no unique verified registration", source.Name, livePod.PodName)
+		if agent == nil {
+			return fmt.Errorf("Runtime pool %s source Pod %s has no verified registration", source.Name, livePod.PodName)
+		}
+		if !verifyPhysical || len(livePod.Slots) == 0 {
+			continue
+		}
+		client, ok := s.agentClient.(*slotRuntimeAgentClient)
+		if !ok {
+			return fmt.Errorf("Runtime pool %s has no slot proof client", source.Name)
+		}
+		slots, err := client.observeRuntimeSlots(ctx, *agent)
+		if err != nil {
+			return err
+		}
+		for _, slot := range slots {
+			if slot.Err != nil {
+				return fmt.Errorf("Runtime pool %s slot %s: %w", source.Name, slot.Name, slot.Err)
+			}
+			if !slot.free() {
+				return fmt.Errorf("Runtime pool %s slot %s is still occupied: %w", source.Name, slot.Name, errRuntimePoolOccupied)
+			}
+		}
+		ports, err := client.runtimeAuditReservedPorts(ctx, *agent)
+		if err != nil {
+			return err
+		}
+		if len(ports) > 0 {
+			return fmt.Errorf("Runtime pool %s has unpublished or retained assignments: %w", source.Name, errRuntimePoolOccupied)
 		}
 	}
 	return nil
