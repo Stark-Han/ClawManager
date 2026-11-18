@@ -70,6 +70,9 @@ func (s *RuntimeScheduler) startPoolRollout(ctx context.Context, r *models.Runti
 	}
 	inventory, ok := s.deployments.(k8s.RuntimeRolloutInventory)
 	if !ok {
+		if r.RuntimeType == RuntimeTypeHermes || r.RuntimeType == RuntimeTypeDeepSeekHarness {
+			return true, fmt.Errorf("Runtime source deployment inventory unavailable")
+		}
 		return false, nil
 	}
 	if _, ok := s.rolloutRepo.(rolloutCheckpointStore); !ok {
@@ -95,6 +98,18 @@ func (s *RuntimeScheduler) startPoolRollout(ctx context.Context, r *models.Runti
 		}
 		if len(targets) == 0 {
 			return true, fmt.Errorf("no eligible live runtime deployment")
+		}
+		for _, source := range targets {
+			if source.Image == r.TargetImageRef {
+				continue
+			}
+			if err := s.requireEmptyPoolRolloutSource(ctx, *r, source); err != nil {
+				if ctx.Err() != nil {
+					return true, err
+				}
+				now, message := time.Now().UTC(), err.Error()
+				return true, s.rolloutRepo.UpdateStatus(ctx, r.ID, "error", r.StartedAt, &now, &message)
+			}
 		}
 		p = &RuntimePoolProgress{Version: 1, Targets: targets}
 		if err := s.savePoolProgress(ctx, r.ID, p); err != nil {
@@ -145,6 +160,14 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 		if s.leader != nil && !s.leader.IsLeader(ctx) {
 			return fmt.Errorf("runtime rollout leadership lost before mutation")
 		}
+		if target.Image != r.TargetImageRef {
+			if err := s.requireEmptyPoolRolloutSource(ctx, r, source); err != nil {
+				if ctx.Err() != nil {
+					return err
+				}
+				return fail(err)
+			}
+		}
 		// A crash between mutation and checkpoint is recovered by an idempotent
 		// update of the same frozen UID/image target, never by widening the plan.
 		if r.RuntimeType == RuntimeTypeHermes && r.Phase == k8s.HermesWebRolloutPhase {
@@ -174,4 +197,49 @@ func (s *RuntimeScheduler) advancePoolRollout(ctx context.Context, r models.Runt
 		p.VerificationStarted = time.Now().UTC()
 	}
 	return s.savePoolProgress(ctx, r.ID, p)
+}
+
+func (s *RuntimeScheduler) requireEmptyPoolRolloutSource(ctx context.Context, r models.RuntimeRollout, source k8s.RuntimeRolloutTarget) error {
+	if r.RuntimeType != RuntimeTypeHermes && r.RuntimeType != RuntimeTypeDeepSeekHarness {
+		return nil
+	}
+	if s.bindingRepo == nil || s.podRepo == nil {
+		return fmt.Errorf("Runtime source binding inventory unavailable")
+	}
+	pods, err := s.podRepo.List(ctx, r.RuntimeType)
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods {
+		if pod.Namespace != source.Namespace || pod.DeploymentName != source.Name || pod.ID <= 0 {
+			continue
+		}
+		bindings, err := s.bindingRepo.ListByRuntimePodID(ctx, pod.ID)
+		if err != nil {
+			return err
+		}
+		if len(bindings) > 0 || pod.UsedSlots > 0 {
+			return fmt.Errorf("Runtime pool %s has bindings or slot claims; in-place image replacement requires an empty pool", source.Name)
+		}
+	}
+	live, err := s.deployments.ListDeploymentPods(ctx, []k8s.RuntimeDeploymentRef{{Namespace: source.Namespace, Name: source.Name}})
+	if err != nil {
+		return err
+	}
+	if len(live) == 0 {
+		return fmt.Errorf("Runtime pool %s has no verifiable source Pods", source.Name)
+	}
+	for _, livePod := range live {
+		var matches int
+		for _, pod := range pods {
+			if livePod.Namespace == source.Namespace && livePod.DeploymentName == source.Name &&
+				runtimeRolloutAgentMatchesPod(pod, livePod) && pod.ID > 0 && pod.PodUID != nil && *pod.PodUID != "" {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("Runtime pool %s source Pod %s has no unique verified registration", source.Name, livePod.PodName)
+		}
+	}
+	return nil
 }
