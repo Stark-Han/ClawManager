@@ -1018,7 +1018,7 @@ func (s *runtimeDeploymentService) renderDeploymentPods(ctx context.Context, dep
 	if strings.HasPrefix(deployment.Labels[upgradeLabPurposeLabel], RuntimeFreshPoolPurposePrefix) {
 		// A site may reconcile the general scheduling label during app rollout.
 		// Only an explicit activation bound to this controller admits fresh work.
-		active := deployment.UID != "" && deployment.Annotations[freshPoolActivationUID] == string(deployment.UID) && schedulingEnabled != nil && *schedulingEnabled
+		active := freshRuntimeActivated(deployment)
 		schedulingEnabled = &active
 	}
 	result := make([]RuntimeDeploymentPod, 0, len(pods))

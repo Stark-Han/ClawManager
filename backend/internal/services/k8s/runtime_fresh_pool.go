@@ -7,14 +7,18 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 const RuntimeFreshPoolPurposePrefix = "fresh-instance-"
 const freshPoolSourceUID = "clawmanager.io/fresh-source-uid"
 const freshPoolActivationUID = "clawmanager.io/fresh-activation-uid"
+const freshPoolActivationImage = "clawmanager.io/fresh-activation-image"
+const freshPoolActivationGeneration = "clawmanager.io/fresh-activation-generation"
 
 type FreshRuntimePoolScope struct {
 	Source           RuntimePodScaleTarget
@@ -99,11 +103,57 @@ func (s *runtimeDeploymentService) ActivateFreshRuntimePool(ctx context.Context,
 	if !freshRuntimeMatches(current, desired) || string(current.UID) != uid || current.Status.ReadyReplicas != 1 || current.Status.ObservedGeneration < current.Generation {
 		return fmt.Errorf("fresh Runtime controller changed or is not ready")
 	}
-	if current.Annotations[freshPoolActivationUID] == uid {
+	if freshRuntimeActivated(current) && current.Annotations[freshPoolActivationImage] == scope.Image {
 		return nil
 	}
 	current.Annotations[freshPoolActivationUID] = uid
+	current.Annotations[freshPoolActivationImage] = scope.Image
+	current.Annotations[freshPoolActivationGeneration] = strconv.FormatInt(current.Generation+1, 10)
 	current.Labels[runtimeSchedulingLabel] = "true"
 	_, err = deployments.Update(ctx, current, metav1.UpdateOptions{})
 	return err
+}
+
+// FreshRuntimePreviewImage joins the running Pod's native identity with the
+// separately admitted immutable image, within the one approved member's scope.
+func FreshRuntimePreviewImage(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, instanceID int, runtimeType string) (string, error) {
+	purpose := pod.Labels[upgradeLabPurposeLabel]
+	if !strings.HasPrefix(purpose, RuntimeFreshPoolPurposePrefix) {
+		return "", nil
+	}
+	if instanceID < 1 || purpose != RuntimeFreshPoolPurposePrefix+strconv.Itoa(instanceID) {
+		return "", fmt.Errorf("fresh Runtime is outside the authorized instance scope")
+	}
+	s := &runtimeDeploymentService{client: client}
+	owner, err := s.ResolveRuntimePodController(ctx, pod.Namespace, pod.Name, string(pod.UID))
+	if err != nil || owner.RuntimeType != runtimeType {
+		return "", fmt.Errorf("fresh Runtime controller identity is unavailable")
+	}
+	d, err := client.AppsV1().Deployments(pod.Namespace).Get(ctx, owner.DeploymentName, metav1.GetOptions{})
+	if err != nil || string(d.UID) != owner.DeploymentUID || !freshRuntimeActivated(d) || d.Labels[upgradeLabPurposeLabel] != purpose || d.Spec.Template.Labels[upgradeLabPurposeLabel] != purpose {
+		return "", fmt.Errorf("fresh Runtime has no matching active approval")
+	}
+	return runtimeContainerImage(d.Spec.Template.Spec.Containers), nil
+}
+
+func freshRuntimeActivated(d *appsv1.Deployment) bool {
+	if d.UID == "" || d.DeletionTimestamp != nil || d.Annotations[freshPoolSourceUID] == "" || d.Annotations[freshPoolActivationUID] != string(d.UID) || d.Labels[runtimeSchedulingLabel] != "true" {
+		return false
+	}
+	image := runtimeContainerImage(d.Spec.Template.Spec.Containers)
+	if runtimeImageDigest(image) == "" || len(d.Spec.Template.Spec.Containers) < 2 {
+		return false
+	}
+	for _, container := range d.Spec.Template.Spec.Containers {
+		if container.Image != image {
+			return false
+		}
+	}
+	if approved := d.Annotations[freshPoolActivationImage]; approved != "" {
+		return approved == image && d.Annotations[freshPoolActivationGeneration] == strconv.FormatInt(d.Generation, 10)
+	}
+	// Initial deployments made before the digest annotation used generation 1
+	// for prepare and generation 2 for UID-only activation. A later spec change
+	// cannot inherit that legacy approval.
+	return d.Generation == 2
 }
