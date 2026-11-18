@@ -119,7 +119,11 @@ func (s *RuntimeScheduler) validateFreshRuntimeWorkspace(ctx context.Context, cl
 	sess := s.management.sess
 	var member, prior int
 	row, err := sess.SQL().QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM team_members WHERE instance_id=? AND team_id=? AND status NOT IN ('deleted','deleting')),
-		(SELECT COUNT(*) FROM instance_runtime_bindings WHERE instance_id=?)+(SELECT COUNT(*) FROM instance_workspace_write_intents WHERE instance_id=?)+(SELECT COUNT(*) FROM runtime_upgrade_items WHERE instance_id=?)`, instance.ID, teamID, instance.ID, instance.ID, instance.ID)
+		(SELECT COUNT(*) FROM instance_runtime_bindings WHERE instance_id=?)+(SELECT COUNT(*) FROM instance_workspace_write_intents WHERE instance_id=?)+
+		(SELECT COUNT(*) FROM runtime_upgrade_items ui JOIN runtime_rollouts r ON r.id=ui.rollout_id WHERE ui.instance_id=?
+		 AND NOT (r.status='preflight_blocked' AND r.phase='preflight' AND ui.state='pending'
+		  AND ui.source_gateway_id IS NULL AND ui.runtime_pod_id IS NULL AND ui.snapshot_ref IS NULL
+		  AND ui.operation_token IS NULL AND ui.started_at IS NULL AND ui.isolated_at IS NULL AND ui.recovery_status IS NULL))`, instance.ID, teamID, instance.ID, instance.ID, instance.ID)
 	if err == nil {
 		err = row.Scan(&member, &prior)
 	}
