@@ -1177,6 +1177,7 @@ func main() {
 			adminRuntime.POST("/runtime-rollouts", runtimePoolHandler.StartRollout)
 			adminRuntime.POST("/runtime-rollouts/preflight", runtimePoolHandler.PreflightOpenClawRollout)
 			adminRuntime.POST("/runtime-rollouts/:id/recover-compatibility-reservation", runtimePoolHandler.RecoverCompatibilityReservation)
+			adminRuntime.POST("/runtime-rollouts/:id/retire-failed-compatibility-pool", runtimePoolHandler.RetireFailedCompatibilityPool)
 			adminRuntime.GET("/runtime-rollouts/:id", runtimePoolHandler.GetRollout)
 			adminRuntime.GET("/runtime-rollouts", runtimePoolHandler.ListRollouts)
 		}
