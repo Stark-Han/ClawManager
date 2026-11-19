@@ -32,6 +32,7 @@ await page.route('**/api/v1/**',async route=>{
  if(p.endsWith('/auth/me'))return send({id:1,username:'admin',role:'admin',status:'active'});
  if(p.endsWith('/version'))return send({version:'fixture'});
  if(p.endsWith('/ieisystem/session')||p.endsWith('/session/refresh'))return send({owner,expires_at:new Date(Date.now()+3600000).toISOString()});
+ if(p.endsWith('/lifecycle-operations/restart-609'))return send({operation:{operation_id:'restart-609',status:'succeeded'}});
  if(p.endsWith('/team-capabilities'))return send({enabled:true,can_create:true});
  if(p.endsWith('/ieisystem/dashboard'))return send({summary:{questions:5,total_tokens:50000,sessions:2},last_activity:{},trend:[]});
  if(p.endsWith('/ieisystem/growth'))return send({xp:0,level:1,tasks:[],ledger:[],days:[]});
@@ -45,6 +46,7 @@ await page.route('**/api/v1/**',async route=>{
  const m=/\/instances\/(\d+)(.*)$/.exec(p);
  if(m){const id=Number(m[1]),suffix=m[2];
   if(!suffix)return send({instance:instances.get(id)});
+  if(suffix==='/restart'&&r.method()==='POST')return send({operation:{operation_id:'restart-609',status:'running'}});
   if(suffix==='/access')return send({access_url:origin+'/fixture-agent/'+id,expires_at:new Date(Date.now()+3600000).toISOString(),workspace_available:true,workspace_root:'Workspace'});
   if(suffix==='/workbench/capabilities')return send({generation:3,workspace:'/workspace',git:false,terminal:true,preview:true,processes:false});
   if(suffix==='/workbench/terminals'){
@@ -66,27 +68,62 @@ try{
  await root().getByRole('button',{name:'新建终端',exact:true}).click();
  await root().locator('.xterm').waitFor();
  assert.equal([...sessions.values()].filter(s=>s.instance===609).length,1);
- await page.getByRole('button',{name:'切换实例',exact:true}).click();
- const drawer=page.getByRole('dialog',{name:'切换实例',exact:true});await drawer.waitFor();
- await drawer.getByRole('button').filter({hasText:'DeepSeek personal instance'}).click();
- await page.waitForURL('**/ieisystem/instances/590');await root().waitFor();
+ const rail=page.locator('.portal-unified-rail');
+ const toolbar=page.locator('.portal-instance-toolbar');
+ const restart=toolbar.getByRole('button',{name:'重启实例',exact:true});
+ const refresh=toolbar.getByRole('button',{name:'刷新访问',exact:true});
+ await restart.waitFor();await refresh.waitFor();
+ assert.equal(await toolbar.locator('h1').textContent(),instances.get(609).name);
+ assert.equal(await toolbar.innerText(),instances.get(609).name);
+ assert.equal(await page.getByRole('button',{name:'切换实例',exact:true}).count(),0);
+ assert.equal(await page.getByRole('link',{name:'返回我的总览',exact:true}).count(),0);
+ const restartCalls=()=>calls.filter(c=>c.method==='POST'&&c.path.endsWith('/instances/609/restart')).length;
+ await refresh.click();await root().waitFor();
+ await restart.click();
+ const confirm=page.getByRole('dialog',{name:'确认重启实例？'});
+ await confirm.getByText(instances.get(609).name,{exact:false}).waitFor();
+ assert.equal(restartCalls(),0);
+ await page.keyboard.press('Escape');
+ assert.ok(await restart.evaluate(el=>el===document.activeElement));
+ await restart.click();
+ await confirm.getByRole('button',{name:'取消',exact:true}).click();
+ assert.equal(restartCalls(),0);
+ await restart.click();
+ await confirm.getByRole('button',{name:'确认重启',exact:true}).click();
+ await page.getByText('实例已完成重启并重新连接。',{exact:true}).waitFor();
+ assert.equal(restartCalls(),1);
+ await rail.locator('[data-instance-id="590"] .instance-summary').click();
+ await page.waitForURL(/\/ieisystem\/instances\/590(?:\?|$)/);await root().waitFor();
  assert.ok(calls.some(c=>c.path==='/api/v1/ieisystem/instances'&&c.query.includes('page=2')),'missing second instance page');
- await page.getByRole('button',{name:'切换实例',exact:true}).click();
- await drawer.getByRole('button',{name:/^Team/}).click();
- await drawer.locator('.owner-switch-member').first().waitFor();
- assert.equal(await drawer.locator('.owner-switch-member').count(),4,'Team members must be directly visible');
- await drawer.getByRole('searchbox').fill('618');await drawer.locator('.owner-switch-member').getByText(/#618/).waitFor();
- assert.equal(await drawer.locator('.owner-switch-member').count(),1);
- await drawer.locator('.owner-switch-member').click();await page.waitForURL('**/ieisystem/instances/618');await root().waitFor();
+ await rail.getByRole('tab',{name:/^Team ·/}).click();
+ await rail.locator('[data-team-id="184"] .ot-card-title').click();
+ await page.locator('.team-chat-workspace').waitFor();
+ assert.equal(await page.getByRole('button',{name:'切换实例',exact:true}).count(),0);
+ assert.equal(await rail.locator('.ot-directory-member').count(),4);
+ await rail.getByRole('link',{name:/成员 2.*#618/}).click();
+ await page.waitForURL(/\/ieisystem\/instances\/618(?:\?|$)/);await root().waitFor();
  await root().getByRole('tab',{name:'网页',exact:true}).click();
  await root().getByRole('button',{name:'新建网页',exact:true}).click();
  await root().locator('.wb-browser input').fill('http://localhost:3000');
  await root().locator('.wb-browser input').press('Enter');
  await root().locator('.wb-preview-frame').waitFor();
- for(const width of [1440,1280,768,390,320]){await page.setViewportSize({width,height:1000});await checkOverflow();await page.getByRole('button',{name:'切换实例',exact:true}).click();await drawer.waitFor();assert.ok(await drawer.evaluate(e=>e.getBoundingClientRect().width<=innerWidth));await page.screenshot({path:path.join(screenshots,'switch-'+width+'.png')});await page.keyboard.press('Escape');assert.equal(await drawer.count(),0);assert.equal(await page.getByRole('button',{name:'切换实例',exact:true}).evaluate(e=>e===document.activeElement),true);}
+ for(const width of [1440,1280,768,390,320]){
+  await page.setViewportSize({width,height:1000});await checkOverflow();
+  const heading=await toolbar.locator('h1').boundingBox();
+  const controls=await toolbar.locator('.portal-instance-toolbar-actions').boundingBox();
+  assert.ok(heading.x+heading.width<=controls.x+1,'title and controls overlap at '+width);
+  if(width<768){
+   await rail.getByRole('button',{name:'工作区列表',exact:true}).click();
+   await rail.getByRole('link',{name:/成员 2.*#618/}).waitFor();
+   await rail.getByRole('button',{name:'工作区列表',exact:true}).click();
+  }
+ }
  await page.setViewportSize({width:1440,height:1000});
- await page.goto(origin+'/ieisystem/list-instances?view=overview');
- const rail=page.locator('.portal-unified-rail');
+ await page.goto(origin+'/ieisystem/list-instances');
+ await rail.getByRole('tab',{name:'总览',exact:true}).waitFor();
+ await rail.getByRole('tab',{name:'Team 设置',exact:true}).waitFor();
+ assert.equal(await rail.getByRole('tab',{name:'总览',exact:true}).getAttribute('aria-selected'),'true');
+ assert.equal(await rail.locator('[data-primary="true"]').allTextContents().then(items=>items.join(',')),'总览,Team 设置');
  await rail.locator('[data-instance-id="609"]').waitFor();
  await page.getByTestId('metric-tokens').getByText('5万',{exact:true}).waitFor();
  await rail.evaluate(node=>window.workspaceRail=node);
@@ -116,7 +153,8 @@ try{
  await page.waitForURL(/\/ieisystem\/instances\/618(?:\?|$)/);
  await root().waitFor();
  assert.equal(await worker.getAttribute('aria-current'),'page');
- await page.getByRole('link',{name:'返回团队',exact:true}).click();
+ assert.equal(await page.getByRole('link',{name:'返回团队',exact:true}).count(),0);
+ await rail.locator('[data-team-id="184"] .ot-card-title').click();
  await page.waitForURL(/\/ieisystem\/teams\/184(?:\?|$)/);
  await page.locator('.team-chat-workspace').waitFor();
  const composer=page.locator('.team-chat-workspace textarea').first();

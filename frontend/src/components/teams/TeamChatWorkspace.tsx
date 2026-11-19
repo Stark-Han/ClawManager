@@ -99,7 +99,7 @@ export default function TeamChatWorkspace({ members, team, owner, leaderKey, ren
     panel?.querySelector<HTMLButtonElement>("button")?.focus();
     const onKey = (event: KeyboardEvent) => {
       // File previews have their own modal layer and keyboard lifecycle.
-      if (event.defaultPrevented || document.querySelector('[data-workspace-preview], [data-workspace-editor], [data-team-member-dialog], [data-team-file-dialog][open], .owner-switch-dialog[open]')) return;
+      if (event.defaultPrevented || document.querySelector('[data-workspace-preview], [data-workspace-editor], [data-team-member-dialog], [data-team-file-dialog][open]')) return;
       if (event.key === "Escape") { event.preventDefault(); close(); }
       if (event.key !== "Tab" || !panel) return;
       const controls = [...panel.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input, textarea, select, summary')]

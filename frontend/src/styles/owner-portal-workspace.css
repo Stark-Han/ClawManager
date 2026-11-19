@@ -59,19 +59,19 @@
 .portal-unified-nav {
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));
-  padding:0 10px 12px;
+  padding:0 10px 8px;
   gap:5px;
 }
 .portal-unified-nav button {
   display:flex;
   align-items:center;
   gap:6px;
-  min-height:36px;
+  min-height:34px;
   min-width:0;
   padding:5px 8px;
   border-radius:8px;
-  background:var(--cm-subtle);
-  color:var(--cm-ink);
+  background:transparent;
+  color:var(--cm-muted);
   white-space:nowrap;
   text-align:left;
 }
@@ -79,7 +79,27 @@
   background:var(--cm-selected);
   color:var(--cm-primary);
 }
-.portal-unified-nav button[aria-selected=true] {box-shadow:inset 2px 0 var(--cm-primary);font-weight:600}
+.portal-unified-nav button[data-primary=true] {
+  grid-column:1/-1;
+  min-height:42px;
+  padding-inline:7px 10px;
+  background:var(--cm-subtle);
+  color:var(--cm-ink);
+  font-weight:600;
+  border:1px solid transparent;
+}
+.portal-unified-nav button[data-primary=true]:is(:hover,[aria-selected=true]) {
+  background:linear-gradient(100deg,var(--cm-selected),var(--cm-subtle));
+  color:var(--cm-primary);
+  border-color:var(--cm-border);
+}
+.portal-unified-nav button[data-primary=true][aria-selected=true] {box-shadow:inset 3px 0 var(--cm-primary)}
+.portal-unified-nav button[data-primary=false] {justify-content:center;font-size:var(--cm-font-label);padding-inline:2px}
+.portal-unified-nav-icon {display:grid;place-items:center;flex:none}
+.portal-unified-nav button[data-primary=true] .portal-unified-nav-icon {
+  width:24px;height:24px;border-radius:6px;background:var(--cm-surface);color:var(--cm-primary)
+}
+.portal-unified-nav-tail {margin-left:auto;color:var(--cm-muted)}
 .portal-unified-nav svg,.portal-unified-directory-toggle svg {flex-shrink:0}
 .portal-unified-directory-toggle.app-button-secondary {display:none}
 .portal-unified-directory {
@@ -192,6 +212,20 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
   flex:1;
 }
 .portal-unified-instance-panes[data-tools=false] {grid-template-columns:minmax(0,1fr)}
+.portal-instance-toolbar {
+  display:flex;align-items:center;justify-content:space-between;flex:none;gap:8px;
+  min-height:48px;padding:5px 10px;border-bottom:1px solid var(--cm-border);
+}
+.portal-instance-toolbar-actions {display:flex;align-items:center;gap:5px;flex:none}
+.portal-instance-toolbar-actions .portal-instance-restart {
+  margin-left:3px;color:var(--cm-error);
+  background:color-mix(in srgb,var(--cm-error) 6%,var(--cm-surface));
+  border-color:color-mix(in srgb,var(--cm-error) 30%,var(--cm-border));
+}
+.portal-instance-toolbar-actions .portal-instance-restart:hover:not(:disabled) {
+  color:var(--cm-error);background:color-mix(in srgb,var(--cm-error) 12%,var(--cm-surface));
+}
+.portal-instance-toolbar-actions .portal-instance-restart:disabled {color:var(--cm-disabled)}
 .portal-unified .portal-unified-team {height:auto;min-width:0;min-height:0;flex:1}
 .portal-unified .portal-unified-team .ot-northbound-header {padding:2px 0 8px;border:0;background:transparent}
 .portal-unified .portal-unified-team .ot-northbound-body {padding:0}
@@ -243,15 +277,15 @@ a.ot-directory-member:hover,.ot-directory-member[aria-current=page] {background:
 @media(max-width:767px) {
   .portal-unified {display:flex;flex-direction:column;height:auto;min-height:100dvh;padding:6px;gap:8px}
   .portal-unified-brand {min-height:44px}
-  .portal-unified-nav {grid-template-columns:repeat(4,minmax(0,1fr));padding:0 6px 6px;gap:3px}
-  .portal-unified-nav button {justify-content:center;padding:4px 1px;gap:3px;font-size:12px;min-height:44px}
-  .portal-unified-nav svg {width:13px;height:13px}
+  .portal-unified-nav {padding:0 6px 6px;gap:4px}
+  .portal-unified-nav button[data-primary=true] {grid-column:auto;min-height:44px}
+  .portal-unified-nav button[data-primary=false] {min-height:36px}
   .portal-unified-directory-toggle.app-button-secondary {display:flex;justify-content:space-between;min-height:44px;margin:0 6px 6px}
   .portal-unified-directory[data-open=false] {display:none}
   .portal-unified-directory {max-height:min(440px,60dvh)}
   .portal-unified-instance {min-height:540px}
-  .portal-unified-instance-header {flex-wrap:wrap}
-  .portal-unified-instance-header > div {max-width:100%}
+  .portal-instance-toolbar {gap:4px;padding-inline:6px}
+  .portal-instance-toolbar-actions {gap:3px}
   .portal-unified-instance-panes {overflow:visible;grid-auto-rows:minmax(440px,auto)}
   .portal-unified-content {overflow:visible}
   .portal-unified .portal-unified-team {min-height:560px}

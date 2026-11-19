@@ -1,11 +1,11 @@
 import { allowBrowserInstance } from "../../lib/browserOrigin";
 import axios from "axios";
-import { ArrowLeft, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
+import { Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Power, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { connectOwnerInstance } from "../../lib/ownerInstanceStart";
-import { ownerOverviewURL, ownerTeamOverviewURL, ownerTeamURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
-import OwnerInstanceSwitcher from "../../components/OwnerInstanceSwitcher";
+import type { OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
+import ConfirmDialog from "../../components/ConfirmDialog";
 import { ScopedInstanceWorkbench } from "../../components/workbench/ScopedInstanceWorkbench";
 import "../../components/teams/team-workspace-tools.css";
 import { useExpiringResourceRenewal } from "../../hooks/useExpiringResourceRenewal";
@@ -71,13 +71,8 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   const clearStartIntentRef = useRef(() => {});
   clearStartIntentRef.current = () => navigate(location.pathname + location.search, { replace: true, state: { ...location.state, startStopped: false } });
   const [startInProgress, setStartInProgress] = useState(false);
-  const returnSearch = location.search || (typeof location.state?.portalReturnSearch === "string" ? location.state.portalReturnSearch : "");
   const frameContainerRef = useRef<HTMLElement | null>(null);
   const [instance, setInstance] = useState<IEISystemInstance | null>(null);
-  const returnTeamID = instance?.team_id || Number(location.state?.portalReturnTeamID);
-  const hasTeam = Number.isSafeInteger(returnTeamID) && returnTeamID > 0;
-  const returnToChat = hasTeam && location.state?.portalReturnFromChat !== false;
-  const listReturnURL = returnToChat ? ownerTeamURL(returnTeamID, returnSearch) : hasTeam ? ownerTeamOverviewURL(returnTeamID, returnSearch) : ownerOverviewURL(instanceID, returnSearch);
   const [access, setAccess] = useState<IEISystemInstanceAccess | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +90,7 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   const [restartNotice, setRestartNotice] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
   const mountedRef = useRef(true);
-  const {onFrameLoad,activityNote}=useOwnerActivity(instanceID,instance?.status==='running'&&!restartInProgress&&!startInProgress);
+  const {onFrameLoad}=useOwnerActivity(instanceID,instance?.status==='running'&&!restartInProgress&&!startInProgress);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -348,9 +343,6 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
           <h1 className="text-lg font-semibold text-slate-950">实例不可访问</h1>
           <p className="mt-2 text-sm leading-6 text-slate-600">{error ?? "访问验证未通过。"}</p>
           <div className="mt-5 flex justify-center gap-2">
-            <Link className="app-button-secondary" to={listReturnURL}>
-              <ArrowLeft className="h-4 w-4" /> 返回我的总览
-            </Link>
             <button type="button" className="app-button-primary" onClick={() => void openInstance()}>
               <RefreshCw className="h-4 w-4" /> 重试
             </button>
@@ -365,69 +357,55 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
 
   return (
     <main className="portal-unified-instance flex min-h-0 flex-col overflow-hidden">
-      <header className="portal-unified-instance-header flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 py-2">
-        <div className="flex min-w-0 items-center gap-3">
-          <Link className="cm-icon-button shrink-0" aria-label={returnToChat ? "返回团队" : "返回我的总览"} title={returnToChat ? "返回团队" : "返回我的总览"} to={listReturnURL}>
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-slate-950">{instanceDisplayName(instance)}</h1>
-            <p className="truncate text-[10px] text-slate-500" title={activityNote}>浪潮信息安全访问 · {instance.owner} · {activityNote}</p>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            className="app-button-secondary"
-            disabled={restartInProgress || loading || !["running", "error"].includes(instance.status.trim().toLowerCase())}
-            onClick={() => {
-              setRestartError(null);
-              setRestartDialogOpen(true);
-            }}
-          >
-            <RotateCw className={`h-4 w-4 ${restartInProgress ? "animate-spin" : ""}`} />
-            {restartInProgress ? "正在重启" : "重启实例"}
-          </button>
-          <OwnerInstanceSwitcher current={{ owner: instance.owner, instanceId: instance.id, teamId: instance.team_id }} />
-        </div>
-      </header>
-
-      {(restartNotice || restartError) && (
-        <div
-          className={`shrink-0 border-b px-4 py-2 text-sm ${
-            restartError
-              ? "border-red-200 bg-red-50 text-red-700"
-              : "border-amber-200 bg-amber-50 text-amber-800"
-          }`}
-          role="status"
-        >
-          <div className="flex items-center gap-2">
-            <RotateCw className={`h-4 w-4 shrink-0 ${restartInProgress ? "animate-spin" : ""}`} />
-            <span>{restartError ?? restartNotice}</span>
-          </div>
-        </div>
-      )}
-
       <section className="portal-unified-instance-panes" data-tools={workspaceVisible}>
         <section
           ref={frameContainerRef}
           className="cm-surface relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
           style={isFullscreen ? { height: "100vh", width: "100vw", borderRadius: 0 } : undefined}
         >
-          <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 px-3">
-            <span className="min-w-0 truncate text-sm font-medium text-slate-950">#{instance.id}</span>
-            <div className="flex shrink-0 items-center gap-2">
+          <header className="portal-instance-toolbar">
+            <h1 className="min-w-0 truncate text-sm font-semibold" title={instanceDisplayName(instance)}>{instanceDisplayName(instance)}</h1>
+            <div className="portal-instance-toolbar-actions">
               <button type="button" className="cm-icon-button" title={workspaceVisible ? '收起文件区' : '展开文件区'} aria-expanded={workspaceVisible} aria-controls="iei-instance-workspace" onClick={() => setWorkspaceVisible(value => !value)}>
                 {workspaceVisible ? <PanelRightClose className="h-4 w-4"/> : <PanelRightOpen className="h-4 w-4"/>}
               </button>
-              <button type="button" className="cm-icon-button" title="刷新访问" disabled={startInProgress} onClick={() => void openInstance()}>
+              <button type="button" className="cm-icon-button" title="刷新访问" aria-label="刷新访问" disabled={startInProgress || restartInProgress} onClick={() => void openInstance()}>
                 <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              </button>
+              <button
+                type="button"
+                className="cm-icon-button portal-instance-restart"
+                title={restartInProgress ? "正在重启" : "重启实例"}
+                aria-label={restartInProgress ? "正在重启" : "重启实例"}
+                aria-haspopup="dialog"
+                disabled={restartInProgress || loading || !["running", "error"].includes(instance.status.trim().toLowerCase())}
+                onClick={() => {
+                  setRestartError(null);
+                  setRestartDialogOpen(true);
+                }}
+              >
+                <Power className="h-4 w-4" />
               </button>
               <button type="button" className="cm-icon-button" title={isFullscreen ? "退出全屏" : "全屏"} onClick={handleFullscreen}>
                 {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </button>
             </div>
-          </div>
+          </header>
+          {(restartNotice || restartError) && (
+            <div
+              className={`shrink-0 border-b px-4 py-2 text-sm ${
+                restartError
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-amber-200 bg-amber-50 text-amber-800"
+              }`}
+              role="status"
+            >
+              <div className="flex items-center gap-2">
+                <RotateCw className={`h-4 w-4 shrink-0 ${restartInProgress ? "animate-spin" : ""}`} />
+                <span>{restartError ?? restartNotice}</span>
+              </div>
+            </div>
+          )}
           {restartInProgress && (
             <div className="absolute inset-x-0 bottom-0 top-12 z-20 flex items-center justify-center bg-white/95 px-6 text-center backdrop-blur-sm">
               <div>
@@ -514,29 +492,16 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
         </div>
       </section>
 
-      {restartDialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="presentation">
-          <section
-            className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-2xl"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="iei-restart-title"
-          >
-            <h2 id="iei-restart-title" className="text-lg font-semibold text-slate-950">确认重启实例？</h2>
-            <p className="mt-3 text-sm leading-6 text-slate-600">
-              重启期间实例会暂时不可访问，当前运行中的任务和会话可能中断；工作区及持久化数据不会删除。
-            </p>
-            <div className="mt-6 flex justify-end gap-2">
-              <button type="button" className="app-button-secondary" onClick={() => setRestartDialogOpen(false)}>
-                取消
-              </button>
-              <button type="button" className="app-button-primary" onClick={() => void handleRestart()}>
-                <RotateCw className="h-4 w-4" /> 确认重启
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
+      <ConfirmDialog
+        open={restartDialogOpen}
+        title="确认重启实例？"
+        message={`将重启“${instanceDisplayName(instance)}”。当前连接和运行中的任务可能中断，已保存的工作区及持久化数据会保留。`}
+        confirmLabel="确认重启"
+        cancelLabel="取消"
+        destructive
+        onConfirm={() => void handleRestart()}
+        onCancel={() => setRestartDialogOpen(false)}
+      />
     </main>
   );
 }

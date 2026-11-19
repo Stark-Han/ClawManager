@@ -17,6 +17,7 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleUserRound,
   LogOut,
   Power,
@@ -41,10 +42,10 @@ import "../../styles/owner-portal-workspace.css";
 const PAGE_SIZE = 100;
 const portalPath = "/ieisystem/list-instances";
 const dashboardTabs = [
-  { id: "overview", name: "总览", icon: BarChart3 },
-  { id: "growth", name: "我的成长", icon: Award },
-  { id: "reports", name: "周期报告", icon: CalendarDays },
-  { id: "team", name: "Team", icon: Users },
+  { id: "overview", name: "总览", icon: BarChart3, primary: true },
+  { id: "team", name: "Team 设置", icon: Users, primary: true },
+  { id: "growth", name: "我的成长", icon: Award, primary: false },
+  { id: "reports", name: "周期报告", icon: CalendarDays, primary: false },
 ] as const;
 
 const EMPTY_STATE_RUNTIMES = [
@@ -622,7 +623,13 @@ export default function IEISystemListInstancesPage() {
         </div>
         {directory && <>
           <nav className="portal-unified-nav" role="tablist" aria-label="我的总览栏目">
-            {dashboardTabs.filter(tab => tab.id !== "team" || ownerTeams.enabled).map(({id, name, icon: Icon}) => <button key={id} id={`owner-tab-${id}`} type="button" role="tab" aria-selected={view === "overview" && id === dashboardTab} aria-controls="owner-workspace-content" onClick={() => openDashboard(id)}><Icon size={16} />{name}</button>)}
+            {dashboardTabs.filter(tab => tab.id !== "team" || ownerTeams.enabled).map(({id, name, icon: Icon, primary}) => (
+              <button key={id} id={`owner-tab-${id}`} type="button" role="tab" data-primary={primary} aria-selected={view === "overview" && id === dashboardTab} aria-controls="owner-workspace-content" onClick={() => openDashboard(id)}>
+                <span className="portal-unified-nav-icon"><Icon size={16} aria-hidden="true" /></span>
+                {name}
+                {primary && <ChevronRight className="portal-unified-nav-tail" size={14} aria-hidden="true" />}
+              </button>
+            ))}
           </nav>
           <button type="button" className="portal-unified-directory-toggle app-button-secondary" aria-expanded={directoryOpen} aria-controls="owner-workspace-directory" onClick={() => setDirectoryOpen(open => !open)}>工作区列表<ChevronDown size={16} /></button>
           <div className="portal-unified-directory" data-open={directoryOpen} id="owner-workspace-directory">
