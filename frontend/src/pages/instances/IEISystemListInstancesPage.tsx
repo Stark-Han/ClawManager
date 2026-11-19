@@ -3,7 +3,7 @@ import {OWNER_SESSION_INVALID,OWNER_SESSION_MESSAGE,isOwnerSessionFailure,isPers
 import {useOwnerPortalVisit} from '../../hooks/useOwnerPortalVisit';
 import { OwnerInstanceCard } from "../../components/OwnerInstanceCard";
 import { getInstanceDisplayStatus } from "../../lib/instanceStatus";
-import { expandedInstanceFromSearch, ownerInstanceURL, ownerWorkspaceURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
+import { ownerInstanceURL, ownerWorkspaceURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
 import { beforePageRefresh } from "../../components/PageVersionNotice";
 import { OwnerDashboard } from "../../components/OwnerDashboard";
 import { useOwnerTeams } from '../../hooks/useOwnerTeams';
@@ -212,7 +212,6 @@ export default function IEISystemListInstancesPage() {
   const ownerTeams = useOwnerTeams(session?.owner);
   useOwnerPortalVisit(isWorkspace ? undefined : session?.owner);
   const showTeams = ownerTeams.enabled && (params.has("workspace_tab") ? ownerTeams.leftTab === "teams" : !!activeTeamID);
-  const expandedInstanceID = expandedInstanceFromSearch(location.search);
   const [instances, setInstances] = useState<IEISystemInstance[]>([]);
   const reportInstance = useCallback((instance: IEISystemInstance) => {
     setWorkspaceInstance(instance);
@@ -226,14 +225,6 @@ export default function IEISystemListInstancesPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [menuInstanceID, setMenuInstanceID] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const restoreExpandedCard = useRef(expandedInstanceID);
-  useEffect(() => {
-    if (loading || !restoreExpandedCard.current) return;
-    const card = document.querySelector(`[data-instance-id="${restoreExpandedCard.current}"]`);
-    if (!card) return;
-    card.scrollIntoView({block:'nearest'});
-    restoreExpandedCard.current = null;
-  }, [loading, instances, showTeams]);
   const [refreshing,setRefreshing]=useState(false);
   const [refreshError,setRefreshError]=useState('');
   const refreshInFlight=useRef(false);
@@ -664,8 +655,7 @@ export default function IEISystemListInstancesPage() {
                   const selected = isWorkspace ? instance.id === routeInstanceID : view === "instance" && instance.id === selectedInstance?.id;
                   const displayStatus = lifecycleDisplayStatus(instance, lifecycleOperations[instance.id]);
                   return <div key={instance.id}>
-                    <OwnerInstanceCard instance={instance} expanded={expandedInstanceID === instance.id} selected={selected} status={statusLabel(displayStatus, instance.stopped_reason)} pending={operationIsPending(lifecycleOperations[instance.id], instance.status)} menuOpen={menuInstanceID === instance.id}
-                      onToggle={() => { updatePresentation({expanded_instance_id: expandedInstanceID === instance.id ? null : String(instance.id)}); setMenuInstanceID(null); }}
+                    <OwnerInstanceCard instance={instance} selected={selected} status={statusLabel(displayStatus, instance.stopped_reason)} pending={operationIsPending(lifecycleOperations[instance.id], instance.status)} menuOpen={menuInstanceID === instance.id}
                       onMenu={() => setMenuInstanceID(current => current === instance.id ? null : instance.id)} onCloseMenu={() => setMenuInstanceID(null)}
                       onDetails={() => openDetails(instance.id)}
                       onRestart={() => void handleRestart(instance)} onReset={() => void handleReset(instance)} />

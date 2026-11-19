@@ -23,24 +23,22 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
    const card=page.locator(`.portal-runtime-card[data-runtime="${type}"]`);await card.scrollIntoViewIfNeeded();await card.hover();await page.waitForTimeout(280);
    const entry=await card.locator('.instance-hover-entry').boundingBox();
    for(const selector of ['.instance-runtime-label','.instance-heading strong','.instance-meta']) assert(!intersects(entry,await card.locator(selector).boundingBox()),type+' collapsed overlap '+width+' '+selector);
-   const rightBefore=await page.locator('.owner-dashboard').count();await card.locator('.instance-card-expand').click();await page.waitForTimeout(300);assert.equal(await card.getAttribute('data-expanded'),'true');assert.equal(await page.locator('.owner-dashboard').count(),rightBefore);
-   assert.equal(await card.locator('.instance-watermark').evaluate(e=>getComputedStyle(e).opacity),'0.25');
-   assert(await card.locator('.instance-watermark').evaluate(e=>e.complete&&e.naturalWidth>0));
-   assert.equal(new URL(await card.locator('.instance-description .instance-entry').getAttribute('href'),page.url()).pathname,'/ieisystem/instances/'+(types.indexOf(type)+1));
-   await card.locator('.instance-card-expand').click();await page.waitForTimeout(300);assert.equal(await card.getAttribute('data-expanded'),'false');
+   assert.equal(await card.locator('.instance-card-expand').count(),0);
+   assert.ok((await card.locator('.instance-avatar').boundingBox()).width>=44);
+   assert(await card.locator('.instance-avatar img').evaluate(e=>e.complete&&e.naturalWidth>0));
   }
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'horizontal overflow '+width);
  }
  await page.setViewportSize({width:1440,height:900});const card=page.locator('.portal-runtime-card[data-runtime="deepseek-harness"]');await card.locator('.instance-more').click();
  let confirmations=0;page.on('dialog',async d=>{confirmations++;await d.dismiss()});await card.getByRole('menuitem',{name:'重启实例',exact:true}).click();assert.equal(confirmations,1);await card.getByRole('menuitem',{name:'重置实例',exact:true}).click();assert.equal(confirmations,2);assert.equal(writes,0);
  await card.getByRole('menuitem',{name:'实例详情',exact:true}).click();await page.getByRole('heading',{name:'运行时说明',exact:true}).waitFor();
- await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.portal-runtime-card[data-runtime="opencode"] .instance-card-expand').click();await page.waitForTimeout(300);await page.screenshot({path:'.tmp/r14-cards.png',fullPage:true});
+ await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.portal-runtime-card[data-runtime="opencode"]').hover();await page.getByTestId('instance-hover-details').waitFor();await page.screenshot({path:'.tmp/r14-cards.png',fullPage:true});
  await context.route('**/instances/*/access',route=>route.fulfill({status:409,json:{error:'Runtime temporarily unavailable'}}));
- await page.locator('.portal-runtime-card[data-runtime="opencode"] .instance-description .instance-entry').click();
- await page.getByRole('link',{name:'返回我的总览',exact:true}).first().click();await page.locator('.owner-dashboard').waitFor();
+ await page.getByTestId('instance-hover-details').locator('.instance-entry').click();
+ await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.owner-dashboard').waitFor();
  assert.equal(new URL(page.url()).searchParams.get('view'),'overview');
- assert.equal(await page.locator('.portal-runtime-card[data-runtime="opencode"]').getAttribute('data-expanded'),'true');
- await page.reload();await page.locator('.owner-dashboard').waitFor();assert.equal(await page.locator('.portal-runtime-card[data-runtime="opencode"]').getAttribute('data-expanded'),'true');
+ assert.equal(await page.getByTestId('instance-hover-details').count(),0);
+ await page.reload();await page.locator('.owner-dashboard').waitFor();assert.equal(await page.getByTestId('instance-hover-details').count(),0);
  for(const [width,height] of [[1920,1080],[1920,944],[1440,900],[1366,768]]){
   await page.setViewportSize({width,height});await page.waitForTimeout(200);
   assert(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight+1),'vertical overflow '+width+'x'+height);
@@ -50,5 +48,5 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  }
  await page.getByRole('tab',{name:'我的成长',exact:true}).click();assert.doesNotMatch(await page.locator('.owner-dashboard').innerText(),/Lv\.100|100\s*级/);
  await page.getByRole('tab',{name:'总览',exact:true}).click();await page.screenshot({path:'.tmp/r15-overview-layout.png',fullPage:true});
- assert.deepEqual(errors,[]);await browser.close();console.log('PASS: five card types; 4 widths; no overlaps; overview return restores expanded target; reload persists; no future level announcement; overview fills height; pending awards and top count');
+ assert.deepEqual(errors,[]);await browser.close();console.log('PASS: runtime card logos; 4 widths; no overlaps; hover details link; overview navigation and reload; no future level announcement; overview fills height; pending awards and top count');
 })().catch(e=>{console.error(e);process.exit(1)});

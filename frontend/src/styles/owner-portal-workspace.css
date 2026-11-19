@@ -12,7 +12,7 @@
   --portal-card-radius:10px;
   --portal-card-gap:8px;
   --portal-card-header-height:60px;
-  --portal-card-logo-box:34px;
+  --portal-card-logo-box:44px;
   --portal-card-logo-gap:8px;
   display:flex;
   flex-direction:column;
@@ -140,12 +140,11 @@
 .portal-unified-rail .portal-runtime-card {border-radius:var(--portal-card-radius)}
 .portal-unified-rail .portal-runtime-card .instance-summary {padding:9px 34px 4px 8px;min-height:60px}
 .portal-unified-rail a.instance-summary::after {position:absolute;inset:0;content:""}
-.portal-unified-rail .portal-runtime-card[data-expanded=true] a.instance-summary::after {position:static}
 .portal-unified-rail .instance-heading {gap:2px}
 .portal-unified-rail .instance-heading strong {font-size:13px;line-height:17px}
-.portal-unified-rail .instance-avatar img {width:34px;height:34px}
+.portal-unified-rail .instance-avatar img {width:44px;height:44px}
 .portal-unified-rail .instance-runtime-label {font-size:11px;line-height:15px}
-.portal-unified-rail .instance-more,.portal-unified-rail .instance-card-expand {
+.portal-unified-rail .instance-more {
   position:absolute;
   right:4px;
   top:4px;
@@ -159,8 +158,7 @@
   background:transparent;
   color:var(--cm-muted);
 }
-.portal-unified-rail .instance-card-expand {top:30px}
-.portal-unified-rail .instance-more:hover,.portal-unified-rail .instance-card-expand:hover {background:var(--instance-soft);color:var(--instance-accent)}
+.portal-unified-rail .instance-more:hover {background:var(--instance-soft);color:var(--instance-accent)}
 .portal-unified-rail .instance-bottom-row {min-height:31px;padding:1px 7px 6px;gap:4px}
 .portal-unified-rail .instance-meta {font-size:11px;line-height:15px;color:var(--cm-muted)}
 .portal-unified-rail .instance-hover-entry {position:relative;z-index:2}
@@ -168,9 +166,6 @@
 .portal-unified-rail .instance-entry span {padding:3px 5px}
 .portal-unified-rail .instance-entry svg {width:12px;height:12px;padding:5px}
 .portal-unified-rail .instance-menu {right:4px;top:31px}
-.portal-unified-rail .instance-description {padding:7px 9px 10px}
-.portal-unified-rail .instance-description footer {margin-top:10px}
-.portal-unified-rail .instance-watermark {width:96px;height:96px;right:9px}
 body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-selected {
   border-color:var(--instance-accent);
   box-shadow:inset 2px 0 var(--cm-primary);
@@ -240,7 +235,7 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
   padding:9px 8px 5px;
 }
 .portal-unified-directory .ot-team-card[data-expanded=true] .ot-card-avatar {display:flex}
-.portal-unified-directory .ot-card-avatar img {width:37px;height:37px}
+.portal-unified-directory .ot-card-avatar img {width:44px;height:44px}
 .portal-unified-directory .ot-card-heading {gap:2px}
 .portal-unified-directory .ot-card-heading strong {font-size:13px;line-height:17px}
 .portal-unified-directory .ot-card-status {min-height:32px;padding:0 8px 7px;grid-template-columns:minmax(0,1fr) auto;gap:3px}
@@ -261,7 +256,7 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
 }
 a.ot-directory-member:hover,.ot-directory-member[aria-current=page] {background:var(--cm-selected)}
 .ot-directory-member > svg {flex:none;color:var(--cm-primary)}
-.ot-directory-avatar {width:25px;height:25px;object-fit:contain;flex:none}
+.ot-directory-avatar {width:29px;height:29px;object-fit:contain;flex:none}
 .ot-directory-identity {min-width:0;flex:1}
 .ot-directory-identity strong,.ot-directory-identity small {display:block;overflow-wrap:anywhere}
 .ot-directory-identity strong {font-size:13px;line-height:17px;font-weight:600}
@@ -292,8 +287,8 @@ a.ot-directory-member:hover,.ot-directory-member[aria-current=page] {background:
 }
 
 @media(pointer:coarse) {
-  .portal-unified-rail .portal-runtime-card .instance-summary {padding-right:47px;min-height:92px}
-  .portal-unified-rail .instance-more,.portal-unified-rail .instance-card-expand {width:42px;height:42px}
-  .portal-unified-rail .instance-card-expand {top:47px}
+  .portal-unified-rail .portal-runtime-card .instance-summary {padding-right:50px;min-height:66px}
+  .portal-unified-rail .instance-more {width:44px;height:44px}
   .portal-unified-rail .instance-entry {min-height:42px}
+  .portal-instance-toolbar-actions .cm-icon-button {min-width:44px;min-height:44px}
 }

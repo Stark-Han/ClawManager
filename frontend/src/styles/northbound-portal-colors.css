@@ -391,14 +391,6 @@ body[data-northbound-portal] .instance-more {
   color: #71809a;
 }
 
-body[data-northbound-portal] .instance-description p {
-  color: #71809a;
-}
-
-body[data-northbound-portal] .instance-description footer>button {
-  color: #75849d;
-}
-
 body[data-northbound-portal] .instance-menu {
   border: 1px solid #e2e8f0;
 }
