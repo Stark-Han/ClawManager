@@ -1,7 +1,7 @@
 import TeamPowerControl, { teamPowerLabel } from './TeamPowerControl';
 import { customTemplateCreationError, teamMemberCreationError, teamRuntimeOptions, teamRuntimeLabel, TEAM_CREATION_NOTICE } from '../../lib/teamCreationPolicy';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Check, ChevronUp, History, Plus, RefreshCw, Search, Settings2, Trash2, Users } from 'lucide-react';
 import { OwnerTeamOperationError, withOwnerTeamIntent, pendingOwnerTeamIntent, recoverOwnerTeamIntent, ownerTeamService, ownerTeamWorkspaceAPI, waitForOwnerTeamOperation, type OwnerTeamSummary, type OwnerTeamCatalogEntry, type TeamOperation } from '../../services/ownerTeamService';
 import type { OwnerTeamsState } from '../../hooks/useOwnerTeams';
@@ -13,6 +13,8 @@ import { OwnerTeamDialog, useOwnerTeamDraftGuard } from './OwnerTeamDialog';
 import { OwnerTeamNotifications, useOwnerTeamFeedback } from './OwnerTeamNotifications';
 import { memberIcon } from '../../lib/teamIcons';
 import { memberRailState } from './teamMemberPresentation';
+import { ownerInstanceURL, ownerTeamURL } from '../../lib/ownerPortalNavigation';
+import { ownerRuntimeLogos } from '../../lib/ieiRuntimeCatalog';
 import './owner-team-workspace.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败';
@@ -25,18 +27,30 @@ function MemberRow({ member, ownerTeamID }: { member: TeamMember; ownerTeamID: n
   return <div className="ot-member"><TeamBadge iconKey={memberIcon(member)} size="chat" /><div><strong>{member.display_name || member.member_key}</strong><p>{member.runtime_type} · {member.role} · <span data-state={state.tone}>{state.label}</span></p></div>{member.instance_id ? <Link to={`/ieisystem/instances/${member.instance_id}`} target="_blank" rel="noopener noreferrer" state={{ portalReturnSearch: window.location.search, portalReturnTeamID: ownerTeamID }}>进入 ↗</Link> : <span className="ot-muted">待创建</span>}</div>;
 }
 
-export function OwnerTeamSidebar({ state, onSelect }: { state: OwnerTeamsState; onSelect?: () => void }) {
+export function OwnerTeamSidebar({ state, activeTeamID, activeInstanceID }: { state: OwnerTeamsState; activeTeamID: number | null; activeInstanceID: number | null }) {
+  const { search } = useLocation();
+  const [collapsedTeamID, setCollapsedTeamID] = useState<number | null>(null);
   return <div className="ot-sidebar"><label className="ot-search"><Search size={15}/><input value={state.query} onChange={e => state.setQuery(e.target.value)} placeholder="搜索团队名称…" aria-label="搜索团队"/></label><div className="ot-card-list">{state.error && <p role="alert" className="ot-error">{state.error}<button className="ot-secondary" onClick={() => void state.refresh()}>重试</button></p>}
     {!state.teams.length && !state.loading && <p className="ot-empty">还没有 Team，可在右侧创建。</p>}
     {state.teams.map(team => {
-      const expanded = state.expandedID === team.id;
-      const toggle = () => { state.expand(team.id); onSelect?.(); };
-      const entry = team.runtime_state && team.runtime_state.state !== "running" ? <TeamPowerControl state={team.runtime_state} start={() => ownerTeamService.startTeam(team.id)} onChange={() => state.refresh()} className="ot-card-entry"/> : <Link aria-label={`进入团队 ${team.name}`} className="ot-card-entry" to={teamURL(team.id)} state={{ portalReturnSearch: window.location.search }}><span>进入团队</span><ArrowRight size={15}/></Link>;
-      return <article key={team.id} data-team-id={team.id} data-expanded={expanded} className={`ot-team-card ${state.selectedID === team.id ? 'is-selected' : ''}`} onClick={e => { if ((e.target as HTMLElement).closest('a,button,input')) return; toggle(); }}>
+      const selected = activeTeamID === team.id;
+      const expanded = (selected || state.expandedID === team.id) && collapsedTeamID !== team.id;
+      const to = ownerTeamURL(team.id, search);
+      const open = () => setCollapsedTeamID(null);
+      const entry = team.runtime_state && team.runtime_state.state !== "running" ? <TeamPowerControl state={team.runtime_state} start={() => ownerTeamService.startTeam(team.id)} onChange={() => state.refresh()} className="ot-card-entry"/> : <Link aria-label={`进入团队 ${team.name}`} className="ot-card-entry" to={to} onClick={open}><span>进入团队</span><ArrowRight size={15}/></Link>;
+      return <article key={team.id} data-team-id={team.id} data-expanded={expanded} className={`ot-team-card ${selected ? 'is-selected' : ''}`}>
         <div className="ot-card-watermark" aria-hidden="true"><img src="/team-expanded.png" alt=""/></div>
-        <button className="ot-card-title" onClick={toggle} aria-expanded={expanded} aria-controls={`ot-members-${team.id}`}><span className="ot-card-avatar"><img src="/team-square.png" alt=""/></span><span className="ot-card-heading"><strong title={team.name}>{team.name}</strong><small>Team #{team.id} · {team.member_count} 名成员</small></span></button>
+        <Link className="ot-card-title" to={to} onClick={open} aria-current={selected && !activeInstanceID ? "page" : undefined}><span className="ot-card-avatar"><img src="/team-square.png" alt=""/></span><span className="ot-card-heading"><strong title={team.name}>{team.name}</strong><small>Team #{team.id} · {team.member_count} 名成员</small></span></Link>
         <div className="ot-card-status"><div><span data-state={team.runtime_state?.state === 'stopped' ? 'stopped' : teamLabel(team) === '需处理' ? 'error' : ['创建中', '待确认'].includes(teamLabel(team)) ? 'waiting' : 'ready'}>● {teamLabel(team)}</span><span>{team.runtime_state?.state === "stopped" ? "成员均已停止" : `${team.available_count}/${team.member_count} 可用`}</span></div>{!expanded && entry}</div>
-        <div id={`ot-members-${team.id}`} hidden={!expanded} className="ot-card-members">{expanded && team.members.map(member => <MemberRow key={member.id} member={member} ownerTeamID={team.id}/>)}<footer><button onClick={toggle}>收起 <ChevronUp size={13}/></button>{entry}</footer></div>
+        <div id={`ot-members-${team.id}`} hidden={!expanded} className="ot-card-members">{expanded && team.members.map(member => {
+          const memberStatus = memberState(member);
+          const name = member.display_name || member.member_key;
+          const logo = member.runtime_type && ownerRuntimeLogos[member.runtime_type];
+          const identity = <>{logo ? <img className="ot-directory-avatar" src={logo} alt="" /> : <TeamBadge iconKey={memberIcon(member)} size="chat" />}<span className="ot-directory-identity"><strong title={name}>{name}</strong><small>{member.runtime_type} · {member.role} · <span data-state={memberStatus.tone}>{memberStatus.label}</span></small></span></>;
+          return member.instance_id
+            ? <Link key={member.id} className="ot-directory-member" aria-label={`进入${name}实例 #${member.instance_id}`} aria-current={activeInstanceID === member.instance_id ? "page" : undefined} to={ownerInstanceURL(member.instance_id, search, team.id)} state={{ portalReturnSearch: search, portalReturnTeamID: team.id, portalReturnFromChat: true }}>{identity}<ArrowRight size={14}/></Link>
+            : <div key={member.id} className="ot-directory-member">{identity}<small>待创建</small></div>;
+        })}<footer><button type="button" onClick={() => setCollapsedTeamID(team.id)}>收起 <ChevronUp size={13}/></button>{entry}</footer></div>
       </article>;
     })}{state.hasMore && <button className="ot-secondary" onClick={state.loadMore}>加载更多</button>}{state.loading && !state.teams.length && <p role="status" className="ot-empty">正在读取 Team…</p>}
   </div></div>;

@@ -2,9 +2,9 @@ import { allowBrowserInstance } from "../../lib/browserOrigin";
 import axios from "axios";
 import { ArrowLeft, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { connectOwnerInstance } from "../../lib/ownerInstanceStart";
-import { ownerOverviewURL, ownerTeamOverviewURL } from "../../lib/ownerPortalNavigation";
+import { ownerOverviewURL, ownerTeamOverviewURL, ownerTeamURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
 import OwnerInstanceSwitcher from "../../components/OwnerInstanceSwitcher";
 import { ScopedInstanceWorkbench } from "../../components/workbench/ScopedInstanceWorkbench";
 import "../../components/teams/team-workspace-tools.css";
@@ -58,18 +58,26 @@ function instanceDisplayName(instance: IEISystemInstance) {
 
 export default function IEISystemInstancePage() {
   const { id = "" } = useParams<{ id: string }>();
-  const instanceID = Number(id);
+  return <OwnerInstanceWorkspace key={id} instanceID={Number(id)} />;
+}
+
+function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const startIntentRef = useRef(location.state?.startStopped === true);
+  const { reportInstance } = useOutletContext<OwnerWorkspaceOutlet>();
+  const startRequested = location.state?.startStopped === true;
+  const startIntentRef = useRef(false);
+  const firstOpen = useRef(true);
   const clearStartIntentRef = useRef(() => {});
   clearStartIntentRef.current = () => navigate(location.pathname + location.search, { replace: true, state: { ...location.state, startStopped: false } });
   const [startInProgress, setStartInProgress] = useState(false);
-  const returnSearch = location.state?.portalReturnSearch;
-  const returnTeamID = Number(location.state?.portalReturnTeamID);
-  const listReturnURL = Number.isSafeInteger(returnTeamID) && returnTeamID>0 ? ownerTeamOverviewURL(returnTeamID,typeof returnSearch==='string'?returnSearch:'') : ownerOverviewURL(instanceID,typeof returnSearch==='string'?returnSearch:'');
+  const returnSearch = location.search || (typeof location.state?.portalReturnSearch === "string" ? location.state.portalReturnSearch : "");
   const frameContainerRef = useRef<HTMLElement | null>(null);
   const [instance, setInstance] = useState<IEISystemInstance | null>(null);
+  const returnTeamID = instance?.team_id || Number(location.state?.portalReturnTeamID);
+  const hasTeam = Number.isSafeInteger(returnTeamID) && returnTeamID > 0;
+  const returnToChat = hasTeam && location.state?.portalReturnFromChat !== false;
+  const listReturnURL = returnToChat ? ownerTeamURL(returnTeamID, returnSearch) : hasTeam ? ownerTeamOverviewURL(returnTeamID, returnSearch) : ownerOverviewURL(instanceID, returnSearch);
   const [access, setAccess] = useState<IEISystemInstanceAccess | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -191,11 +199,18 @@ export default function IEISystemInstancePage() {
   }, [recoverRuntimeConnection]);
 
   useEffect(() => {
+    if (instance?.id === instanceID) reportInstance(instance);
+  }, [instance, instanceID, reportInstance]);
+
+  useEffect(() => {
+    if (!firstOpen.current && !startRequested) return;
     const timer = window.setTimeout(() => {
+      firstOpen.current = false;
+      if (startRequested) startIntentRef.current = true;
       void openInstance();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [openInstance]);
+  }, [openInstance, startRequested]);
 
   const renewAccess = useCallback(async () => {
     const request = requestRef.current;
@@ -319,7 +334,7 @@ export default function IEISystemInstancePage() {
 
   if (loading && (!instance || instance.id !== instanceID)) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-600">
+      <main className="portal-unified-route-state flex items-center justify-center bg-slate-100 text-sm text-slate-600">
         <RefreshCw className="mr-2 h-5 w-5 animate-spin" />
         正在验证并进入实例…
       </main>
@@ -328,7 +343,7 @@ export default function IEISystemInstancePage() {
 
   if (!instance || instance.id !== instanceID || error) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100 p-6">
+      <main className="portal-unified-route-state flex items-center justify-center bg-slate-100 p-6">
         <section className="w-full max-w-md rounded-xl border border-red-200 bg-white p-6 text-center shadow-sm">
           <h1 className="text-lg font-semibold text-slate-950">实例不可访问</h1>
           <p className="mt-2 text-sm leading-6 text-slate-600">{error ?? "访问验证未通过。"}</p>
@@ -349,10 +364,10 @@ export default function IEISystemInstancePage() {
   const isWorkBuddyLite = instance.type.trim().toLowerCase() === "workbuddy" && instance.runtime_type === "gateway";
 
   return (
-    <main className="flex h-screen min-h-[560px] flex-col overflow-hidden bg-slate-100">
-      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4">
+    <main className="portal-unified-instance flex min-h-0 flex-col overflow-hidden">
+      <header className="portal-unified-instance-header flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 py-2">
         <div className="flex min-w-0 items-center gap-3">
-          <Link className="cm-icon-button shrink-0" aria-label="返回我的总览" title="返回我的总览" to={listReturnURL}>
+          <Link className="cm-icon-button shrink-0" aria-label={returnToChat ? "返回团队" : "返回我的总览"} title={returnToChat ? "返回团队" : "返回我的总览"} to={listReturnURL}>
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <div className="min-w-0">
@@ -393,14 +408,14 @@ export default function IEISystemInstancePage() {
         </div>
       )}
 
-      <section className={`grid min-h-0 flex-1 gap-4 p-4 max-xl:overflow-y-auto ${workspaceVisible ? 'max-xl:grid-rows-[minmax(420px,1fr)_minmax(460px,0.8fr)] xl:grid-cols-[minmax(0,1fr)_minmax(360px,28rem)]' : 'grid-cols-1'}`}>
+      <section className="portal-unified-instance-panes" data-tools={workspaceVisible}>
         <section
           ref={frameContainerRef}
           className="cm-surface relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
           style={isFullscreen ? { height: "100vh", width: "100vw", borderRadius: 0 } : undefined}
         >
           <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 px-3">
-            <span className="min-w-0 truncate text-sm font-medium text-slate-950">{instanceDisplayName(instance)}</span>
+            <span className="min-w-0 truncate text-sm font-medium text-slate-950">#{instance.id}</span>
             <div className="flex shrink-0 items-center gap-2">
               <button type="button" className="cm-icon-button" title={workspaceVisible ? '收起文件区' : '展开文件区'} aria-expanded={workspaceVisible} aria-controls="iei-instance-workspace" onClick={() => setWorkspaceVisible(value => !value)}>
                 {workspaceVisible ? <PanelRightClose className="h-4 w-4"/> : <PanelRightOpen className="h-4 w-4"/>}

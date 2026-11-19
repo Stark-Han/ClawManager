@@ -1,3 +1,5 @@
+import type { IEISystemInstance } from '../services/ieiSystemService';
+
 // Only known presentation parameters are carried back; never copy tokens or URLs.
 export function ownerOverviewURL(instanceID: number, search = ''): string {
  const prior = new URLSearchParams(search);
@@ -26,3 +28,28 @@ export function expandedInstanceFromSearch(search: string): number|null {
  const value=Number(new URLSearchParams(search).get('expanded_instance_id'));
  return Number.isSafeInteger(value)&&value>0?value:null;
 }
+export type OwnerWorkspaceOutlet = {
+ owner: string;
+ reportInstance: (instance: IEISystemInstance) => void;
+};
+
+const presentationKeys = ['view','q','runtime','usage_range','dashboard_tab','workspace_tab','team_q','team_section','selected_team_id','expanded_team_id','selected_instance_id','expanded_instance_id'] as const;
+
+export function ownerWorkspaceURL(path: string, search: string, updates: Record<string, string | null> = {}): string {
+ const previous = new URLSearchParams(search);
+ const next = new URLSearchParams();
+ for (const key of presentationKeys) {
+  const value = Object.hasOwn(updates, key) ? updates[key] : previous.get(key);
+  if (value) next.set(key, value);
+ }
+ return next.size ? path+'?'+next.toString() : path;
+}
+
+export const ownerInstanceURL = (id: number, search: string, teamID?: number) =>
+ ownerWorkspaceURL(`/ieisystem/instances/${id}`, search, {
+  workspace_tab: teamID ? 'teams' : 'instances',
+  ...(teamID ? { selected_team_id: String(teamID) } : {}),
+ });
+
+export const ownerTeamURL = (id: number, search: string) =>
+ ownerWorkspaceURL(`/ieisystem/teams/${id}`, search, {workspace_tab:'teams',selected_team_id:String(id)});

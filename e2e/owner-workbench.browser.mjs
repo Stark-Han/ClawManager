@@ -32,6 +32,9 @@ await page.route('**/api/v1/**',async route=>{
  if(p.endsWith('/auth/me'))return send({id:1,username:'admin',role:'admin',status:'active'});
  if(p.endsWith('/version'))return send({version:'fixture'});
  if(p.endsWith('/ieisystem/session')||p.endsWith('/session/refresh'))return send({owner,expires_at:new Date(Date.now()+3600000).toISOString()});
+ if(p.endsWith('/team-capabilities'))return send({enabled:true,can_create:true});
+ if(p.endsWith('/ieisystem/dashboard'))return send({summary:{questions:5,total_tokens:50000,sessions:2},last_activity:{},trend:[]});
+ if(p.endsWith('/ieisystem/growth'))return send({xp:0,level:1,tasks:[],ledger:[],days:[]});
  if(p==='/api/v1/ieisystem/instances'){const index=Number(u.searchParams.get('page')||1);return send({instances:index===1?[instances.get(609)]:[instances.get(590)],total:2,page:index,limit:1});}
  if(p.endsWith('/teams')&&r.method()==='GET')return send({teams:[{...team,members,member_count:4,available_count:4}],total:1,page:1,limit:100});
  if(p.endsWith('/teams/184'))return send(detail);
@@ -70,19 +73,58 @@ try{
  assert.ok(calls.some(c=>c.path==='/api/v1/ieisystem/instances'&&c.query.includes('page=2')),'missing second instance page');
  await page.getByRole('button',{name:'切换实例',exact:true}).click();
  await drawer.getByRole('button',{name:/^Team/}).click();
- assert.equal(await drawer.locator('.owner-switch-card').count(),4,'Team members must be directly visible');
- await drawer.getByRole('searchbox').fill('618');assert.equal(await drawer.locator('.owner-switch-card').count(),1);
- await drawer.locator('.owner-switch-card').click();await page.waitForURL('**/ieisystem/instances/618');await root().waitFor();
+ await drawer.locator('.owner-switch-member').first().waitFor();
+ assert.equal(await drawer.locator('.owner-switch-member').count(),4,'Team members must be directly visible');
+ await drawer.getByRole('searchbox').fill('618');await drawer.locator('.owner-switch-member').getByText(/#618/).waitFor();
+ assert.equal(await drawer.locator('.owner-switch-member').count(),1);
+ await drawer.locator('.owner-switch-member').click();await page.waitForURL('**/ieisystem/instances/618');await root().waitFor();
  await root().getByRole('tab',{name:'网页',exact:true}).click();
  await root().getByRole('button',{name:'新建网页',exact:true}).click();
  await root().locator('.wb-browser input').fill('http://localhost:3000');
  await root().locator('.wb-browser input').press('Enter');
  await root().locator('.wb-preview-frame').waitFor();
  for(const width of [1440,1280,768,390,320]){await page.setViewportSize({width,height:1000});await checkOverflow();await page.getByRole('button',{name:'切换实例',exact:true}).click();await drawer.waitFor();assert.ok(await drawer.evaluate(e=>e.getBoundingClientRect().width<=innerWidth));await page.screenshot({path:path.join(screenshots,'switch-'+width+'.png')});await page.keyboard.press('Escape');assert.equal(await drawer.count(),0);assert.equal(await page.getByRole('button',{name:'切换实例',exact:true}).evaluate(e=>e===document.activeElement),true);}
+ await page.setViewportSize({width:1440,height:1000});
+ await page.goto(origin+'/ieisystem/list-instances?view=overview');
+ const rail=page.locator('.portal-unified-rail');
+ await rail.locator('[data-instance-id="609"]').waitFor();
+ await page.getByTestId('metric-tokens').getByText('5万',{exact:true}).waitFor();
+ await rail.evaluate(node=>window.workspaceRail=node);
+ await rail.getByRole('tab',{name:/^Team ·/}).click();
+ await rail.locator('[data-team-id="184"] .ot-card-title').click();
+ await page.waitForURL(/\/ieisystem\/teams\/184(?:\?|$)/);
+ await page.locator('.team-chat-workspace').waitFor();
+ assert.ok(await rail.evaluate(node=>window.workspaceRail===node),'workspace navigation remounted the sidebar');
+ const worker=rail.getByRole('link',{name:/成员 2.*#618/});
+ await worker.click();
+ await page.waitForURL(/\/ieisystem\/instances\/618(?:\?|$)/);
+ await root().waitFor();
+ assert.equal(await worker.getAttribute('aria-current'),'page');
+ await page.getByRole('link',{name:'返回团队',exact:true}).click();
+ await page.waitForURL(/\/ieisystem\/teams\/184(?:\?|$)/);
+ await page.locator('.team-chat-workspace').waitFor();
+ const composer=page.locator('.team-chat-workspace textarea').first();
+ await composer.fill('尚未发送的任务');
+ await rail.getByRole('tab',{name:'总览',exact:true}).click();
+ await page.getByRole('alert').filter({hasText:'请先保存或关闭当前编辑'}).waitFor();
+ assert.equal(await composer.inputValue(),'尚未发送的任务');
+ await composer.fill('');
+ await rail.getByRole('tab',{name:'总览',exact:true}).click();
+ await page.getByTestId('metric-tokens').waitFor();
+ await page.goBack();
+ await page.locator('.team-chat-workspace').waitFor();
+ await page.reload();
+ await worker.waitFor();
+ await checkOverflow();
  for(const route of ['/ieisystem/teams/184','/teams/184']){
   await page.setViewportSize({width:1440,height:1000});await page.goto(origin+route);const w=page.locator('.team-chat-workspace');await w.waitFor();
   await w.locator('.team-header-files-trigger').click();await w.locator('.team-file-row').first().waitFor();
-  await w.locator('.team-tools-toolbar').getByRole('button',{name:'终端',exact:true}).click();
+  const ownerRoute=route.includes('ieisystem');
+  const showTerminal=async()=>{
+   if(ownerRoute){await w.locator('.owner-team-tool-views').getByRole('button',{name:'实例工具',exact:true}).click();await toolPane().getByRole('button',{name:'终端',exact:true}).click();}
+   else await w.locator('.team-tools-toolbar').getByRole('button',{name:'终端',exact:true}).click();
+  };
+  await showTerminal();
   const selector=toolPane().getByRole('combobox',{name:'工具运行成员'});
   for(const id of route.includes('ieisystem')?[616,617,618,619]:[616]){
    console.log('Checking Team terminal',route,id);
@@ -91,7 +133,7 @@ try{
   }
   const before=sessions.size;
   await w.locator('.team-tools-toolbar').getByRole('button',{name:'文件',exact:true}).click();await w.locator('.team-file-row').first().waitFor();
-  await w.locator('.team-tools-toolbar').getByRole('button',{name:'终端',exact:true}).click();await toolPane().locator('.xterm').waitFor();assert.equal(sessions.size,before,'restoring a terminal created a duplicate session');
+  await showTerminal();await toolPane().locator('.xterm').waitFor();assert.equal(sessions.size,before,'restoring a terminal created a duplicate session');
   for(const width of [1440,1280,768,390,320]){await page.setViewportSize({width,height:1000});await checkOverflow();await page.screenshot({path:path.join(screenshots,(route.includes('ieisystem')?'owner':'cm')+'-team-'+width+'.png')});}
  }
  const ownerCalls=calls.filter(c=>c.path.startsWith('/api/v1/ieisystem/')&&c.path.includes('/workbench/'));

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { ownerTeamService, type OwnerTeamCapabilities, type OwnerTeamSummary } from '../services/ownerTeamService';
 import { OWNER_SESSION_INVALID, OWNER_SESSION_MESSAGE } from '../lib/ownerReadNotice';
 
 export function useOwnerTeams(owner?: string) {
   const [params, setParams] = useSearchParams();
+  const { state: routeState } = useLocation();
   const [capabilities, setCapabilities] = useState<OwnerTeamCapabilities | null>(null);
   const [teams, setTeams] = useState<OwnerTeamSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -26,8 +27,8 @@ export function useOwnerTeams(owner?: string) {
   const setPresentation = useCallback((values: Record<string, string | null>) => {
     const next = new URLSearchParams(window.location.search);
     Object.entries(values).forEach(([key, value]) => value === null ? next.delete(key) : next.set(key, value));
-    next.delete('token'); setParams(next, { replace: true });
-  }, [setParams]);
+    next.delete('token'); setParams(next, { replace: true, state: routeState });
+  }, [routeState, setParams]);
   const refresh = useCallback(async (signal?: AbortSignal) => {
     if (!owner) return;
     const request = ++sequence.current;

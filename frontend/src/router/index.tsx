@@ -176,9 +176,11 @@ function AppRoutes() {
       />
       <Route path="/share/:code" element={<SharedInstancePage />} />
       <Route element={<NorthboundPortalTheme />}>
-        <Route path="/ieisystem/list-instances" element={<IEISystemListInstancesPage />} />
-        <Route path="/ieisystem/instances/:id" element={<IEISystemInstancePage />} />
-        <Route path="/ieisystem/teams/:id" element={<IEISystemTeamPage />} />
+        <Route element={<IEISystemListInstancesPage />}>
+          <Route path="/ieisystem/list-instances" element={null} />
+          <Route path="/ieisystem/instances/:id" element={<IEISystemInstancePage />} />
+          <Route path="/ieisystem/teams/:id" element={<IEISystemTeamPage />} />
+        </Route>
       </Route>
 
       {/* User Routes */}
