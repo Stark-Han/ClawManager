@@ -2,7 +2,6 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } f
 import { Columns3, FolderOpen, Maximize2, Minimize2, PanelLeftClose, Settings2, SquareTerminal, X } from "lucide-react";
 import { useI18n } from "../../contexts/I18nContext";
 import type { Team, TeamMember } from "../../types/team";
-import OwnerInstanceSwitcher from "../OwnerInstanceSwitcher";
 import { MemberCards, MemberInfoDialog, MemberPager, MemberRail } from "./TeamMembers";
 import { memberPageSize } from "./teamMemberPresentation";
 import "./team-chat-workspace.css";
@@ -124,12 +123,11 @@ export default function TeamChatWorkspace({ members, team, owner, leaderKey, ren
       <div className="team-members-body"><MemberCards members={pageMembers} start={start} leaderKey={leaderKey} onDetails={setMemberInfo} /></div>
       <MemberPager page={page} pages={pages} onPage={setMemberPage} />
     </aside>
-    <main className="team-chat-main" inert={drawerOpen}>{chat(<>
-      {owner && <OwnerInstanceSwitcher current={{ owner, teamId: team.id }} />}
+    <main className="team-chat-main" inert={drawerOpen}>{chat(
       <button type="button" className="team-header-files-trigger" onClick={() => {
         if (owner && right === "files" && tool !== "files") showOwnerTools("files"); else openRight("files");
       }} aria-expanded={owner ? view === "files" : right === "files"} aria-controls={toolsPanelId}><FolderOpen size={17} /><span>{t("teams.files")}</span></button>
-    </>)}</main>
+    )}</main>
     <aside id={toolsPanelId} ref={rightPanel} className="team-tools-panel" role={drawerOpen && right !== "closed" ? "dialog" : undefined} aria-modal={drawerOpen && right !== "closed" ? true : undefined} aria-label={t("teams.toolsLabel")} inert={drawerOpen && left}>
       <header className="team-tools-toolbar" hidden={right === "closed"}>
         {owner ? <>

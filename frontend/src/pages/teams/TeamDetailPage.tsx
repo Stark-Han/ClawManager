@@ -4497,23 +4497,23 @@ function KanbanColumn({
 }) {
   const style = kanbanColumnStyle(tone);
   return (
-    <div className={`min-h-[138px] rounded-xl border p-1.5 shadow-sm transition-all duration-300 hover:shadow-sm ${style.shell}`} data-lane-empty={cards.length === 0}>
-      <div className="mb-1 flex items-start justify-between gap-2">
+    <div className={`team-kanban-lane min-h-[138px] rounded-xl border p-1.5 shadow-sm transition-all duration-300 hover:shadow-sm ${style.shell}`}>
+      <div className="team-kanban-lane-header mb-1 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
             <span className={`h-1.5 w-1.5 rounded-full shadow-sm ${style.dot}`} />
             <h3 className="text-xs font-semibold text-slate-900">{title}</h3>
           </div>
-          <p className="mt-0.5 text-xs leading-3 text-slate-500">{subtitle}</p>
+          <p className="team-kanban-lane-subtitle mt-0.5 text-xs leading-3 text-slate-500">{subtitle}</p>
         </div>
-        <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${style.count}`}>
+        <span className={`team-kanban-lane-count rounded-full px-1.5 py-0.5 text-xs font-semibold ${style.count}`}>
           {cards.length}
         </span>
       </div>
 
-      <div className="max-h-[230px] space-y-1 overflow-y-auto pr-1">
+      <div className="team-kanban-lane-cards max-h-[230px] space-y-1 overflow-y-auto pr-1">
         {cards.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-300/80 bg-white/55 px-2 py-2.5 text-center text-xs leading-5 text-slate-400 backdrop-blur-sm">
+          <div className="team-kanban-lane-empty rounded-lg border border-dashed border-slate-300/80 bg-white/55 px-2 py-2.5 text-center text-xs leading-5 text-slate-400 backdrop-blur-sm">
             暂无卡片
           </div>
         ) : (
@@ -4545,7 +4545,8 @@ function KanbanCard({
     <button
       type="button"
       onClick={onSelect}
-      className={`group w-full rounded-lg border bg-[var(--cm-subtle)] px-1.5 py-1 text-left text-xs shadow-sm transition duration-200 hover:border-sky-300/80 hover:shadow-sm ${
+      data-selected={selected}
+      className={`team-kanban-card group w-full rounded-lg border bg-[var(--cm-subtle)] px-1.5 py-1 text-left text-xs shadow-sm transition duration-200 hover:border-sky-300/80 hover:shadow-sm ${
         selected ? "border-sky-400/80 ring-2 ring-sky-200/70" : style.border
       }`}
     >
@@ -4553,7 +4554,7 @@ function KanbanCard({
         <span className={`mt-1 h-5 w-1 shrink-0 rounded-full ${style.bar}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-1.5">
-            <div className="line-clamp-1 text-xs font-semibold leading-4 text-slate-900">
+            <div className="team-kanban-card-title line-clamp-1 text-xs font-semibold leading-4 text-slate-900">
               {card.title}
             </div>
             {card.column === "doing" && (

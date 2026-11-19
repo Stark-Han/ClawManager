@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react
 import { ArrowLeft } from 'lucide-react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import type UserLayout from '../../components/UserLayout';
-import { TeamPageEnvironmentProvider } from '../../components/teams/TeamPageEnvironment';
+import OwnerInstanceSwitcher from '../../components/OwnerInstanceSwitcher';
+import { TeamPageEnvironmentProvider, useTeamPageEnvironment } from '../../components/teams/TeamPageEnvironment';
 import { ownerTeamWorkspaceAPI } from '../../services/ownerTeamService';
 import { ieiSystemService } from '../../services/ieiSystemService';
 import { ownerTeamOverviewURL } from '../../lib/ownerPortalNavigation';
@@ -11,8 +12,21 @@ import TeamDetailPage from './TeamDetailPage';
 import '../../components/teams/owner-team-workspace.css';
 
 function NorthboundTeamLayout({ title, titleAccessory, children }: ComponentProps<typeof UserLayout>) {
-  const { id } = useParams(); const location = useLocation();
-  return <main className="ot-northbound-layout"><header className="ot-northbound-header"><div><Link className="ot-secondary ot-return" to={ownerTeamOverviewURL(Number(id), location.state?.portalReturnSearch || '')}><ArrowLeft size={15}/>我的团队空间</Link><h1>{title || '团队对话'}</h1></div>{titleAccessory}</header><section className="ot-northbound-body">{children}</section></main>;
+  const { id } = useParams();
+  const location = useLocation();
+  const { owner } = useTeamPageEnvironment();
+  const teamId = Number(id);
+
+  return <main className="ot-northbound-layout">
+    <header className="ot-northbound-header">
+      <div><Link className="ot-secondary ot-return" to={ownerTeamOverviewURL(teamId, location.state?.portalReturnSearch || '')}><ArrowLeft size={15} />我的团队空间</Link><h1>{title || '团队对话'}</h1></div>
+      <div className="ot-northbound-header-actions">
+        {titleAccessory}
+        {owner && <OwnerInstanceSwitcher current={{ owner, teamId }} />}
+      </div>
+    </header>
+    <section className="ot-northbound-body">{children}</section>
+  </main>;
 }
 
 export default function IEISystemTeamPage() {

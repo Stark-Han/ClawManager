@@ -139,3 +139,13 @@
 @media(max-width:700px){.ot-directory-template-area .ot-template-toolbar{grid-template-columns:minmax(0,1fr);padding:12px 4px}.ot-directory-template-area .ot-template-toolbar>.ot-template-library-heading{display:none}.ot-template-selection-toolbar{flex-wrap:wrap;gap:8px}.ot-directory-template-area .ot-template-name{flex-basis:100%}.ot-directory-template-area .ot-template-list{padding:4px 5px 8px 4px;max-height:120px}.ot-directory-editor .ot-template-information textarea{min-height:140px}.ot-directory-editor .ot-editor-section-heading{display:flex}.ot-directory-editor .ot-member-detail-grid{gap:0}.ot-directory-editor .ot-template-local-actions{margin-top:12px}.ot-directory-editor .ot-member-detail-actions>.ot-secondary{font-size:11px;padding:7px}}
 
 .ot-card-status [data-state="stopped"] { color: #64748b; }
+.ot-northbound-header-actions {
+  position:relative;display:flex;align-items:center;justify-content:flex-end;gap:8px;
+  margin-inline-start:auto;flex-wrap:wrap;
+}
+.ot-northbound-header-actions .cm-team-header-actions {position:static}
+.ot-northbound-header .owner-switch-trigger {
+  display:inline-flex;align-items:center;gap:6px;height:var(--cm-control-height);
+  padding:0 10px;border-color:var(--cm-border);background:var(--cm-selected);color:var(--cm-primary);white-space:nowrap;
+}
+.ot-northbound-header .owner-switch-trigger:hover {border-color:var(--cm-primary)}
