@@ -1,6 +1,6 @@
 import { allowBrowserInstance } from "../../lib/browserOrigin";
 import axios from "axios";
-import { Maximize2, Minimize2, PanelRightClose, PanelRightOpen, Power, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
+import { Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Power, RefreshCw, RotateCw, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import { connectOwnerInstance } from "../../lib/ownerInstanceStart";
@@ -79,8 +79,14 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const requestRef = useRef(0);
   const [frameVersion, setFrameVersion] = useState(0);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [layoutFullscreen, setLayoutFullscreen] = useState(false);
+  const [directoryVisible, setDirectoryVisible] = useState(true);
   const [workspaceVisible, setWorkspaceVisible] = useState(true);
+  const forcedFullscreen = nativeFullscreen || layoutFullscreen;
+  const directoryShown = directoryVisible && !forcedFullscreen;
+  const workspaceShown = workspaceVisible && !forcedFullscreen;
+  const isFullscreen = !directoryShown && !workspaceShown;
   const recoveryAttempts = useRef(0);
   const recoveryInFlight = useRef(false);
   const recoveryTimer = useRef<number | null>(null);
@@ -242,7 +248,7 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   }, []);
 
   useEffect(() => {
-    const handleFullscreen = () => setIsFullscreen(document.fullscreenElement === frameContainerRef.current);
+    const handleFullscreen = () => setNativeFullscreen(!!frameContainerRef.current && document.fullscreenElement === frameContainerRef.current);
     document.addEventListener("fullscreenchange", handleFullscreen);
     return () => document.removeEventListener("fullscreenchange", handleFullscreen);
   }, []);
@@ -268,11 +274,27 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
     requiresRuntimeCertificateTrust,
   );
 
-  const handleFullscreen = () => {
+  const handleFullscreen = async () => {
     const element = frameContainerRef.current;
     if (!element) return;
-    if (document.fullscreenElement === element) void document.exitFullscreen();
-    else void element.requestFullscreen().catch(() => undefined);
+    if (document.fullscreenElement === element) {
+      await document.exitFullscreen();
+    } else if (layoutFullscreen) {
+      setLayoutFullscreen(false);
+    } else if (isFullscreen) {
+      setDirectoryVisible(true);
+      setWorkspaceVisible(true);
+    } else {
+      try {
+        if (document.fullscreenEnabled && element.requestFullscreen) {
+          await element.requestFullscreen();
+          return;
+        }
+      } catch {
+        // A browser can deny native fullscreen while still allowing the workspace to fill the page.
+      }
+      setLayoutFullscreen(true);
+    }
   };
 
   const waitForRestartRecovery = useCallback(async (operationID: string) => {
@@ -356,19 +378,21 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
   const isWorkBuddyLite = instance.type.trim().toLowerCase() === "workbuddy" && instance.runtime_type === "gateway";
 
   return (
-    <main className="portal-unified-instance flex min-h-0 flex-col overflow-hidden">
-      <section className="portal-unified-instance-panes" data-tools={workspaceVisible}>
+    <main className="portal-unified-instance flex min-h-0 flex-col overflow-hidden" data-directory-collapsed={!directoryShown}>
+      <section className="portal-unified-instance-panes" data-tools={workspaceShown}>
         <section
           ref={frameContainerRef}
           className="cm-surface relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-white"
-          style={isFullscreen ? { height: "100vh", width: "100vw", borderRadius: 0 } : undefined}
+          style={nativeFullscreen ? { height: "100dvh", width: "100vw", borderRadius: 0 } : undefined}
         >
           <header className="portal-instance-toolbar">
-            <h1 className="min-w-0 truncate text-sm font-semibold" title={instanceDisplayName(instance)}>{instanceDisplayName(instance)}</h1>
-            <div className="portal-instance-toolbar-actions">
-              <button type="button" className="cm-icon-button" title={workspaceVisible ? '收起文件区' : '展开文件区'} aria-expanded={workspaceVisible} aria-controls="iei-instance-workspace" onClick={() => setWorkspaceVisible(value => !value)}>
-                {workspaceVisible ? <PanelRightClose className="h-4 w-4"/> : <PanelRightOpen className="h-4 w-4"/>}
+            <div className="portal-instance-toolbar-title">
+              <button type="button" className="cm-icon-button portal-instance-pane-toggle" title={directoryShown ? "收起左侧工作区" : "展开左侧工作区"} aria-expanded={directoryShown} aria-controls="owner-workspace-rail" disabled={forcedFullscreen} onClick={() => setDirectoryVisible(value => !value)}>
+                {directoryShown ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
               </button>
+              <h1 className="min-w-0 truncate text-sm font-semibold" title={instanceDisplayName(instance)}>{instanceDisplayName(instance)}</h1>
+            </div>
+            <div className="portal-instance-toolbar-actions">
               <button type="button" className="cm-icon-button" title="刷新访问" aria-label="刷新访问" disabled={startInProgress || restartInProgress} onClick={() => void openInstance()}>
                 <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               </button>
@@ -386,8 +410,11 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
               >
                 <Power className="h-4 w-4" />
               </button>
-              <button type="button" className="cm-icon-button" title={isFullscreen ? "退出全屏" : "全屏"} onClick={handleFullscreen}>
+              <button type="button" className="cm-icon-button" title={isFullscreen ? "退出全屏" : "全屏"} aria-pressed={isFullscreen} onClick={() => void handleFullscreen()}>
                 {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
+              <button type="button" className="cm-icon-button portal-instance-pane-toggle" title={workspaceShown ? "收起文件区" : "展开文件区"} aria-expanded={workspaceShown} aria-controls="iei-instance-workspace" disabled={forcedFullscreen} onClick={() => setWorkspaceVisible(value => !value)}>
+                {workspaceShown ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
               </button>
             </div>
           </header>
@@ -465,9 +492,19 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
               {checkingCertificate ? "正在检查 HTTPS 证书…" : "正在进入实例…"}
             </div>
           )}
+          <ConfirmDialog
+            open={restartDialogOpen}
+            title="确认重启实例？"
+            message={`将重启“${instanceDisplayName(instance)}”。当前连接和运行中的任务可能中断，已保存的工作区及持久化数据会保留。`}
+            confirmLabel="确认重启"
+            cancelLabel="取消"
+            destructive
+            onConfirm={() => void handleRestart()}
+            onCancel={() => setRestartDialogOpen(false)}
+          />
         </section>
 
-        <div id="iei-instance-workspace" className={workspaceVisible ? 'min-h-0 min-w-0' : 'hidden'}>
+        <div id="iei-instance-workspace" className={workspaceShown ? 'min-h-0 min-w-0' : 'hidden'}>
         {canShowWorkspace ? (
           <div className="owner-instance-workbench h-full min-h-[360px] min-w-0">
             <ScopedInstanceWorkbench
@@ -476,7 +513,7 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
               scope={`iei:${instance.owner}`}
               runtimeGeneration={instance.runtime_generation ?? 0}
               isRunning={instance.status === "running" && !restartInProgress && !startInProgress}
-              visible={workspaceVisible}
+              visible={workspaceShown}
               presentation="portal"
               initialPath={isWorkBuddyLite ? "/home" : (instance.workspace_root ?? access?.workspace_root) === "/config" ? "/config" : undefined}
               workspace={isWorkBuddyLite ? workBuddyWorkspaceService : ieiSystemWorkspaceService}
@@ -492,16 +529,6 @@ function OwnerInstanceWorkspace({ instanceID }: { instanceID: number }) {
         </div>
       </section>
 
-      <ConfirmDialog
-        open={restartDialogOpen}
-        title="确认重启实例？"
-        message={`将重启“${instanceDisplayName(instance)}”。当前连接和运行中的任务可能中断，已保存的工作区及持久化数据会保留。`}
-        confirmLabel="确认重启"
-        cancelLabel="取消"
-        destructive
-        onConfirm={() => void handleRestart()}
-        onCancel={() => setRestartDialogOpen(false)}
-      />
     </main>
   );
 }

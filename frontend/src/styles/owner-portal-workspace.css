@@ -8,6 +8,8 @@
   background:var(--cm-canvas);
   color:var(--cm-ink);
 }
+.portal-unified:has(.portal-unified-instance[data-directory-collapsed=true]) {grid-template-columns:minmax(0,1fr)}
+.portal-unified:has(.portal-unified-instance[data-directory-collapsed=true]) > .portal-unified-rail {display:none}
 .portal-unified-rail {
   --portal-card-radius:10px;
   --portal-card-gap:8px;
@@ -211,7 +213,10 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
   display:flex;align-items:center;justify-content:space-between;flex:none;gap:8px;
   min-height:48px;padding:5px 10px;border-bottom:1px solid var(--cm-border);
 }
+.portal-instance-toolbar-title {display:flex;align-items:center;gap:8px;min-width:0}
 .portal-instance-toolbar-actions {display:flex;align-items:center;gap:5px;flex:none}
+.portal-instance-toolbar .portal-instance-pane-toggle {flex:none}
+.portal-instance-toolbar .portal-instance-pane-toggle:disabled {color:var(--cm-disabled);cursor:default}
 .portal-instance-toolbar-actions .portal-instance-restart {
   margin-left:3px;color:var(--cm-error);
   background:color-mix(in srgb,var(--cm-error) 6%,var(--cm-surface));
@@ -290,5 +295,5 @@ a.ot-directory-member:hover,.ot-directory-member[aria-current=page] {background:
   .portal-unified-rail .portal-runtime-card .instance-summary {padding-right:50px;min-height:66px}
   .portal-unified-rail .instance-more {width:44px;height:44px}
   .portal-unified-rail .instance-entry {min-height:42px}
-  .portal-instance-toolbar-actions .cm-icon-button {min-width:44px;min-height:44px}
+  .portal-instance-toolbar .cm-icon-button {min-width:44px;min-height:44px}
 }

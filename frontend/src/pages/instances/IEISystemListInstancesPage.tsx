@@ -592,7 +592,7 @@ export default function IEISystemListInstancesPage() {
       if (link.pathname === location.pathname && link.search === location.search) return;
       if (!canNavigate()) event.preventDefault();
     }}>
-      <aside className="portal-unified-rail portal-instance-sidebar" aria-label="导航和工作区">
+      <aside id="owner-workspace-rail" className="portal-unified-rail portal-instance-sidebar" aria-label="导航和工作区">
         <div className="portal-unified-brand">
           <img src="/inspur-information.png" alt="浪潮信息" />
           {session && <details ref={account} className="portal-unified-account" onBlur={event => {
