@@ -53,8 +53,12 @@ func TestRuntimeLeaseBatchRechecksRevocationWithoutThreeDuplicateReads(t *testin
 		})
 		id := runtimeauth.Identity{InstanceID: 7, UserID: 3, Generation: 2, PodUID: "pod-7"}
 		lease, err := a.IssueLease(context.Background(), id, netip.MustParseAddr("10.2.0.3"))
-		if reads != 2 {
-			t.Fatalf("expected peer snapshot plus signing recheck, reads=%d", reads)
+		wantReads := 3 // Peer snapshot, batch signing check and completion fence.
+		if revoke {
+			wantReads = 2
+		}
+		if reads != wantReads {
+			t.Fatalf("assignment reads=%d, want %d", reads, wantReads)
 		}
 		if revoke {
 			if err == nil || lease.ModelToken != "" {

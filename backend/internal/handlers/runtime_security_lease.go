@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -61,7 +64,13 @@ func (h *RuntimeSecurityLeaseHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		fail(http.StatusUnauthorized)
 		return
 	}
-	ctx, cancel := context.WithTimeout(runtimeauth.WithDiagnostics(r.Context()), 2*time.Second)
+	var correlationBytes [16]byte
+	if _, err := rand.Read(correlationBytes[:]); err != nil {
+		fail(http.StatusServiceUnavailable)
+		return
+	}
+	correlationID := hex.EncodeToString(correlationBytes[:])
+	ctx, cancel := context.WithTimeout(services.WithRuntimeSecurityCorrelation(runtimeauth.WithDiagnostics(r.Context()), correlationID), 2*time.Second)
 	defer cancel()
 	// Bound stalled uploads as well as issuance; canceling a request context
 	// alone does not interrupt reads from the incoming server request body.
@@ -95,6 +104,8 @@ func (h *RuntimeSecurityLeaseHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 	}
 	runtimeauth.LogDiagnostics(ctx, identity.InstanceID, identity.Generation, started, err)
 	if err != nil || ctx.Err() != nil {
+		d := services.RuntimeSecurityFailureDiagnostic(err)
+		log.Printf("runtime_lease_denied correlation_id=%q reason=%s stage=%s instance=%d generation=%d pod_uid=%q assignment_uid=%q assignment_rv=%q", correlationID, d.Reason, d.Stage, identity.InstanceID, identity.Generation, identity.PodUID, d.AssignmentUID, d.AssignmentResourceVersion)
 		status := http.StatusForbidden
 		if runtimeauth.IsUnavailable(err) {
 			status = http.StatusServiceUnavailable

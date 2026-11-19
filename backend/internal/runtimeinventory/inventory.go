@@ -17,11 +17,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-var errUnavailable = errors.New("protected runtime inventory is unavailable")
+// ErrUnavailable identifies a temporarily unhealthy or stale shared observation.
+// A healthy inventory with no assignment is a terminal authorization denial.
+var ErrUnavailable = errors.New("protected runtime inventory is unavailable")
+var ErrAssignmentNotFound = errors.New("protected runtime assignment is absent")
+var ErrAssignmentInvalid = errors.New("protected runtime assignment is invalid")
+
+var errUnavailable = ErrUnavailable
 
 // ErrAssignmentAbsent is an authoritative absence in a fresh observation,
 // unlike an unavailable/stale watch. Both deny access, but only the latter retries.
-var ErrAssignmentAbsent = errors.New("protected runtime assignment is absent")
+var ErrAssignmentAbsent = ErrAssignmentNotFound
 
 const maxObservationAge = 3 * time.Second
 
@@ -61,7 +67,7 @@ func (s *objectStore) get(name string) (runtime.Object, error) {
 		return nil, errUnavailable
 	}
 	if s.objects[name] == nil {
-		return nil, ErrAssignmentAbsent
+		return nil, ErrAssignmentNotFound
 	}
 	return s.objects[name].DeepCopyObject(), nil
 }
@@ -136,11 +142,11 @@ func (i *Inventory) Assignment(ctx context.Context, id int) (*corev1.ConfigMap, 
 	}
 	cm, ok := assignment.(*corev1.ConfigMap)
 	if !ok {
-		return nil, nil, errUnavailable
+		return nil, nil, ErrAssignmentInvalid
 	}
 	endpoint, err := url.Parse(cm.Data["endpoint"])
 	if err != nil || endpoint.Hostname() == "" {
-		return nil, nil, errUnavailable
+		return nil, nil, ErrAssignmentInvalid
 	}
 	podObjects, err := i.pods.selectObjects(func(_ string, object runtime.Object) bool {
 		pod, ok := object.(*corev1.Pod)
@@ -153,7 +159,7 @@ func (i *Inventory) Assignment(ctx context.Context, id int) (*corev1.ConfigMap, 
 	for _, object := range podObjects {
 		pod, ok := object.(*corev1.Pod)
 		if !ok {
-			return nil, nil, errUnavailable
+			return nil, nil, ErrAssignmentInvalid
 		}
 		pods = append(pods, *pod)
 	}
