@@ -213,6 +213,12 @@ export default function IEISystemListInstancesPage() {
   const showTeams = ownerTeams.enabled && (params.has("workspace_tab") ? ownerTeams.leftTab === "teams" : !!activeTeamID);
   const expandedInstanceID = expandedInstanceFromSearch(location.search);
   const [instances, setInstances] = useState<IEISystemInstance[]>([]);
+  const reportInstance = useCallback((instance: IEISystemInstance) => {
+    setWorkspaceInstance(instance);
+    setInstances(items => items.some(item => item.id === instance.id)
+      ? items.map(item => item.id === instance.id ? { ...item, ...instance } : item)
+      : items);
+  }, []);
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const query = params.get("q") || "";
   const runtimeFilter = params.get("runtime") || "all";
@@ -273,7 +279,7 @@ export default function IEISystemListInstancesPage() {
   const loadInstances = useCallback(async (preferredID?: number | null) => {
     const first = await ieiSystemService.listInstances(1, PAGE_SIZE);
     const items = [...(first.instances ?? [])];
-    const pages = Math.ceil(first.total / PAGE_SIZE);
+    const pages = Math.ceil(first.total / (first.limit || PAGE_SIZE));
     for (let page = 2; page <= pages; page += 1) {
       const next = await ieiSystemService.listInstances(page, PAGE_SIZE);
       items.push(...(next.instances ?? []));
@@ -397,8 +403,9 @@ export default function IEISystemListInstancesPage() {
     ? lifecycleWarnings[selectedInstance.id]
     : undefined;
 
-  const selectedInstanceID = selectedInstance?.id;
-  const selectedInstanceStatus = selectedInstance?.status;
+  const selectedCard = isWorkspace ? instances.find(instance => instance.id === routeInstanceID) : selectedInstance;
+  const selectedInstanceID = selectedCard?.id;
+  const selectedInstanceStatus = selectedCard?.status;
   useEffect(() => {
     if (!selectedInstanceID) return;
     let cancelled = false;
@@ -582,7 +589,7 @@ export default function IEISystemListInstancesPage() {
     if (account.current) account.current.open = false;
   }, [location.pathname]);
 
-  const workspaceContext: OwnerWorkspaceOutlet = { owner: session?.owner ?? "", reportInstance: setWorkspaceInstance };
+  const workspaceContext: OwnerWorkspaceOutlet = { owner: session?.owner ?? "", reportInstance };
   const directory = session && !error && !loading;
 
   return (

@@ -117,6 +117,44 @@
   overscroll-behavior:contain;
 }
 .portal-unified-list-error {padding:8px;color:var(--cm-error)}
+.portal-unified-rail .portal-runtime-card {border-radius:var(--portal-card-radius)}
+.portal-unified-rail .portal-runtime-card .instance-summary {padding:9px 34px 4px 8px;min-height:60px}
+.portal-unified-rail a.instance-summary::after {position:absolute;inset:0;content:""}
+.portal-unified-rail .portal-runtime-card[data-expanded=true] a.instance-summary::after {position:static}
+.portal-unified-rail .instance-heading {gap:2px}
+.portal-unified-rail .instance-heading strong {font-size:13px;line-height:17px}
+.portal-unified-rail .instance-avatar img {width:34px;height:34px}
+.portal-unified-rail .instance-runtime-label {font-size:11px;line-height:15px}
+.portal-unified-rail .instance-more,.portal-unified-rail .instance-card-expand {
+  position:absolute;
+  right:4px;
+  top:4px;
+  z-index:3;
+  display:grid;
+  place-items:center;
+  width:26px;
+  height:26px;
+  padding:0;
+  border-radius:6px;
+  background:transparent;
+  color:var(--cm-muted);
+}
+.portal-unified-rail .instance-card-expand {top:30px}
+.portal-unified-rail .instance-more:hover,.portal-unified-rail .instance-card-expand:hover {background:var(--instance-soft);color:var(--instance-accent)}
+.portal-unified-rail .instance-bottom-row {min-height:31px;padding:1px 7px 6px;gap:4px}
+.portal-unified-rail .instance-meta {font-size:11px;line-height:15px;color:var(--cm-muted)}
+.portal-unified-rail .instance-hover-entry {position:relative;z-index:2}
+.portal-unified-rail .instance-entry {font-size:11px;line-height:16px}
+.portal-unified-rail .instance-entry span {padding:3px 5px}
+.portal-unified-rail .instance-entry svg {width:12px;height:12px;padding:5px}
+.portal-unified-rail .instance-menu {right:4px;top:31px}
+.portal-unified-rail .instance-description {padding:7px 9px 10px}
+.portal-unified-rail .instance-description footer {margin-top:10px}
+.portal-unified-rail .instance-watermark {width:96px;height:96px;right:9px}
+body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-selected {
+  border-color:var(--instance-accent);
+  box-shadow:inset 2px 0 var(--cm-primary);
+}
 .portal-unified-content {display:flex;flex-direction:column;min-height:0;min-width:0;overflow:auto}
 .portal-unified-alert {
   margin-bottom:8px;
@@ -217,4 +255,11 @@ a.ot-directory-member:hover,.ot-directory-member[aria-current=page] {background:
   .portal-unified-instance-panes {overflow:visible;grid-auto-rows:minmax(440px,auto)}
   .portal-unified-content {overflow:visible}
   .portal-unified .portal-unified-team {min-height:560px}
+}
+
+@media(pointer:coarse) {
+  .portal-unified-rail .portal-runtime-card .instance-summary {padding-right:47px;min-height:92px}
+  .portal-unified-rail .instance-more,.portal-unified-rail .instance-card-expand {width:42px;height:42px}
+  .portal-unified-rail .instance-card-expand {top:47px}
+  .portal-unified-rail .instance-entry {min-height:42px}
 }

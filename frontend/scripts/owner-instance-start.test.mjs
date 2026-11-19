@@ -39,16 +39,15 @@ test('explicit Stop, navigation cancellation and timeout never replay lifecycle 
  const left=fixture();await assert.rejects(left.run(instance(),true,()=>false));assert.equal(left.counts().starts,0);
 });
 const {OwnerInstanceCard}=load('../src/components/OwnerInstanceCard.tsx',{
- 'react-router-dom':{Link:({to,state,children,...props})=>React.createElement('a',{...props,href:to,'data-start':String(state?.startStopped)},children)},
- '../lib/ieiRuntimeCatalog':{getIEIRuntimePresentation:type=>({id:type,name:type,category:'runtime',capabilities:[]})},
+ 'react-router-dom':{useLocation:()=>({search:'?view=overview'}),Link:({to,state,children,...props})=>React.createElement('a',{...props,href:to,'data-start':String(state?.startStopped)},children)},
+ '../lib/ieiRuntimeCatalog':{ownerRuntimeLogos:{},getIEIRuntimePresentation:type=>({id:type,name:type,category:'runtime',capabilities:[]})},
+ '../lib/ownerPortalNavigation':load('../src/lib/ownerPortalNavigation.ts'),
  '../lib/compactDisplayTime':{compactDisplayTime:()=>'-'},'../styles/owner-instance-card.css':{},
 });
 test('all Runtime cards label only stopped entries as Start, including the menu',()=>{
- global.window={location:{search:'?view=overview'}};
  for(const type of ['openclaw','hermes','opencode','deepseek-harness','workbuddy'])for(const status of ['stopped','running','error','deleting']){
   const html=renderToStaticMarkup(React.createElement(OwnerInstanceCard,{instance:{...instance(status),type,updated_at:'2026-11-05T00:00:00Z'},expanded:true,selected:false,menuOpen:true,pending:false,status,onToggle(){},onMenu(){},onCloseMenu(){},onRestart(){},onReset(){}}));
-  if(status==='stopped'){assert.match(html,/启动实例/);assert.match(html,/data-start="true"/)}
+  if(status==='stopped'){assert.match(html,/启动实例/);assert.match(html,/data-start="true"/);assert.match(html,/aria-label="打开实例工作区 saved-instance"[^>]*data-start="undefined"/)}
   else {assert.doesNotMatch(html,/data-start="true"/);if(status!=='deleting')assert.match(html,/进入实例/)}
  }
- delete global.window;
 });

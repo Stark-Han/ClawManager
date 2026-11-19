@@ -14,8 +14,8 @@ export type TeamWorkspaceTool = "files" | "browser" | "terminal";
 export type TeamWorkspaceProgram = Exclude<TeamWorkspaceTool, "files">;
 
 // Width is the workspace's usable width, not the browser viewport.
-export function workspaceMode(width: number) {
-  return width >= 1540 ? "dual" : width >= 1248 ? "single" : "drawer";
+export function workspaceMode(width: number, northbound = false) {
+  return width >= 1540 ? "dual" : width >= (northbound ? 1024 : 1248) ? "single" : "drawer";
 }
 
 export default function TeamChatWorkspace({ members, team, owner, leaderKey, renderMemberDetails, chat, renderKanban, files }: {
@@ -46,7 +46,7 @@ export default function TeamChatWorkspace({ members, team, owner, leaderKey, ren
   const [program, setProgram] = useState<TeamWorkspaceProgram>("browser");
   const [boardWide, setBoardWide] = useState(false);
   const [lastSide, setLastSide] = useState<"left" | "right">("right");
-  const mode = workspaceMode(width);
+  const mode = workspaceMode(width, !!owner);
   // Leave space for the rail too, so both states can always show the same page.
   const pageSize = memberPageSize(Math.max(0, height - 110), members.length);
   const pages = Math.max(1, Math.ceil(members.length / pageSize));
