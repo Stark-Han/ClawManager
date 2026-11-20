@@ -114,8 +114,20 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   assert.equal(await page.locator('.owner-growth-cards .owner-task').count(),6);
   for(const selector of ['.owner-token-card','.owner-integrated-tasks','.owner-continue']) assert.ok(await page.locator(selector).evaluate(el=>el.scrollHeight<=el.clientHeight+1),'inner content clipped '+selector+' '+width);
   assert.ok((await page.getByTestId('usage-chart').first().locator('svg').boundingBox()).height>=150,'readable usage chart');
+  const workCards=await page.locator('.owner-continue-list>button').all();
+  const list=await page.locator('.owner-continue-list').boundingBox();
+  for(const workCard of workCards){const box=await workCard.boundingBox();assert.ok(box.width<=340.5&&box.x+box.width<=list.x+list.width+1,'Continue Work card stretched or overflowed '+width);}
+  if(workCards.length*340+(workCards.length-1)*8>list.width)assert.ok((await workCards[0].boundingBox()).width<340,'full row must shrink to fit');
   await page.screenshot({path:'.tmp/overview-layout-'+width+'x'+height+'.png'});
  }
+ instances.splice(2);
+ await page.reload();await page.locator('.owner-continue-list>button').nth(1).waitFor();
+ for(const width of [1920,1440,1280]){
+  await page.setViewportSize({width,height:900});await page.waitForTimeout(200);
+  const sparse=page.locator('.owner-continue-list>button');assert.equal(await sparse.count(),2);
+  for(const card of await sparse.all())assert.ok(Math.abs((await card.boundingBox()).width-340)<1,'sparse Continue Work cards must keep their initial width '+width);
+ }
+ await page.screenshot({path:'.tmp/overview-continue-initial-width.png'});
  await page.goto(origin+'/ieisystem/list-instances?dashboard_tab=growth');
  await growthDialog.getByText('成长路径 Lv.1–50').waitFor();assert.doesNotMatch(await growthDialog.innerText(),/Lv\.100|100\s*级/);
  await page.keyboard.press('Escape');await page.screenshot({path:'.tmp/r15-overview-layout.png',fullPage:true});
