@@ -139,15 +139,27 @@
 @media(max-width:700px){.ot-directory-template-area .ot-template-toolbar{grid-template-columns:minmax(0,1fr);padding:12px 4px}.ot-directory-template-area .ot-template-toolbar>.ot-template-library-heading{display:none}.ot-template-selection-toolbar{flex-wrap:wrap;gap:8px}.ot-directory-template-area .ot-template-name{flex-basis:100%}.ot-directory-template-area .ot-template-list{padding:4px 5px 8px 4px;max-height:120px}.ot-directory-editor .ot-template-information textarea{min-height:140px}.ot-directory-editor .ot-editor-section-heading{display:flex}.ot-directory-editor .ot-member-detail-grid{gap:0}.ot-directory-editor .ot-template-local-actions{margin-top:12px}.ot-directory-editor .ot-member-detail-actions>.ot-secondary{font-size:11px;padding:7px}}
 
 .ot-card-status [data-state="stopped"] { color: #64748b; }
-.ot-guide-layout {display:grid;grid-template-columns:144px minmax(0,1fr);gap:13px;padding:14px;overflow:auto}
+.ot-modal:has(.ot-guide-layout) {width:min(880px,calc(100% - 32px));height:min(690px,calc(100dvh - 36px))}
+.ot-guide-layout {display:grid;grid-template-columns:164px minmax(0,1fr);gap:16px;padding:16px;min-height:0;overflow:hidden;flex:1}
 .ot-guide-layout > nav {display:flex;flex-direction:column;gap:4px;align-items:stretch;align-self:start}
 .ot-guide-layout > nav button {text-align:start;padding:7px 8px;border-radius:var(--cm-radius-control);overflow-wrap:anywhere}
-.ot-guide-layout > nav button:is(:hover,[aria-pressed=true]) {background:var(--cm-selected);color:var(--cm-primary)}
-.ot-guide-layout > article {border-inline-start:1px solid var(--cm-border);padding-inline-start:13px;min-width:0}
+.ot-guide-layout > nav button:is(:hover,[aria-selected=true]) {background:var(--cm-selected);color:var(--cm-primary)}
+.ot-guide-layout > article {border-inline-start:1px solid var(--cm-border);padding-inline:16px 8px;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;line-height:1.65}
 .ot-guide-layout :is(h4,h5) {font-weight:600;line-height:1.45}
 .ot-guide-layout h4 {font-size:var(--cm-font-title)}
 .ot-guide-layout section {margin-top:10px}
 .ot-guide-layout p {margin-block-start:3px;color:var(--cm-muted);line-height:1.6;overflow-wrap:anywhere}
+.ot-guide-layout article h3 {font-size:var(--cm-font-body);font-weight:600;margin:20px 0 8px}
+.ot-guide-layout article p {margin-block:8px}
+.ot-guide-layout article :is(ul,ol) {padding-inline-start:22px;margin-block:8px}
+.ot-guide-layout article ul {list-style:disc}
+.ot-guide-layout article ol {list-style:decimal}
+.ot-guide-layout article li {margin-block:5px}
+.ot-guide-layout article blockquote {border-inline-start:3px solid var(--cm-primary);padding:8px 12px;margin-block:10px;background:var(--cm-subtle)}
+.ot-guide-table {max-width:100%;overflow:auto;margin-block:12px}
+.ot-guide-table table {width:100%;border-collapse:collapse;font-size:var(--cm-font-label)}
+.ot-guide-table :is(th,td) {padding:7px 9px;text-align:start;border:1px solid var(--cm-border);vertical-align:top;min-width:90px}
+.ot-guide-table th {background:var(--cm-subtle);font-weight:600}
 .ot-workspace .ot-heading > .ot-actions {flex-wrap:wrap}
 @media(max-width:480px){
   .ot-guide-layout {grid-template-columns:minmax(0,1fr);gap:8px}

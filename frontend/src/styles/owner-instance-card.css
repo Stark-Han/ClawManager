@@ -16,6 +16,7 @@
 .instance-more{position:absolute;right:10px;top:10px;padding:6px;border-radius:var(--cm-radius-panel);background:rgba(255,255,255,.92);color:var(--cm-muted);z-index:3}
 .instance-more:hover{background:var(--instance-soft);color:var(--instance-accent)}
 .portal-runtime-card[data-runtime=hermes] .instance-avatar img{clip-path:inset(3%)}
+body[data-northbound-portal] :is(.instance-detail-watermark,.owner-continue-logo,.ot-directory-avatar)[src$="/hermes.png"]{clip-path:inset(3%);border:0;box-shadow:none}
 .portal-runtime-card[data-runtime=opencode] .instance-avatar img{padding:5px}
 .instance-detail-popover {
   position:fixed;z-index:45;width:min(314px,calc(100vw - 16px));

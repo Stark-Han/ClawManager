@@ -140,8 +140,27 @@ try{
  const guideButton=page.getByRole('button',{name:'使用指南',exact:true});
  await guideButton.click();
  const guide=page.getByRole('dialog',{name:'Team 使用指南'});
- await guide.getByRole('button',{name:'文件与实例工具',exact:true}).click();
- await guide.getByRole('heading',{name:'网页与终端',exact:true}).waitFor();
+ assert.equal(await guide.getByRole('tab').count(),8);
+ for(const tab of await guide.getByRole('tab').all()) {
+  const title=await tab.innerText();await tab.click();
+  await guide.getByRole('tabpanel').getByRole('heading',{name:title,exact:true}).waitFor();
+  assert.ok((await guide.getByRole('tabpanel').innerText()).length>450,'full chapter '+title);
+ }
+ await guide.getByRole('tab',{name:'共享文件与编辑',exact:true}).click();
+ await guide.getByRole('heading',{name:'网页与终端（实例工具）',exact:true}).waitFor();
+ assert.ok(await guide.getByRole('table').count()>=2);
+ await guide.getByRole('tab',{name:'共享文件与编辑',exact:true}).focus();
+ await page.keyboard.press('End');
+ assert.equal(await guide.getByRole('tab',{selected:true}).innerText(),'操作记录与常见问题');
+ await page.keyboard.press('Home');
+ assert.equal(await guide.getByRole('tab',{selected:true}).innerText(),'第一次使用');
+ await page.screenshot({path:path.join(screenshots,'full-team-guide-desktop.png')});
+ await page.setViewportSize({width:390,height:844});
+ await guide.getByRole('tab',{name:'共享文件与编辑',exact:true}).click();
+ await guide.getByRole('tabpanel').evaluate(el=>el.scrollTo({top:el.scrollHeight}));
+ const guideBox=await guide.boundingBox();assert.ok(guideBox.x>=0&&guideBox.x+guideBox.width<=390&&guideBox.y>=0&&guideBox.y+guideBox.height<=844);
+ await page.screenshot({path:path.join(screenshots,'full-team-guide-mobile.png')});
+ await page.setViewportSize({width:1440,height:1000});
  await page.keyboard.press('Escape');await guide.waitFor({state:'hidden'});
  assert.ok(await guideButton.evaluate(node=>node===document.activeElement));
  assert.ok(await page.getByRole('button',{name:'操作记录',exact:true}).isVisible());
