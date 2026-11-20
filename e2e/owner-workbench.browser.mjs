@@ -36,6 +36,7 @@ await page.route('**/api/v1/**',async route=>{
  if(p.endsWith('/team-capabilities'))return send({enabled:true,can_create:true});
  if(p.endsWith('/ieisystem/dashboard'))return send({summary:{questions:5,total_tokens:50000,sessions:2},last_activity:{},trend:[]});
  if(p.endsWith('/ieisystem/growth'))return send({xp:0,level:1,tasks:[],ledger:[],days:[]});
+ if(p.endsWith('/ieisystem/reports'))return send({start:'2026-11-16',end:'2026-11-22',ongoing:true,counts:{tokens:50000,sessions:2},active_days:1,previous:{},runtime:[],days:[]});
  if(p==='/api/v1/ieisystem/instances'){const index=Number(u.searchParams.get('page')||1);return send({instances:index===1?[instances.get(609)]:[instances.get(590)],total:2,page:index,limit:1});}
  if(p.endsWith('/teams')&&r.method()==='GET')return send({teams:[{...team,members,member_count:4,available_count:4}],total:1,page:1,limit:100});
  if(p.endsWith('/teams/184'))return send(detail);

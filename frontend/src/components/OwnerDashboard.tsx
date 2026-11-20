@@ -3,19 +3,29 @@ import {useSearchParams} from 'react-router-dom';
 import {ieiSystemService,type IEISystemInstance,type OwnerDashboardData,type OwnerGrowth,type UsageDay} from '../services/ieiSystemService';
 import {OwnerContinueWork} from './OwnerContinueWork';
 import {ActivityHeatmap,UsageChart,ownerNumber} from './OwnerUsageCharts';
-import {GrowthSummary,OwnerGrowthPanel} from './OwnerGrowthPanel';
+import {GrowthSummary,OwnerGrowthDetails,OwnerGrowthTasks} from './OwnerGrowthWorkspace';
 import {OwnerModal} from './OwnerModal';
 import '../styles/owner-dashboard.css';
 import {statisticsTime} from '../lib/ownerTaskState';
 import {OwnerReportsPanel} from './OwnerReportsPanel';
 import {isOwnerSessionFailure,isPersistentReadFailure,nextReadFailure,type ReadFailure} from '../lib/ownerReadNotice';
+import {ownerDashboardSection} from '../lib/ownerPortalNavigation';
+import '../styles/owner-dashboard-overview.css';
 
 export function OwnerDashboard({instances,onSelect,owner,refreshAction,teamContent}:{refreshAction?:RefObject<(()=>Promise<void>)|null>;instances:IEISystemInstance[];onSelect:(id:number)=>void;owner:string;teamContent?:ReactNode}){
- const [params,setParams]=useSearchParams();const tab=['overview','growth','reports','team'].includes(params.get('dashboard_tab')??'')?params.get('dashboard_tab')!:'overview';
+ const [params,setParams]=useSearchParams();const {tab,detail:dashboardDetail}=ownerDashboardSection(params);
  const range=['7d','30d','month'].includes(params.get('usage_range')??'')?params.get('usage_range')!:'7d';
  const [data,setData]=useState<OwnerDashboardData|null>(null);const [growth,setGrowth]=useState<OwnerGrowth|null>(null);const [error,setError]=useState('');const [growthError,setGrowthError]=useState('');const [loading,setLoading]=useState(true);const [detail,setDetail]=useState<UsageDay|null>(null);
+ const [dataRange,setDataRange]=useState(range);
  const [info,setInfo]=useState<{title:string;body:string}|null>(null);
  const setQuery=(key:string,value:string)=>setParams(old=>{const p=new URLSearchParams(old);p.set(key,value);return p},{replace:true});
+ const changeDetail=(detail:'growth'|'report'|'tasks'|null)=>setParams(previous=>{
+  const next=new URLSearchParams(previous);
+  next.set('view','overview');
+  next.set('dashboard_tab','overview');
+  if(detail)next.set('dashboard_detail',detail);else next.delete('dashboard_detail');
+  return next;
+ },{replace:true});
  const sequence=useRef(0);const reportRefresh=useRef<(()=>Promise<void>)|null>(null);
  const readFailure=useRef<ReadFailure|null>(null);const hasSnapshot=useRef(false);
  const fetchSnapshot=useCallback(async(visit=false)=>{
@@ -23,10 +33,13 @@ export function OwnerDashboard({instances,onSelect,owner,refreshAction,teamConte
   try{
    if(visit)await ieiSystemService.recordVisit().catch(e=>{if(isOwnerSessionFailure(e))throw e});
    const d=await ieiSystemService.getDashboard(range);
-   const g=d.growth??await ieiSystemService.getGrowth(false);
    if(request!==sequence.current)return;
    hasSnapshot.current=true;readFailure.current=null;
-   setData(d);setGrowth(g);setError('');setGrowthError('');
+   setData(d);setDataRange(range);setError('');
+   try{
+    const g=d.growth??await ieiSystemService.getGrowth(false);
+    if(request===sequence.current){setGrowth(g);setGrowthError('')}
+   }catch(error){if(request===sequence.current&&!isOwnerSessionFailure(error))setGrowthError('成长数据暂时无法更新。')}
   }catch(e){if(request===sequence.current&&!isOwnerSessionFailure(e)){
    readFailure.current=nextReadFailure(readFailure.current,Date.now());
    setError(!hasSnapshot.current?'统计暂时无法读取，请稍后刷新。':isPersistentReadFailure(readFailure.current)?'统计暂时无法更新，已保留上次结果，请稍后刷新。':'');
@@ -50,17 +63,27 @@ export function OwnerDashboard({instances,onSelect,owner,refreshAction,teamConte
  return <div className="owner-dashboard" data-dashboard-tab={tab}>
  <h2 className="sr-only">我的总览</h2>{tab!=='team'&&(error||growthError?<p role="alert" className="owner-alert">{error||growthError}</p>:data?.snapshot?.state==='deferred'?<p role="status" className="owner-alert">部分统计更新延迟，当前展示最近可用结果；实例可正常使用。</p>:data?.snapshot?.state==='initializing'?<p role="status" className="owner-alert owner-initializing">历史统计正在初始化，已完成部分正常展示。</p>:null)}
  <div id="owner-tab-panel" className="owner-panel">
- {tab==='team'?teamContent||<p className="owner-alert">北向 Team 尚未启用</p>:tab==='growth'?<OwnerGrowthPanel growth={growth} owner={owner} onRefresh={refreshGrowth} loading={loading}/>:tab==='reports'?<OwnerReportsPanel refreshAction={reportRefresh}/>:<div className="owner-overview">
+ {tab==='team'?teamContent||<p className="owner-alert">北向 Team 尚未启用</p>:<div className="owner-overview owner-integrated-overview">
  <section data-testid="owner-overview-summary" className="owner-summary">
- <GrowthSummary growth={growth} owner={owner} embedded/>
+ <GrowthSummary growth={growth} owner={owner} openGrowth={()=>changeDetail('growth')}/>
  {[
  ['questions','有效提问',data?.summary.questions==null?'—':ownerNumber(data.summary.questions),'累计已确认人工提问'],
  ['tokens','Total Token',data?ownerNumber(data.summary.total_tokens):'—','累计已采集用量'],
  ['sessions','会话数',data?ownerNumber(data.summary.sessions):'—','累计有成功调用的会话'],
  ['streak','连续访问',data?.visits?`${data.visits.streak} 天`:'—',data?.visits_unavailable?'访问统计暂不可用':data?.visits?.provisional?'北京时间 · 日历未完整，暂定':'北京时间 · 休息日保护连签']
  ].map(([key,label,value,note])=><div key={key} className="owner-metric" data-testid={`metric-${key}`}><p className="owner-metric-label">{label}</p><p className="owner-metric-value tabular-nums">{value}</p><p className="owner-metric-note">{note}</p>{key!=='streak'&&<button title={compareTitle(key)} onClick={()=>setInfo({title:"同期比较口径",body:compareTitle(key)})} className="owner-comparison">{comparison(key)}</button>}</div>)}</section>
- <div className="owner-charts"><section className="owner-chart-card"><div className="owner-chart-head"><div><h3 className="text-base font-semibold">Token 使用趋势</h3></div><div className="flex rounded-lg bg-slate-50 p-1">{[['7d','7天'],['30d','30天'],['month','本月']].map(([value,label])=><button key={value} aria-pressed={range===value} onClick={()=>setQuery('usage_range',value)} className={`rounded-md px-2 py-1 text-sm ${range===value?'bg-white text-blue-600 shadow-sm':'text-slate-500'}`}>{label}</button>)}</div></div><p className="owner-chart-caption">周期合计 {ownerNumber(days.reduce((sum,d)=>sum+d.tokens,0))} Token · 数据快照 {statisticsTime(data?.insights?.as_of)}{data?.snapshot?.last_batch_at&&<> · 最近汇总批次 {statisticsTime(data.snapshot.last_batch_at)}</>}</p>{loading&&!data?<p role="status" className="py-16 text-center text-sm text-slate-500">正在读取统计…</p>:<UsageChart days={days} onDay={setDetail} fit/>}</section><ActivityHeatmap visits={data?.visits} days={data?.insights?.days??[]} onDay={setDetail}/></div>
+ <div className="owner-overview-grid">
+  <section className="owner-chart-card owner-token-card"><div className="owner-chart-head"><h3>Token 使用趋势</h3><div className="owner-compact-tabs" aria-label="趋势范围">{[['7d','7天'],['30d','30天'],['month','本月']].map(([value,label])=><button type="button" key={value} aria-pressed={range===value} onClick={()=>setQuery('usage_range',value)}>{label}</button>)}</div></div>
+   <p className="owner-token-total"><strong>{days.some(day=>day.observed)?ownerNumber(days.reduce((sum,day)=>sum+(day.observed?day.tokens:0),0)):'—'}</strong> Token · 周期合计</p>
+   {loading&&!data?<p role="status" className="owner-metric-note">正在读取统计…</p>:<UsageChart days={days} onDay={setDetail} height={122} maxTicks={5}/>}
+   <p className="owner-chart-caption">{data && dataRange!==range && <>显示上次范围（{dataRange==='7d'?'7天':dataRange==='30d'?'30天':'本月'}） · </>}数据快照 {statisticsTime(data?.insights?.as_of)}{data?.snapshot?.last_batch_at&&<> · 最近汇总批次 {statisticsTime(data.snapshot.last_batch_at)}</>}</p>
+  </section>
+  <OwnerGrowthTasks growth={growth} loading={loading} open={dashboardDetail==='tasks'} show={()=>changeDetail('tasks')} close={()=>changeDetail(null)}/>
+  <OwnerReportsPanel refreshAction={reportRefresh} open={dashboardDetail==='report'} show={()=>changeDetail('report')} close={()=>changeDetail(null)}/>
+  <ActivityHeatmap visits={data?.visits} days={data?.insights?.days??[]} onDay={setDetail}/>
+ </div>
  <OwnerContinueWork instances={recent} data={data} onSelect={onSelect}/>
+ {dashboardDetail==='growth' && <OwnerGrowthDetails growth={growth} onRefresh={refreshGrowth} loading={loading} onClose={()=>changeDetail(null)}/>}
  </div>}
  </div>
  {detail&&<OwnerModal title="当日使用明细" onClose={()=>setDetail(null)}><h4 className="font-semibold">{detail.date}</h4>{detail.observed?<dl className="mt-4 grid grid-cols-2 gap-3">{[['有效提问',detail.questions],['新增会话',detail.sessions],['输入 Token',detail.prompt_tokens],['输出 Token',detail.completion_tokens]].map(([name,value])=><div key={name}><dt className="text-sm text-slate-500">{name}</dt><dd className="mt-1">{Number(value).toLocaleString()}</dd></div>)}</dl>:<p>这一天没有可确认记录，不能推断为零用量。</p>}</OwnerModal>}

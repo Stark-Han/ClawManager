@@ -3,18 +3,16 @@ import {OWNER_SESSION_INVALID,OWNER_SESSION_MESSAGE,isOwnerSessionFailure,isPers
 import {useOwnerPortalVisit} from '../../hooks/useOwnerPortalVisit';
 import { OwnerInstanceCard } from "../../components/OwnerInstanceCard";
 import { getInstanceDisplayStatus } from "../../lib/instanceStatus";
-import { ownerInstanceURL, ownerWorkspaceURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
+import { ownerDashboardSection, ownerInstanceURL, ownerWorkspaceURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
 import { beforePageRefresh } from "../../components/PageVersionNotice";
 import { OwnerDashboard } from "../../components/OwnerDashboard";
 import { useOwnerTeams } from '../../hooks/useOwnerTeams';
 import { OwnerTeamSidebar, OwnerTeamDashboard } from '../../components/teams/OwnerTeamWorkspace';
 import {
   ArrowRight,
-  Award,
   BarChart3,
   Briefcase,
   Box,
-  CalendarDays,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -44,8 +42,6 @@ const portalPath = "/ieisystem/list-instances";
 const dashboardTabs = [
   { id: "overview", name: "总览", icon: BarChart3, primary: true },
   { id: "team", name: "Team 设置", icon: Users, primary: true },
-  { id: "growth", name: "我的成长", icon: Award, primary: false },
-  { id: "reports", name: "周期报告", icon: CalendarDays, primary: false },
 ] as const;
 
 const EMPTY_STATE_RUNTIMES = [
@@ -198,8 +194,9 @@ export default function IEISystemListInstancesPage() {
   const isWorkspace = !!(teamMatch || instanceMatch);
   const params = new URLSearchParams(location.search);
   const rawView = params.get("view");
-  const view = isWorkspace ? "workspace" : rawView === "overview" ? "overview" : rawView === "instance" || params.has("selected_instance_id") ? "instance" : "overview";
-  const dashboardTab = dashboardTabs.find(tab => tab.id === params.get("dashboard_tab"))?.id ?? "overview";
+  const dashboard = ownerDashboardSection(params);
+  const view = isWorkspace ? "workspace" : rawView === "overview" || dashboard.legacy ? "overview" : rawView === "instance" || params.has("selected_instance_id") ? "instance" : "overview";
+  const dashboardTab = dashboard.tab;
   const [workspaceInstance, setWorkspaceInstance] = useState<IEISystemInstance | null>(null);
   const activeTeamID = Number(teamMatch?.params.id) || (workspaceInstance?.id === routeInstanceID ? workspaceInstance.team_id ?? null : null);
   const [directoryOpen, setDirectoryOpen] = useState(false);
@@ -246,11 +243,14 @@ export default function IEISystemListInstancesPage() {
     if (next !== location.pathname + location.search) navigate(next, { replace: true, state: location.state });
   };
   const openDashboard = (tab: string) => {
-    if (view === "overview" && dashboardTab === tab) return;
+    if (view === "overview" && dashboardTab === tab && !dashboard.detail) return;
     if (!canNavigate()) return;
     setMenuInstanceID(null);
     setDirectoryOpen(false);
-    navigate(ownerWorkspaceURL(portalPath, window.location.search, { view: "overview", dashboard_tab: tab }));
+    navigate(ownerWorkspaceURL(portalPath, window.location.search, {
+      view: "overview", dashboard_tab: tab, dashboard_detail: null,
+      ...(tab === "team" && activeTeamID ? { workspace_tab: "teams", selected_team_id: String(activeTeamID) } : {}),
+    }));
   };
   const openDetails = (id: number) => {
     if (!canNavigate()) return;
