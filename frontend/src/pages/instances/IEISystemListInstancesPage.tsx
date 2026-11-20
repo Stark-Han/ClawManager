@@ -596,11 +596,20 @@ export default function IEISystemListInstancesPage() {
       const menu = account.current;
       if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false;
     };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      const menu = account.current;
+      if (event.key !== "Escape" || event.defaultPrevented || !menu?.open) return;
+      event.preventDefault();
+      menu.open = false;
+      menu.querySelector("summary")?.focus();
+    };
     document.addEventListener("pointerdown", closeOutside);
     document.addEventListener("focusin", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
     return () => {
       document.removeEventListener("pointerdown", closeOutside);
       document.removeEventListener("focusin", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
     };
   }, []);
 
@@ -618,12 +627,7 @@ export default function IEISystemListInstancesPage() {
       <aside id="owner-workspace-rail" className="portal-unified-rail portal-instance-sidebar" aria-label="导航和工作区">
         <div className="portal-unified-brand">
           <img src="/inspur-information.png" alt="浪潮信息" />
-          {session && <details ref={account} className="portal-unified-account" onKeyDown={event => {
-            if (event.key === "Escape" && event.currentTarget.open) {
-              event.currentTarget.open = false;
-              event.currentTarget.querySelector("summary")?.focus();
-            }
-          }}>
+          {session && <details ref={account} className="portal-unified-account">
             <summary aria-label="账户与会话" title="账户与会话"><CircleUserRound size={18} /></summary>
             <div className="portal-unified-account-menu">
               <p className="flex items-center gap-2 text-sm font-medium"><CheckCircle2 size={16} className="text-emerald-600" /> 已验证所有者</p>

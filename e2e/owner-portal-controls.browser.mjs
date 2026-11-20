@@ -51,6 +51,9 @@ try{
  const email=account.getByText(owner,{exact:true});await email.click();
  assert.equal(await account.evaluate(el=>el.open),true,'email click must keep the menu stable');
  await email.dblclick();assert.ok(await email.isVisible());
+ await page.keyboard.press('Escape');
+ assert.equal(await account.evaluate(el=>el.open),false,'Escape must close after selecting static email text');
+ await account.locator('summary').click();
  await account.getByRole('button',{name:'刷新',exact:true}).focus();
  assert.equal(await account.evaluate(el=>el.open),true);
  await page.keyboard.press('Escape');assert.equal(await account.evaluate(el=>el.open),false);
