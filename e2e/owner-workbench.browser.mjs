@@ -128,6 +128,27 @@ try{
  await rail.getByRole('tab',{name:/^Team ·/}).click();
  await rail.locator('[data-team-id="184"] .ot-card-title').click();
  await page.locator('.team-chat-workspace').waitFor();
+ const headingActions=page.locator('.team-chat-header-actions');
+ await headingActions.locator('.team-header-files-trigger').waitFor();
+ await headingActions.getByRole('button',{name:'Team 操作',exact:true}).click();
+ await headingActions.getByRole('region',{name:'Team 操作'}).getByRole('button',{name:/删除/}).click();
+ const deleteDialog=page.getByRole('dialog',{name:/删除/});
+ await deleteDialog.getByRole('button',{name:'取消',exact:true}).click();
+ assert.equal(calls.filter(call=>call.method==='DELETE').length,0);
+ assert.equal(await page.getByRole('link',{name:'我的团队空间',exact:true}).count(),0);
+ await rail.getByRole('tab',{name:'Team 设置',exact:true}).click();
+ const guideButton=page.getByRole('button',{name:'使用指南',exact:true});
+ await guideButton.click();
+ const guide=page.getByRole('dialog',{name:'Team 使用指南'});
+ await guide.getByRole('button',{name:'文件与实例工具',exact:true}).click();
+ await guide.getByRole('heading',{name:'网页与终端',exact:true}).waitFor();
+ await page.keyboard.press('Escape');await guide.waitFor({state:'hidden'});
+ assert.ok(await guideButton.evaluate(node=>node===document.activeElement));
+ assert.ok(await page.getByRole('button',{name:'操作记录',exact:true}).isVisible());
+ assert.ok(await page.getByRole('tab',{name:'团队模板',exact:true}).isVisible());
+ assert.equal(new URL(page.url()).searchParams.get('selected_team_id'),'184');
+ await rail.locator('[data-team-id="184"] .ot-card-title').click();
+ await page.locator('.team-chat-workspace').waitFor();
  assert.equal(await page.getByRole('button',{name:'切换实例',exact:true}).count(),0);
  assert.equal(await rail.locator('.ot-directory-member').count(),4);
  await rail.getByRole('link',{name:/成员 2.*#618/}).click();
@@ -217,8 +238,10 @@ try{
  await checkOverflow();
  for(const route of ['/ieisystem/teams/184','/teams/184']){
   await page.setViewportSize({width:1440,height:1000});await page.goto(origin+route);const w=page.locator('.team-chat-workspace');await w.waitFor();
-  await w.locator('.team-header-files-trigger').click();await w.locator('.team-file-row').first().waitFor();
   const ownerRoute=route.includes('ieisystem');
+  assert.equal(await w.locator('.team-chat-header-actions .cm-team-header-actions').count(),ownerRoute?1:0);
+  assert.equal(await page.locator('.cm-team-header-actions').count(),1);
+  await w.locator('.team-header-files-trigger').click();await w.locator('.team-file-row').first().waitFor();
   const showTerminal=async()=>{
    if(ownerRoute){await w.locator('.owner-team-tool-views').getByRole('button',{name:'实例工具',exact:true}).click();await toolPane().getByRole('button',{name:'终端',exact:true}).click();}
    else await w.locator('.team-tools-toolbar').getByRole('button',{name:'终端',exact:true}).click();

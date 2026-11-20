@@ -504,15 +504,6 @@ body[data-northbound-portal] .ot-northbound-layout {
   color: #173255;
 }
 
-body[data-northbound-portal] .ot-northbound-header {
-  border-bottom: 1px solid #dce5f2;
-}
-
-body[data-northbound-portal] .ot-return {
-  --ot-border: #dce5f2;
-  --ot-ink: #173255;
-}
-
 /* components/teams/owner-team-feedback.css */
 
 body[data-northbound-portal] .ot-floating-notice {

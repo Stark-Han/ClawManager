@@ -1316,34 +1316,36 @@ const TeamDetailPage: React.FC = () => {
     );
   }
 
+  const teamActions = (
+    <TeamHeaderActions>
+      <span className="cm-team-status" data-status={details.team.runtime_state?.state || details.team.status}>{teamPowerLabel(details.team.runtime_state) || teamStatusLabel(locale, details.team.status)}</span>
+      <span>Team #{details.team.id}</span>
+      <span className="cm-team-shared-path">{t("teams.sharedPath", { path: details.team.shared_mount_path })}</span>
+      <div className="cm-team-header-buttons">
+        <TeamPowerControl
+          state={details.team.runtime_state}
+          start={() => teamService.startTeam(details.team.id)}
+          stop={() => teamService.stopTeam(details.team.id)}
+          onChange={() => loadTeam({background:true})}
+        />
+        <button
+          type="button"
+          onClick={() => { setDeleteError(""); setDeleteOpen(true); }}
+          disabled={actionLoading === "delete-team"}
+          className="app-button-secondary text-red-700"
+        >
+          {t(actionLoading === "delete-team" ? "teams.deleting" : "teams.delete")}
+        </button>
+        {!environment.owner && <Link to={environment.returnURL} className="app-button-secondary">{t("teams.back")}</Link>}
+      </div>
+    </TeamHeaderActions>
+  );
+
   return (
     <><ConfirmDialog open={deleteOpen} title={t("teams.delete")} message={`${t(environment.owner ? "teams.deleteOwnerConfirm" : "teams.deleteConfirm", { name: details.team.name })}${deleteError ? `\n${deleteError}` : ""}`} confirmLabel={t("teams.delete")} cancelLabel={t("teams.cancel")} destructive loading={actionLoading === "delete-team"} onConfirm={() => void handleDeleteTeam()} onCancel={() => setDeleteOpen(false)} /><TeamPageLayout
       fillHeight
       title={t("nav.teams")}
-      titleAccessory={
-        <TeamHeaderActions>
-          <span className="cm-team-status" data-status={details.team.runtime_state?.state || details.team.status}>{teamPowerLabel(details.team.runtime_state) || teamStatusLabel(locale, details.team.status)}</span>
-          <span>Team #{details.team.id}</span>
-          <span className="cm-team-shared-path">{t("teams.sharedPath", { path: details.team.shared_mount_path })}</span>
-          <div className="cm-team-header-buttons">
- <TeamPowerControl state={details.team.runtime_state} start={() => teamService.startTeam(details.team.id)} stop={() => teamService.stopTeam(details.team.id)} onChange={() => loadTeam({background:true})}/>
-            <button
-              type="button"
-              onClick={() => { setDeleteError(""); setDeleteOpen(true); }}
-              disabled={actionLoading === "delete-team"}
-              className="app-button-secondary text-red-700"
-            >
-              {t(actionLoading === "delete-team" ? "teams.deleting" : "teams.delete")}
-            </button>
-            <Link
-              to={environment.returnURL}
-              className="app-button-secondary"
-            >
-              {t("teams.back")}
-            </Link>
-          </div>
-        </TeamHeaderActions>
-      }
+      titleAccessory={environment.owner ? undefined : teamActions}
     >
       {error && <div role="alert" className="shrink-0 px-3 py-2 text-sm text-red-700">{t("teams.updateFailed", { error })}</div>}
       {workspaceError && <div role="alert" className="shrink-0 px-3 py-2 text-sm text-[var(--cm-error)]">{workspaceError}</div>}
@@ -1359,7 +1361,7 @@ const TeamDetailPage: React.FC = () => {
           <section><h3>运行详情</h3><dl><dt>运行状态</dt><dd>{member.runtime_status || "-"}</dd><dt>意图</dt><dd>{member.runtime_intent || "-"}</dd><dt>任务</dt><dd>{member.runtime_task_id || "-"}</dd><dt>最后在线</dt><dd>{formatDateTime(member.last_seen_at)}</dd></dl></section>
         </>}
         chat={headerTools => <CollaborationPanel
-          headerTools={headerTools}
+          headerTools={environment.owner ? <>{headerTools}{teamActions}</> : headerTools}
           team={details.team}
           groups={collaborationGroups}
           members={details.members}

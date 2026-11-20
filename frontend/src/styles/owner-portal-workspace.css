@@ -227,7 +227,6 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
 }
 .portal-instance-toolbar-actions .portal-instance-restart:disabled {color:var(--cm-disabled)}
 .portal-unified .portal-unified-team {height:auto;min-width:0;min-height:0;flex:1}
-.portal-unified .portal-unified-team .ot-northbound-header {padding:2px 0 8px;border:0;background:transparent}
 .portal-unified .portal-unified-team .ot-northbound-body {padding:0}
 .portal-unified .portal-unified-team .ot-northbound-body > .team-workspace {min-width:0}
 .portal-unified-directory .ot-sidebar {padding:0 2px;gap:8px}

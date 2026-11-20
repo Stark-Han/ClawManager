@@ -9,6 +9,7 @@ import type { TeamDetails, TeamMember } from '../../types/team';
 import type { CustomTeamTemplate } from '../../types/customTeamTemplate';
 import TeamBadge from './TeamBadge';
 import { OwnerTeamTemplates } from './OwnerTeamTemplates';
+import { OwnerTeamGuide } from './OwnerTeamGuide';
 import { OwnerTeamDialog, useOwnerTeamDraftGuard } from './OwnerTeamDialog';
 import { OwnerTeamNotifications, useOwnerTeamFeedback } from './OwnerTeamNotifications';
 import { memberIcon } from '../../lib/teamIcons';
@@ -18,13 +19,13 @@ import { ownerRuntimeLogos } from '../../lib/ieiRuntimeCatalog';
 import './owner-team-workspace.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败';
-const teamURL = (id: number) => `/ieisystem/teams/${id}`;
 const teamLabel = (team: OwnerTeamSummary) => teamPowerLabel(team.runtime_state) || (team.status === 'creating' ? '创建中' : team.status !== 'running' || (team.fault_count ?? team.members.filter(m => m.status === 'failed' || m.availability === 'blocked' || m.availability === 'offline').length) > 0 ? '需处理' : team.available_count < team.member_count ? '待确认' : team.members.some(m => m.status === 'busy' || m.availability === 'busy') ? '执行中' : '在线');
 const memberState = (m: TeamMember) => memberRailState(m);
 
 function MemberRow({ member, ownerTeamID }: { member: TeamMember; ownerTeamID: number }) {
   const state = memberState(member);
-  return <div className="ot-member"><TeamBadge iconKey={memberIcon(member)} size="chat" /><div><strong>{member.display_name || member.member_key}</strong><p>{member.runtime_type} · {member.role} · <span data-state={state.tone}>{state.label}</span></p></div>{member.instance_id ? <Link to={`/ieisystem/instances/${member.instance_id}`} target="_blank" rel="noopener noreferrer" state={{ portalReturnSearch: window.location.search, portalReturnTeamID: ownerTeamID }}>进入 ↗</Link> : <span className="ot-muted">待创建</span>}</div>;
+  const {search} = useLocation();
+  return <div className="ot-member"><TeamBadge iconKey={memberIcon(member)} size="chat" /><div><strong>{member.display_name || member.member_key}</strong><p>{member.runtime_type} · {member.role} · <span data-state={state.tone}>{state.label}</span></p></div>{member.instance_id ? <Link to={ownerInstanceURL(member.instance_id,search,ownerTeamID)} target="_blank" rel="noopener noreferrer">进入 ↗</Link> : <span className="ot-muted">待创建</span>}</div>;
 }
 
 export function OwnerTeamSidebar({ state, activeTeamID, activeInstanceID }: { state: OwnerTeamsState; activeTeamID: number | null; activeInstanceID: number | null }) {
@@ -127,7 +128,7 @@ function OwnerTeamDashboardContent({ state }: { state: OwnerTeamsState }) {
     return () => { active = false; clearInterval(timer); };
   }, [state.selectedID, state.owner]);
   const selected = state.teams.find(t => t.id === state.selectedID) || (details && details.team.id === state.selectedID ? { ...details.team, members: details.members, member_count: details.members.length, available_count: details.members.filter(m => ['idle','busy'].includes(m.availability || '')).length } : undefined);
-  return <section className="ot-workspace"><header className="ot-heading"><div><h2>团队空间</h2><p>{state.total} 个团队 · 创建、管理与协作</p></div><div className="ot-actions"><button type="button" className="ot-secondary" onClick={feedback.openHistory}><History size={15}/>操作记录</button><button className="ot-primary" disabled={!state.capabilities?.can_create} title={state.capabilities?.create_disabled_reason} onClick={() => setCreate(true)}><Plus size={16}/> 新建 Team</button></div></header>
+  return <section className="ot-workspace"><header className="ot-heading"><div><h2>团队空间</h2><p>{state.total} 个团队 · 创建、管理与协作</p></div><div className="ot-actions"><OwnerTeamGuide/><button type="button" className="ot-secondary" onClick={feedback.openHistory}><History size={15}/>操作记录</button><button className="ot-primary" disabled={!state.capabilities?.can_create} title={state.capabilities?.create_disabled_reason} onClick={() => setCreate(true)}><Plus size={16}/> 新建 Team</button></div></header>
 
     {!state.capabilities?.can_create && <p className="ot-note">{state.capabilities?.create_disabled_reason || '当前暂不能创建团队；已有团队不受影响。'}</p>}
     <div className="ot-tabs" role="tablist" aria-label="团队空间"><button role="tab" aria-selected={section === 'teams'} onClick={() => setSection('teams')}>我的 Team</button><button role="tab" aria-selected={section === 'templates'} onClick={() => setSection('templates')}>团队模板</button></div>
@@ -136,7 +137,7 @@ function OwnerTeamDashboardContent({ state }: { state: OwnerTeamsState }) {
       <div className="ot-master"><label className="ot-search"><Search size={14}/><input aria-label="筛选团队" placeholder="搜索团队…" value={state.query} onChange={e => state.setQuery(e.target.value)}/></label>{state.error && <p role="alert" className="ot-error">{state.error}</p>}{state.teams.map(t => <button key={t.id} aria-pressed={state.selectedID === t.id} className="ot-master-item" onClick={() => { state.select(t.id); setNarrowDetail(true); }}><strong>{t.name}</strong><span>#{t.id} · {t.available_count}/{t.member_count} 可用</span><small>{teamLabel(t)}</small></button>)}{state.hasMore && <button onClick={state.loadMore}>加载更多</button>}</div>
       <div className="ot-detail"><button className="ot-mobile-back ot-secondary" onClick={() => setNarrowDetail(false)}><ArrowLeft size={14}/>团队列表</button>{detailError ? <p role="alert" className="ot-error">{detailError}</p> : selected ? <>
         <div className="ot-detail-title"><div className="ot-team-icon"><Users size={22}/></div><div><h3>{selected.name}</h3><p>Team #{selected.id}</p></div></div><p className="ot-description">{selected.description || '协作完成团队任务，沉淀共享产物。'}</p><p className="ot-muted">{selected.member_count} 名成员 · {selected.available_count}/{selected.member_count} 可用 · Leader 统筹</p>
-        <div className="ot-actions">{selected.runtime_state && selected.runtime_state.state !== "running" ? <TeamPowerControl state={selected.runtime_state} start={() => ownerTeamService.startTeam(selected.id)} onChange={() => state.refresh()} className="ot-primary"/> : <Link className="ot-primary" to={teamURL(selected.id)} state={{ portalReturnSearch: window.location.search }}>进入团队对话 <ArrowRight size={15}/></Link>}{selected.runtime_state && selected.runtime_state.state !== "running" && <Link className="ot-secondary" to={teamURL(selected.id)} state={{ portalReturnSearch: window.location.search }}>查看历史</Link>}<button className="ot-secondary" onClick={() => setManage(true)}><Settings2 size={15}/>管理</button><button className="ot-secondary" aria-label="刷新团队" onClick={() => void state.refresh()}><RefreshCw size={15}/>刷新</button></div>
+        <div className="ot-actions">{selected.runtime_state && selected.runtime_state.state !== "running" ? <TeamPowerControl state={selected.runtime_state} start={() => ownerTeamService.startTeam(selected.id)} onChange={() => state.refresh()} className="ot-primary"/> : <Link className="ot-primary" to={ownerTeamURL(selected.id,params.toString())}>进入团队对话 <ArrowRight size={15}/></Link>}{selected.runtime_state && selected.runtime_state.state !== "running" && <Link className="ot-secondary" to={ownerTeamURL(selected.id,params.toString())}>查看历史</Link>}<button className="ot-secondary" onClick={() => setManage(true)}><Settings2 size={15}/>管理</button><button className="ot-secondary" aria-label="刷新团队" onClick={() => void state.refresh()}><RefreshCw size={15}/>刷新</button></div>
         <div className="ot-task-summary"><small>当前任务</small><p>{details?.tasks?.find(t => ['pending', 'dispatched', 'running', 'waiting'].includes(t.status))?.payload?.prompt as string || '暂无执行中的任务'}</p></div>
         <h4>团队成员</h4>{(details?.members || selected.members).map(m => <MemberRow key={m.id} member={m} ownerTeamID={selected.id}/>)}
         {manage && details && <OwnerTeamManage key={selected.id} details={details} onClose={() => setManage(false)} onChange={state.refresh} onOperation={operation.begin}/>}

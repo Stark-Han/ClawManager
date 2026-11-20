@@ -63,8 +63,14 @@
 .team-chat-workspace[data-owner-view=instance] .team-workspace-tool-tabs button[aria-pressed=true] {
   background:var(--cm-selected);border-color:transparent;
 }
+.portal-unified-team .team-chat-header-actions .cm-team-header-actions {flex:none}
+.portal-unified-team .team-chat-header-actions .cm-team-header-actions > summary {
+  min-height:36px;padding:6px 9px;border-radius:10px;white-space:nowrap;
+}
+.portal-unified-team .team-chat-topbar:has(.cm-team-header-actions[open]) {z-index:46}
 @container (max-width:449px) {
   .team-chat-workspace[data-owner-view] .team-chat-header-actions .team-header-files-trigger {min-height:40px;padding:6px 9px}
+  .portal-unified-team .team-chat-header-actions .cm-team-header-actions > summary {min-height:40px;padding:6px 7px}
 }
 @container (max-width:385px) {
   .team-chat-workspace[data-owner-view=kanban] .team-kanban-lane-subtitle {

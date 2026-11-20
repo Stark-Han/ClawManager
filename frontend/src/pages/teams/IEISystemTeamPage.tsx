@@ -1,6 +1,5 @@
 import { useMemo, type ComponentProps } from 'react';
-import { ArrowLeft } from 'lucide-react';
-import { Link, useLocation, useOutletContext, useParams } from 'react-router-dom';
+import { useLocation, useOutletContext, useParams } from 'react-router-dom';
 import type UserLayout from '../../components/UserLayout';
 import { TeamPageEnvironmentProvider } from '../../components/teams/TeamPageEnvironment';
 import { ownerTeamWorkspaceAPI } from '../../services/ownerTeamService';
@@ -8,18 +7,8 @@ import { ownerInstanceURL, ownerTeamOverviewURL, type OwnerWorkspaceOutlet } fro
 import TeamDetailPage from './TeamDetailPage';
 import '../../components/teams/owner-team-workspace.css';
 
-function NorthboundTeamLayout({ titleAccessory, children }: ComponentProps<typeof UserLayout>) {
-  const { id } = useParams();
-  const location = useLocation();
-  const teamId = Number(id);
-
+function NorthboundTeamLayout({ children }: ComponentProps<typeof UserLayout>) {
   return <main className="ot-northbound-layout portal-unified-team" aria-label="团队对话">
-    <header className="ot-northbound-header">
-      <div><Link className="ot-secondary ot-return" to={ownerTeamOverviewURL(teamId, location.search)}><ArrowLeft size={15} />我的团队空间</Link></div>
-      <div className="ot-northbound-header-actions">
-        {titleAccessory}
-      </div>
-    </header>
     <section className="ot-northbound-body">{children}</section>
   </main>;
 }
