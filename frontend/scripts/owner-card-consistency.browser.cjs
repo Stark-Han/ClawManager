@@ -83,7 +83,10 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   assert(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight+1),'vertical overflow '+width+'x'+height);
   const trend=await page.getByRole('heading',{name:'Token 使用趋势'}).boundingBox();
   const tasks=await page.getByRole('heading',{name:'成长任务'}).boundingBox();
-  assert.ok(trend.x<trend.x+trend.width&&trend.x+trend.width<=tasks.x&&Math.abs(trend.y-tasks.y)<8,'trend and tasks should share the first row '+width+'x'+height);
+  assert.ok(trend.x+trend.width<=tasks.x&&Math.abs(trend.y-tasks.y)<8,'trend and tasks should share the first row '+width+'x'+height);
+  const summary=await page.getByTestId('owner-overview-summary').boundingBox();
+  const metric=await page.getByTestId('metric-streak').boundingBox();
+  assert.ok(metric.y+metric.height<=summary.y+summary.height,'overview metrics clipped at '+width+'x'+height);
   assert.ok(await page.getByRole('heading',{name:'继续工作'}).isVisible());
   assert(await page.locator('.owner-summary .owner-welcome-line').evaluate(e=>parseFloat(getComputedStyle(e).fontSize)>=19));
  }

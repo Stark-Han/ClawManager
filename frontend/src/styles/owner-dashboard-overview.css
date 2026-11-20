@@ -1,5 +1,5 @@
 .owner-dashboard .owner-panel > .owner-integrated-overview {
-  display:grid;grid-template-rows:auto auto auto;align-content:start;gap:10px;
+  display:grid;grid-template-rows:repeat(3,max-content);align-content:start;gap:10px;
 }
 .owner-integrated-overview .owner-summary {grid-template-rows:auto auto}
 .owner-integrated-overview .owner-summary .owner-welcome {
