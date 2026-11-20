@@ -6,21 +6,22 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  const instances=types.map((type,i)=>({id:i+1,name:'长名称实例 · '+type+' · 协作工作空间',type,status:i===3?'error':'running',instance_mode:'lite',created_at:'2026-09-01T00:00:00Z',updated_at:'2026-09-21T04:00:00Z'}));
  const tasks=[['login',1,10],['questions',3,20],['questions',5,30],['tokens',5000,10],['tokens',20000,10],['tokens',50000,20]].map(([metric,target,xp],i)=>({code:'task-'+i,name:['今日启航','深入交流','持续推进','轻量协作','深度协作','充分协作'][i],metric,target,xp,period:'day',progress:i===0?1:0,awarded:false}));
  const growth={xp:27,level:1,level_start:0,next_level:120,started_at:'2026-09-01T00:00:00Z',as_of:'2026-09-21T04:00:00Z',tasks,ledger:[],days:[],rule:'growth-v3',note:'规则',daily_limit:100};
+ const days=Array.from({length:90},(_,index)=>({date:new Date(Date.UTC(2026,7,24+index)).toISOString().slice(0,10),tokens:index%3===0?50000:0,prompt_tokens:30000,completion_tokens:20000,questions:index%3===0?3:0,sessions:1,observed:index>=10}));
  let writes=0;
  let reportFailure=false;
  const reportRequests=[];
- await context.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;let data={};if(p.endsWith('/session'))data={owner:'accept123@example.com',expires_at:'2030-01-01T00:00:00Z'};else if(p.endsWith('/instances'))data={instances,total:5};else if(p.includes('/growth'))data=growth;else if(p.endsWith('/dashboard'))data={summary:{questions:5,total_tokens:50000,sessions:2,workday_streak:1},trend:[],last_activity:{},coverage:{questions_supported:true,partial:true},insights:{as_of:growth.as_of,days:[],comparison:{tokens:{status:'new',current:5,previous:0,delta:5,percent:null}},window:{kind:'day'}}};else if(p.includes('lifecycle-operation')){await route.fulfill({status:404,json:{error:'none'}});return}else if(route.request().method()==='POST'&&/\/instances\/\d+\/(restart|reset)$/.test(p)){writes++}await route.fulfill({json:{data}})});
+ await context.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;let data={};if(p.endsWith('/session'))data={owner:'accept123@example.com',expires_at:'2030-01-01T00:00:00Z'};else if(p.endsWith('/instances'))data={instances,total:instances.length};else if(p.includes('/growth'))data=growth;else if(p.endsWith('/dashboard'))data={summary:{questions:5,total_tokens:50000,sessions:2,workday_streak:1},trend:days.slice(-7).map(({date,tokens})=>({date,tokens})),last_activity:{},coverage:{questions_supported:true,partial:true},insights:{as_of:growth.as_of,days,comparison:{tokens:{status:'new',current:5,previous:0,delta:5,percent:null}},window:{kind:'day'}}};else if(p.includes('lifecycle-operation')){await route.fulfill({status:404,json:{error:'none'}});return}else if(route.request().method()==='POST'&&/\/instances\/\d+\/(restart|reset)$/.test(p)){writes++}await route.fulfill({json:{data}})});
  await context.route('**/ieisystem/reports?**',route=>{
   const {searchParams:q}=new URL(route.request().url());
   reportRequests.push({kind:q.get('kind'),date:q.get('date'),revision:q.get('revision'),method:route.request().method()});
   if(reportFailure)return route.fulfill({status:503,json:{error:'unavailable'}});
   const ongoing=q.get('date')!=='2026-10-14';
-  return route.fulfill({json:{data:{start:ongoing?'2026-11-16':'2026-10-01',end:ongoing?'2026-11-22':'2026-10-31',ongoing,counts:{tokens:50000,sessions:4},active_days:2,previous:{},runtime:[],days:[],saved_revisions:ongoing?[]:[1,2,3],revision:route.request().method()==='POST'?3:Number(q.get('revision'))}}});
+  return route.fulfill({json:{data:{start:ongoing?'2026-11-16':'2026-10-01',end:ongoing?'2026-11-22':'2026-10-31',ongoing,counts:{tokens:50000,sessions:4},active_days:2,previous:{},runtime:types.map(runtime=>({runtime,tokens:12500,questions:2})),days:days.slice(-7),saved_revisions:ongoing?[]:[1,2,3],revision:route.request().method()==='POST'?3:Number(q.get('revision'))}}});
  });
  const origin=process.env.OWNER_PREVIEW_URL||'http://127.0.0.1:38479';
  await page.goto(origin+'/ieisystem/list-instances?view=overview');await page.locator('.portal-runtime-card').first().waitFor();
  await page.getByText('已达标，奖励待入账',{exact:true}).waitFor();assert.match(await page.getByTestId('task-stat').innerText(),/1 \/ 6/);assert.match(await page.getByTestId('task-stat').innerText(),/已入账 0 \/ 100 XP/);
- await page.getByRole('button',{name:'全部任务'}).click();
+ await page.getByRole('button',{name:'全部任务与规则'}).click();
  const taskDialog=page.getByRole('dialog',{name:'全部成长任务'});
  await taskDialog.waitFor();
  assert.equal(await taskDialog.locator('li').count(),6);
@@ -35,12 +36,13 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  await page.keyboard.press('Escape');
  await growthDialog.waitFor({state:'hidden'});
  assert.ok(await growthTrigger.evaluate(el=>el===document.activeElement));
- await page.getByRole('button',{name:'全部任务'}).click();await taskDialog.getByRole('button',{name:'新任务预告'}).click();
+ await page.getByRole('button',{name:'全部任务与规则'}).click();await taskDialog.getByRole('button',{name:'新任务预告'}).click();
  await taskDialog.getByText('未来任务预告',{exact:true}).waitFor();await page.keyboard.press('Escape');
  const reportCard=page.getByRole('region',{name:'周期报告'});
- await reportCard.getByText('进行中',{exact:true}).waitFor();
- reportFailure=true;await reportCard.getByRole('button',{name:'月报',exact:true}).click();
- await reportCard.getByRole('alert').waitFor();assert.ok(await page.getByTestId('metric-tokens').isVisible());
+ await reportCard.getByRole('button',{name:'完整报告',exact:true}).click();
+ const errorReport=page.getByRole('dialog',{name:'周期报告'});
+ reportFailure=true;await errorReport.getByRole('button',{name:'月报',exact:true}).click();
+ await errorReport.getByRole('alert').waitFor();await page.keyboard.press('Escape');assert.ok(await page.getByTestId('metric-tokens').isVisible());
  reportFailure=false;
  await page.goto(origin+'/ieisystem/list-instances?view=overview&dashboard_tab=reports&report_kind=month&report_date=2026-10-14&report_revision=2');
  const reportDialog=page.getByRole('dialog',{name:'周期报告'});
@@ -78,17 +80,28 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  assert.equal(new URL(page.url()).searchParams.get('view'),'overview');
  assert.equal(await page.getByTestId('instance-hover-details').count(),0);
  await page.reload();await page.locator('.owner-dashboard').waitFor();assert.equal(await page.getByTestId('instance-hover-details').count(),0);
- for(const [width,height] of [[1920,1080],[1920,944],[1440,900],[1366,768]]){
+ for(const [width,height] of [[1920,1080],[1920,944],[1440,900],[1366,768],[1280,800]]){
   await page.setViewportSize({width,height});await page.waitForTimeout(200);
   assert(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight+1),'vertical overflow '+width+'x'+height);
-  const trend=await page.getByRole('heading',{name:'Token 使用趋势'}).boundingBox();
+  const trend=await page.getByRole('heading',{name:'用量与周期报告'}).boundingBox();
   const tasks=await page.getByRole('heading',{name:'成长任务'}).boundingBox();
   assert.ok(trend.x+trend.width<=tasks.x&&Math.abs(trend.y-tasks.y)<8,'trend and tasks should share the first row '+width+'x'+height);
   const summary=await page.getByTestId('owner-overview-summary').boundingBox();
   const metric=await page.getByTestId('metric-streak').boundingBox();
   assert.ok(metric.y+metric.height<=summary.y+summary.height,'overview metrics clipped at '+width+'x'+height);
   assert.ok(await page.getByRole('heading',{name:'继续工作'}).isVisible());
-  assert(await page.locator('.owner-summary .owner-welcome-line').evaluate(e=>parseFloat(getComputedStyle(e).fontSize)>=19));
+  const ranking=await page.getByTestId('growth-stat').boundingBox();
+  const middle=await page.locator('.owner-integrated-tasks').boundingBox();
+  assert.ok(Math.abs(ranking.x-middle.x)<=1,'ranking/middle alignment '+width+'x'+height);
+  const continuation=await page.locator('.owner-continue').boundingBox();
+  assert.ok(continuation.y+continuation.height<=height,'Continue Work outside viewport '+width+'x'+height);
+  const geometry=await page.evaluate(()=>{const box=s=>{const e=document.querySelector(s),r=e.getBoundingClientRect();return {y:r.y,h:r.height,scroll:e.scrollHeight,client:e.clientHeight}};return Object.fromEntries(['.portal-unified-content','.owner-overview-top','.owner-overview-grid','.owner-continue'].map(s=>[s,box(s)]))});
+  if(geometry['.portal-unified-content'].scroll>geometry['.portal-unified-content'].client+1){console.log(geometry);await page.screenshot({path:'.tmp/overview-overflow.png'})}
+  assert.ok(geometry['.portal-unified-content'].scroll<=geometry['.portal-unified-content'].client+1,'overview scrolls '+width+'x'+height);
+  assert.equal(await page.locator('.owner-growth-cards .owner-task').count(),6);
+  for(const selector of ['.owner-token-card','.owner-integrated-tasks','.owner-continue']) assert.ok(await page.locator(selector).evaluate(el=>el.scrollHeight<=el.clientHeight+1),'inner content clipped '+selector+' '+width);
+  assert.ok((await page.getByTestId('usage-chart').first().locator('svg').boundingBox()).height>=150,'readable usage chart');
+  await page.screenshot({path:'.tmp/overview-layout-'+width+'x'+height+'.png'});
  }
  await page.goto(origin+'/ieisystem/list-instances?dashboard_tab=growth');
  await growthDialog.getByText('成长路径 Lv.1–50').waitFor();assert.doesNotMatch(await growthDialog.innerText(),/Lv\.100|100\s*级/);

@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import {ChevronRight, Route} from 'lucide-react';
+import {ChevronRight, Cpu, Footprints, MessagesSquare, Route} from 'lucide-react';
 import type {GrowthTask, OwnerGrowth, UsageDay} from '../services/ieiSystemService';
 import {UsageChart, ownerNumber} from './OwnerUsageCharts';
 import {OwnerModal} from './OwnerModal';
@@ -83,8 +83,23 @@ function TaskRows({tasks, upcoming=false}: {tasks: GrowthTask[]; upcoming?: bool
  return <ul className="owner-integrated-task-list">
   {tasks.map(task => <li key={task.code} className="owner-detail-row" data-awarded={task.awarded}>
    <div><strong>{task.name}</strong><small>{upcoming ? taskTarget({...task,progress:0}) : taskTarget(task)}</small></div>
-   <div><span>{upcoming ? '待生效' : taskStateLabel(task)}</span><strong>+{task.xp} XP</strong></div>
+   <div><span>{upcoming ? '待生效' : taskStateLabel(task)}</span><strong>{task.reward || `+${task.xp} XP`}</strong></div>
   </li>)}
+ </ul>;
+}
+
+function TaskCards({tasks}: {tasks: GrowthTask[]}) {
+ return <ul className="owner-growth-cards">
+  {tasks.map(task => {
+   const Icon = task.metric==='tokens' ? Cpu : ['login','full_days'].includes(task.metric) ? Footprints : MessagesSquare;
+   const progress = Math.min(100,Math.max(0,task.progress/Math.max(1,task.target)*100));
+   return <li key={task.code} className="owner-task" data-awarded={task.awarded}>
+    <div className="owner-task-title"><Icon size={16} aria-hidden="true"/><strong>{task.name}</strong></div>
+    <p className="owner-task-condition" title={taskStateLabel(task)}><span>{taskStateLabel(task)}</span> · {task.metric==='tokens'?'Token 用量':task.metric==='questions'?'有效提问':task.metric==='seconds'?'使用时长':'访问天数'}</p>
+    <div className="owner-task-progress" role="progressbar" aria-label={`${task.name}进度`} aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100}><span style={{width:`${progress}%`}}/></div>
+    <div className="owner-task-values"><span>{taskTarget(task)}</span><strong>{task.reward || `+${task.xp} XP`}</strong></div>
+   </li>;
+  })}
  </ul>;
 }
 
@@ -102,13 +117,14 @@ export function OwnerGrowthTasks({growth, open, show, close, loading}: {growth: 
   <div className="owner-chart-head"><h3>成长任务</h3>{tabs}</div>
   {growth ? <>
    <div className="owner-task-summary" data-testid="task-stat"><strong>{period==='day'?'今日':'累计'} {done} / {tasks.length} {period==='day'?'达标':'已完成'}</strong>{period==='day' && <small>已入账 {earned} / {growth.daily_limit??105} XP</small>}</div>
-   <TaskRows tasks={(milestones.length ? milestones : tasks).slice(0,3)}/>
+   <TaskCards tasks={(milestones.length ? milestones : tasks).slice(0,6)}/>
   </> : <p role="status">{loading ? '正在读取成长任务…' : '成长任务暂不可用'}</p>}
-  <button type="button" className="owner-more-button" aria-haspopup="dialog" onClick={() => {setShowUpcoming(false);show()}}>全部任务 <ChevronRight size={15} aria-hidden="true"/></button>
+  <div className="owner-task-footer"><small>达标后奖励自动入账</small><button type="button" className="owner-more-button" aria-haspopup="dialog" onClick={() => {setShowUpcoming(false);show()}}>全部任务与规则 <ChevronRight size={15} aria-hidden="true"/></button></div>
   {open && <OwnerModal title="全部成长任务" onClose={close}>
    <div className="owner-detail-toolbar">{tabs}{!!growth?.upcoming_tasks?.length && <button type="button" className="owner-compact-button" aria-pressed={showUpcoming} onClick={() => setShowUpcoming(true)}>新任务预告</button>}</div>
    {showUpcoming && growth?.effective_at && <p className="owner-metric-note">{statisticsTime(growth.effective_at)} 生效</p>}
    <TaskRows tasks={showUpcoming ? growth?.upcoming_tasks ?? [] : tasks} upcoming={showUpcoming}/>
+   {growth?.note && <details><summary>成长规则</summary><p className="owner-metric-note">{growth.note}</p></details>}
   </OwnerModal>}
  </section>;
 }

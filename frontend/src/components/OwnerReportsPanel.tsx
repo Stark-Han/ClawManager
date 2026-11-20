@@ -11,8 +11,8 @@ import {isOwnerSessionFailure} from '../lib/ownerReadNotice';
 const dateFormat = new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'});
 type ReportResult = {key: string; report?: OwnerReport; loading: boolean; error: string};
 
-export function OwnerReportsPanel({open, show, close, refreshAction}: {
- open: boolean; show: () => void; close: () => void; refreshAction?: RefObject<(() => Promise<void>) | null>;
+export function OwnerReportsPanel({open, show, close, refreshAction, entryOnly=false, onReportChange}: {
+ open: boolean; show: () => void; close: () => void; refreshAction?: RefObject<(() => Promise<void>) | null>; entryOnly?: boolean; onReportChange?: (report: OwnerReport | null) => void;
 }) {
  const [params,setParams] = useSearchParams();
  const kind = params.get('report_kind') === 'month' ? 'month' : 'week';
@@ -27,6 +27,7 @@ export function OwnerReportsPanel({open, show, close, refreshAction}: {
  const active = result?.key === requestKey ? result : undefined;
  const report = active?.report;
  const loading = !active || active.loading;
+ useEffect(()=>{onReportChange?.(report ?? null)},[report,onReportChange]);
 
  const setPeriod = (name: string, value: string) => {
   const updated = new URLSearchParams(window.location.search);
@@ -64,7 +65,9 @@ export function OwnerReportsPanel({open, show, close, refreshAction}: {
  const title = report ? `${report.start.slice(0,10)} 至 ${report.end.slice(0,10)}` : '';
  const status = report?.ongoing ? '进行中' : report?.revision ? `快照 v${report.revision}` : '周期已结束 · 统计预览';
 
- return <section className="owner-chart-card owner-report-card" aria-label="周期报告">
+ const entry = <button type="button" className="owner-more-button" aria-haspopup="dialog" onClick={()=>{setShowDetails(false);show()}}>完整报告 <ChevronRight size={15} aria-hidden="true"/></button>;
+ return <section className={entryOnly?'owner-report-entry':'owner-chart-card owner-report-card'} aria-label="周期报告">
+  {entryOnly ? entry : <>
   <div className="owner-chart-head"><h3>周期报告</h3>{periods}</div>
   {report && <>
    <div className="owner-report-period"><strong>{title}</strong><span className="owner-title-badge">{status}</span></div>
@@ -77,6 +80,7 @@ export function OwnerReportsPanel({open, show, close, refreshAction}: {
   {active?.error && <p className="owner-metric-note" role="alert">{active.error}</p>}
   {loading && <p className="owner-metric-note" role="status">正在读取周期记录…</p>}
   <div className="owner-report-card-footer"><small>按北京时间统计</small><button type="button" className="owner-more-button" aria-haspopup="dialog" onClick={()=>{setShowDetails(false);show()}}>查看报告 <ChevronRight size={15} aria-hidden="true"/></button></div>
+  </>}
   {open && <OwnerModal title="周期报告" onClose={close} wide>
    <div className="owner-reports">
     <section className="owner-report-tools">
