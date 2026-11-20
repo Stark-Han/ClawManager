@@ -215,7 +215,7 @@ try{
  await preview.getByText('深度任务智能体',{exact:true}).waitFor();
  assert.equal(await preview.getAttribute('data-side'),'right');
  assert.equal((await card.boundingBox()).height,cardHeight,'the card expanded in the list');
- const watermark=preview.locator('.instance-detail-watermark');
+ const watermark=preview.locator('.instance-detail-watermark img');
  assert.ok(await watermark.evaluate(img=>img.complete&&img.naturalWidth>0));
  assert.ok((await watermark.boundingBox()).x>(await preview.locator('h3').boundingBox()).x);
  await preview.hover();

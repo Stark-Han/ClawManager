@@ -15,7 +15,8 @@ import { OwnerTeamNotifications, useOwnerTeamFeedback } from './OwnerTeamNotific
 import { memberIcon } from '../../lib/teamIcons';
 import { memberRailState } from './teamMemberPresentation';
 import { ownerInstanceURL, ownerTeamURL } from '../../lib/ownerPortalNavigation';
-import { ownerRuntimeLogos } from '../../lib/ieiRuntimeCatalog';
+import { OwnerAgentStateIcon } from '../OwnerAgentStateIcon';
+import { ownerMemberAgentState } from '../../lib/ownerAgentState';
 import './owner-team-workspace.css';
 
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败';
@@ -46,8 +47,7 @@ export function OwnerTeamSidebar({ state, activeTeamID, activeInstanceID }: { st
         <div id={`ot-members-${team.id}`} hidden={!expanded} className="ot-card-members">{expanded && team.members.map(member => {
           const memberStatus = memberState(member);
           const name = member.display_name || member.member_key;
-          const logo = member.runtime_type && ownerRuntimeLogos[member.runtime_type];
-          const identity = <>{logo ? <img className="ot-directory-avatar" src={logo} alt="" /> : <TeamBadge iconKey={memberIcon(member)} size="chat" />}<span className="ot-directory-identity"><strong title={name}>{name}</strong><small>{member.runtime_type} · {member.role} · <span data-state={memberStatus.tone}>{memberStatus.label}</span></small></span></>;
+          const identity = <>{member.runtime_type ? <OwnerAgentStateIcon className="ot-directory-avatar" type={member.runtime_type} status={ownerMemberAgentState(member)} stoppedReason={team.runtime_state?.reason} size={29}/> : <TeamBadge iconKey={memberIcon(member)} size="chat" />}<span className="ot-directory-identity"><strong title={name}>{name}</strong><small>{member.runtime_type} · {member.role} · <span data-state={memberStatus.tone}>{memberStatus.label}</span></small></span></>;
           return member.instance_id
             ? <Link key={member.id} className="ot-directory-member" aria-label={`进入${name}实例 #${member.instance_id}`} aria-current={activeInstanceID === member.instance_id ? "page" : undefined} to={ownerInstanceURL(member.instance_id, search, team.id)} state={{ portalReturnSearch: search, portalReturnTeamID: team.id, portalReturnFromChat: true }}>{identity}<ArrowRight size={14}/></Link>
             : <div key={member.id} className="ot-directory-member">{identity}<small>待创建</small></div>;

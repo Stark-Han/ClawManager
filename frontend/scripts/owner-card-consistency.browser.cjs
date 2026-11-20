@@ -72,7 +72,7 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  }
  await page.setViewportSize({width:1440,height:900});
  await page.locator('.portal-runtime-card[data-runtime="hermes"]').hover();
- const hermesMark=page.getByTestId('instance-hover-details').locator('.instance-detail-watermark');
+ const hermesMark=page.getByTestId('instance-hover-details').locator('.instance-detail-watermark img');
  await hermesMark.waitFor();await hermesMark.evaluate(img=>img.decode());
  const watermark=await hermesMark.screenshot();
  const cleanEdges=await page.evaluate(async png=>{
@@ -122,6 +122,20 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   if(workCards.length*340+(workCards.length-1)*8>list.width)assert.ok((await workCards[0].boundingBox()).width<340,'full row must shrink to fit');
   await page.screenshot({path:'.tmp/overview-layout-'+width+'x'+height+'.png'});
  }
+ for(const [status,reason,state] of [['running',undefined,'running'],['stopped','idle_timeout','sleeping'],['stopped','manual','stopped'],['error',undefined,'error'],['creating',undefined,'starting'],['offline',undefined,'offline'],['unknown',undefined,'unknown']]){
+  for(const instance of instances){instance.status=status;instance.stopped_reason=reason;}
+  await page.reload();await page.locator('.portal-runtime-card').first().waitFor();
+  for(const type of types){
+   const avatar=page.locator(`.portal-runtime-card[data-runtime="${type}"] .owner-agent-icon`);
+   assert.equal(await avatar.getAttribute('data-owner-agent-state'),state);
+   assert.ok(await avatar.getByRole('img').getAttribute('aria-label'));
+   if(state==='error')await avatar.locator('.cm-agent-state-warning').waitFor();
+   if(state==='sleeping')await avatar.locator('.cm-agent-state-sleep-sign').waitFor();
+   if(['starting','offline','unknown'].includes(state))await avatar.locator('.owner-agent-status-badge').waitFor();
+  }
+  await page.screenshot({path:'.tmp/owner-agent-state-'+state+'.png'});
+ }
+ for(const [index,instance] of instances.entries()){instance.status=index===3?'error':'running';delete instance.stopped_reason;}
  instances.splice(2);
  await page.reload();await page.locator('.owner-continue-list>button').nth(1).waitFor();
  for(const width of [1920,1440,1280]){

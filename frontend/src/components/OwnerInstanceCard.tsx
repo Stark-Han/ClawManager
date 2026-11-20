@@ -1,4 +1,5 @@
-import {ArrowRight,MoreHorizontal,Info,Power,RefreshCw,Box} from 'lucide-react';
+import {ArrowRight,MoreHorizontal,Info,Power,RefreshCw} from 'lucide-react';
+import {OwnerAgentStateIcon} from './OwnerAgentStateIcon';
 import {useCallback,useEffect,useLayoutEffect,useRef,useState,type PointerEvent} from 'react';
 import {createPortal} from 'react-dom';
 import {Link,useLocation} from 'react-router-dom';
@@ -100,10 +101,11 @@ export function OwnerInstanceCard({instance,selected,menuOpen,status,pending,onM
  const to=ownerInstanceURL(instance.id,search);
  const entryState={portalReturnSearch:search,startStopped};
  const logo=ownerRuntimeLogos[runtime.id];
+ const visualStatus=pending?'starting':instance.status;
  const meta=<span className="instance-meta"><span className={`instance-status ${instance.status==='running'?'running':instance.status==='error'?'error':''}`}>● {status}</span><time dateTime={instance.updated_at} title={new Date(instance.updated_at).toLocaleString('zh-CN')}>{compactDisplayTime(instance.updated_at)}</time></span>;
  const entry=(compact=false)=>canEnter?startStopped&&pending?<button disabled className="instance-entry"><span>处理中</span></button>:<Link aria-label={`${entryLabel} ${name}`} to={to} state={entryState} onClick={closePreview} className={`instance-entry ${compact?'compact':''}`}><span>{entryLabel}</span><ArrowRight size={15}/></Link>:<button disabled className="instance-entry"><span>正在删除</span></button>;
  const identity=<>
-   <span className="instance-avatar">{logo?<img src={logo} alt=""/>:<Box size={38}/>}</span>
+   <span className="instance-avatar"><OwnerAgentStateIcon type={runtime.id} status={visualStatus} stoppedReason={instance.stopped_reason} size={44}/></span>
    <span className="instance-heading"><strong title={name}>{name}</strong><span className="instance-runtime-label">{runtime.name} · #{instance.id}</span></span>
  </>;
  return <><article ref={card} data-instance-id={instance.id} data-runtime={runtime.id} className={`portal-runtime-card ${selected?'is-selected':''}`}
@@ -121,7 +123,7 @@ export function OwnerInstanceCard({instance,selected,menuOpen,status,pending,onM
    onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node)&&!e.currentTarget.matches(':hover'))closePreview();}}>
    <div className="instance-detail-surface">
     <header className="instance-detail-heading">
-     {logo&&<img className="instance-detail-watermark" src={logo} alt="" aria-hidden="true"/>}
+     {logo&&<OwnerAgentStateIcon className="instance-detail-watermark" type={runtime.id} status={visualStatus} stoppedReason={instance.stopped_reason} size={99} decorative/>}
      <div className="instance-detail-identity">
       <h3>{name}</h3>
       <span className="instance-runtime-label">{runtime.name} · #{instance.id}{instance.instance_mode==='pro'?' · Pro':instance.instance_mode==='lite'?' · Lite':''}</span>

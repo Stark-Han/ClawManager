@@ -2,6 +2,7 @@ import axios from "axios";
 import {OWNER_SESSION_INVALID,OWNER_SESSION_MESSAGE,isOwnerSessionFailure,isPersistentReadFailure,nextReadFailure,type ReadFailure} from "../../lib/ownerReadNotice";
 import {useOwnerPortalVisit} from '../../hooks/useOwnerPortalVisit';
 import { OwnerInstanceCard } from "../../components/OwnerInstanceCard";
+import { OwnerAgentStateIcon } from "../../components/OwnerAgentStateIcon";
 import { getInstanceDisplayStatus } from "../../lib/instanceStatus";
 import { ownerDashboardSection, ownerInstanceURL, ownerWorkspaceURL, type OwnerWorkspaceOutlet } from "../../lib/ownerPortalNavigation";
 import { beforePageRefresh } from "../../components/PageVersionNotice";
@@ -90,10 +91,17 @@ function statusLabel(status: string, stoppedReason?: string) {
 function InstanceTypeIcon({
   type,
   className = "h-full w-full",
+  status,
+  stoppedReason,
+  size = 40,
 }: {
   type: string;
   className?: string;
+  status?: string;
+  stoppedReason?: string;
+  size?: number;
 }) {
+  if (status) return <OwnerAgentStateIcon type={type} status={status} stoppedReason={stoppedReason} size={size} className={className}/>;
   const normalizedType = type.trim().toLowerCase();
   if (normalizedType === "openclaw") {
     return <img src="/openclaw.png" alt="OpenClaw" className={`${className} object-contain`} />;
@@ -783,7 +791,7 @@ export default function IEISystemListInstancesPage() {
                   <div
                     className={`flex h-24 w-24 shrink-0 items-center justify-center rounded-2xl border ${selectedRuntime.theme.border} ${selectedRuntime.theme.accentSoft} p-4`}
                   >
-                    <InstanceTypeIcon type={selectedInstance.type} />
+                    <InstanceTypeIcon type={selectedInstance.type} status={selectedDisplayStatus} stoppedReason={selectedInstance.stopped_reason} size={64}/>
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-3">
@@ -943,7 +951,7 @@ export default function IEISystemListInstancesPage() {
                   <div
                     className={`mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border ${selectedRuntime.theme.border} ${selectedRuntime.theme.accentSoft} p-3`}
                   >
-                    <InstanceTypeIcon type={selectedInstance.type} />
+                    <InstanceTypeIcon type={selectedInstance.type} status={selectedInstance.status} stoppedReason={selectedInstance.stopped_reason}/>
                   </div>
                   <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
                     <h3 className="max-w-full truncate text-lg font-bold text-[#10203b]">
