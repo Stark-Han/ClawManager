@@ -589,6 +589,21 @@ export default function IEISystemListInstancesPage() {
     if (account.current) account.current.open = false;
   }, [location.pathname]);
 
+  useEffect(() => {
+    // Static menu text does not receive focus. Closing <details> on its blur
+    // can hide the pointer target during the same click/focus transaction.
+    const closeOutside = (event: Event) => {
+      const menu = account.current;
+      if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) menu.open = false;
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("focusin", closeOutside);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("focusin", closeOutside);
+    };
+  }, []);
+
   const workspaceContext: OwnerWorkspaceOutlet = { owner: session?.owner ?? "", reportInstance };
   const directory = session && !error && !loading;
 
@@ -603,9 +618,7 @@ export default function IEISystemListInstancesPage() {
       <aside id="owner-workspace-rail" className="portal-unified-rail portal-instance-sidebar" aria-label="导航和工作区">
         <div className="portal-unified-brand">
           <img src="/inspur-information.png" alt="浪潮信息" />
-          {session && <details ref={account} className="portal-unified-account" onBlur={event => {
-            if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
-          }} onKeyDown={event => {
+          {session && <details ref={account} className="portal-unified-account" onKeyDown={event => {
             if (event.key === "Escape" && event.currentTarget.open) {
               event.currentTarget.open = false;
               event.currentTarget.querySelector("summary")?.focus();

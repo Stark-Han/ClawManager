@@ -64,6 +64,12 @@ const root=()=>page.locator('.owner-instance-workbench .wb-root');
 const toolPane=()=>page.locator('.team-workspace-tools');
 const checkOverflow=async()=>assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflows');
 try{
+ await page.goto(origin+'/ieisystem/list-instances');
+ const account=page.locator('.portal-unified-account');
+ await account.locator('summary').click();
+ await account.getByText(owner,{exact:true}).click();
+ await page.waitForTimeout(150);
+ assert.deepEqual(errors,[],'clicking the owner email must not crash the portal');
  await page.goto(origin+'/ieisystem/instances/609');
  await root().getByRole('tab',{name:'终端',exact:true}).click();
  await root().getByRole('button',{name:'新建终端',exact:true}).click();

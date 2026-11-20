@@ -10,7 +10,7 @@ import "./team-classic-presentation.css";
 import "./owner-team-chat-tools.css";
 
 export type TeamWorkspacePanel = "closed" | "kanban" | "files";
-export type TeamWorkspaceTool = "files" | "browser" | "terminal";
+export type TeamWorkspaceTool = "files" | "browser" | "terminal" | "git";
 export type TeamWorkspaceProgram = Exclude<TeamWorkspaceTool, "files">;
 
 // Width is the workspace's usable width, not the browser viewport.

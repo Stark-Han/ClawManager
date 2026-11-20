@@ -195,15 +195,15 @@ body[data-northbound-portal] .portal-unified-rail .portal-runtime-card.is-select
 .portal-unified-route-state {min-height:300px;flex:1}
 .portal-unified-instance {
   flex:1;
-  border:1px solid var(--cm-border);
-  border-radius:12px;
-  background:var(--cm-canvas);
+  border:0;
+  border-radius:0;
+  background:transparent;
 }
 .portal-unified-instance-panes {
   display:grid;
   grid-template-columns:minmax(0,1fr) clamp(300px,28vw,420px);
-  gap:8px;
-  padding:8px;
+  gap:10px;
+  padding:0;
   min-width:0;
   min-height:0;
   flex:1;

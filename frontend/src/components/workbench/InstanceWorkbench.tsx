@@ -66,7 +66,7 @@ function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
 }
 interface Props {
   presentation?: "default" | "portal";
-  programKind?: "browser" | "terminal";
+  programKind?: "browser" | "terminal" | "git";
   hideHeader?: boolean;
   instanceId: number;
   runtimeGeneration: number;
@@ -100,9 +100,12 @@ export function InstanceWorkbench({
   );
   const state = sharedState ?? localState;
   const dispatch = onWorkbenchEvent ?? localDispatch;
-  const [kind, setKind] = useState<"browser" | "terminal">(programKind ?? "browser");
+  const [kind, setKind] = useState<"browser" | "terminal">(programKind === "terminal" ? "terminal" : "browser");
   useEffect(() => {
-    if (programKind) { setKind(programKind); dispatch({ type: "panel", panel: "preview" }); }
+    if (programKind) {
+      if (programKind !== "git") setKind(programKind);
+      dispatch({ type: "panel", panel: programKind === "git" ? "git" : "preview" });
+    }
   }, [programKind, dispatch]);
   const full = state.full && visible;
   const showSessions = state.showSessions;
@@ -317,7 +320,7 @@ export function InstanceWorkbench({
       ? workbenchError(caps.error)
       : caps.isLoading
         ? t("workbench.loading")
-        : presentation === "portal" && caps.data && !(kind === "terminal" ? caps.data.terminal : caps.data.preview)
+        : presentation === "portal" && state.panel === "preview" && caps.data && !(kind === "terminal" ? caps.data.terminal : caps.data.preview)
           ? t("workbench.upgrade") : null;
   return (
     <section
@@ -341,6 +344,7 @@ export function InstanceWorkbench({
         >
           {(presentation === "portal" ? [
               { id: "files", icon: Files },
+              { id: "git", icon: GitBranch },
               { id: "preview", icon: Globe },
               { id: "terminal", icon: Terminal },
             ] as const : [
@@ -384,7 +388,8 @@ export function InstanceWorkbench({
       <div
         id={`wb-panel-${viewID}-git`}
         role="tabpanel"
-        aria-labelledby={`wb-tab-${viewID}-git`}
+        aria-labelledby={hideHeader ? undefined : `wb-tab-${viewID}-git`}
+        aria-label={hideHeader ? t("workbench.git") : undefined}
         hidden={state.panel !== "git"}
         className="wb-panel"
       >

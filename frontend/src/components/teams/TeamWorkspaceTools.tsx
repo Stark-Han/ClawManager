@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Globe, SquareTerminal } from "lucide-react";
+import { GitBranch, Globe, SquareTerminal } from "lucide-react";
 import { useI18n } from "../../contexts/I18nContext";
 import { useAuthStore } from "../../stores/authStore";
 import { useTeamPageEnvironment } from "./TeamPageEnvironment";
@@ -51,13 +51,14 @@ export default function TeamWorkspaceTools({ teamId, members, leaderKey, active,
         {members.filter(m => m.instance_id && m.status !== "deleted" && m.status !== "deleting").map(m => <option key={m.id} value={m.instance_id}>{m.display_name} · {m.runtime_type} #{m.instance_id}</option>)}
       </select></label>
       {onProgramChange && <div className="team-workspace-tool-tabs" role="group" aria-label={zh ? "实例工具类型" : "Instance tool type"}>
+        <button type="button" onClick={() => onProgramChange("git")} aria-pressed={tool === "git"}><GitBranch size={15}/>{t("workbench.git")}</button>
         <button type="button" onClick={() => onProgramChange("browser")} aria-pressed={tool === "browser"}><Globe size={15} />{t("workbench.web")}</button>
         <button type="button" onClick={() => onProgramChange("terminal")} aria-pressed={tool === "terminal"}><SquareTerminal size={15} />{t("workbench.terminal")}</button>
       </div>}
       {!instanceId ? <p className="team-tool-message" role="status">{zh ? "当前成员尚未绑定实例，请选择成员。" : "The selected member has no instance binding."}</p> : metadata.error ? <div className="team-tool-message" role="alert"><p>{zh ? "无法读取成员实例，已有文件和会话保留。" : "Unable to read this instance. Files and sessions are retained."}</p><button type="button" className="app-button-secondary" onClick={() => void metadata.refetch()}>{t("workbench.retry")}</button></div> : !instance ? <p className="team-tool-message" role="status">{t("workbench.loading")}</p> : <ScopedInstanceWorkbench
         key={`${scope}:${instanceId}`} scope={scope} instanceId={instanceId}
         runtimeGeneration={instance.runtime_generation ?? 0} isRunning={instance.status === "running" && !metadata.isError}
-        visible={active && tool !== "files"} presentation="portal" programKind={tool === "terminal" ? "terminal" : "browser"} hideHeader
+        visible={active && tool !== "files"} presentation="portal" programKind={tool === "git" ? "git" : tool === "terminal" ? "terminal" : "browser"} hideHeader
         service={owner ? ownerWorkbenchService : instanceWorkbenchService} workspace={owner ? ieiSystemWorkspaceService : workspaceService} canWrite={instance.status === "running"}
       />}
     </div>
