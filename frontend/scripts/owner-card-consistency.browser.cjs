@@ -70,10 +70,23 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
   }
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'horizontal overflow '+width);
  }
- await page.setViewportSize({width:1440,height:900});const card=page.locator('.portal-runtime-card[data-runtime="deepseek-harness"]');await card.locator('.instance-more').click();
+ await page.setViewportSize({width:1440,height:900});
+ await page.locator('.portal-runtime-card[data-runtime="hermes"]').hover();
+ const hermesMark=page.getByTestId('instance-hover-details').locator('.instance-detail-watermark');
+ await hermesMark.waitFor();await hermesMark.evaluate(img=>img.decode());
+ const watermark=await hermesMark.screenshot();
+ const cleanEdges=await page.evaluate(async png=>{
+  const img=new Image();img.src='data:image/png;base64,'+png;await img.decode();
+  const canvas=document.createElement('canvas');canvas.width=img.width;canvas.height=img.height;
+  const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);
+  return [[0,Math.floor(img.height/2)],[img.width-1,Math.floor(img.height/2)],[Math.floor(img.width/2),0],[Math.floor(img.width/2),img.height-1]].every(([x,y])=>Array.from(ctx.getImageData(x,y,1,1).data).slice(0,3).every(value=>value>=245));
+ },watermark.toString('base64'));
+ assert.ok(cleanEdges,'Hermes watermark must not render the asset’s dark outer frame');
+ await page.mouse.move(2,2);await page.getByTestId('instance-hover-details').waitFor({state:'detached'});
+ const card=page.locator('.portal-runtime-card[data-runtime="deepseek-harness"]');await card.locator('.instance-more').click();
  let confirmations=0;page.on('dialog',async d=>{confirmations++;await d.dismiss()});await card.getByRole('menuitem',{name:'重启实例',exact:true}).click();assert.equal(confirmations,1);await card.getByRole('menuitem',{name:'重置实例',exact:true}).click();assert.equal(confirmations,2);assert.equal(writes,0);
  await card.getByRole('menuitem',{name:'实例详情',exact:true}).click();await page.getByRole('heading',{name:'运行时说明',exact:true}).waitFor();
- await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.portal-runtime-card[data-runtime="opencode"]').hover();await page.getByTestId('instance-hover-details').waitFor();await page.screenshot({path:'.tmp/r14-cards.png',fullPage:true});
+ await page.getByRole('tab',{name:'总览',exact:true}).click();await page.mouse.move(2,2);await page.locator('.portal-runtime-card[data-runtime="opencode"]').hover();await page.getByTestId('instance-hover-details').waitFor();await page.screenshot({path:'.tmp/r14-cards.png',fullPage:true});
  await context.route('**/instances/*/access',route=>route.fulfill({status:409,json:{error:'Runtime temporarily unavailable'}}));
  await page.getByTestId('instance-hover-details').locator('.instance-entry').click();
  await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.owner-dashboard').waitFor();
