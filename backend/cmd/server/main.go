@@ -166,6 +166,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize object storage: %v", err)
 	}
+	observationObjects, err := configureDatabaseMaintenance(database, objectStorageService)
+	if err != nil {
+		log.Fatalf("Failed to configure durable database maintenance: %v", err)
+	}
 	skillScannerClient := services.NewSkillScannerClient(cfg.SkillScanner)
 	aiObservabilityService := services.NewAIObservabilityService(modelInvocationRepo, auditEventRepo, costRecordRepo, riskHitRepo, chatMessageRepo, chatSessionRepo, llmModelRepo, instanceRepo, userRepo, instanceRuntimeStatusRepo)
 	clusterResourceService := services.NewClusterResourceService(instanceRepo)
@@ -302,6 +306,9 @@ func main() {
 	services.ConfigureRuntimeUpgradeNFSIO(runtimeUpgradeService, cfg.Runtime.SandboxProfile)
 	browserWorkerService := services.NewBrowserWorkerService(browserWorkerRepo, instanceRepo, k8s.GetClient())
 	if cfg.Runtime.ContainerSlots > 0 {
+		if err := services.ConfigureSlotResetExternalWriterCleanup(runtimeAgentClient, browserWorkerService.CleanupSlotResetExternalWriter); err != nil {
+			log.Fatal("Failed to configure slot reset external writer authority")
+		}
 		if err := services.ConfigureSlotExternalWriterAbsence(runtimeAgentClient, browserWorkerService.VerifyNoBrowserWriterHistory); err != nil {
 			log.Fatal("Failed to configure external Runtime writer absence authority")
 		}
@@ -365,7 +372,8 @@ func main() {
 		}
 	}
 	instanceAgentService := services.NewInstanceAgentService(instanceRepo, instanceAgentRepo, instanceDesiredStateRepo, instanceRuntimeStatusRepo, instanceCommandRepo)
-	instanceRuntimeStatusService := services.NewInstanceRuntimeStatusService(instanceRuntimeStatusRepo, instanceAgentRepo, instanceDesiredStateRepo)
+	shutdownAudits := repository.NewRuntimeShutdownAuditRepository(database)
+	instanceRuntimeStatusService := services.NewInstanceRuntimeStatusService(instanceRuntimeStatusRepo, instanceAgentRepo, instanceDesiredStateRepo, shutdownAudits)
 	instanceCommandService := services.NewInstanceCommandService(instanceCommandRepo, instanceRuntimeStatusRepo, instanceDesiredStateRepo, skillRepo)
 	instanceConfigRevisionService := services.NewInstanceConfigRevisionService(instanceConfigRevisionRepo)
 	teamService := services.NewTeamService(
@@ -444,7 +452,7 @@ func main() {
 	gatewayRuntimeHandler := handlers.NewGatewayRuntimeHandler(runtimeTasks, aiGatewayService, auditEventService)
 	runtimeProtocols := repository.NewRuntimeProtocolRepository(database)
 	runtimeProtocolHandler := handlers.NewRuntimeProtocolHandler(runtimeProtocols, instanceRepo)
-	runtimeMaintenanceHandler := handlers.NewRuntimeMaintenanceHandler(repository.NewRuntimeMaintenanceRepository(database))
+	runtimeMaintenanceHandler := handlers.NewRuntimeMaintenanceHandler(repository.NewRuntimeMaintenanceRepository(database), instanceRepo)
 	runtimeProtocolPolicy := middleware.RuntimeProtocolPolicy(runtimeProtocols)
 	customTeamTemplateService := teamtemplate.NewService(customTeamTemplateRepo, aiGatewayService)
 	ownerTeamAPI := northbound.NewOwnerTeamAPI(database, teamService, instanceService, userRepo, aiGatewayService, false, 0)
@@ -475,7 +483,7 @@ func main() {
 		services.NewInstanceShellService(),
 		services.WithInstanceProxyRuntimeRepositories(instanceRepo, runtimePodRepo, bindingRepo),
 		services.WithInstanceProxyRuntimeSecurity(runtimeSecurity),
-		services.WithOpenCodeLiteSessionBootstrap(),
+		services.WithOpenCodeOnboardingWorkspace(workspaceFileService, externalAccessService),
 		services.WithInstanceProxyPolicyCoordinator(runtimeAgentClient, cfg.Runtime.Namespace),
 		services.WithInstanceProxyOwnerUsage(ownerStore),
 	)
@@ -658,6 +666,7 @@ func main() {
 		instanceConfigRevisionService,
 		skillService,
 		handlers.WithAgentSkillReportPersistence(cfg.Runtime.SkillReportPersistence),
+		handlers.WithAgentShutdownAudits(shutdownAudits),
 	)
 	if !cfg.Runtime.SkillReportPersistence {
 		log.Printf("skill inventory report persistence is disabled; reports will be acknowledged without database synchronization")
@@ -698,7 +707,7 @@ func main() {
 	workspaceFileHandler.SetSkillRepository(skillRepo)
 	workspaceFileHandler.SetExternalAccessServices(externalAccessService, instanceHandler.InstanceAccessService())
 	ieiSystemHandler.SetWorkspaceFileHandler(workspaceFileHandler)
-	runtimeAgentHandler := handlers.NewRuntimeAgentHandler(cfg.Runtime, runtimePodRepo, bindingRepo, instanceRepo, runtimeEvents, skillService)
+	runtimeAgentHandler := handlers.NewRuntimeAgentHandler(cfg.Runtime, runtimePodRepo, bindingRepo, instanceRepo, runtimeEvents, skillService).WithShutdownAudits(shutdownAudits)
 	if runtimeSecurity != nil {
 		runtimeAgentHandler.SetRuntimeGatewayReportVerifier(runtimeSecurity)
 	}
@@ -731,7 +740,7 @@ func main() {
 			log.Printf("runtime scheduler disabled: k8s client is unavailable")
 		} else {
 			runtimeLeader := services.NewRuntimeLeaderService(k8sClient.Clientset, cfg.Runtime.Namespace, cfg.Runtime.BackendReplicaID)
-			runtimeDeployments := k8s.NewRuntimeDeploymentService(k8sClient.Clientset)
+			runtimeDeployments := k8s.NewRuntimeDeploymentService(k8sClient.Clientset, k8sClient.Config)
 			runtimeSchedulerOptions := []services.RuntimeSchedulerOption{
 				services.WithRuntimeSchedulerWorkspaceRoot(cfg.Runtime.WorkspaceRoot),
 				services.WithRuntimeSchedulerAutoStopRepository(autoStopRepo),
@@ -801,6 +810,7 @@ func main() {
 	runtimePoolHandler.SetUpgradeService(runtimeUpgradeService)
 	runtimeManagementService := services.NewRuntimeManagementService(database, runtimeScheduler, northboundRepo)
 	runtimeManagementHandler := handlers.NewRuntimeManagementHandler(runtimeManagementService)
+	runtimeSlotResetHandler := handlers.NewRuntimeSlotResetHandler(runtimeManagementService)
 	runtimePodMaintenanceHandler := handlers.NewRuntimePodMaintenanceHandler(services.NewRuntimePodMaintenanceService(database, runtimeScheduler))
 	workbuddyPrewarmController := k8s.NewWorkbuddyPrewarmController()
 
@@ -831,6 +841,9 @@ func main() {
 		}
 	}
 	defer leaderCancel()
+	if err := startDatabaseMaintenance(leaderCtx, database, observationObjects, cfg.Database); err != nil {
+		log.Fatalf("Failed to start database maintenance: %v", err)
+	}
 	workspaceStore := workspacedashboard.NewStore(database)
 	if runtimeScheduler != nil {
 		workspaceStore.SetCapacityReader(runtimeScheduler.WorkspaceCapacity)
@@ -989,6 +1002,7 @@ func main() {
 		}
 
 		runtimeAgent := api.Group("/runtime-agent")
+		runtimeAgent.POST("/shutdown-deliveries", runtimeAgentHandler.ReportShutdownDeliveries)
 		{
 			runtimeAgent.POST("/register", runtimeAgentHandler.Register)
 			runtimeAgent.POST("/heartbeat", runtimeAgentHandler.Heartbeat)
@@ -1080,7 +1094,12 @@ func main() {
 			instances.GET("/:id/environment-overrides", instanceHandler.GetInstanceEnvironmentOverrides)
 			instances.GET("/:id/status", instanceHandler.GetInstanceStatus)
 			instances.GET("/:id/runtime", instanceHandler.GetRuntimeDetails)
+			instances.GET("/:id/model-catalog-sync", instanceHandler.GetModelCatalogSync)
 			instances.GET("/:id/runtime-governance", runtimeProtocolHandler.Status)
+			instances.GET("/:id/runtime-shutdown-audits", handlers.NewRuntimeShutdownAuditHandler(instanceRepo, shutdownAudits).List)
+			instances.GET("/:id/runtime-maintenance", runtimeMaintenanceHandler.Status)
+			instances.POST("/:id/runtime-maintenance", runtimeMaintenanceHandler.Begin)
+			instances.POST("/:id/runtime-maintenance/cancel", runtimeMaintenanceHandler.Cancel)
 			instances.GET("/:id/session-usage", instanceHandler.GetInstanceSessionUsage)
 			instances.GET("/:id/session-usage/detail", instanceHandler.GetInstanceSessionUsageDetail)
 			instances.POST("/:id/runtime/:command", instanceHandler.CreateRuntimeCommand)
@@ -1167,9 +1186,11 @@ func main() {
 			adminRuntime.GET("/runtime-pods/:id/events", runtimePoolHandler.GetPodEvents)
 			adminRuntime.POST("/runtime-pods/:id/scheduling", runtimeManagementHandler.Scheduling)
 			adminRuntime.POST("/runtime-pods/:id/evict", runtimeManagementHandler.Evict)
+			adminRuntime.POST("/runtime-pods/:id/slots/:slot/reset/preflight", runtimeSlotResetHandler.Preflight)
+			adminRuntime.POST("/runtime-pods/:id/slots/:slot/reset", runtimeSlotResetHandler.Submit)
 			adminRuntime.POST("/runtime-scheduling/preflight", runtimeManagementHandler.Preflight)
 			adminRuntime.POST("/runtime-scheduling", runtimeManagementHandler.Submit)
-			adminRuntime.GET("/runtime-scheduling", runtimeManagementHandler.History)
+			adminRuntime.GET("/runtime-scheduling", runtimeSlotResetHandler.History(runtimeManagementHandler.History))
 			adminRuntime.POST("/runtime-balance/plan", runtimeManagementHandler.BalancePlan)
 			adminRuntime.POST("/runtime-balance", runtimeManagementHandler.Balance)
 			adminRuntime.POST("/runtime-scheduling/:id/cancel", runtimeManagementHandler.Cancel)
@@ -1180,6 +1201,8 @@ func main() {
 			adminRuntime.POST("/runtime-rollouts/preflight", runtimePoolHandler.PreflightOpenClawRollout)
 			adminRuntime.POST("/runtime-rollouts/:id/recover-compatibility-reservation", runtimePoolHandler.RecoverCompatibilityReservation)
 			adminRuntime.POST("/runtime-rollouts/:id/retire-failed-compatibility-pool", runtimePoolHandler.RetireFailedCompatibilityPool)
+			adminRuntime.POST("/runtime-rollouts/:id/force-retry/preflight", runtimePoolHandler.PreflightOpenCodeForceRetry)
+			adminRuntime.POST("/runtime-rollouts/:id/force-retry", runtimePoolHandler.ConfirmOpenCodeForceRetry)
 			adminRuntime.GET("/runtime-rollouts/:id", runtimePoolHandler.GetRollout)
 			adminRuntime.GET("/runtime-rollouts", runtimePoolHandler.ListRollouts)
 		}
@@ -1433,6 +1456,25 @@ func main() {
 			adminAIAudit.GET("/:traceId", aiObservabilityHandler.GetTraceDetail)
 		}
 
+		historyArchive := handlers.NewHistoryArchiveHandler(databaseHistory, false)
+		historyRoutes := api.Group("/history")
+		historyRoutes.Use(middleware.Auth(), middleware.SetUserInfo(userRepo))
+		{
+			historyRoutes.GET("/:kind", historyArchive.List)
+			historyRoutes.GET("/:kind/export", historyArchive.Export)
+			historyRoutes.GET("/:kind/:id", historyArchive.Get)
+			historyRoutes.GET("/:kind/:id/body", historyArchive.Body)
+		}
+		adminHistoryArchive := handlers.NewHistoryArchiveHandler(databaseHistory, true)
+		adminHistoryRoutes := api.Group("/admin/history")
+		adminHistoryRoutes.Use(middleware.Auth(), middleware.SetUserInfo(userRepo), middleware.NewAdminAuth(userRepo))
+		{
+			adminHistoryRoutes.GET("/:kind", adminHistoryArchive.List)
+			adminHistoryRoutes.GET("/:kind/export", adminHistoryArchive.Export)
+			adminHistoryRoutes.GET("/:kind/:id", adminHistoryArchive.Get)
+			adminHistoryRoutes.GET("/:kind/:id/body", adminHistoryArchive.Body)
+		}
+
 		adminCosts := api.Group("/admin/costs")
 		adminCosts.Use(middleware.Auth())
 		adminCosts.Use(middleware.SetUserInfo(userRepo))
@@ -1512,9 +1554,13 @@ func main() {
 			gatewayLLM.GET("/images/models", aiGatewayHandler.ImageModels)
 			gatewayLLM.GET("/runtime/catalog", gatewayRuntimeHandler.Catalog)
 			gatewayLLM.POST("/runtime/capabilities", runtimeProtocolHandler.Negotiate)
+			gatewayLLM.GET("/runtime/capabilities", runtimeProtocolHandler.Inspect)
+			gatewayLLM.POST("/runtime/capabilities/renew", runtimeProtocolHandler.Renew)
+			gatewayLLM.POST("/runtime/capabilities/enroll", runtimeProtocolHandler.Enroll)
 			gatewayLLM.POST("/runtime/maintenance", runtimeMaintenanceHandler.Poll)
 			gatewayLLM.POST("/runtime/tasks/check", gatewayRuntimeHandler.CheckTask)
 			gatewayLLM.POST("/runtime/tasks/finish", gatewayRuntimeHandler.FinishTask)
+			gatewayLLM.POST("/runtime/tasks/inspect", gatewayRuntimeHandler.InspectTasks)
 			gatewayLLM.POST("/chat/completions", runtimeProtocolPolicy, aiGatewayHandler.ChatCompletions)
 			gatewayLLM.POST("/responses", runtimeProtocolPolicy, aiGatewayHandler.Responses)
 			gatewayLLM.POST("/v1/responses", runtimeProtocolPolicy, aiGatewayHandler.Responses)
@@ -1529,6 +1575,8 @@ func main() {
 			agent.POST("/commands/:id/start", agentHandler.StartCommand)
 			agent.POST("/commands/:id/finish", agentHandler.FinishCommand)
 			agent.POST("/state/report", agentHandler.ReportState)
+			agent.POST("/shutdown-deliveries", agentHandler.ReportShutdownDeliveries)
+			agent.GET("/shutdown-deliveries/scope", agentHandler.ShutdownDeliveryScope)
 			agent.POST("/skills/inventory", agentHandler.ReportSkillInventory)
 			agent.POST("/skills/upload", agentHandler.UploadSkillPackage)
 			agent.GET("/skills/versions/:skillVersion/download", agentHandler.DownloadSkillVersion)

@@ -92,7 +92,7 @@ func TestUpgradeMySQLUnpublishedReservationRetiresOnlyUnderClaimAndPublicationFe
 						done = make(chan error, 1)
 						pod, _ := u.pods.GetByID(ctx, 319)
 						go func() {
-							done <- repository.WithRuntimePodAssignmentAdmission(context.Background(), sess, *pod, 481, 8, func() error { return errors.New("publication crossed fence") })
+							done <- repository.WithRuntimePodAssignmentAdmission(context.Background(), sess, *pod, 481, 8, b.GatewayPort, func() error { return errors.New("publication crossed fence") })
 						}()
 						select {
 						case e := <-done:

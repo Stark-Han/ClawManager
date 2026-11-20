@@ -55,8 +55,15 @@ func canonicalNativeMaintenance(value any) ([]byte, error) {
 	return json.Marshal(object)
 }
 
-func (c *slotRuntimeAgentClient) nativeMaintenanceProfile(ctx context.Context, endpoint string) (*corev1.Pod, error) {
-	pod, err := c.containerStopPod(ctx, endpoint, "")
+func (c *slotRuntimeAgentClient) nativeMaintenanceProfile(ctx context.Context, endpoint string, expectedUID ...string) (*corev1.Pod, error) {
+	uid := ""
+	if len(expectedUID) > 1 {
+		return nil, fmt.Errorf("ambiguous expected native Pod UID")
+	}
+	if len(expectedUID) == 1 {
+		uid = expectedUID[0]
+	}
+	pod, err := c.containerStopPod(ctx, endpoint, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +500,7 @@ func (c *slotRuntimeAgentClient) finishNativeMaintenanceExecution(ctx context.Co
 }
 
 func (c *slotRuntimeAgentClient) PreflightWorkspace(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentWorkspacePreflight, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +512,7 @@ func (c *slotRuntimeAgentClient) PreflightWorkspace(ctx context.Context, endpoin
 	return &result, err
 }
 func (c *slotRuntimeAgentClient) PreflightUpgradeCompatibility(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentUpgradeCompatibility, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +524,7 @@ func (c *slotRuntimeAgentClient) PreflightUpgradeCompatibility(ctx context.Conte
 	return &result, err
 }
 func (c *slotRuntimeAgentClient) MigrateSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +536,7 @@ func (c *slotRuntimeAgentClient) MigrateSessionSQLite(ctx context.Context, endpo
 	return &result, err
 }
 func (c *slotRuntimeAgentClient) SessionSQLiteMigrationStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteMigration, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}
@@ -541,7 +548,7 @@ func (c *slotRuntimeAgentClient) SessionSQLiteMigrationStatus(ctx context.Contex
 	return &result, err
 }
 func (c *slotRuntimeAgentClient) RestoreSessionSQLite(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +560,7 @@ func (c *slotRuntimeAgentClient) RestoreSessionSQLite(ctx context.Context, endpo
 	return &result, err
 }
 func (c *slotRuntimeAgentClient) SessionSQLiteRestoreStatus(ctx context.Context, endpoint string, req RuntimeAgentWorkspaceRequest) (*RuntimeAgentSessionSQLiteRestore, error) {
-	pod, err := c.nativeMaintenanceProfile(ctx, endpoint)
+	pod, err := c.nativeMaintenanceProfile(ctx, endpoint, req.ExpectedPodUID)
 	if err != nil {
 		return nil, err
 	}

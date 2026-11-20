@@ -63,7 +63,7 @@ func (s *RuntimeScheduler) FreshRuntimeCapacity(ctx context.Context, id int, req
 	if err != nil {
 		return nil, err
 	}
-	base, snapshot, err := maintenance.defaultScaleSnapshot(ctx, s.management.sess, scaler, instance.Type)
+	base, snapshot, err := maintenance.defaultScaleSnapshot(ctx, s.management.sess, scaler, instance.Type, scaleHealthySource)
 	if err != nil {
 		return nil, err
 	}

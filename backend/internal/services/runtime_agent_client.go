@@ -46,6 +46,7 @@ type RuntimeUpgradeAgentClient interface {
 }
 
 type RuntimeAgentWorkspaceRequest struct {
+	ExpectedPodUID          string `json:"expected_pod_uid,omitempty"`
 	ManagedPluginPlanSHA256 string `json:"managed_plugin_plan_sha256,omitempty"`
 	RolloutID               string `json:"rollout_id"`
 	SnapshotID              string `json:"snapshot_id,omitempty"`
@@ -109,6 +110,8 @@ type RuntimeAgentRestoreResponse struct {
 }
 
 type RuntimeAgentSessionSQLiteMigration struct {
+	RolloutID            string           `json:"rollout_id,omitempty"`
+	Generation           int              `json:"generation,omitempty"`
 	InstanceID           int              `json:"instance_id"`
 	Status               string           `json:"status"`
 	OutputSHA256         string           `json:"output_sha256"`
@@ -127,6 +130,8 @@ type RuntimeAgentSessionSQLiteMigration struct {
 }
 
 type RuntimeAgentUpgradeCompatibility struct {
+	RolloutID               string    `json:"rollout_id,omitempty"`
+	Generation              int       `json:"generation,omitempty"`
 	ManagedPluginPlanSHA256 string    `json:"managed_plugin_plan_sha256,omitempty"`
 	InstanceID              int       `json:"instance_id"`
 	Status                  string    `json:"status"`
@@ -144,6 +149,8 @@ type RuntimeAgentUpgradeCompatibility struct {
 }
 
 type RuntimeAgentSessionSQLiteRestore struct {
+	RolloutID              string           `json:"rollout_id,omitempty"`
+	Generation             int              `json:"generation,omitempty"`
 	InstanceID             int              `json:"instance_id"`
 	Status                 string           `json:"status"`
 	OutputSHA256           string           `json:"output_sha256"`
@@ -155,10 +162,11 @@ type RuntimeAgentSessionSQLiteRestore struct {
 }
 
 type RuntimeAgentGatewayState struct {
-	GatewayID  string `json:"gateway_id"`
-	InstanceID int    `json:"instance_id"`
-	Generation int    `json:"generation"`
-	State      string `json:"state"`
+	ModelCatalogSync *RuntimeModelCatalogSyncReport `json:"model_catalog_sync,omitempty"`
+	GatewayID        string                         `json:"gateway_id"`
+	InstanceID       int                            `json:"instance_id"`
+	Generation       int                            `json:"generation"`
+	State            string                         `json:"state"`
 
 	// Runtime errors may include credentials. Decode only the classification;
 	// neither raw details nor the private verdict can enter inspection JSON.
@@ -176,6 +184,7 @@ func (state *RuntimeAgentGatewayState) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*state = RuntimeAgentGatewayState(wire.identity)
+	state.ModelCatalogSync = sanitizeModelCatalogSyncReport(state.ModelCatalogSync)
 	state.recoveryFailureBlocked = runtimeRecoveryFreshFailureBlocked(wire.ErrorCode, wire.ErrorMessage)
 	return nil
 }

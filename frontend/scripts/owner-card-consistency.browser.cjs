@@ -10,7 +10,7 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  let writes=0;
  let reportFailure=false;
  const reportRequests=[];
- await context.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;let data={};if(p.endsWith('/session'))data={owner:'accept123@example.com',expires_at:'2030-01-01T00:00:00Z'};else if(p.endsWith('/instances'))data={instances,total:instances.length};else if(p.includes('/growth'))data=growth;else if(p.endsWith('/dashboard'))data={summary:{questions:5,total_tokens:50000,sessions:2,workday_streak:1},trend:days.slice(-7).map(({date,tokens})=>({date,tokens})),last_activity:{},coverage:{questions_supported:true,partial:true},insights:{as_of:growth.as_of,days,comparison:{tokens:{status:'new',current:5,previous:0,delta:5,percent:null}},window:{kind:'day'}}};else if(p.includes('lifecycle-operation')){await route.fulfill({status:404,json:{error:'none'}});return}else if(route.request().method()==='POST'&&/\/instances\/\d+\/(restart|reset)$/.test(p)){writes++}await route.fulfill({json:{data}})});
+ await context.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;let data={};if(p.endsWith('/session'))data={owner:'accept123@example.com',expires_at:'2030-01-01T00:00:00Z'};else if(p.endsWith('/instances'))data={instances,total:instances.length};else if(/\/instances\/\d+$/.test(p))data={instance:instances.find(instance=>instance.id===Number(p.split('/').pop()))};else if(p.includes('/growth'))data=growth;else if(p.endsWith('/dashboard'))data={summary:{questions:5,total_tokens:50000,sessions:2,workday_streak:1},trend:days.slice(-7).map(({date,tokens})=>({date,tokens})),last_activity:{},coverage:{questions_supported:true,partial:true},insights:{as_of:growth.as_of,days,comparison:{tokens:{status:'new',current:5,previous:0,delta:5,percent:null}},window:{kind:'day'}}};else if(p.includes('lifecycle-operation')){await route.fulfill({status:404,json:{error:'none'}});return}else if(route.request().method()==='POST'&&/\/instances\/\d+\/(restart|reset)$/.test(p)){writes++}await route.fulfill({json:{data}})});
  await context.route('**/ieisystem/reports?**',route=>{
   const {searchParams:q}=new URL(route.request().url());
   reportRequests.push({kind:q.get('kind'),date:q.get('date'),revision:q.get('revision'),method:route.request().method()});
@@ -89,6 +89,8 @@ const {chromium}=require('playwright');const assert=require('node:assert/strict'
  await page.getByRole('tab',{name:'总览',exact:true}).click();await page.mouse.move(2,2);await page.locator('.portal-runtime-card[data-runtime="opencode"]').hover();await page.getByTestId('instance-hover-details').waitFor();await page.screenshot({path:'.tmp/r14-cards.png',fullPage:true});
  await context.route('**/instances/*/access',route=>route.fulfill({status:409,json:{error:'Runtime temporarily unavailable'}}));
  await page.getByTestId('instance-hover-details').locator('.instance-entry').click();
+ await page.locator('.portal-instance-toolbar').waitFor();
+ await page.getByText('暂时无法连接运行界面，请稍后重新连接。',{exact:true}).waitFor();
  await page.getByRole('tab',{name:'总览',exact:true}).click();await page.locator('.owner-dashboard').waitFor();
  assert.equal(new URL(page.url()).searchParams.get('view'),'overview');
  assert.equal(await page.getByTestId('instance-hover-details').count(),0);

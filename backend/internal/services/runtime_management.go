@@ -34,6 +34,7 @@ type RuntimeSchedulingRequest struct {
 }
 
 type RuntimeSchedulingItem struct {
+	SlotReset        *RuntimeSlotResetJournal      `json:"slot_reset,omitempty"`
 	RetryOperationID string                        `json:"retry_operation_id,omitempty"`
 	OrphanRecovery   *RuntimeOrphanRecoveryJournal `json:"orphan_recovery,omitempty"`
 	Recovery         *RuntimeFaultEvictionJournal  `json:"recovery,omitempty"`
@@ -703,6 +704,9 @@ func (s *RuntimeManagementService) enqueue(ctx context.Context, kind string, req
 		if err := repository.LockRuntimeManagementAdmission(ctx, tx); err != nil {
 			return err
 		}
+		if err := checkResetBeforeRecoveryEviction(ctx, tx, op.Items); err != nil {
+			return err
+		}
 		runtimeTypes, scopeErr := repository.RuntimeOperationTypes(ctx, tx, string(requestJSON), string(itemsJSON))
 		if scopeErr != nil {
 			if !errors.Is(scopeErr, repository.ErrRuntimeOperationScopeUnknown) {
@@ -811,7 +815,8 @@ func (s *RuntimeManagementService) operations(ctx context.Context, activeOnly bo
 		if op.Kind == "orphan_recovery" && len(op.Items) == 1 && op.Items[0].OrphanRecovery != nil {
 			op.Phase = op.Items[0].OrphanRecovery.Phase
 		}
-		items = append(items, op)
+		s.refreshSlotResetProjection(ctx, &op)
+		items = append(items, publicSlotResetOperation(op))
 	}
 	return items, rows.Err()
 }
@@ -826,7 +831,7 @@ func (s *RuntimeManagementService) Process(ctx context.Context) error {
 	}
 	// Process returns only after every worker exits. A processing row left by
 	// this owner is interrupted too (for example SQL failed after a replica CAS).
-	_, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_management_operations SET status=CASE WHEN kind IN ('orphan_recovery','rollout_wake') OR (kind='eviction' AND JSON_UNQUOTE(JSON_EXTRACT(request_json,'$.mode'))='recovery') THEN 'pending' ELSE 'needs_attention' END,owner_token='',updated_at=? WHERE status='processing'`, time.Now().UTC())
+	_, err := s.sess.SQL().ExecContext(ctx, `UPDATE runtime_management_operations SET status=CASE WHEN kind IN ('orphan_recovery','rollout_wake','slot_reset') OR (kind='eviction' AND JSON_UNQUOTE(JSON_EXTRACT(request_json,'$.mode'))='recovery') THEN 'pending' ELSE 'needs_attention' END,owner_token='',updated_at=? WHERE status='processing'`, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -837,7 +842,9 @@ func (s *RuntimeManagementService) Process(ctx context.Context) error {
 		return err
 	}
 	var id, raw, kind string
-	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT id,kind,request_json FROM runtime_management_operations WHERE status='pending' ORDER BY created_at LIMIT 1`)
+	// Every resumed attempt yields to operations that have waited longer. A stuck
+	// recovery must not monopolize the worker or starve another Runtime type.
+	rows, err := s.sess.SQL().QueryContext(ctx, `SELECT id,kind,request_json FROM runtime_management_operations WHERE status='pending' ORDER BY updated_at,created_at,id LIMIT 1`)
 	if err != nil {
 		return err
 	}
@@ -864,14 +871,15 @@ func (s *RuntimeManagementService) Process(ctx context.Context) error {
 		return err
 	}
 	var itemJSON string
-	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT items_json FROM runtime_management_operations WHERE id=?`, id)
+	var createdAt, updatedAt time.Time
+	row, err := s.sess.SQL().QueryRowContext(ctx, `SELECT items_json,created_at,updated_at FROM runtime_management_operations WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
-	if err = row.Scan(&itemJSON); err != nil {
+	if err = row.Scan(&itemJSON, &createdAt, &updatedAt); err != nil {
 		return err
 	}
-	op := &RuntimeManagementOperation{ID: id, Kind: kind, Status: "processing"}
+	op := &RuntimeManagementOperation{ID: id, Kind: kind, Status: "processing", CreatedAt: createdAt, UpdatedAt: updatedAt}
 	if err = json.Unmarshal([]byte(itemJSON), &op.Items); err != nil {
 		return err
 	}
@@ -896,6 +904,9 @@ func (s *RuntimeManagementService) Process(ctx context.Context) error {
 	}
 	if kind == "orphan_recovery" {
 		return s.processOrphanRecovery(operationCtx, op)
+	}
+	if kind == "slot_reset" {
+		return s.processSlotReset(operationCtx, op)
 	}
 	if kind == rolloutWakeKind {
 		return s.advanceRolloutWake(operationCtx, op, raw)
@@ -1389,6 +1400,9 @@ func (s *RuntimeManagementService) Cancel(ctx context.Context, id string) error 
 	if op.Kind == "orphan_recovery" {
 		return s.cancelOrphanRecovery(ctx, id)
 	}
+	if op.Kind == "slot_reset" {
+		return errors.New("a committed slot reset cannot be cancelled; continue its fixed source task")
+	}
 	var req RuntimeSchedulingRequest
 	if op.Kind == "eviction" && json.Unmarshal([]byte(raw), &req) == nil && req.Mode == "recovery" {
 		return s.cancelRecoveryEviction(ctx, id)
@@ -1426,6 +1440,11 @@ func (s *RuntimeManagementService) RetryOperation(ctx context.Context, id string
 		return nil, errors.New("operation is terminal or missing; create a new preflight for further mutations")
 	}
 	op, _, _, err := s.runtimeManagementOperation(ctx, id)
+	if err == nil && op != nil {
+		s.refreshSlotResetProjection(ctx, op)
+		public := publicSlotResetOperation(*op)
+		op = &public
+	}
 	return op, err
 }
 
@@ -1559,7 +1578,7 @@ func (s *RuntimeManagementService) retryOperation(ctx context.Context, id string
 		op.Phase, op.ErrorMessage = journal.Phase, journal.ErrorMessage
 		return op, err
 	}
-	if op.Kind == "orphan_recovery" {
+	if op.Kind == "orphan_recovery" || op.Kind == "slot_reset" {
 		op.Status = "pending"
 		return op, s.save(ctx, op)
 	}
