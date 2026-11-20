@@ -1474,6 +1474,9 @@ function TeamWorkspaceBrowser({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadFiles = useCallback(async (background = false) => {
+    // Keep an unfinished read alive across polling, focus and artifact batches.
+    // Explicit refreshes and directory changes still replace the old request.
+    if (background && listRequest.current && !listRequest.current.signal.aborted) return false;
     listRequest.current?.abort();
     const request = new AbortController(); listRequest.current = request;
     try {
@@ -1485,6 +1488,7 @@ function TeamWorkspaceBrowser({
       if (!request.signal.aborted) setError(err.response?.data?.error || "加载共享目录失败");
       return false;
     } finally {
+      if (listRequest.current === request) listRequest.current = null;
       if (!request.signal.aborted) setLoading(false);
     }
   }, [path, teamId]);
